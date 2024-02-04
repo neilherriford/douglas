@@ -1,0 +1,49 @@
+volumes:
+  postgres:
+
+services:
+  postgres:
+    image: postgres:16.1
+    volumes:
+      - postgres:/var/lib/postgresql/data
+    environment:
+      POSTGRES_DB: keycloak
+      POSTGRES_USER: ${KEYCLOAK_DB_USER}
+      POSTGRES_PASSWORD: ${KEYCLOAK_DB_PASSWORD}
+    healthcheck:
+      test: [ "CMD", "pg_isready", "-q", "-d", "keycloak", "-U", "${KEYCLOAK_DB_USER}" ]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+    restart: unless-stopped
+
+  traefik:
+    image: traefik:v2.11
+    ports:
+      - 8085:80
+      - 8088:8080 # for testing
+    volumes:
+      - ./config:/etc/traefik
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    restart: unless-stopped
+
+  blue:
+    build:
+      context: .
+      dockerfile: ./hello-world/Dockerfile
+    command:
+      "npm start"
+    environment:
+      PORT: 3000
+      RESPONSE_MESSAGE: "blue build"
+
+  green:
+    build:
+      context: .
+      dockerfile: ./hello-world/Dockerfile
+    command:
+      "npm start"
+    environment:
+      PORT: 4000
+      RESPONSE_MESSAGE: "green build"

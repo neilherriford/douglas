@@ -1,0 +1,26 @@
+
+log:
+ level: ERROR
+ format: common
+ filePath: /var/log/traefik/traefik.log
+accesslog:
+  format: common
+  filePath: /var/log/traefik/access.log
+
+entryPoints:
+  http:
+    address: ":80"
+  https:
+    address: ":443"
+
+providers:
+  docker:
+    exposedByDefault: false
+
+  file:
+    directory: /etc/traefik/dynamic
+    watch: true
+
+api:
+  dashboard: true
+  insecure: true

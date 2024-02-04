@@ -1,0 +1,28 @@
+# http routing section
+http:
+  routers:
+    to_backend:
+      rule: "Host(`localhost`)"
+       # If the rule matches, applies the middleware
+      # middlewares:
+      # - test-user
+      # If the rule matches, forward to the whoami service (declared below)
+      service: blue_backend
+
+  # middlewares:
+  #   # Define an authentication mechanism
+  #   test-user:
+  #     basicAuth:
+  #       users:
+  #       - test:$apr1$H6uskkkW$IgXLP6ewTrSuBkTrqE8wj/
+
+  services:
+    # Define how to reach an existing service on our infrastructure
+    blue_backend:
+      loadBalancer:
+        servers:
+        - url: "http://blue:3000"
+    green_backend:
+      loadBalancer:
+        servers:
+        - url: "http://green:4000"
