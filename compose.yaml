@@ -10,7 +10,7 @@ services:
       retries: 5
       timeout: 5s
     volumes:
-      - database:/var/lib/postgresql/data
+      - ./volumes/postgresql:/var/lib/postgresql/data
     environment:
       - POSTGRES_PASSWORD=${AUTHENTIK_PG_PASS}
       - POSTGRES_USER=${AUTHENTIK_PG_USER}
@@ -38,7 +38,6 @@ services:
 
   authentik-server:
     image: ghcr.io/goauthentik/server:2024.6.2
-    # container_name: authentik-server
     restart: unless-stopped
     command: server
     environment:
@@ -51,9 +50,9 @@ services:
       - AUTHENTIK_ERROR_REPORTING___ENABLED=true
       - AUTHENTIK_SECRET_KEY=${AUTHENTIK_SECRET_KEY}
     volumes:
-      - ./authentik/media:/media
-      - ./authentik/custom-templates:/templates
-      - ./authentik/override.css:/web/dist/custom.css
+      - ./volumes/authentik/media:/media
+      - ./volumes/authentik/custom-templates:/templates
+      - ./volumes/authentik/override.css:/web/dist/custom.css
     ports:
       - "${COMPOSE_PORT_HTTP:-9000}:9000"
       - "${COMPOSE_PORT_HTTPS:-9443}:9443"
@@ -67,7 +66,6 @@ services:
 
   authentik-worker:
     image: ghcr.io/goauthentik/server:2024.6.2
-    # container_name: authentik-worker
     restart: unless-stopped
     command: worker
     environment:
@@ -82,9 +80,9 @@ services:
     user: root
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
-      - ./media:/media
-      - ./certs:/certs
-      - ./custom-templates:/templates
+      - ./volumes/authentik-worker/media:/media
+      - ./volumes/authentik-worker/certs:/certs
+      - ./volumes/authentik-worker/custom-templates:/templates
     depends_on:
       - postgresql
       - redis
@@ -97,11 +95,20 @@ services:
       - 8085:80
       - 8088:8080 # for testing
     volumes:
-      - ./config:/etc/traefik
+      - ./volumes/traefik-config:/etc/traefik
       - /var/run/docker.sock:/var/run/docker.sock:ro
     restart: unless-stopped
     networks:
       - frontend
+
+  registry:
+    image: registry:2.8.3
+    ports:
+    - "5001:5000"
+    environment:
+      REGISTRY_STORAGE_FILESYSTEM_ROOTDIRECTORY: /data
+    volumes:
+      - ./volumes/registry:/data
 
   blue:
     build:
@@ -131,7 +138,7 @@ volumes:
   database:
   redis:
   authentik_server:
-
+  registry:
 
 networks:
   frontend:

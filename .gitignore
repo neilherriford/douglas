@@ -1,2 +1,5 @@
 *.env
 ./var/*
+
+volumes/postgresql/**/*
+volumes/registry/**/*
