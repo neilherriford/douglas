@@ -1,0 +1,24 @@
+log:
+  level: TRACE
+  format: common
+
+accesslog:
+  format: common
+
+entryPoints:
+  http:
+    address: ":80"
+  https:
+    address: ":443"
+
+providers:
+  docker:
+    network: douglas-internal
+    exposedByDefault: false
+
+api:
+  dashboard: true
+  insecure: true
+
+tracing:
+  serviceName: traefik
