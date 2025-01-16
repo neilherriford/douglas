@@ -2,6 +2,7 @@ services:
   reverse-proxy:
     # The official v3 Traefik docker image
     image: traefik:v3.3
+    container_name: reverse-proxy
     # Enables the web UI and tells Traefik to listen to docker
     command: --api.insecure=true --providers.docker
     ports:
@@ -12,7 +13,7 @@ services:
     volumes:
       # So that Traefik can listen to the Docker events
       - /var/run/docker.sock:/var/run/docker.sock
-      - ./volumes/traefik/traefik.yaml:/etc/traefik/traefik.yaml
+      - ./volumes/traefik/:/etc/traefik/
     networks:
       - douglas-internal
 
