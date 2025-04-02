@@ -1,5 +1,6 @@
 use clap::{Arg, Command};
-use docker::images;
+// use docker::images;
+use uds_utils::buffer;
 
 // mod services;
 // use services::action::Action;
@@ -33,8 +34,9 @@ async fn main() {
     match matches.subcommand() {
         Some((cmd_bootstrap, sub_matches)) => {
             if sub_matches.get_flag("start") {
-                let body = images::list().await.unwrap();
-                println!("{:?}", body);
+                let boffo = buffer(String::from("/var/run/docker.sock")).await;
+                // let body = images::list().await.unwrap();
+                // println!("{:?}", body);
                 // let l = List;
                 // let _ = l.fart().await;
             }
