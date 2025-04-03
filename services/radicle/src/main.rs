@@ -40,7 +40,11 @@ async fn main() {
                     None,
                 )
                 .unwrap();
-                let boffo = uds_utils::buffer(String::from("/var/run/docker.sock"), req).await;
+
+                let client = uds_utils::Client::new(String::from("/var/run/docker.sock"));
+                client.get(String::from("/images/json")).await;
+
+                // let boffo = uds_utils::buffer(String::from("/var/run/docker.sock"), req).await;
                 // let body = images::list().await.unwrap();
                 // println!("{:?}", body);
                 // let l = List;
