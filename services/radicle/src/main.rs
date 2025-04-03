@@ -1,6 +1,6 @@
 use clap::{Arg, Command};
 // use docker::images;
-use uds_utils::buffer;
+use uds_utils;
 
 // mod services;
 // use services::action::Action;
@@ -34,7 +34,13 @@ async fn main() {
     match matches.subcommand() {
         Some((cmd_bootstrap, sub_matches)) => {
             if sub_matches.get_flag("start") {
-                let boffo = buffer(String::from("/var/run/docker.sock")).await;
+                let req = uds_utils::create_request(
+                    String::from("/images/json"),
+                    Some(uds_utils::Verb::Get),
+                    None,
+                )
+                .unwrap();
+                let boffo = uds_utils::buffer(String::from("/var/run/docker.sock"), req).await;
                 // let body = images::list().await.unwrap();
                 // println!("{:?}", body);
                 // let l = List;
