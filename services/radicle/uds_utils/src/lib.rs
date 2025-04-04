@@ -4,15 +4,15 @@ use hyper_util::rt::TokioIo;
 use std::path::Path;
 use tokio::net::UnixStream;
 
-pub struct Client {
-    socket_file_path: String,
-}
-
 pub enum Response {
     Okay(Option<String>),
     Created(Option<String>),
     NoContent,
     Error { code: u16, message: String },
+}
+
+pub struct Client {
+    socket_file_path: String,
 }
 
 impl Client {
@@ -44,18 +44,34 @@ impl Client {
         &self,
         req: Request<String>,
     ) -> Result<Response, Box<dyn std::error::Error>> {
-        let socket_path = Path::new(&self.socket_file_path);
-        let stream = UnixStream::connect(socket_path).await?;
-        let io = TokioIo::new(stream);
-
+        let io = self.create_unix_stream_io().await?;
         let (mut sender, conn) = hyper::client::conn::http1::handshake(io).await?;
+
         tokio::task::spawn(async move {
             if let Err(err) = conn.await {
                 println!("Connection failed: {:?}", err);
             }
         });
 
-        let mut res = sender.send_request(req).await?;
+        let res = sender.send_request(req).await?;
+
+        let status = res.status();
+        let body = Client::read_body(res).await?;
+
+        Ok(Client::create_response(status, body))
+    }
+
+    async fn create_unix_stream_io(
+        &self,
+    ) -> Result<TokioIo<UnixStream>, Box<dyn std::error::Error>> {
+        let socket_path = Path::new(&self.socket_file_path);
+        let stream = UnixStream::connect(socket_path).await?;
+        Ok(TokioIo::new(stream))
+    }
+
+    async fn read_body(
+        mut res: hyper::Response<hyper::body::Incoming>,
+    ) -> Result<String, Box<dyn std::error::Error>> {
         let mut body = String::new();
 
         while let Some(next) = res.frame().await {
@@ -65,10 +81,10 @@ impl Client {
             }
         }
 
-        Ok(Client::create_resposne(res.status(), body))
+        Ok(body)
     }
 
-    fn create_resposne(status: StatusCode, body: String) -> Response {
+    fn create_response(status: StatusCode, body: String) -> Response {
         match status {
             StatusCode::OK => Response::Okay(if body.len() == 0 { None } else { Some(body) }),
             StatusCode::CREATED => {
