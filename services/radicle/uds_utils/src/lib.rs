@@ -39,6 +39,14 @@ impl Client {
         Ok(Client::create_response(status, body))
     }
 
+    async fn create_unix_stream_io(
+        &self,
+    ) -> Result<TokioIo<UnixStream>, Box<dyn std::error::Error>> {
+        let socket_path = Path::new(&self.socket_file_path);
+        let stream = UnixStream::connect(socket_path).await?;
+        Ok(TokioIo::new(stream))
+    }
+
     async fn create_sender(
         io: TokioIo<UnixStream>,
     ) -> Result<hyper::client::conn::http1::SendRequest<String>, Box<dyn std::error::Error>> {
@@ -66,14 +74,6 @@ impl Client {
         }
 
         Ok(body)
-    }
-
-    async fn create_unix_stream_io(
-        &self,
-    ) -> Result<TokioIo<UnixStream>, Box<dyn std::error::Error>> {
-        let socket_path = Path::new(&self.socket_file_path);
-        let stream = UnixStream::connect(socket_path).await?;
-        Ok(TokioIo::new(stream))
     }
 
     fn create_response(status: StatusCode, body: String) -> Response {
