@@ -45,7 +45,19 @@ impl Client {
         req: Request<String>,
     ) -> Result<Response, Box<dyn std::error::Error>> {
         let io = self.create_unix_stream_io().await?;
-        let (mut sender, conn) = hyper::client::conn::http1::handshake(io).await?;
+        let mut sender = Client::create_sender(io).await?;
+        let res = sender.send_request(req).await?;
+
+        let status = res.status();
+        let body = Client::read_body(res).await?;
+
+        Ok(Client::create_response(status, body))
+    }
+
+    async fn create_sender(
+        io: TokioIo<UnixStream>,
+    ) -> Result<hyper::client::conn::http1::SendRequest<String>, Box<dyn std::error::Error>> {
+        let (sender, conn) = hyper::client::conn::http1::handshake(io).await?;
 
         tokio::task::spawn(async move {
             if let Err(err) = conn.await {
@@ -53,12 +65,7 @@ impl Client {
             }
         });
 
-        let res = sender.send_request(req).await?;
-
-        let status = res.status();
-        let body = Client::read_body(res).await?;
-
-        Ok(Client::create_response(status, body))
+        Ok(sender)
     }
 
     async fn create_unix_stream_io(
