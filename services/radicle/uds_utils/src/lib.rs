@@ -25,21 +25,6 @@ impl Client {
         self.preform_request(req).await
     }
 
-    fn create_request(
-        verb: String,
-        path: String,
-        body: Option<String>,
-    ) -> Result<Request<String>, Box<dyn std::error::Error>> {
-        let url = format!("http://localhost{}", &path).parse::<hyper::Uri>()?;
-        let authority = url.authority().unwrap().clone();
-
-        Ok(Request::builder()
-            .method(verb.as_str())
-            .uri(url)
-            .header(hyper::header::HOST, authority.as_str())
-            .body(body.unwrap_or(String::new()))?)
-    }
-
     async fn preform_request(
         &self,
         req: Request<String>,
@@ -68,14 +53,6 @@ impl Client {
         Ok(sender)
     }
 
-    async fn create_unix_stream_io(
-        &self,
-    ) -> Result<TokioIo<UnixStream>, Box<dyn std::error::Error>> {
-        let socket_path = Path::new(&self.socket_file_path);
-        let stream = UnixStream::connect(socket_path).await?;
-        Ok(TokioIo::new(stream))
-    }
-
     async fn read_body(
         mut res: hyper::Response<hyper::body::Incoming>,
     ) -> Result<String, Box<dyn std::error::Error>> {
@@ -91,6 +68,14 @@ impl Client {
         Ok(body)
     }
 
+    async fn create_unix_stream_io(
+        &self,
+    ) -> Result<TokioIo<UnixStream>, Box<dyn std::error::Error>> {
+        let socket_path = Path::new(&self.socket_file_path);
+        let stream = UnixStream::connect(socket_path).await?;
+        Ok(TokioIo::new(stream))
+    }
+
     fn create_response(status: StatusCode, body: String) -> Response {
         match status {
             StatusCode::OK => Response::Okay(if body.len() == 0 { None } else { Some(body) }),
@@ -103,5 +88,20 @@ impl Client {
                 message: body,
             },
         }
+    }
+
+    fn create_request(
+        verb: String,
+        path: String,
+        body: Option<String>,
+    ) -> Result<Request<String>, Box<dyn std::error::Error>> {
+        let url = format!("http://localhost{}", &path).parse::<hyper::Uri>()?;
+        let authority = url.authority().unwrap().clone();
+
+        Ok(Request::builder()
+            .method(verb.as_str())
+            .uri(url)
+            .header(hyper::header::HOST, authority.as_str())
+            .body(body.unwrap_or(String::new()))?)
     }
 }
