@@ -1,12 +1,18 @@
 use http_body_util::BodyExt;
-use hyper::Request;
+use hyper::{Request, StatusCode};
 use hyper_util::rt::TokioIo;
 use std::path::Path;
-use tokio::io::{self, AsyncWriteExt};
 use tokio::net::UnixStream;
 
 pub struct Client {
     socket_file_path: String,
+}
+
+pub enum Response {
+    Okay(Option<String>),
+    Created(Option<String>),
+    NoContent,
+    Error { code: u16, message: String },
 }
 
 impl Client {
@@ -14,7 +20,7 @@ impl Client {
         Client { socket_file_path }
     }
 
-    pub async fn get(&self, path: String) -> Result<(), Box<dyn std::error::Error>> {
+    pub async fn get(&self, path: String) -> Result<Response, Box<dyn std::error::Error>> {
         let req = Client::create_request(String::from("GET"), path, Some(String::new())).unwrap();
         self.preform_request(req).await
     }
@@ -37,7 +43,7 @@ impl Client {
     async fn preform_request(
         &self,
         req: Request<String>,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<Response, Box<dyn std::error::Error>> {
         let socket_path = Path::new(&self.socket_file_path);
         let stream = UnixStream::connect(socket_path).await?;
         let io = TokioIo::new(stream);
@@ -50,15 +56,29 @@ impl Client {
         });
 
         let mut res = sender.send_request(req).await?;
-        println!("Response status: {}", res.status());
+        let mut body = String::new();
 
         while let Some(next) = res.frame().await {
             let frame = next?;
             if let Some(chunk) = frame.data_ref() {
-                io::stdout().write_all(chunk).await?;
+                body.push_str(String::from_utf8(chunk.to_vec()).unwrap().as_str());
             }
         }
 
-        Ok(())
+        Ok(Client::create_resposne(res.status(), body))
+    }
+
+    fn create_resposne(status: StatusCode, body: String) -> Response {
+        match status {
+            StatusCode::OK => Response::Okay(if body.len() == 0 { None } else { Some(body) }),
+            StatusCode::CREATED => {
+                Response::Created(if body.len() == 0 { None } else { Some(body) })
+            }
+            StatusCode::NO_CONTENT => Response::NoContent,
+            status => Response::Error {
+                code: status.as_u16(),
+                message: body,
+            },
+        }
     }
 }

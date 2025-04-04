@@ -34,15 +34,13 @@ async fn main() {
     match matches.subcommand() {
         Some((cmd_bootstrap, sub_matches)) => {
             if sub_matches.get_flag("start") {
-                let req = uds_utils::create_request(
-                    String::from("/images/json"),
-                    Some(uds_utils::Verb::Get),
-                    None,
-                )
-                .unwrap();
-
                 let client = uds_utils::Client::new(String::from("/var/run/docker.sock"));
-                client.get(String::from("/images/json")).await;
+                let response = client.get(String::from("/images/json")).await.unwrap();
+
+                match response {
+                    uds_utils::Response::Okay(Some(body)) => println!("{}", body),
+                    _ => println!("oops"),
+                };
 
                 // let boffo = uds_utils::buffer(String::from("/var/run/docker.sock"), req).await;
                 // let body = images::list().await.unwrap();
