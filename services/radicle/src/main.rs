@@ -1,6 +1,6 @@
 use clap::{Arg, Command};
 // use docker::images;
-use unix_domain_socket_http::{Client, Response};
+use unix_domain_socket_rest_client::{Response, RestClient, UnixDomainSocketRestClient};
 
 // mod services;
 // use services::action::Action;
@@ -34,10 +34,10 @@ async fn main() {
     match matches.subcommand() {
         Some((cmd_bootstrap, sub_matches)) => {
             if sub_matches.get_flag("start") {
-                let client = Client::new(String::from("/var/run/docker.sock"));
-                let response = client.get(String::from("/images/json")).await.unwrap();
+                let client = UnixDomainSocketRestClient::new(String::from("/var/run/docker.sock"));
+                let outcome = client.get(String::from("/images/json")).await.unwrap();
 
-                match response {
+                match outcome {
                     Response::Okay(Some(body)) => println!("{}", body),
                     _ => println!("oops"),
                 };

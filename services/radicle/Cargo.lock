@@ -74,7 +74,18 @@ dependencies = [
  "clap",
  "docker",
  "tokio",
- "unix_domain_socket_http",
+ "unix_domain_socket_rest_client",
+]
+
+[[package]]
+name = "async-trait"
+version = "0.1.88"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e539d3fca749fcee5236ab05e93a52867dd549cc157c8cb7f99595f3cedffdb5"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
 ]
 
 [[package]]
@@ -680,9 +691,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5a5f39404a5da50712a4c1eecf25e90dd62b613502b7e925fd4e4d19b5c96512"
 
 [[package]]
-name = "unix_domain_socket_http"
+name = "unix_domain_socket_rest_client"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "http-body-util",
  "hyper",
  "hyper-util",
