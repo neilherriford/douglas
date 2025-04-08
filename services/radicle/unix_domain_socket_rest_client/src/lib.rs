@@ -1,6 +1,9 @@
+mod request_builder;
+
 use http_body_util::BodyExt;
+use hyper::StatusCode;
 use hyper::body::Incoming;
-use hyper::{Request, StatusCode};
+use request_builder::{LocalhostRequestBuilder, RequestBuilder};
 use std::error::Error;
 use std::future::Future;
 
@@ -38,35 +41,6 @@ impl HttpExecutor for UnixDomainSocketHttpExecutor {
 
         let res = sender.send_request(req).await?;
         Ok(res)
-    }
-}
-
-trait RequestBuilder {
-    fn build(
-        &self,
-        verb: String,
-        path: String,
-        body: Option<String>,
-    ) -> Result<Request<String>, Box<dyn Error>>;
-}
-
-struct LocalhostRequestBuilder;
-
-impl RequestBuilder for LocalhostRequestBuilder {
-    fn build(
-        &self,
-        verb: String,
-        path: String,
-        body: Option<String>,
-    ) -> Result<Request<String>, Box<dyn Error>> {
-        let url = format!("http://localhost{}", &path).parse::<hyper::Uri>()?;
-        let authority = url.authority().unwrap().clone();
-
-        Ok(Request::builder()
-            .method(verb.as_str())
-            .uri(url)
-            .header(hyper::header::HOST, authority.as_str())
-            .body(body.unwrap_or(String::new()))?)
     }
 }
 
