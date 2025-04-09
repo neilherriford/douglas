@@ -12,7 +12,7 @@ trait HttpExecutor {
     async fn perform(
         &self,
         req: hyper::Request<String>,
-    ) -> Result<hyper::Response<hyper::body::Incoming>, Box<dyn Error + Send + Sync>>;
+    ) -> Result<hyper::Response<hyper::body::Incoming>, Box<dyn Error>>;
 }
 
 struct UnixDomainSocketHttpExecutor {
@@ -24,7 +24,7 @@ impl HttpExecutor for UnixDomainSocketHttpExecutor {
     async fn perform(
         &self,
         req: hyper::Request<String>,
-    ) -> Result<hyper::Response<hyper::body::Incoming>, Box<dyn Error + Send + Sync>> {
+    ) -> Result<hyper::Response<hyper::body::Incoming>, Box<dyn Error>> {
         use hyper_util::rt::TokioIo;
         use std::path::Path;
         use tokio::net::UnixStream;
@@ -99,7 +99,7 @@ impl UnixDomainSocketRestClient {
 
     async fn create_response(
         &self,
-        perform_result: Result<hyper::Response<Incoming>, Box<dyn Error + Send + Sync>>,
+        perform_result: Result<hyper::Response<Incoming>, Box<dyn Error>>,
     ) -> Result<Response, Box<dyn Error>> {
         match perform_result {
             Ok(res) => {
