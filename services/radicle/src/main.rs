@@ -2,10 +2,8 @@ use clap::{Arg, Command};
 use simple_rest_client::http_executor::HttpClientBuilder;
 use simple_rest_client::io_builder::IoBuilder;
 use simple_rest_client::request_builder::LocalhostRequestBuilder;
-use simple_rest_client::rest_client::Response;
-use simple_rest_client::rest_client::RestClient;
-use simple_rest_client::rest_client::SimpleRestClient;
 use simple_rest_client::unix_domain_socket_io_builder::UnixDomainSocketIoBuilder;
+use simple_rest_client::{Response, RestClient, SimpleRestClient};
 
 #[tokio::main]
 async fn main() {

@@ -37,7 +37,7 @@ impl HttpExecutorBuilder for HttpClientBuilder {
 }
 
 #[async_trait::async_trait]
-pub(crate) trait HttpExecutor {
+pub trait HttpExecutor {
     async fn execute(
         &mut self,
         req: hyper::Request<String>,
