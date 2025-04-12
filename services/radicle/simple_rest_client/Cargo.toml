@@ -1,5 +1,5 @@
 [package]
-name = "unix_domain_socket_rest_client"
+name = "simple_rest_client"
 version = "0.1.0"
 edition = "2024"
 

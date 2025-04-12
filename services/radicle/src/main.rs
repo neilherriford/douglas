@@ -1,11 +1,11 @@
 use clap::{Arg, Command};
-use unix_domain_socket_rest_client::http_executor::HttpClientBuilder;
-use unix_domain_socket_rest_client::io_builder::IoBuilder;
-use unix_domain_socket_rest_client::request_builder::LocalhostRequestBuilder;
-use unix_domain_socket_rest_client::rest_client::Response;
-use unix_domain_socket_rest_client::rest_client::RestClient;
-use unix_domain_socket_rest_client::rest_client::SimpleRestClient;
-use unix_domain_socket_rest_client::unix_domain_socket_io_builder::UnixDomainSocketIoBuilder;
+use simple_rest_client::http_executor::HttpClientBuilder;
+use simple_rest_client::io_builder::IoBuilder;
+use simple_rest_client::request_builder::LocalhostRequestBuilder;
+use simple_rest_client::rest_client::Response;
+use simple_rest_client::rest_client::RestClient;
+use simple_rest_client::rest_client::SimpleRestClient;
+use simple_rest_client::unix_domain_socket_io_builder::UnixDomainSocketIoBuilder;
 
 #[tokio::main]
 async fn main() {

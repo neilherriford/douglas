@@ -5,12 +5,12 @@ edition = "2024"
 
 [dependencies]
 docker = { path = "./docker" }
-unix_domain_socket_rest_client = { path = "./unix_domain_socket_rest_client" }
+simple_rest_client = { path = "./simple_rest_client" }
 clap = "4.5.32"
 tokio = {version = "1.44.1", features = ["full"]}
 
 
 [workspace]
 members = [
-    "./unix_domain_socket_rest_client",
+    "./simple_rest_client",
 ]
