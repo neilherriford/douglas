@@ -3,11 +3,11 @@ use std::error::Error;
 use std::future::Future;
 use std::pin::Pin;
 
-pub(crate) trait IoStream: Read + Write + Unpin + Send {}
+pub trait IoStream: Read + Write + Unpin + Send {}
 
 impl<T: Read + Write + Unpin + Send> IoStream for T {}
 
-pub(crate) trait IoBuilder {
+pub trait IoBuilder {
     fn build<'a>(
         &'a self,
     ) -> Pin<

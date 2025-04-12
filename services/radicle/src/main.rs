@@ -1,15 +1,15 @@
 use clap::{Arg, Command};
-// use docker::images;
-use unix_domain_socket_rest_client::{Response, RestClient, UnixDomainSocketRestClient};
-
-// mod services;
-// use services::action::Action;
-// use services::docker::images::list::List;
+use unix_domain_socket_rest_client::http_executor::HttpClientBuilder;
+use unix_domain_socket_rest_client::io_builder::IoBuilder;
+use unix_domain_socket_rest_client::request_builder::LocalhostRequestBuilder;
+use unix_domain_socket_rest_client::rest_client::Response;
+use unix_domain_socket_rest_client::rest_client::RestClient;
+use unix_domain_socket_rest_client::rest_client::SimpleRestClient;
+use unix_domain_socket_rest_client::unix_domain_socket_io_builder::UnixDomainSocketIoBuilder;
 
 #[tokio::main]
 async fn main() {
     let cmd_bootstrap: &str = "bootstrap";
-    // let arg_server: &str = "server";
 
     let matches = Command::new("radicle")
         .version("0.01")
@@ -34,45 +34,28 @@ async fn main() {
     match matches.subcommand() {
         Some((cmd_bootstrap, sub_matches)) => {
             if sub_matches.get_flag("start") {
-                let client = UnixDomainSocketRestClient::new(String::from("/var/run/docker.sock"));
+                let io_stream =
+                    UnixDomainSocketIoBuilder::new(String::from("/var/run/docker.sock"))
+                        .build()
+                        .await
+                        .unwrap();
+
+                let mut client = SimpleRestClient::build(
+                    Box::new(HttpClientBuilder::new()),
+                    io_stream,
+                    Box::new(LocalhostRequestBuilder::new()),
+                )
+                .await
+                .unwrap();
+
                 let outcome = client.get(String::from("/images/json")).await.unwrap();
 
                 match outcome {
                     Response::Okay(Some(body)) => println!("{}", body),
                     _ => println!("oops"),
                 };
-
-                // let boffo = uds_utils::buffer(String::from("/var/run/docker.sock"), req).await;
-                // let body = images::list().await.unwrap();
-                // println!("{:?}", body);
-                // let l = List;
-                // let _ = l.fart().await;
             }
         }
         _ => todo!(),
     }
-
-    // .arg(
-    //     Arg::new(ARG_BOOTSTRAP)
-    //         .long(ARG_BOOTSTRAP)
-    //         .help("Starts the bootstrap proccess")
-    //         .action(clap::ArgAction::SetTrue)
-    //         .conflicts_with(arg_server),
-    // )
-    // .arg(
-    //     Arg::new(arg_server)
-    //         .long(ARG_SERVER)
-    //         .help("Starts the admin server")
-    //         .action(clap::ArgAction::SetTrue)
-    //         .conflicts_with(ARG_BOOTSTRAP),
-    // )
-    // .get_matches();
-
-    // if matches.get_flag("fart") {
-    //     println!("--fart flag is set!");
-    //     let l = List;
-    //     let _ = l.fart().await;
-    // } else {
-    //     println!("--fart flag is not set.");
-    // }
 }

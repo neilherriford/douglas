@@ -2,7 +2,7 @@ use hyper::Request;
 use hyper::http::uri;
 use std::error::Error;
 
-pub(crate) trait RequestBuilder {
+pub trait RequestBuilder {
     fn build(
         &self,
         verb: String,
@@ -11,7 +11,13 @@ pub(crate) trait RequestBuilder {
     ) -> Result<Request<String>, Box<dyn Error>>;
 }
 
-pub(crate) struct LocalhostRequestBuilder;
+pub struct LocalhostRequestBuilder;
+
+impl LocalhostRequestBuilder {
+    pub fn new() -> LocalhostRequestBuilder {
+        Self {}
+    }
+}
 
 impl RequestBuilder for LocalhostRequestBuilder {
     fn build(

@@ -6,7 +6,7 @@ use std::path::Path;
 use std::pin::Pin;
 use tokio::net::UnixStream;
 
-pub(crate) struct UnixDomainSocketIoBuilder {
+pub struct UnixDomainSocketIoBuilder {
     socket_file_path: String,
 }
 
