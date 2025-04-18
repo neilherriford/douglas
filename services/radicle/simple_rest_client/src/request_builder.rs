@@ -5,9 +5,9 @@ use std::error::Error;
 pub trait RequestBuilder {
     fn build(
         &self,
-        verb: String,
-        path: String,
-        body: Option<String>,
+        verb: &str,
+        path: &str,
+        body: Option<&str>,
     ) -> Result<Request<String>, Box<dyn Error>>;
 }
 
@@ -22,9 +22,9 @@ impl LocalhostRequestBuilder {
 impl RequestBuilder for LocalhostRequestBuilder {
     fn build(
         &self,
-        verb: String,
-        path: String,
-        body: Option<String>,
+        verb: &str,
+        path: &str,
+        body: Option<&str>,
     ) -> Result<Request<String>, Box<dyn Error>> {
         let authority: &str = "localhost";
         let uri = uri::Builder::new()
@@ -35,10 +35,10 @@ impl RequestBuilder for LocalhostRequestBuilder {
             .unwrap();
 
         Ok(Request::builder()
-            .method(verb.as_str())
+            .method(verb)
             .uri(uri)
             .header(hyper::header::HOST, authority)
-            .body(body.unwrap_or(String::new()))?)
+            .body(body.unwrap_or("").into())?)
     }
 }
 
@@ -48,11 +48,7 @@ mod tests {
 
     #[test]
     fn should_create_a_local_request() {
-        let result = LocalhostRequestBuilder {}.build(
-            String::from("verb"),
-            String::from("/path"),
-            Some(String::from("body")),
-        );
+        let result = LocalhostRequestBuilder {}.build("verb", "/path", Some("body"));
 
         assert!(result.is_ok());
 
@@ -61,7 +57,6 @@ mod tests {
         assert_eq!("body", body);
         assert_eq!(1, parts.headers.len());
 
-        // The header is needed for local domain sockets
         let (name, value) = parts.headers.iter().next().unwrap();
         assert_eq!(hyper::header::HOST, name.as_str());
         assert_eq!("localhost", value.to_str().unwrap());
@@ -74,11 +69,7 @@ mod tests {
 
     #[test]
     fn should_return_error_for_invalid() {
-        let result = LocalhostRequestBuilder {}.build(
-            String::from("spaces are invalid in URIs"),
-            String::from("/path"),
-            None,
-        );
+        let result = LocalhostRequestBuilder {}.build("spaces are invalid in URIs", "/path", None);
 
         assert_eq!(false, result.is_ok());
     }

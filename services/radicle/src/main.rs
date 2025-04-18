@@ -1,9 +1,11 @@
 use clap::{Arg, Command};
 use simple_rest_client::http_executor::HttpClientBuilder;
 use simple_rest_client::io_builder::IoBuilder;
+use simple_rest_client::log::StdOutLogger;
 use simple_rest_client::request_builder::LocalhostRequestBuilder;
 use simple_rest_client::unix_domain_socket_io_builder::UnixDomainSocketIoBuilder;
 use simple_rest_client::{Response, RestClient, SimpleRestClient};
+use std::sync::Arc;
 
 #[tokio::main]
 async fn main() {
@@ -38,7 +40,10 @@ async fn main() {
                         .await
                         .unwrap();
 
+                let logger = StdOutLogger::new();
+
                 let mut client = SimpleRestClient::build(
+                    Arc::new(logger),
                     Box::new(HttpClientBuilder::new()),
                     io_stream,
                     Box::new(LocalhostRequestBuilder::new()),
@@ -46,7 +51,7 @@ async fn main() {
                 .await
                 .unwrap();
 
-                let outcome = client.get(String::from("/images/json")).await.unwrap();
+                let outcome = client.get("/images/json").await.unwrap();
 
                 match outcome {
                     Response::Okay(Some(body)) => println!("{}", body),

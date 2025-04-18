@@ -1,15 +1,16 @@
-use crate::http_executor::HttpExecutor;
-use crate::http_executor::HttpExecutorBuilder;
+use crate::http_executor::{HttpExecutor, HttpExecutorBuilder};
 use crate::io_builder::IoStream;
+use crate::log::Logger;
 use crate::request_builder::RequestBuilder;
 use http_body_util::BodyExt;
-use hyper::StatusCode;
-use hyper::body::Incoming;
+use hyper::{StatusCode, body::Incoming};
 use std::error::Error;
 use std::future::Future;
+use std::sync::Arc;
 
 pub mod http_executor;
 pub mod io_builder;
+pub mod log;
 pub mod request_builder;
 pub mod unix_domain_socket_io_builder;
 
@@ -21,33 +22,38 @@ pub enum Response {
 }
 
 pub trait RestClient {
-    fn get(&mut self, path: String) -> impl Future<Output = Result<Response, Box<dyn Error>>>;
+    fn get(&mut self, path: &str) -> impl Future<Output = Result<Response, Box<dyn Error>>>;
     fn put(
         &mut self,
-        path: String,
-        body: String,
+        path: &str,
+        body: &str,
     ) -> impl Future<Output = Result<Response, Box<dyn Error>>>;
     fn post(
         &mut self,
-        path: String,
-        body: String,
+        path: &str,
+        body: &str,
     ) -> impl Future<Output = Result<Response, Box<dyn Error>>>;
 }
 
 pub struct SimpleRestClient {
+    logger: Arc<dyn Logger>,
     http_executor: Box<dyn HttpExecutor>,
     request_builder: Box<dyn RequestBuilder>,
 }
 
 impl SimpleRestClient {
     pub async fn build(
+        logger: Arc<dyn Logger>,
         http_executor_builder: Box<dyn HttpExecutorBuilder>,
         io_stream: Box<dyn IoStream>,
         request_builder: Box<dyn RequestBuilder>,
     ) -> Result<Self, Box<dyn Error>> {
-        let http_executor = http_executor_builder.build(io_stream).await?;
+        let http_executor = http_executor_builder
+            .build(Arc::clone(&logger), io_stream)
+            .await?;
 
         Ok(Self {
+            logger: Arc::clone(&logger),
             http_executor,
             request_builder,
         })
@@ -98,30 +104,24 @@ impl SimpleRestClient {
 }
 
 impl RestClient for SimpleRestClient {
-    async fn get(&mut self, path: String) -> Result<Response, Box<dyn Error>> {
-        let req = self
-            .request_builder
-            .build(String::from("GET"), path, None)
-            .unwrap();
+    async fn get(&mut self, path: &str) -> Result<Response, Box<dyn Error>> {
+        let req = self.request_builder.build("GET", path, None).unwrap();
 
         let perform_result = self.http_executor.execute(req).await;
         self.create_response(perform_result).await
     }
 
-    async fn put(&mut self, path: String, body: String) -> Result<Response, Box<dyn Error>> {
-        let req = self
-            .request_builder
-            .build(String::from("PUT"), path, Some(body))
-            .unwrap();
+    async fn put(&mut self, path: &str, body: &str) -> Result<Response, Box<dyn Error>> {
+        let req = self.request_builder.build("PUT", path, Some(body)).unwrap();
 
         let perform_result = self.http_executor.execute(req).await;
         self.create_response(perform_result).await
     }
 
-    async fn post(&mut self, path: String, body: String) -> Result<Response, Box<dyn Error>> {
+    async fn post(&mut self, path: &str, body: &str) -> Result<Response, Box<dyn Error>> {
         let req = self
             .request_builder
-            .build(String::from("POST"), path, Some(body))
+            .build("POST", path, Some(body))
             .unwrap();
 
         let perform_result = self.http_executor.execute(req).await;
