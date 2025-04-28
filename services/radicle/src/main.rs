@@ -1,10 +1,7 @@
 use clap::{Arg, Command};
-use simple_rest_client::http_executor::HttpClientBuilder;
-use simple_rest_client::io_builder::IoBuilder;
 use simple_rest_client::log::StdOutLogger;
-use simple_rest_client::request_builder::LocalhostRequestBuilder;
-use simple_rest_client::unix_domain_socket_io_builder::UnixDomainSocketIoBuilder;
-use simple_rest_client::{Response, RestClient, SimpleRestClient};
+use simple_rest_client::unix_domain_socket::build_client as build_uds_client;
+use simple_rest_client::{Request, Response, RestClient};
 use std::sync::Arc;
 
 #[tokio::main]
@@ -32,31 +29,30 @@ async fn main() {
         .get_matches();
 
     match matches.subcommand() {
-        Some((cmd_bootstrap, sub_matches)) => {
+        Some((_cmd_bootstrap, sub_matches)) => {
             if sub_matches.get_flag("start") {
-                let io_stream =
-                    UnixDomainSocketIoBuilder::new(String::from("/var/run/docker.sock"))
-                        .build()
-                        .await
-                        .unwrap();
-
                 let logger = StdOutLogger::new();
 
-                let mut client = SimpleRestClient::build(
-                    Arc::new(logger),
-                    Box::new(HttpClientBuilder::new()),
-                    io_stream,
-                    Box::new(LocalhostRequestBuilder::new()),
-                )
-                .await
-                .unwrap();
+                let mut client =
+                    build_uds_client("/var/run/docker.sock".to_string(), Arc::new(logger))
+                        .await
+                        .expect("it worked");
 
-                let outcome = client.get("/images/json").await.unwrap();
-
-                match outcome {
-                    Response::Okay(Some(body)) => println!("{}", body),
-                    _ => println!("oops"),
+                let req = Request::Get {
+                    path: "/images/json".to_string(),
+                    headers: None,
                 };
+
+                let response: Result<Response<String>, Box<dyn std::error::Error>> =
+                    client.execute(&req).await;
+
+                match response {
+                    Ok(Response::Okay {
+                        headers: _,
+                        body: Some(body),
+                    }) => println!("{}", body),
+                    _ => println!("oops"),
+                }
             }
         }
         _ => todo!(),
