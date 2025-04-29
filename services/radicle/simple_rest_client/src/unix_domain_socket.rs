@@ -1,27 +1,78 @@
-use crate::{Header, IoStream, Logger, RestClient, SimpleRestClient};
+use crate::{Header, Logger, RestClient, SimpleRestClient};
 use hyper_util::rt::TokioIo;
 use std::error::Error;
 use std::fmt::Debug;
+use std::fmt::Formatter;
 use std::path::Path;
 use std::sync::Arc;
+
+use hyper::rt::{Read, ReadBufCursor, Write};
+use std::{
+    pin::Pin,
+    task::{Context, Poll},
+};
 use tokio::net::UnixStream;
 
-impl IoStream for TokioIo<UnixStream> {}
-
-pub async fn build_stream(socket_file_path: String) -> Result<impl IoStream, Box<dyn Error>> {
-    let stream = UnixStream::connect(Path::new(&socket_file_path)).await?;
-    Ok(TokioIo::new(stream))
+pub struct IoStream {
+    stream: TokioIo<UnixStream>,
+    socket_file_path: String,
 }
 
+impl Read for IoStream {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: ReadBufCursor<'_>,
+    ) -> Poll<Result<(), std::io::Error>> {
+        Pin::new(&mut self.stream).poll_read(cx, buf)
+    }
+}
+
+impl Write for IoStream {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<Result<usize, std::io::Error>> {
+        Pin::new(&mut self.stream).poll_write(cx, buf)
+    }
+
+    fn poll_flush(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<(), std::io::Error>> {
+        Pin::new(&mut self.stream).poll_flush(cx)
+    }
+
+    fn poll_shutdown(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<(), std::io::Error>> {
+        Pin::new(&mut self.stream).poll_shutdown(cx)
+    }
+}
+
+impl std::fmt::Display for IoStream {
+    fn fmt(&self, f: &mut Formatter<'_>) -> Result<(), std::fmt::Error> {
+        write!(f, "({})", self.socket_file_path)
+    }
+}
+impl crate::IoStream for IoStream {}
+
 pub async fn build_client<T>(
-    socket_path: String,
+    socket_file_path: String,
     logger: Arc<dyn Logger>,
-) -> Result<impl RestClient<T>, Box<dyn std::error::Error>>
+) -> Result<impl RestClient<T>, Box<dyn Error>>
 where
     T: TryFrom<String> + std::fmt::Display,
     T::Error: Debug,
 {
-    let io_stream = build_stream(socket_path).await?;
+    let unix_stream = UnixStream::connect(Path::new(&socket_file_path)).await?;
+    let io_stream = IoStream {
+        stream: TokioIo::new(unix_stream),
+        socket_file_path,
+    };
+
     let result = SimpleRestClient::new(
         "http",
         "localhost",

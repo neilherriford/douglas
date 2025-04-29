@@ -213,6 +213,7 @@ dependencies = [
  "hyperlocal",
  "serde",
  "serde_json",
+ "simple_rest_client",
  "tokio",
 ]
 
@@ -747,8 +748,6 @@ dependencies = [
  "hyper",
  "hyper-util",
  "mockall",
- "serde",
- "serde_json",
  "tokio",
  "tokio-test",
 ]
