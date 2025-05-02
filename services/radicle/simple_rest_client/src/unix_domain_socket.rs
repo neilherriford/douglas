@@ -1,4 +1,4 @@
-use crate::{Header, Logger, RestClient, SimpleRestClient};
+use crate::{Header, Logger, Parser, RestClient, SimpleRestClient};
 use hyper_util::rt::TokioIo;
 use std::error::Error;
 use std::fmt::Debug;
@@ -62,6 +62,7 @@ impl crate::IoStream for IoStream {}
 pub async fn build_client<T>(
     socket_file_path: String,
     logger: Arc<dyn Logger>,
+    parser: impl Parser<String, T> + 'static,
 ) -> Result<impl RestClient<T>, Box<dyn Error>>
 where
     T: TryFrom<String> + std::fmt::Display,
@@ -79,6 +80,7 @@ where
         io_stream,
         Some(vec![Header::new("host", "localhost")]),
         Arc::clone(&logger),
+        parser,
     );
 
     Ok(result)
