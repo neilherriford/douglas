@@ -1,5 +1,5 @@
 use clap::{Arg, Command};
-use docker::{DockerClient, SimpleDockerClient};
+use docker::{DockerImageRepository, SimpleDockerClient};
 use simple_rest_client::log::SilentLogger;
 use std::sync::Arc;
 
@@ -37,7 +37,7 @@ async fn main() {
                         .await
                         .expect("it worked");
 
-                let images = client.list_images().await.expect("uhoh");
+                let images = client.list().await.expect("uhoh");
 
                 println!("{:?}", images);
             }

@@ -79,8 +79,8 @@ where
 }
 
 #[async_trait::async_trait]
-pub trait DockerClient {
-    async fn list_images(&mut self) -> Result<Vec<Image>, Box<dyn Error>>;
+pub trait DockerImageRepository {
+    async fn list(&mut self) -> Result<Vec<Image>, Box<dyn Error>>;
 }
 
 pub struct SimpleDockerClient {
@@ -88,8 +88,8 @@ pub struct SimpleDockerClient {
 }
 
 #[async_trait::async_trait]
-impl DockerClient for SimpleDockerClient {
-    async fn list_images(&mut self) -> Result<Vec<Image>, Box<(dyn Error)>> {
+impl DockerImageRepository for SimpleDockerClient {
+    async fn list(&mut self) -> Result<Vec<Image>, Box<(dyn Error)>> {
         let req = Request::Get {
             path: "/images/json".to_string(),
             headers: None,
@@ -153,7 +153,7 @@ impl SimpleDockerClient {
 
 #[cfg(test)]
 mod tests {
-    mod list_images {
+    mod list {
         use super::super::*;
         use serde_json::json;
         use serde_json::value::Value as Json;
@@ -173,7 +173,7 @@ mod tests {
                 rest_client: Box::new(mock_rest_client),
             };
 
-            let result = client.list_images().await;
+            let result = client.list().await;
 
             match result {
                 Err(error) => assert_eq!(
@@ -198,7 +198,7 @@ mod tests {
                 rest_client: Box::new(mock_rest_client),
             };
 
-            let result = client.list_images().await;
+            let result = client.list().await;
 
             match result {
                 Err(error) => assert_eq!(
@@ -220,7 +220,7 @@ mod tests {
                 rest_client: Box::new(mock_rest_client),
             };
 
-            let result = client.list_images().await;
+            let result = client.list().await;
 
             match result {
                 Err(error) => assert_eq!(
@@ -246,7 +246,7 @@ mod tests {
                 rest_client: Box::new(mock_rest_client),
             };
 
-            let result = client.list_images().await;
+            let result = client.list().await;
 
             match result {
                 Err(error) => assert_eq!("Received error status: 500", error.to_string()),
@@ -268,12 +268,12 @@ mod tests {
                 rest_client: Box::new(mock_rest_client),
             };
 
-            let result = client.list_images().await;
+            let result = client.list().await;
             assert_eq!(true, result.is_err());
         }
 
         #[tokio::test]
-        async fn should_list_images() {
+        async fn should_list() {
             let mut mock_rest_client = MockRestClient::new();
             mock_rest_client.expect_execute().returning(|_req| {
                 Ok(Response::<Json>::Okay {
@@ -307,7 +307,7 @@ mod tests {
                 rest_client: Box::new(mock_rest_client),
             };
 
-            let result = client.list_images().await;
+            let result = client.list().await;
 
             match result {
                 Ok(actual) => {
@@ -366,7 +366,7 @@ mod tests {
                 rest_client: Box::new(mock_rest_client),
             };
 
-            let result = client.list_images().await;
+            let result = client.list().await;
 
             match result {
                 Ok(actual) => {
@@ -391,7 +391,7 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn should_list_images_with_simple_ids() {
+        async fn should_list_with_simple_ids() {
             let mut mock_rest_client = MockRestClient::new();
             mock_rest_client.expect_execute().returning(|_req| {
                 Ok(Response::<Json>::Okay {
@@ -425,7 +425,7 @@ mod tests {
                 rest_client: Box::new(mock_rest_client),
             };
 
-            let result = client.list_images().await;
+            let result = client.list().await;
 
             match result {
                 Ok(actual) => {
