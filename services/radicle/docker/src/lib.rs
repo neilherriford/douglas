@@ -16,11 +16,14 @@ pub enum DockerError {
     #[error("Received error status: {status}")]
     ErrorResponse { status: u16, body: Option<Json> },
 
+    #[error("Ambiguous match")]
+    AmbiguousMatch,
+
     #[error("Not implemented yet.")]
     NotImplemented,
 }
 
-#[derive(Debug, Deserialize, PartialEq)]
+#[derive(Debug, Deserialize, Clone, PartialEq)]
 pub struct Image {
     #[serde(rename = "Id")]
     #[serde(deserialize_with = "deserialize_id")]
@@ -31,13 +34,13 @@ pub struct Image {
     pub tags: Vec<Tag>,
 }
 
-#[derive(Debug, Deserialize, PartialEq)]
+#[derive(Debug, Deserialize, Clone, PartialEq)]
 pub struct Id {
     pub algorithm: String,
     pub hex: String,
 }
 
-#[derive(Debug, Deserialize, PartialEq)]
+#[derive(Debug, Deserialize, Clone, PartialEq)]
 pub struct Tag {
     pub name: String,
     pub version: String,
@@ -81,6 +84,7 @@ where
 #[async_trait::async_trait]
 pub trait DockerImageRepository {
     async fn list(&mut self) -> Result<Vec<Image>, Box<dyn Error>>;
+    async fn find(&mut self, id: &Id) -> Result<Option<Image>, Box<dyn Error>>;
 }
 
 pub struct SimpleDockerClient {
@@ -119,6 +123,20 @@ impl DockerImageRepository for SimpleDockerClient {
                 status: status,
                 body: body,
             })),
+        }
+    }
+
+    async fn find(&mut self, id: &Id) -> Result<Option<Image>, Box<dyn Error>> {
+        let mut matches = self
+            .list()
+            .await?
+            .into_iter()
+            .filter(|image| image.id == *id);
+
+        match (matches.next(), matches.next()) {
+            (Some(first), None) => Ok(Some(first)),
+            (None, _) => Ok(None),
+            _ => Err(Box::new(DockerError::AmbiguousMatch)),
         }
     }
 }
@@ -446,6 +464,103 @@ mod tests {
                     unreachable!("Expected a vec of images!")
                 }
             }
+        }
+    }
+
+    mod find {
+        use super::super::*;
+        use serde_json::json;
+        use serde_json::value::Value as Json;
+        use simple_rest_client::MockRestClient;
+
+        #[tokio::test]
+        async fn should_find_none() {
+            let mut mock_rest_client = MockRestClient::new();
+            mock_rest_client.expect_execute().returning(|_req| {
+                Ok(Response::<Json>::Okay {
+                    headers: vec![],
+                    body: Some(json!([{"Id": "alg:123", "RepoTags": ["foo:bar"]}])),
+                })
+            });
+
+            let mut client = SimpleDockerClient {
+                rest_client: Box::new(mock_rest_client),
+            };
+
+            let result = client
+                .find(&Id {
+                    algorithm: "alg".to_string(),
+                    hex: "456".to_string(),
+                })
+                .await;
+
+            assert_eq!(true, result.is_ok());
+            let found = result.unwrap();
+            assert_eq!(true, found.is_none());
+        }
+
+        #[tokio::test]
+        async fn should_find_one() {
+            let mut mock_rest_client = MockRestClient::new();
+            mock_rest_client.expect_execute().returning(|_req| {
+                Ok(Response::<Json>::Okay {
+                    headers: vec![],
+                    body: Some(json!([{"Id": "alg:123", "RepoTags": ["foo:bar"]}])),
+                })
+            });
+
+            let mut client = SimpleDockerClient {
+                rest_client: Box::new(mock_rest_client),
+            };
+
+            let result = client
+                .find(&Id {
+                    algorithm: "alg".to_string(),
+                    hex: "123".to_string(),
+                })
+                .await;
+
+            assert_eq!(true, result.is_ok());
+            let found = result.unwrap();
+            assert_eq!(true, found.is_some());
+            let image = found.unwrap();
+            assert_eq!("alg".to_string(), image.id.algorithm);
+            assert_eq!("123".to_string(), image.id.hex);
+            assert_eq!(1, image.tags.len());
+            let tag = image.tags.first().unwrap();
+            assert_eq!("foo".to_string(), tag.name);
+            assert_eq!("bar".to_string(), tag.version);
+        }
+
+        #[tokio::test]
+        async fn should_error_if_more_than_one_match() {
+            let mut mock_rest_client = MockRestClient::new();
+            mock_rest_client.expect_execute().returning(|_req| {
+                Ok(Response::<Json>::Okay {
+                    headers: vec![],
+                    body: Some(json!([
+                        {"Id": "alg:123", "RepoTags": ["foo:bar"]},
+                        {"Id": "alg:123", "RepoTags": ["bas:qux"]}
+                    ])),
+                })
+            });
+
+            let mut client = SimpleDockerClient {
+                rest_client: Box::new(mock_rest_client),
+            };
+
+            let result = client
+                .find(&Id {
+                    algorithm: "alg".to_string(),
+                    hex: "123".to_string(),
+                })
+                .await;
+
+            assert_eq!(true, result.is_err());
+            assert_eq!(
+                "Ambiguous match".to_string(),
+                result.err().unwrap().to_string()
+            );
         }
     }
 }
