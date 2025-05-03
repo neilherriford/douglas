@@ -85,6 +85,7 @@ where
 pub trait DockerImageRepository {
     async fn list(&mut self) -> Result<Vec<Image>, Box<dyn Error>>;
     async fn find(&mut self, id: &Id) -> Result<Option<Image>, Box<dyn Error>>;
+    async fn where_named(&mut self, name: &str) -> Result<Option<Vec<Image>>, Box<dyn Error>>;
 }
 
 pub struct SimpleDockerClient {
@@ -137,6 +138,25 @@ impl DockerImageRepository for SimpleDockerClient {
             (Some(first), None) => Ok(Some(first)),
             (None, _) => Ok(None),
             _ => Err(Box::new(DockerError::AmbiguousMatch)),
+        }
+    }
+
+    async fn where_named(&mut self, name: &str) -> Result<Option<Vec<Image>>, Box<dyn Error>> {
+        let matches: Vec<_> = self
+            .list()
+            .await?
+            .into_iter()
+            .filter(|image| {
+                image
+                    .tags
+                    .iter()
+                    .any(|tag| tag.name == "name" && tag.version == name)
+            })
+            .collect();
+
+        match matches.len() {
+            0 => Ok(None),
+            _ => Ok(Some(matches)),
         }
     }
 }
@@ -560,6 +580,156 @@ mod tests {
             assert_eq!(
                 "Ambiguous match".to_string(),
                 result.err().unwrap().to_string()
+            );
+        }
+    }
+
+    mod where_named {
+        use super::super::*;
+        use serde_json::json;
+        use serde_json::value::Value as Json;
+        use simple_rest_client::MockRestClient;
+
+        #[tokio::test]
+        async fn should_find_none_when_no_name_tags() {
+            let mut mock_rest_client = MockRestClient::new();
+            mock_rest_client.expect_execute().returning(|_req| {
+                Ok(Response::<Json>::Okay {
+                    headers: vec![],
+                    body: Some(json!([{"Id": "alg:123", "RepoTags": ["foo:bar"]}])),
+                })
+            });
+
+            let mut client = SimpleDockerClient {
+                rest_client: Box::new(mock_rest_client),
+            };
+
+            let result = client.where_named("bar").await;
+
+            assert_eq!(true, result.is_ok());
+            let found = result.unwrap();
+            assert_eq!(true, found.is_none());
+        }
+
+        #[tokio::test]
+        async fn should_find_none_when_no_matches() {
+            let mut mock_rest_client = MockRestClient::new();
+            mock_rest_client.expect_execute().returning(|_req| {
+                Ok(Response::<Json>::Okay {
+                    headers: vec![],
+                    body: Some(json!([{"Id": "alg:123", "RepoTags": ["name:foo"]}])),
+                })
+            });
+
+            let mut client = SimpleDockerClient {
+                rest_client: Box::new(mock_rest_client),
+            };
+
+            let result = client.where_named("bar").await;
+
+            assert_eq!(true, result.is_ok());
+            let found = result.unwrap();
+            assert_eq!(true, found.is_none());
+        }
+
+        #[tokio::test]
+        async fn should_find_one_match() {
+            let mut mock_rest_client = MockRestClient::new();
+            mock_rest_client.expect_execute().returning(|_req| {
+                Ok(Response::<Json>::Okay {
+                    headers: vec![],
+                    body: Some(json!([{"Id": "alg:123", "RepoTags": ["name:foo"]}])),
+                })
+            });
+
+            let mut client = SimpleDockerClient {
+                rest_client: Box::new(mock_rest_client),
+            };
+
+            let result = client.where_named("foo").await;
+
+            assert_eq!(true, result.is_ok());
+            let found = result.unwrap();
+            assert_eq!(true, found.is_some());
+            let images = found.unwrap();
+            assert_eq!(1, images.len());
+            assert_eq!(
+                Id {
+                    algorithm: "alg".to_string(),
+                    hex: "123".to_string()
+                },
+                images.first().unwrap().id
+            );
+        }
+
+        #[tokio::test]
+        async fn should_find_one_match_with_multiple_name_tags() {
+            let mut mock_rest_client = MockRestClient::new();
+            mock_rest_client.expect_execute().returning(|_req| {
+                Ok(Response::<Json>::Okay {
+                    headers: vec![],
+                    body: Some(json!([{"Id": "alg:123", "RepoTags": ["name:latest", "name:foo"]}])),
+                })
+            });
+
+            let mut client = SimpleDockerClient {
+                rest_client: Box::new(mock_rest_client),
+            };
+
+            let result = client.where_named("foo").await;
+
+            assert_eq!(true, result.is_ok());
+            let found = result.unwrap();
+            assert_eq!(true, found.is_some());
+            let images = found.unwrap();
+            assert_eq!(1, images.len());
+            assert_eq!(
+                Id {
+                    algorithm: "alg".to_string(),
+                    hex: "123".to_string()
+                },
+                images.first().unwrap().id
+            )
+        }
+
+        #[tokio::test]
+        async fn should_find_multiple_matches() {
+            let mut mock_rest_client = MockRestClient::new();
+            mock_rest_client.expect_execute().returning(|_req| {
+                Ok(Response::<Json>::Okay {
+                    headers: vec![],
+                    body: Some(json!([
+                        {"Id": "alg:123", "RepoTags": ["name:latest", "name:foo"]},
+                        {"Id": "alg:456", "RepoTags": ["name:foo"]},
+                    ])),
+                })
+            });
+
+            let mut client = SimpleDockerClient {
+                rest_client: Box::new(mock_rest_client),
+            };
+
+            let result = client.where_named("foo").await;
+            assert_eq!(true, result.is_ok());
+            let found = result.unwrap();
+            assert_eq!(true, found.is_some());
+            let images = found.unwrap();
+            assert_eq!(2, images.len());
+            assert_eq!(
+                true,
+                images.iter().any(|image| image.id
+                    == Id {
+                        algorithm: "alg".to_string(),
+                        hex: "123".to_string()
+                    })
+            );
+            assert_eq!(
+                true,
+                images.iter().any(|image| image.id
+                    == Id {
+                        algorithm: "alg".to_string(),
+                        hex: "456".to_string()
+                    })
             );
         }
     }
