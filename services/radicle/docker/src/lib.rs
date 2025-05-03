@@ -23,11 +23,18 @@ pub enum DockerError {
 #[derive(Debug, Deserialize, PartialEq)]
 pub struct Image {
     #[serde(rename = "Id")]
-    pub id: String,
+    #[serde(deserialize_with = "deserialize_id")]
+    pub id: Id,
 
     #[serde(rename = "RepoTags")]
     #[serde(deserialize_with = "deserialize_tags")]
     pub tags: Vec<Tag>,
+}
+
+#[derive(Debug, Deserialize, PartialEq)]
+pub struct Id {
+    pub algorithm: String,
+    pub hex: String,
 }
 
 #[derive(Debug, Deserialize, PartialEq)]
@@ -55,6 +62,20 @@ where
         .collect();
 
     Ok(tags)
+}
+
+fn deserialize_id<'de, D>(deserializer: D) -> Result<Id, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let raw_id: String = Deserialize::deserialize(deserializer)?;
+    let parts: Vec<&str> = raw_id.split(':').collect();
+    let (algorithm, hex) = match parts.as_slice() {
+        [first, second] => (first.to_string(), second.to_string()),
+        _ => ("missing-algorithim".to_string(), raw_id),
+    };
+
+    Ok(Id { algorithm, hex })
 }
 
 #[async_trait::async_trait]
@@ -291,8 +312,132 @@ mod tests {
             match result {
                 Ok(actual) => {
                     let expected = vec![Image {
-                        id: "sha256:49891f502916212e83198a7e3425f99581a97e11762f462acd91c9a7b8d37f28".to_string(),
-                        tags: vec![Tag {name: "foo".to_string(), version: "bar".to_string()}]
+                        id: Id {
+                            algorithm: "sha256".to_string(),
+                            hex: "49891f502916212e83198a7e3425f99581a97e11762f462acd91c9a7b8d37f28"
+                                .to_string(),
+                        },
+                        tags: vec![Tag {
+                            name: "foo".to_string(),
+                            version: "bar".to_string(),
+                        }],
+                    }];
+
+                    assert_eq!(expected, actual)
+                }
+                _ => {
+                    unreachable!("Expected a vec of images!")
+                }
+            }
+        }
+
+        #[tokio::test]
+        async fn should_decode_tags_without_semicolons() {
+            let mut mock_rest_client = MockRestClient::new();
+            mock_rest_client.expect_execute().returning(|_req| {
+                Ok(Response::<Json>::Okay {
+                    headers: vec![],
+                    body: Some(json!(
+[
+  {
+    "Containers": -1,
+    "Created": 1732220204,
+    "Id": "sha256:49891f502916212e83198a7e3425f99581a97e11762f462acd91c9a7b8d37f28",
+    "Labels": null,
+    "ParentId": "",
+    "RepoDigests":
+    [
+      "example@sha256:888402a8cd6075c5dc83a31f58287f13306c318eaad016661ed12e076f3e6341"
+    ],
+    "RepoTags":
+    [
+      "foo"
+    ],
+    "SharedSize": -1,
+    "Size": 12345,
+    "VirtualSize": 67890
+  }
+]
+)),
+                })
+            });
+
+            let mut client = SimpleDockerClient {
+                rest_client: Box::new(mock_rest_client),
+            };
+
+            let result = client.list_images().await;
+
+            match result {
+                Ok(actual) => {
+                    let expected = vec![Image {
+                        id: Id {
+                            algorithm: "sha256".to_string(),
+                            hex: "49891f502916212e83198a7e3425f99581a97e11762f462acd91c9a7b8d37f28"
+                                .to_string(),
+                        },
+                        tags: vec![Tag {
+                            name: "foo".to_string(),
+                            version: "".to_string(),
+                        }],
+                    }];
+
+                    assert_eq!(expected, actual)
+                }
+                _ => {
+                    unreachable!("Expected a vec of images!")
+                }
+            }
+        }
+
+        #[tokio::test]
+        async fn should_list_images_with_simple_ids() {
+            let mut mock_rest_client = MockRestClient::new();
+            mock_rest_client.expect_execute().returning(|_req| {
+                Ok(Response::<Json>::Okay {
+                    headers: vec![],
+                    body: Some(json!(
+[
+  {
+    "Containers": -1,
+    "Created": 1732220204,
+    "Id": "no-alg-just-value",
+    "Labels": null,
+    "ParentId": "",
+    "RepoDigests":
+    [
+      "example@sha256:888402a8cd6075c5dc83a31f58287f13306c318eaad016661ed12e076f3e6341"
+    ],
+    "RepoTags":
+    [
+      "foo:bar"
+    ],
+    "SharedSize": -1,
+    "Size": 12345,
+    "VirtualSize": 67890
+  }
+]
+)),
+                })
+            });
+
+            let mut client = SimpleDockerClient {
+                rest_client: Box::new(mock_rest_client),
+            };
+
+            let result = client.list_images().await;
+
+            match result {
+                Ok(actual) => {
+                    let expected = vec![Image {
+                        id: Id {
+                            algorithm: "missing-algorithim".to_string(),
+                            hex: "no-alg-just-value".to_string(),
+                        },
+                        tags: vec![Tag {
+                            name: "foo".to_string(),
+                            version: "bar".to_string(),
+                        }],
                     }];
 
                     assert_eq!(expected, actual)
