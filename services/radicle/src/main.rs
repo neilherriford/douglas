@@ -1,7 +1,6 @@
 use clap::{Arg, Command};
-use simple_rest_client::log::StdOutLogger;
-use simple_rest_client::unix_domain_socket::build_client as build_uds_client;
-use simple_rest_client::{Request, Response, RestClient};
+use docker::{DockerClient, SimpleDockerClient};
+use simple_rest_client::log::SilentLogger;
 use std::sync::Arc;
 
 #[tokio::main]
@@ -31,28 +30,16 @@ async fn main() {
     match matches.subcommand() {
         Some((_cmd_bootstrap, sub_matches)) => {
             if sub_matches.get_flag("start") {
-                let logger = StdOutLogger::new();
+                let logger = SilentLogger::new();
 
                 let mut client =
-                    build_uds_client("/var/run/docker.sock".to_string(), Arc::new(logger))
+                    SimpleDockerClient::build("/var/run/docker.sock".to_string(), Arc::new(logger))
                         .await
                         .expect("it worked");
 
-                let req = Request::Get {
-                    path: "/images/json".to_string(),
-                    headers: None,
-                };
+                let images = client.list_images().await.expect("uhoh");
 
-                let response: Result<Response<String>, Box<dyn std::error::Error>> =
-                    client.execute(&req).await;
-
-                match response {
-                    Ok(Response::Okay {
-                        headers: _,
-                        body: Some(body),
-                    }) => println!("{}", body),
-                    _ => println!("oops"),
-                }
+                println!("{:?}", images);
             }
         }
         _ => todo!(),

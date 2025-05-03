@@ -30,3 +30,19 @@ impl Logger for StdOutLogger {
         println!("{} {}", "[err]".red().bold(), message)
     }
 }
+
+#[derive(Debug, Default)]
+pub struct SilentLogger {}
+
+impl SilentLogger {
+    pub fn new() -> Self {
+        Self {}
+    }
+}
+
+impl Logger for SilentLogger {
+    fn debug(&self, _message: &str) {}
+    fn info(&self, _message: &str) {}
+
+    fn error(&self, _message: &str) {}
+}
