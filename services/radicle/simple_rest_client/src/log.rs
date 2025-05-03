@@ -1,8 +1,7 @@
 use colored::Colorize;
-use mockall::automock;
 use std::fmt::Debug;
 
-#[automock]
+#[cfg_attr(feature = "mock", mockall::automock)]
 pub trait Logger: Send + Sync + Debug {
     fn debug(&self, message: &str);
     fn info(&self, message: &str);
@@ -43,6 +42,5 @@ impl SilentLogger {
 impl Logger for SilentLogger {
     fn debug(&self, _message: &str) {}
     fn info(&self, _message: &str) {}
-
     fn error(&self, _message: &str) {}
 }
