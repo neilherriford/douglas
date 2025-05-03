@@ -1,7 +1,6 @@
 use crate::{Header, Logger, Parser, RestClient, SimpleRestClient};
 use hyper_util::rt::TokioIo;
 use std::error::Error;
-use std::fmt::Debug;
 use std::fmt::Formatter;
 use std::path::Path;
 use std::sync::Arc;
@@ -65,8 +64,7 @@ pub async fn build_client<T>(
     parser: impl Parser<String, T> + 'static,
 ) -> Result<impl RestClient<T>, Box<dyn Error>>
 where
-    T: TryFrom<String> + std::fmt::Display,
-    T::Error: Debug,
+    T: Send,
 {
     let unix_stream = UnixStream::connect(Path::new(&socket_file_path)).await?;
     let io_stream = IoStream {

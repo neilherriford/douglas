@@ -66,8 +66,9 @@ impl Header {
 
 pub trait IoStream: hyper::rt::Read + hyper::rt::Write + Unpin + Send + Sync {}
 
+#[cfg_attr(feature = "mock", mockall::automock)]
 #[async_trait::async_trait]
-pub trait RestClient<T> {
+pub trait RestClient<T: Send> {
     async fn execute(&mut self, request: &Request) -> Result<Response<T>, Box<dyn Error>>;
 }
 
@@ -329,8 +330,7 @@ impl<TIo: IoStream + 'static, TResponseBody> SimpleRestClient<TIo, TResponseBody
 #[async_trait::async_trait]
 impl<TResponseBody, TIo> RestClient<TResponseBody> for SimpleRestClient<TIo, TResponseBody>
 where
-    TResponseBody: TryFrom<String> + std::fmt::Display,
-    TResponseBody::Error: std::fmt::Debug,
+    TResponseBody: Send,
     TIo: IoStream + 'static,
 {
     async fn execute(

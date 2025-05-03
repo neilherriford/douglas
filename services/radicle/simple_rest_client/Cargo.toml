@@ -4,6 +4,10 @@ version = "0.1.0"
 edition = "2024"
 publish = false
 
+[features]
+default = []
+mock = ["mockall"]
+
 [dependencies]
 tokio = {version = "1.44.1", features = ["full"]}
 hyper = {version = "1.6.0", features = ["client"]}
@@ -11,7 +15,7 @@ http-body-util = "0.1"
 hyper-util = { version = "0.1.11", features = ["full"] }
 async-trait = "0.1"
 colored = "3"
-mockall = "0.13.1"
+mockall = { version = "0.13.1", optional = true }
 
 [dev-dependencies]
 fake = "4.3.0"
