@@ -11,17 +11,20 @@ use thiserror::Error;
 
 #[derive(Error, Debug)]
 pub enum RestClientError {
-    #[error("HTTP error: {0}")]
-    Http(#[from] hyper::http::Error),
+    #[error("Stream error: {0}")]
+    Stream(#[from] hyper::http::Error),
 
-    #[error("HTTP client error: {0}")]
-    HttpClient(#[from] hyper::Error),
+    #[error("Client error: {0}")]
+    Client(#[from] hyper::Error),
 
     #[error("Parser error: {0}")]
     Parser(String),
 
     #[error("IO stream already taken")]
     IoStreamAlreadyTaken,
+
+    #[error("General error: {0}")]
+    General(String),
 }
 
 #[derive(Debug, PartialEq)]
