@@ -64,7 +64,7 @@ pub async fn build_client<T>(
     parser: impl Parser<String, T> + 'static,
 ) -> Result<impl RestClient<T>, Box<dyn Error>>
 where
-    T: Send,
+    T: Send + Sync,
 {
     let unix_stream = UnixStream::connect(Path::new(&socket_file_path)).await?;
     let io_stream = IoStream {

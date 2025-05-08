@@ -4,8 +4,25 @@ pub mod unix_domain_socket;
 use crate::log::Logger;
 use http_body_util::BodyExt;
 use hyper::client::conn::http1::SendRequest;
-use std::error::Error;
+use std::collections::HashMap;
+use std::marker::PhantomData;
 use std::sync::Arc;
+use thiserror::Error;
+
+#[derive(Error, Debug)]
+pub enum RestClientError {
+    #[error("HTTP error: {0}")]
+    Http(#[from] hyper::http::Error),
+
+    #[error("HTTP client error: {0}")]
+    HttpClient(#[from] hyper::Error),
+
+    #[error("Parser error: {0}")]
+    Parser(String),
+
+    #[error("IO stream already taken")]
+    IoStreamAlreadyTaken,
+}
 
 #[derive(Debug, PartialEq)]
 pub enum Request {
@@ -64,37 +81,65 @@ impl Header {
     }
 }
 
+pub fn create_path_and_query_string(path: &str, parameters: HashMap<&str, &str>) -> String {
+    if parameters.len() == 0 {
+        path.to_string()
+    } else {
+        let encoded_params = parameters
+            .into_iter()
+            .map(|(name, value)| {
+                format!(
+                    "{}={}",
+                    urlencoding::encode(name),
+                    urlencoding::encode(value)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("&");
+
+        format!("{}?{}", path, encoded_params)
+    }
+}
+
 pub trait IoStream: hyper::rt::Read + hyper::rt::Write + Unpin + Send + Sync {}
 
 #[cfg_attr(feature = "mock", mockall::automock)]
 #[async_trait::async_trait]
 pub trait RestClient<T: Send> {
-    async fn execute(&mut self, request: &Request) -> Result<Response<T>, Box<dyn Error>>;
+    async fn execute(&mut self, request: &Request) -> Result<Response<T>, RestClientError>;
 }
 
 pub trait Parser<TIn, TOut>: Send + Sync + std::fmt::Debug {
-    fn parse(&self, input: TIn) -> Result<TOut, Box<dyn Error>>;
+    type ParseError: std::error::Error + Send + Sync + 'static;
+    fn parse(&self, input: TIn) -> Result<TOut, Self::ParseError>;
 }
 
 #[derive(Debug)]
-pub struct SimpleRestClient<TIo: IoStream, TResponseBody> {
-    parser: Box<dyn Parser<String, TResponseBody>>,
+pub struct SimpleRestClient<
+    TIo: IoStream,
+    TResponseBody: Send + Sync,
+    TParser: Parser<String, TResponseBody>,
+> {
+    parser: TParser,
     scheme: String,
     authority: String,
     io_stream: Option<TIo>,
     sender: Option<SendRequest<String>>,
     default_headers: Option<Vec<Header>>,
     logger: Arc<dyn Logger>,
+    _marker: PhantomData<TResponseBody>,
 }
 
-impl<TIo: IoStream + 'static, TResponseBody> SimpleRestClient<TIo, TResponseBody> {
+impl<TIo: IoStream + 'static, TResponseBody: Send + Sync, TParser: Parser<String, TResponseBody>>
+    SimpleRestClient<TIo, TResponseBody, TParser>
+{
     pub fn new(
         scheme: &str,
         authority: &str,
         io_stream: TIo,
         default_headers: Option<Vec<Header>>,
         logger: Arc<dyn Logger>,
-        parser: impl Parser<String, TResponseBody> + 'static,
+        parser: TParser,
     ) -> Self {
         Self {
             scheme: scheme.into(),
@@ -103,14 +148,15 @@ impl<TIo: IoStream + 'static, TResponseBody> SimpleRestClient<TIo, TResponseBody
             sender: None,
             default_headers,
             logger,
-            parser: Box::new(parser),
+            parser: parser,
+            _marker: PhantomData,
         }
     }
 
     fn build_hyper_request(
         &self,
         request: &Request,
-    ) -> Result<hyper::Request<String>, Box<dyn Error>> {
+    ) -> Result<hyper::Request<String>, RestClientError> {
         let uri_builder = hyper::http::uri::Builder::new()
             .scheme(self.scheme.as_str())
             .authority(self.authority.as_str());
@@ -162,15 +208,18 @@ impl<TIo: IoStream + 'static, TResponseBody> SimpleRestClient<TIo, TResponseBody
             }
         }
 
-        Ok(request_builer.body(request_body.clone().unwrap_or("".to_string()))?)
+        Ok(request_builer.body(request_body.clone().unwrap_or(String::new()))?)
     }
 
     async fn send_request(
         &mut self,
         request: hyper::Request<String>,
-    ) -> Result<Response<TResponseBody>, Box<dyn Error>> {
+    ) -> Result<Response<TResponseBody>, RestClientError> {
         if self.sender.is_none() {
-            let io = self.io_stream.take().ok_or("IO stream already taken")?;
+            let io = self
+                .io_stream
+                .take()
+                .ok_or(RestClientError::IoStreamAlreadyTaken)?;
 
             let (sender, conn) = hyper::client::conn::http1::handshake::<TIo, String>(io).await?;
             let task_logger = Arc::clone(&self.logger);
@@ -190,7 +239,7 @@ impl<TIo: IoStream + 'static, TResponseBody> SimpleRestClient<TIo, TResponseBody
     async fn build_response_from_hyper_response(
         &self,
         hyper_response: hyper::Response<hyper::body::Incoming>,
-    ) -> Result<Response<TResponseBody>, Box<dyn Error>> {
+    ) -> Result<Response<TResponseBody>, RestClientError> {
         let status = hyper_response.status();
         let headers: Vec<Header> = hyper_response
             .headers()
@@ -200,12 +249,16 @@ impl<TIo: IoStream + 'static, TResponseBody> SimpleRestClient<TIo, TResponseBody
                 value: header_value.to_str().unwrap().to_string(),
             })
             .collect();
+
         let raw_body = self.read_raw_body(hyper_response).await?;
         self.log_response(status.as_u16(), &headers, &raw_body);
 
         let body = match raw_body {
             None => None,
-            Some(text) => Some(self.parser.parse(text).unwrap()),
+            Some(text) => match self.parser.parse(text) {
+                Ok(parsed) => Some(parsed),
+                Err(err) => return Err(RestClientError::Parser(err.to_string())),
+            },
         };
 
         match status {
@@ -223,20 +276,20 @@ impl<TIo: IoStream + 'static, TResponseBody> SimpleRestClient<TIo, TResponseBody
     async fn read_raw_body(
         &self,
         mut hyper_response: hyper::Response<hyper::body::Incoming>,
-    ) -> Result<Option<String>, Box<dyn Error>> {
-        let mut body = String::new();
+    ) -> Result<Option<String>, RestClientError> {
+        let mut buffer = String::new();
 
         while let Some(next) = hyper_response.frame().await {
             let frame = next?;
             if let Some(chunk) = frame.data_ref() {
-                body.push_str(String::from_utf8(chunk.to_vec()).unwrap().as_str());
+                buffer.push_str(&String::from_utf8(chunk.to_vec()).unwrap());
             }
         }
 
-        if body.len() == 0 {
+        if buffer.len() == 0 {
             Ok(None)
         } else {
-            Ok(Some(body))
+            Ok(Some(buffer))
         }
     }
 
@@ -314,13 +367,14 @@ impl<TIo: IoStream + 'static, TResponseBody> SimpleRestClient<TIo, TResponseBody
         response_body: &Option<String>,
     ) {
         let mut result = format!(
-            "Received '{}' with headers {}",
+            "Received '{}' with headers {}, ",
             status_code,
             self.pretty_headers(response_headers)
         );
 
-        if let Some(body) = response_body {
-            result.push_str(&format!(", with body {}", body));
+        match response_body {
+            None => result.push_str("and no body"),
+            Some(body) => result.push_str(&format!("with body '{}'", body)),
         }
 
         self.logger.info(&result);
@@ -328,15 +382,17 @@ impl<TIo: IoStream + 'static, TResponseBody> SimpleRestClient<TIo, TResponseBody
 }
 
 #[async_trait::async_trait]
-impl<TResponseBody, TIo> RestClient<TResponseBody> for SimpleRestClient<TIo, TResponseBody>
+impl<TResponseBody, TIo, TParser> RestClient<TResponseBody>
+    for SimpleRestClient<TIo, TResponseBody, TParser>
 where
-    TResponseBody: Send,
+    TResponseBody: Send + Sync,
+    TParser: Parser<String, TResponseBody>,
     TIo: IoStream + 'static,
 {
     async fn execute(
         &mut self,
         request: &Request,
-    ) -> Result<Response<TResponseBody>, Box<dyn Error>> {
+    ) -> Result<Response<TResponseBody>, RestClientError> {
         self.log_request(request);
         let hyper_request = self.build_hyper_request(&request)?;
         let response: Response<TResponseBody> = self.send_request(hyper_request).await?;
@@ -350,6 +406,8 @@ mod tests {
     use crate::log::MockLogger;
     use hyper_util::rt::TokioIo;
     use mockall::predicate::str::contains;
+
+    use thiserror::Error;
     use tokio_test::io::Mock;
 
     impl IoStream for TokioIo<Mock> {}
@@ -357,8 +415,13 @@ mod tests {
     #[derive(Debug)]
     struct PassthroughParser {}
 
+    #[derive(Error, Debug)]
+    enum PassthroughParserError {}
+
     impl<T> Parser<T, T> for PassthroughParser {
-        fn parse(&self, input: T) -> Result<T, Box<(dyn Error + 'static)>> {
+        type ParseError = PassthroughParserError;
+
+        fn parse(&self, input: T) -> Result<T, Self::ParseError> {
             Ok(input)
         }
     }
@@ -390,7 +453,9 @@ mod tests {
 
         logger
             .expect_info()
-            .with(contains("Received '200' with headers 'content-length=0'"))
+            .with(contains(
+                "Received '200' with headers 'content-length=0', and no body",
+            ))
             .times(1)
             .return_const(());
 
@@ -403,7 +468,7 @@ mod tests {
             PassthroughParser::new(),
         );
 
-        let result: Result<Response<String>, Box<dyn std::error::Error>> = client
+        let result: Result<Response<String>, _> = client
             .execute(&Request::Get {
                 path: "/".to_string(),
                 headers: None,
@@ -470,7 +535,7 @@ mod tests {
             PassthroughParser::new(),
         );
 
-        let _: Result<Response<String>, Box<dyn std::error::Error>> = client
+        let _: Result<Response<String>, _> = client
             .execute(&Request::Get {
                 path: "/".to_string(),
                 headers: None,
@@ -499,7 +564,7 @@ mod tests {
         logger
             .expect_info()
             .with(contains(
-                "Received '201' with headers 'content-length=11', with body hello world",
+                "Received '201' with headers 'content-length=11', with body 'hello world'",
             ))
             .times(1)
             .return_const(());
@@ -513,7 +578,7 @@ mod tests {
             PassthroughParser::new(),
         );
 
-        let result: Result<Response<String>, Box<dyn std::error::Error>> = client
+        let result: Result<Response<String>, _> = client
             .execute(&Request::Get {
                 path: "/".to_string(),
                 headers: None,
@@ -559,7 +624,7 @@ mod tests {
             PassthroughParser::new(),
         );
 
-        let result: Result<Response<String>, Box<dyn std::error::Error>> = client
+        let result: Result<Response<String>, _> = client
             .execute(&Request::Get {
                 path: "/".to_string(),
                 headers: None,
@@ -601,7 +666,7 @@ mod tests {
             PassthroughParser::new(),
         );
 
-        let result: Result<Response<String>, Box<dyn std::error::Error>> = client
+        let result: Result<Response<String>, _> = client
             .execute(&Request::Get {
                 path: "/".to_string(),
                 headers: None,
@@ -649,7 +714,7 @@ mod tests {
             PassthroughParser::new(),
         );
 
-        let result: Result<Response<String>, Box<dyn std::error::Error>> = client
+        let result: Result<Response<String>, _> = client
             .execute(&Request::Delete {
                 path: "/".to_string(),
                 headers: None,
@@ -695,7 +760,7 @@ mod tests {
             PassthroughParser::new(),
         );
 
-        let result: Result<Response<String>, Box<dyn std::error::Error>> = client
+        let result: Result<Response<String>, _> = client
             .execute(&Request::Put {
                 path: "/".to_string(),
                 headers: None,
@@ -742,7 +807,7 @@ mod tests {
             PassthroughParser::new(),
         );
 
-        let result: Result<Response<String>, Box<dyn std::error::Error>> = client
+        let result: Result<Response<String>, _> = client
             .execute(&Request::Post {
                 path: "/".to_string(),
                 headers: Some(vec![Header::new("baz", "qux")]),
@@ -766,6 +831,23 @@ mod tests {
                 assert_eq!(body, "hello world");
             }
             _ => panic!("Expected headers and body to be present"),
+        }
+    }
+
+    mod query_string {
+        use super::super::*;
+
+        #[test]
+        fn should_make_query_string_without_params() {
+            let actual = create_path_and_query_string("/foo/bar", HashMap::<&str, &str>::new());
+            assert_eq!("/foo/bar", actual);
+        }
+
+        #[test]
+        fn should_make_query_string_with_params() {
+            let actual =
+                create_path_and_query_string("/foo/bar", HashMap::from([("bas", "qux & quux")]));
+            assert_eq!("/foo/bar?bas=qux%20%26%20quux", actual);
         }
     }
 }
