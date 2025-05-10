@@ -1,5 +1,6 @@
 use clap::{Arg, Command};
-use docker::{DockerImageRepository, SimpleDockerClient};
+use docker::SimpleDockerClient;
+use docker::image::Repository;
 use simple_rest_client::log::StdOutLogger;
 use std::sync::Arc;
 
@@ -40,7 +41,7 @@ async fn main() {
                 let result = client
                     .pull(
                         "hello-world",
-                        docker::Version::Specific("linux".to_string()),
+                        docker::image::Version::Specific("linux".to_string()),
                     )
                     .await;
 
