@@ -2,25 +2,55 @@ use serde::{Deserialize, Deserializer};
 use serde_json::from_value;
 use serde_json::value::Value as Json;
 use simple_rest_client::log::Logger;
-use simple_rest_client::unix_domain_socket::build_client;
-use simple_rest_client::{Parser, Request, Response, RestClient};
-use std::error::Error;
+use simple_rest_client::unix_domain_socket::{BuilderError, build_client};
+use simple_rest_client::{Parser, Request, Response, RestClient, RestClientError};
+use std::collections::HashMap;
 use std::sync::Arc;
 use thiserror::Error;
 
-#[derive(Error, Debug, PartialEq)]
+#[derive(Error, Debug)]
 pub enum DockerError {
-    #[error("Unexpected response: {0}")]
-    UnexpectedResponse(String),
+    #[error("Missing response body")]
+    MissingBodyError,
 
-    #[error("Received error status: {status}")]
-    ErrorResponse { status: u16, body: Option<Json> },
+    #[error("Received unexpected response with status: {status}, {message}")]
+    UnexpectedResponseError {
+        status: u16,
+        body: Option<Vec<Json>>,
+        message: String,
+    },
+
+    #[error("Client error: {0}")]
+    ClientError(#[from] RestClientError),
+
+    #[error("Init error: {0}")]
+    InitError(#[from] BuilderError),
 
     #[error("Ambiguous match")]
-    AmbiguousMatch,
+    AmbiguousMatchError,
 
-    #[error("Not implemented yet.")]
-    NotImplemented,
+    #[error("Ambiguous match")]
+    ParseError(#[from] serde_json::Error),
+
+    #[error("API error {0}")]
+    ApiError(String),
+}
+
+#[derive(Debug)]
+pub enum Version {
+    Latest,
+    Specific(String),
+}
+
+impl std::fmt::Display for Version {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let formatted = match self {
+            Version::Latest => "latest".to_string(),
+            Version::Specific(version) => version.to_string(),
+        };
+
+        write!(f, "{}", formatted)
+    }
 }
 
 #[derive(Debug, Deserialize, Clone, PartialEq)]
@@ -83,51 +113,36 @@ where
 
 #[async_trait::async_trait]
 pub trait DockerImageRepository {
-    async fn list(&mut self) -> Result<Vec<Image>, Box<dyn Error>>;
-    async fn find(&mut self, id: &Id) -> Result<Option<Image>, Box<dyn Error>>;
-    async fn where_named(&mut self, name: &str) -> Result<Option<Vec<Image>>, Box<dyn Error>>;
+    async fn list(&mut self) -> Result<Vec<Image>, DockerError>;
+    async fn find(&mut self, id: &Id) -> Result<Option<Image>, DockerError>;
+    async fn where_named(&mut self, name: &str) -> Result<Option<Vec<Image>>, DockerError>;
+    async fn pull(&mut self, name: &str, version: Version) -> Result<Image, DockerError>;
+    async fn inspect(&mut self, name: &str, version: Version) -> Result<Image, DockerError>;
 }
 
 pub struct SimpleDockerClient {
-    rest_client: Box<dyn RestClient<Json> + Send>,
+    rest_client: Box<dyn RestClient<Vec<Json>> + Send>,
 }
 
 #[async_trait::async_trait]
 impl DockerImageRepository for SimpleDockerClient {
-    async fn list(&mut self) -> Result<Vec<Image>, Box<(dyn Error)>> {
+    async fn list(&mut self) -> Result<Vec<Image>, DockerError> {
         let req = Request::Get {
             path: "/images/json".to_string(),
             headers: None,
         };
 
-        let response: Response<Json> = self.rest_client.execute(&req).await?;
-
-        match response {
-            Response::Okay {
-                headers: _,
-                body: Some(body),
-            } => Ok(from_value::<Vec<Image>>(body)?),
-            Response::Okay { body: None, .. } => Err(Box::new(DockerError::UnexpectedResponse(
-                "Expected non-empty body".to_string(),
-            ))),
-            Response::Created { .. } => Err(Box::new(DockerError::UnexpectedResponse(
-                "Expected OK, but got Created status".to_string(),
-            ))),
-            Response::NoContent { .. } => Err(Box::new(DockerError::UnexpectedResponse(
-                "Expected OK, but got No Content status".to_string(),
-            ))),
-            Response::Error {
-                headers: _,
-                status,
-                body,
-            } => Err(Box::new(DockerError::ErrorResponse {
-                status: status,
-                body: body,
-            })),
-        }
+        let response: Response<Vec<Json>> = self.rest_client.execute(&req).await?;
+        let chunks = self.expect_ok_with_body(response)?;
+        chunks
+            .into_iter()
+            .map(from_value::<Vec<Image>>)
+            .collect::<Result<Vec<Vec<Image>>, _>>()
+            .map(|vecs| vecs.into_iter().flatten().collect())
+            .map_err(Into::into)
     }
 
-    async fn find(&mut self, id: &Id) -> Result<Option<Image>, Box<dyn Error>> {
+    async fn find(&mut self, id: &Id) -> Result<Option<Image>, DockerError> {
         let mut matches = self
             .list()
             .await?
@@ -137,11 +152,11 @@ impl DockerImageRepository for SimpleDockerClient {
         match (matches.next(), matches.next()) {
             (Some(first), None) => Ok(Some(first)),
             (None, _) => Ok(None),
-            _ => Err(Box::new(DockerError::AmbiguousMatch)),
+            _ => Err(DockerError::AmbiguousMatchError),
         }
     }
 
-    async fn where_named(&mut self, name: &str) -> Result<Option<Vec<Image>>, Box<dyn Error>> {
+    async fn where_named(&mut self, name: &str) -> Result<Option<Vec<Image>>, DockerError> {
         let matches: Vec<_> = self
             .list()
             .await?
@@ -159,20 +174,73 @@ impl DockerImageRepository for SimpleDockerClient {
             _ => Ok(Some(matches)),
         }
     }
+
+    async fn pull(&mut self, name: &str, version: Version) -> Result<Image, DockerError> {
+        let req = Request::Post {
+            path: simple_rest_client::create_path_and_query_string(
+                "/images/create",
+                HashMap::from([("fromImage", name), ("tag", version.to_string().as_str())]),
+            ),
+            body: None,
+            headers: None,
+        };
+
+        let response: Response<Vec<Json>> = self.rest_client.execute(&req).await?;
+        let chunks = self.expect_ok_with_body(response)?;
+        self.expect_no_docker_errors(chunks)?;
+
+        Ok(self.inspect(name, version).await?)
+    }
+
+    async fn inspect(&mut self, name: &str, version: Version) -> Result<Image, DockerError> {
+        let req = Request::Get {
+            path: format!("/images/{}:{}/json", name, version),
+            headers: None,
+        };
+
+        let response: Response<Vec<Json>> = self.rest_client.execute(&req).await?;
+        let mut chunks = self.expect_ok_with_body(response)?.into_iter();
+
+        match (chunks.next(), chunks.next()) {
+            (None, _) => Err(DockerError::UnexpectedResponseError {
+                status: 200,
+                body: None,
+                message: "no results".to_string(),
+            }),
+            (Some(json), None) => Ok(from_value::<Image>(json)?),
+            (Some(first), Some(second)) => Err(DockerError::UnexpectedResponseError {
+                status: 200,
+                body: Some(vec![first, second]),
+                message: "too many results".to_string(),
+            }),
+        }
+    }
 }
 
 #[derive(Debug)]
-struct JsonParser {}
+struct ChunkedJsonParser {}
 
-impl JsonParser {
+impl ChunkedJsonParser {
     pub fn new() -> Self {
         Self {}
     }
 }
 
-impl Parser<String, Json> for JsonParser {
-    fn parse(&self, input: String) -> Result<Json, Box<(dyn Error)>> {
-        serde_json::from_str(&input).map_err(|e| e.into())
+#[derive(Error, Debug)]
+pub enum ChunkedJsonParserError {
+    #[error("HTTP client error: {0}")]
+    Json(#[from] serde_json::Error),
+}
+
+impl Parser<String, Vec<Json>> for ChunkedJsonParser {
+    type ParseError = ChunkedJsonParserError;
+
+    fn parse(&self, input: String) -> Result<Vec<Json>, Self::ParseError> {
+        input
+            .split("\r\n")
+            .filter(|chunk| chunk.len() > 0)
+            .map(|chunk| serde_json::from_str(chunk).map_err(|e| e.into()))
+            .collect()
     }
 }
 
@@ -180,12 +248,55 @@ impl SimpleDockerClient {
     pub async fn build(
         socket_file_path: String,
         logger: Arc<dyn Logger>,
-    ) -> Result<SimpleDockerClient, Box<dyn Error>> {
-        let client = build_client(socket_file_path, logger, JsonParser::new()).await?;
+    ) -> Result<Self, DockerError> {
+        let client = build_client(socket_file_path, logger, ChunkedJsonParser::new()).await?;
 
-        Ok(SimpleDockerClient {
+        Ok(Self {
             rest_client: Box::new(client),
         })
+    }
+
+    fn expect_no_docker_errors(&self, responses: Vec<Json>) -> Result<(), DockerError> {
+        for response in responses {
+            if let Some(message) = response.get("error") {
+                let msg = match message.as_str() {
+                    Some(text) => text.to_string(),
+                    None => message.to_string(),
+                };
+
+                return Err(DockerError::ApiError(msg));
+            }
+        }
+
+        Ok(())
+    }
+
+    fn expect_ok_with_body(&self, response: Response<Vec<Json>>) -> Result<Vec<Json>, DockerError> {
+        match response {
+            Response::Okay {
+                headers: _,
+                body: Some(chunks),
+            } => Ok(chunks),
+            Response::Okay {
+                headers: _,
+                body: None,
+            } => Err(DockerError::MissingBodyError),
+            Response::Created { body, .. } => Err(DockerError::UnexpectedResponseError {
+                status: 201,
+                body,
+                message: "expected OK, but recieved CREATED".to_string(),
+            }),
+            Response::NoContent { .. } => Err(DockerError::UnexpectedResponseError {
+                status: 204,
+                body: None,
+                message: "expected OK, but recieved NO CONTENT".to_string(),
+            }),
+            Response::Error { status, body, .. } => Err(DockerError::UnexpectedResponseError {
+                status,
+                body,
+                message: "non successful response".to_string(),
+            }),
+        }
     }
 }
 
@@ -201,7 +312,7 @@ mod tests {
         async fn should_error_empty_body() {
             let mut mock_rest_client = MockRestClient::new();
             mock_rest_client.expect_execute().returning(|_req| {
-                Ok(Response::<Json>::Okay {
+                Ok(Response::<Vec<Json>>::Okay {
                     headers: vec![],
                     body: None,
                 })
@@ -213,20 +324,14 @@ mod tests {
 
             let result = client.list().await;
 
-            match result {
-                Err(error) => assert_eq!(
-                    "Unexpected response: Expected non-empty body",
-                    error.to_string()
-                ),
-                _ => unreachable!("Expected an error!"),
-            }
+            assert!(matches!(result, Err(DockerError::MissingBodyError)));
         }
 
         #[tokio::test]
         async fn should_error_on_created() {
             let mut mock_rest_client = MockRestClient::new();
             mock_rest_client.expect_execute().returning(|_req| {
-                Ok(Response::<Json>::Created {
+                Ok(Response::<Vec<Json>>::Created {
                     headers: vec![],
                     body: None,
                 })
@@ -240,7 +345,7 @@ mod tests {
 
             match result {
                 Err(error) => assert_eq!(
-                    "Unexpected response: Expected OK, but got Created status",
+                    "Received unexpected response with status: 201, expected OK, but recieved CREATED",
                     error.to_string()
                 ),
                 _ => unreachable!("Expected an error!"),
@@ -252,7 +357,7 @@ mod tests {
             let mut mock_rest_client = MockRestClient::new();
             mock_rest_client
                 .expect_execute()
-                .returning(|_req| Ok(Response::<Json>::NoContent { headers: vec![] }));
+                .returning(|_req| Ok(Response::<Vec<Json>>::NoContent { headers: vec![] }));
 
             let mut client = SimpleDockerClient {
                 rest_client: Box::new(mock_rest_client),
@@ -262,7 +367,7 @@ mod tests {
 
             match result {
                 Err(error) => assert_eq!(
-                    "Unexpected response: Expected OK, but got No Content status",
+                    "Received unexpected response with status: 204, expected OK, but recieved NO CONTENT",
                     error.to_string()
                 ),
                 _ => unreachable!("Expected an error!"),
@@ -273,7 +378,7 @@ mod tests {
         async fn should_error_on_error() {
             let mut mock_rest_client = MockRestClient::new();
             mock_rest_client.expect_execute().returning(|_req| {
-                Ok(Response::<Json>::Error {
+                Ok(Response::<Vec<Json>>::Error {
                     headers: vec![],
                     status: 500,
                     body: None,
@@ -287,7 +392,10 @@ mod tests {
             let result = client.list().await;
 
             match result {
-                Err(error) => assert_eq!("Received error status: 500", error.to_string()),
+                Err(error) => assert_eq!(
+                    "Received unexpected response with status: 500, non successful response",
+                    error.to_string()
+                ),
                 _ => unreachable!("Expected an error!"),
             }
         }
@@ -296,9 +404,9 @@ mod tests {
         async fn should_return_error_if_the_json_is_unexpected() {
             let mut mock_rest_client = MockRestClient::new();
             mock_rest_client.expect_execute().returning(|_req| {
-                Ok(Response::<Json>::Okay {
+                Ok(Response::<Vec<Json>>::Okay {
                     headers: vec![],
-                    body: Some(json!({"unexpected": "json format"})),
+                    body: Some(vec![json!({"unexpected": "json format"})]),
                 })
             });
 
@@ -314,9 +422,9 @@ mod tests {
         async fn should_list() {
             let mut mock_rest_client = MockRestClient::new();
             mock_rest_client.expect_execute().returning(|_req| {
-                Ok(Response::<Json>::Okay {
+                Ok(Response::<Vec<Json>>::Okay {
                     headers: vec![],
-                    body: Some(json!(
+                    body: Some(vec![json!(
 [
   {
     "Containers": -1,
@@ -337,7 +445,7 @@ mod tests {
     "VirtualSize": 67890
   }
 ]
-)),
+)]),
                 })
             });
 
@@ -373,9 +481,9 @@ mod tests {
         async fn should_decode_tags_without_semicolons() {
             let mut mock_rest_client = MockRestClient::new();
             mock_rest_client.expect_execute().returning(|_req| {
-                Ok(Response::<Json>::Okay {
+                Ok(Response::<Vec<Json>>::Okay {
                     headers: vec![],
-                    body: Some(json!(
+                    body: Some(vec![json!(
 [
   {
     "Containers": -1,
@@ -396,7 +504,7 @@ mod tests {
     "VirtualSize": 67890
   }
 ]
-)),
+)]),
                 })
             });
 
@@ -432,9 +540,9 @@ mod tests {
         async fn should_list_with_simple_ids() {
             let mut mock_rest_client = MockRestClient::new();
             mock_rest_client.expect_execute().returning(|_req| {
-                Ok(Response::<Json>::Okay {
+                Ok(Response::<Vec<Json>>::Okay {
                     headers: vec![],
-                    body: Some(json!(
+                    body: Some(vec![json!(
 [
   {
     "Containers": -1,
@@ -455,7 +563,7 @@ mod tests {
     "VirtualSize": 67890
   }
 ]
-)),
+)]),
                 })
             });
 
@@ -497,9 +605,9 @@ mod tests {
         async fn should_find_none() {
             let mut mock_rest_client = MockRestClient::new();
             mock_rest_client.expect_execute().returning(|_req| {
-                Ok(Response::<Json>::Okay {
+                Ok(Response::<Vec<Json>>::Okay {
                     headers: vec![],
-                    body: Some(json!([{"Id": "alg:123", "RepoTags": ["foo:bar"]}])),
+                    body: Some(vec![json!([{"Id": "alg:123", "RepoTags": ["foo:bar"]}])]),
                 })
             });
 
@@ -523,9 +631,9 @@ mod tests {
         async fn should_find_one() {
             let mut mock_rest_client = MockRestClient::new();
             mock_rest_client.expect_execute().returning(|_req| {
-                Ok(Response::<Json>::Okay {
+                Ok(Response::<Vec<Json>>::Okay {
                     headers: vec![],
-                    body: Some(json!([{"Id": "alg:123", "RepoTags": ["foo:bar"]}])),
+                    body: Some(vec![json!([{"Id": "alg:123", "RepoTags": ["foo:bar"]}])]),
                 })
             });
 
@@ -556,12 +664,12 @@ mod tests {
         async fn should_error_if_more_than_one_match() {
             let mut mock_rest_client = MockRestClient::new();
             mock_rest_client.expect_execute().returning(|_req| {
-                Ok(Response::<Json>::Okay {
+                Ok(Response::<Vec<Json>>::Okay {
                     headers: vec![],
-                    body: Some(json!([
+                    body: Some(vec![json!([
                         {"Id": "alg:123", "RepoTags": ["foo:bar"]},
                         {"Id": "alg:123", "RepoTags": ["bas:qux"]}
-                    ])),
+                    ])]),
                 })
             });
 
@@ -594,9 +702,9 @@ mod tests {
         async fn should_find_none_when_no_name_tags() {
             let mut mock_rest_client = MockRestClient::new();
             mock_rest_client.expect_execute().returning(|_req| {
-                Ok(Response::<Json>::Okay {
+                Ok(Response::<Vec<Json>>::Okay {
                     headers: vec![],
-                    body: Some(json!([{"Id": "alg:123", "RepoTags": ["foo:bar"]}])),
+                    body: Some(vec![json!([{"Id": "alg:123", "RepoTags": ["foo:bar"]}])]),
                 })
             });
 
@@ -615,9 +723,9 @@ mod tests {
         async fn should_find_none_when_no_matches() {
             let mut mock_rest_client = MockRestClient::new();
             mock_rest_client.expect_execute().returning(|_req| {
-                Ok(Response::<Json>::Okay {
+                Ok(Response::<Vec<Json>>::Okay {
                     headers: vec![],
-                    body: Some(json!([{"Id": "alg:123", "RepoTags": ["name:foo"]}])),
+                    body: Some(vec![json!([{"Id": "alg:123", "RepoTags": ["name:foo"]}])]),
                 })
             });
 
@@ -636,9 +744,9 @@ mod tests {
         async fn should_find_one_match() {
             let mut mock_rest_client = MockRestClient::new();
             mock_rest_client.expect_execute().returning(|_req| {
-                Ok(Response::<Json>::Okay {
+                Ok(Response::<Vec<Json>>::Okay {
                     headers: vec![],
-                    body: Some(json!([{"Id": "alg:123", "RepoTags": ["name:foo"]}])),
+                    body: Some(vec![json!([{"Id": "alg:123", "RepoTags": ["name:foo"]}])]),
                 })
             });
 
@@ -666,9 +774,11 @@ mod tests {
         async fn should_find_one_match_with_multiple_name_tags() {
             let mut mock_rest_client = MockRestClient::new();
             mock_rest_client.expect_execute().returning(|_req| {
-                Ok(Response::<Json>::Okay {
+                Ok(Response::<Vec<Json>>::Okay {
                     headers: vec![],
-                    body: Some(json!([{"Id": "alg:123", "RepoTags": ["name:latest", "name:foo"]}])),
+                    body: Some(vec![
+                        json!([{"Id": "alg:123", "RepoTags": ["name:latest", "name:foo"]}]),
+                    ]),
                 })
             });
 
@@ -696,12 +806,12 @@ mod tests {
         async fn should_find_multiple_matches() {
             let mut mock_rest_client = MockRestClient::new();
             mock_rest_client.expect_execute().returning(|_req| {
-                Ok(Response::<Json>::Okay {
+                Ok(Response::<Vec<Json>>::Okay {
                     headers: vec![],
-                    body: Some(json!([
+                    body: Some(vec![json!([
                         {"Id": "alg:123", "RepoTags": ["name:latest", "name:foo"]},
                         {"Id": "alg:456", "RepoTags": ["name:foo"]},
-                    ])),
+                    ])]),
                 })
             });
 
@@ -731,6 +841,652 @@ mod tests {
                         hex: "456".to_string()
                     })
             );
+        }
+    }
+
+    mod pull {
+        use super::super::*;
+        use serde_json::json;
+        use serde_json::value::Value as Json;
+        use simple_rest_client::MockRestClient;
+
+        #[tokio::test]
+        async fn shoud_error_if_body_missing() {
+            let mut mock_rest_client = MockRestClient::new();
+
+            mock_rest_client
+                .expect_execute()
+                .withf(|req| {
+                    if let Request::Post { path, .. } = req {
+                        path.starts_with("/images/create?")
+                            && path.contains("tag=latest")
+                            && path.contains("fromImage=foo")
+                    } else {
+                        false
+                    }
+                })
+                .times(1)
+                .return_once(|_req| {
+                    Ok(Response::<Vec<Json>>::Okay {
+                        headers: vec![],
+                        body: None,
+                    })
+                });
+
+            let mut client = SimpleDockerClient {
+                rest_client: Box::new(mock_rest_client),
+            };
+
+            let result = client.pull("foo", Version::Latest).await;
+
+            assert!(matches!(result, Err(DockerError::MissingBodyError)));
+        }
+
+        #[tokio::test]
+        async fn shoud_error_if_received_got_created() {
+            let mut mock_rest_client = MockRestClient::new();
+
+            mock_rest_client
+                .expect_execute()
+                .withf(|req| {
+                    if let Request::Post { path, .. } = req {
+                        path.starts_with("/images/create?")
+                            && path.contains("tag=latest")
+                            && path.contains("fromImage=foo")
+                    } else {
+                        false
+                    }
+                })
+                .times(1)
+                .return_once(|_req| {
+                    Ok(Response::<Vec<Json>>::Created {
+                        headers: vec![],
+                        body: None,
+                    })
+                });
+
+            let mut client = SimpleDockerClient {
+                rest_client: Box::new(mock_rest_client),
+            };
+
+            let result = client.pull("foo", Version::Latest).await;
+
+            assert!(matches!(
+                result,
+                Err(DockerError::UnexpectedResponseError {
+                    status: 201,
+                    body: None,
+                    ..
+                })
+            ));
+        }
+
+        #[tokio::test]
+        async fn shoud_error_if_received_got_no_content() {
+            let mut mock_rest_client = MockRestClient::new();
+
+            mock_rest_client
+                .expect_execute()
+                .withf(|req| {
+                    if let Request::Post { path, .. } = req {
+                        path.starts_with("/images/create?")
+                            && path.contains("tag=latest")
+                            && path.contains("fromImage=foo")
+                    } else {
+                        false
+                    }
+                })
+                .times(1)
+                .return_once(|_req| Ok(Response::<Vec<Json>>::NoContent { headers: vec![] }));
+
+            let mut client = SimpleDockerClient {
+                rest_client: Box::new(mock_rest_client),
+            };
+
+            let result = client.pull("foo", Version::Latest).await;
+
+            assert!(matches!(
+                result,
+                Err(DockerError::UnexpectedResponseError {
+                    status: 204,
+                    body: None,
+                    ..
+                })
+            ));
+        }
+
+        #[tokio::test]
+        async fn shoud_error_if_received_error() {
+            let mut mock_rest_client = MockRestClient::new();
+
+            mock_rest_client
+                .expect_execute()
+                .withf(|req| {
+                    if let Request::Post { path, .. } = req {
+                        path.starts_with("/images/create?")
+                            && path.contains("tag=latest")
+                            && path.contains("fromImage=foo")
+                    } else {
+                        false
+                    }
+                })
+                .times(1)
+                .return_once(|_req| {
+                    Ok(Response::<Vec<Json>>::Error {
+                        status: 500,
+                        body: None,
+                        headers: vec![],
+                    })
+                });
+
+            let mut client = SimpleDockerClient {
+                rest_client: Box::new(mock_rest_client),
+            };
+
+            let result = client.pull("foo", Version::Latest).await;
+
+            assert!(matches!(
+                result,
+                Err(DockerError::UnexpectedResponseError {
+                    status: 500,
+                    body: None,
+                    ..
+                })
+            ));
+        }
+
+        #[tokio::test]
+        async fn should_error_if_docker_error() {
+            let mut mock_rest_client = MockRestClient::new();
+
+            mock_rest_client
+                .expect_execute()
+                .withf(|req| {
+                    if let Request::Post { path, .. } = req {
+                        path.starts_with("/images/create?")
+                            && path.contains("tag=latest")
+                            && path.contains("fromImage=foo")
+                    } else {
+                        false
+                    }
+                })
+                .times(1)
+                .return_once(|_req| {
+                    Ok(Response::<Vec<Json>>::Okay {
+                        headers: vec![],
+                        body: Some(vec![json!({"error":"Oops all errors"})]),
+                    })
+                });
+
+            let mut client = SimpleDockerClient {
+                rest_client: Box::new(mock_rest_client),
+            };
+
+            let result = client.pull("foo", Version::Latest).await;
+
+            match result {
+                Err(DockerError::ApiError(msg)) => assert_eq!(msg, "Oops all errors"),
+                _ => panic!("expected DockerError::ApiError"),
+            }
+        }
+
+        #[tokio::test]
+        async fn should_pull_latest() {
+            let mut mock_rest_client = MockRestClient::new();
+
+            mock_rest_client
+                .expect_execute()
+                .withf(|req| {
+                    if let Request::Post { path, .. } = req {
+                        path.starts_with("/images/create?")
+                            && path.contains("tag=latest")
+                            && path.contains("fromImage=foo")
+                    } else {
+                        false
+                    }
+                })
+                .times(1)
+                .return_once(|_req| {
+                    Ok(Response::<Vec<Json>>::Okay {
+                        headers: vec![],
+                        body: Some(vec![
+                            json!({"status":"Pulling from library/foo","id":"latest"}),
+                        ]),
+                    })
+                });
+
+            mock_rest_client
+                .expect_execute()
+                .withf(|req| {
+                    if let Request::Get { path, .. } = req {
+                        path == "/images/foo:latest/json"
+                    } else {
+                        false
+                    }
+                })
+                .times(1)
+                .return_once(|_req| {
+                    Ok(Response::<Vec<Json>>::Okay {
+                        headers: vec![],
+                        body: Some(vec![json!({
+                        "Id": "alg:123456",
+                          "RepoTags":["foo:latest"],
+                        })]),
+                    })
+                });
+
+            let mut client = SimpleDockerClient {
+                rest_client: Box::new(mock_rest_client),
+            };
+
+            let result = client.pull("foo", Version::Latest).await;
+
+            match result {
+                Ok(image) => {
+                    assert_eq!(
+                        Image {
+                            id: Id {
+                                algorithm: "alg".to_string(),
+                                hex: "123456".to_string()
+                            },
+                            tags: vec! {Tag{name: "foo".to_string(), version: "latest".to_string()}}
+                        },
+                        image
+                    );
+                }
+                _ => unreachable!("Expeceted images to match!"),
+            }
+        }
+
+        #[tokio::test]
+        async fn should_pull_specific_versio() {
+            let mut mock_rest_client = MockRestClient::new();
+
+            mock_rest_client
+                .expect_execute()
+                .withf(|req| {
+                    if let Request::Post { path, .. } = req {
+                        path.starts_with("/images/create?")
+                            && path.contains("tag=1.2.3")
+                            && path.contains("fromImage=foo")
+                    } else {
+                        false
+                    }
+                })
+                .times(1)
+                .return_once(|_req| {
+                    Ok(Response::<Vec<Json>>::Okay {
+                        headers: vec![],
+                        body: Some(vec![
+                            json!({"status":"Pulling from library/foo","id":"latest"}),
+                        ]),
+                    })
+                });
+
+            mock_rest_client
+                .expect_execute()
+                .withf(|req| {
+                    if let Request::Get { path, .. } = req {
+                        path == "/images/foo:1.2.3/json"
+                    } else {
+                        false
+                    }
+                })
+                .times(1)
+                .return_once(|_req| {
+                    Ok(Response::<Vec<Json>>::Okay {
+                        headers: vec![],
+                        body: Some(vec![json!({
+                        "Id": "alg:123456",
+                          "RepoTags":["foo:1.2.3"],
+                        })]),
+                    })
+                });
+
+            let mut client = SimpleDockerClient {
+                rest_client: Box::new(mock_rest_client),
+            };
+
+            let result = client
+                .pull("foo", Version::Specific("1.2.3".to_string()))
+                .await;
+
+            match result {
+                Ok(image) => {
+                    assert_eq!(
+                        Image {
+                            id: Id {
+                                algorithm: "alg".to_string(),
+                                hex: "123456".to_string()
+                            },
+                            tags: vec! {Tag{name: "foo".to_string(), version: "1.2.3".to_string()}}
+                        },
+                        image
+                    );
+                }
+                _ => unreachable!("Expeceted images to match!"),
+            }
+        }
+    }
+
+    mod inspect {
+        use super::super::*;
+        use serde_json::json;
+        use serde_json::value::Value as Json;
+        use simple_rest_client::MockRestClient;
+
+        #[tokio::test]
+        async fn should_error_if_body_missing() {
+            let mut mock_rest_client = MockRestClient::new();
+
+            mock_rest_client
+                .expect_execute()
+                .withf(|req| {
+                    if let Request::Get { path, .. } = req {
+                        path == "/images/foo:latest/json"
+                    } else {
+                        false
+                    }
+                })
+                .times(1)
+                .return_once(|_req| {
+                    Ok(Response::<Vec<Json>>::Okay {
+                        headers: vec![],
+                        body: None,
+                    })
+                });
+
+            let mut client = SimpleDockerClient {
+                rest_client: Box::new(mock_rest_client),
+            };
+
+            let result = client.inspect("foo", Version::Latest).await;
+            assert!(matches!(result, Err(DockerError::MissingBodyError)));
+        }
+
+        #[tokio::test]
+        async fn should_error_if_created() {
+            let mut mock_rest_client = MockRestClient::new();
+
+            mock_rest_client
+                .expect_execute()
+                .withf(|req| {
+                    if let Request::Get { path, .. } = req {
+                        path == "/images/foo:latest/json"
+                    } else {
+                        false
+                    }
+                })
+                .times(1)
+                .return_once(|_req| {
+                    Ok(Response::<Vec<Json>>::Created {
+                        headers: vec![],
+                        body: None,
+                    })
+                });
+
+            let mut client = SimpleDockerClient {
+                rest_client: Box::new(mock_rest_client),
+            };
+
+            let result = client.inspect("foo", Version::Latest).await;
+            assert!(matches!(
+                result,
+                Err(DockerError::UnexpectedResponseError {
+                    status: 201,
+                    body: None,
+                    ..
+                })
+            ));
+        }
+
+        #[tokio::test]
+        async fn should_error_if_no_content() {
+            let mut mock_rest_client = MockRestClient::new();
+
+            mock_rest_client
+                .expect_execute()
+                .withf(|req| {
+                    if let Request::Get { path, .. } = req {
+                        path == "/images/foo:latest/json"
+                    } else {
+                        false
+                    }
+                })
+                .times(1)
+                .return_once(|_req| Ok(Response::<Vec<Json>>::NoContent { headers: vec![] }));
+
+            let mut client = SimpleDockerClient {
+                rest_client: Box::new(mock_rest_client),
+            };
+
+            let result = client.inspect("foo", Version::Latest).await;
+            assert!(matches!(
+                result,
+                Err(DockerError::UnexpectedResponseError {
+                    status: 204,
+                    body: None,
+                    ..
+                })
+            ));
+        }
+
+        #[tokio::test]
+        async fn should_error_if_error() {
+            let mut mock_rest_client = MockRestClient::new();
+
+            mock_rest_client
+                .expect_execute()
+                .withf(|req| {
+                    if let Request::Get { path, .. } = req {
+                        path == "/images/foo:latest/json"
+                    } else {
+                        false
+                    }
+                })
+                .times(1)
+                .return_once(|_req| {
+                    Ok(Response::<Vec<Json>>::Error {
+                        status: 500,
+                        headers: vec![],
+                        body: None,
+                    })
+                });
+
+            let mut client = SimpleDockerClient {
+                rest_client: Box::new(mock_rest_client),
+            };
+
+            let result = client.inspect("foo", Version::Latest).await;
+            assert!(matches!(
+                result,
+                Err(DockerError::UnexpectedResponseError {
+                    status: 500,
+                    body: None,
+                    ..
+                })
+            ));
+        }
+
+        #[tokio::test]
+        async fn should_error_if_too_little_json() {
+            let mut mock_rest_client = MockRestClient::new();
+
+            mock_rest_client
+                .expect_execute()
+                .withf(|req| {
+                    if let Request::Get { path, .. } = req {
+                        path == "/images/foo:latest/json"
+                    } else {
+                        false
+                    }
+                })
+                .times(1)
+                .return_once(|_req| {
+                    Ok(Response::<Vec<Json>>::Okay {
+                        headers: vec![],
+                        body: Some(vec![]),
+                    })
+                });
+
+            let mut client = SimpleDockerClient {
+                rest_client: Box::new(mock_rest_client),
+            };
+
+            let result = client.inspect("foo", Version::Latest).await;
+
+            match result {
+                Err(DockerError::UnexpectedResponseError {
+                    status, message, ..
+                }) => {
+                    assert_eq!(200, status);
+                    assert_eq!("no results", message);
+                }
+                _ => unreachable!("Expeceted images to match!"),
+            }
+        }
+
+        #[tokio::test]
+        async fn should_error_if_too_much_json() {
+            let mut mock_rest_client = MockRestClient::new();
+
+            mock_rest_client
+                .expect_execute()
+                .withf(|req| {
+                    if let Request::Get { path, .. } = req {
+                        path == "/images/foo:latest/json"
+                    } else {
+                        false
+                    }
+                })
+                .times(1)
+                .return_once(|_req| {
+                    Ok(Response::<Vec<Json>>::Okay {
+                        headers: vec![],
+                        body: Some(vec![
+                            json!({
+                            "Id": "alg:123456",
+                              "RepoTags":["foo:latest"],
+                            }),
+                            json!({
+                            "Id": "alg:987654",
+                              "RepoTags":["foo:1.2.3"],
+                            }),
+                        ]),
+                    })
+                });
+
+            let mut client = SimpleDockerClient {
+                rest_client: Box::new(mock_rest_client),
+            };
+
+            let result = client.inspect("foo", Version::Latest).await;
+
+            match result {
+                Err(DockerError::UnexpectedResponseError {
+                    status, message, ..
+                }) => {
+                    assert_eq!(200, status);
+                    assert_eq!("too many results", message);
+                }
+                _ => unreachable!("Expeceted images to match!"),
+            }
+        }
+
+        #[tokio::test]
+        async fn should_inspect_latest() {
+            let mut mock_rest_client = MockRestClient::new();
+
+            mock_rest_client
+                .expect_execute()
+                .withf(|req| {
+                    if let Request::Get { path, .. } = req {
+                        path == "/images/foo:latest/json"
+                    } else {
+                        false
+                    }
+                })
+                .times(1)
+                .return_once(|_req| {
+                    Ok(Response::<Vec<Json>>::Okay {
+                        headers: vec![],
+                        body: Some(vec![json!({
+                        "Id": "alg:123456",
+                          "RepoTags":["foo:latest"],
+                        })]),
+                    })
+                });
+
+            let mut client = SimpleDockerClient {
+                rest_client: Box::new(mock_rest_client),
+            };
+
+            let result = client.inspect("foo", Version::Latest).await;
+
+            match result {
+                Ok(image) => {
+                    assert_eq!(
+                        Image {
+                            id: Id {
+                                algorithm: "alg".to_string(),
+                                hex: "123456".to_string()
+                            },
+                            tags: vec! {Tag{name: "foo".to_string(), version: "latest".to_string()}}
+                        },
+                        image
+                    );
+                }
+                _ => unreachable!("Expeceted images to match!"),
+            }
+        }
+
+        #[tokio::test]
+        async fn should_inspect_specific() {
+            let mut mock_rest_client = MockRestClient::new();
+
+            mock_rest_client
+                .expect_execute()
+                .withf(|req| {
+                    if let Request::Get { path, .. } = req {
+                        path == "/images/foo:1.2.3/json"
+                    } else {
+                        false
+                    }
+                })
+                .times(1)
+                .return_once(|_req| {
+                    Ok(Response::<Vec<Json>>::Okay {
+                        headers: vec![],
+                        body: Some(vec![json!({
+                        "Id": "alg:123456",
+                          "RepoTags":["foo:1.2.3"],
+                        })]),
+                    })
+                });
+
+            let mut client = SimpleDockerClient {
+                rest_client: Box::new(mock_rest_client),
+            };
+
+            let result = client
+                .inspect("foo", Version::Specific("1.2.3".to_string()))
+                .await;
+
+            match result {
+                Ok(image) => {
+                    assert_eq!(
+                        Image {
+                            id: Id {
+                                algorithm: "alg".to_string(),
+                                hex: "123456".to_string()
+                            },
+                            tags: vec! {Tag{name: "foo".to_string(), version: "1.2.3".to_string()}}
+                        },
+                        image
+                    );
+                }
+                _ => unreachable!("Expeceted images to match!"),
+            }
         }
     }
 }

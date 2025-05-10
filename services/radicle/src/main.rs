@@ -1,6 +1,6 @@
 use clap::{Arg, Command};
 use docker::{DockerImageRepository, SimpleDockerClient};
-use simple_rest_client::log::SilentLogger;
+use simple_rest_client::log::StdOutLogger;
 use std::sync::Arc;
 
 #[tokio::main]
@@ -30,16 +30,24 @@ async fn main() {
     match matches.subcommand() {
         Some((_cmd_bootstrap, sub_matches)) => {
             if sub_matches.get_flag("start") {
-                let logger = SilentLogger::new();
+                let logger = StdOutLogger::new();
 
                 let mut client =
                     SimpleDockerClient::build("/var/run/docker.sock".to_string(), Arc::new(logger))
                         .await
                         .expect("it worked");
 
-                let images = client.list().await.expect("uhoh");
+                let result = client
+                    .pull(
+                        "hello-world",
+                        docker::Version::Specific("linux".to_string()),
+                    )
+                    .await;
 
-                println!("{:?}", images);
+                match result {
+                    Ok(image) => println!("{:?}", image),
+                    Err(err) => println!("🚨{}", err.to_string()),
+                }
             }
         }
         _ => todo!(),

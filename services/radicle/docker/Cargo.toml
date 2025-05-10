@@ -18,3 +18,4 @@ thiserror = "1"
 
 [dev-dependencies]
 simple_rest_client = { path = "../simple_rest_client", features = ["mock"] }
+mockall = { version = "0.13.1"}

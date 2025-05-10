@@ -1,9 +1,9 @@
 use crate::{Header, Logger, Parser, RestClient, SimpleRestClient};
 use hyper_util::rt::TokioIo;
-use std::error::Error;
 use std::fmt::Formatter;
 use std::path::Path;
 use std::sync::Arc;
+use thiserror::Error;
 
 use hyper::rt::{Read, ReadBufCursor, Write};
 use std::{
@@ -58,11 +58,17 @@ impl std::fmt::Display for IoStream {
 }
 impl crate::IoStream for IoStream {}
 
+#[derive(Error, Debug)]
+pub enum BuilderError {
+    #[error("IO Error: {0}")]
+    IoError(#[from] std::io::Error),
+}
+
 pub async fn build_client<T>(
     socket_file_path: String,
     logger: Arc<dyn Logger>,
     parser: impl Parser<String, T> + 'static,
-) -> Result<impl RestClient<T>, Box<dyn Error>>
+) -> Result<impl RestClient<T>, BuilderError>
 where
     T: Send + Sync,
 {
