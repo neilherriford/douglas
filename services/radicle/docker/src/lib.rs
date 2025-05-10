@@ -1,11 +1,25 @@
+pub mod container;
 pub mod image;
 
+use serde::Deserialize;
 use serde_json::value::Value as Json;
 use simple_rest_client::log::Logger;
 use simple_rest_client::unix_domain_socket::{BuilderError, build_client};
 use simple_rest_client::{Parser, Response, RestClient, RestClientError};
 use std::sync::Arc;
 use thiserror::Error;
+
+#[derive(Debug, Deserialize, Clone, PartialEq)]
+pub struct Id {
+    pub algorithm: String,
+    pub hex: String,
+}
+
+impl std::fmt::Display for Id {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}:{}", self.algorithm, self.hex)
+    }
+}
 
 #[derive(Error, Debug)]
 pub enum ChunkedJsonParserError {

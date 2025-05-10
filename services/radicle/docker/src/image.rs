@@ -1,4 +1,4 @@
-use crate::{DockerError, SimpleDockerClient};
+use crate::{DockerError, Id, SimpleDockerClient};
 use serde::{Deserialize, Deserializer};
 use serde_json::from_value;
 use serde_json::value::Value as Json;
@@ -31,12 +31,6 @@ pub struct Image {
     #[serde(rename = "RepoTags")]
     #[serde(deserialize_with = "deserialize_tags")]
     pub tags: Vec<Tag>,
-}
-
-#[derive(Debug, Deserialize, Clone, PartialEq)]
-pub struct Id {
-    pub algorithm: String,
-    pub hex: String,
 }
 
 #[derive(Debug, Deserialize, Clone, PartialEq)]
@@ -86,7 +80,9 @@ pub trait Repository {
     async fn find(&mut self, id: &Id) -> Result<Option<Image>, DockerError>;
     async fn where_named(&mut self, name: &str) -> Result<Option<Vec<Image>>, DockerError>;
     async fn pull(&mut self, name: &str, version: Version) -> Result<Image, DockerError>;
-    async fn inspect(&mut self, name: &str, version: Version) -> Result<Image, DockerError>;
+    async fn inspect_by_name(&mut self, name: &str, version: Version)
+    -> Result<Image, DockerError>;
+    async fn inspect_by_id(&mut self, id: Id) -> Result<Image, DockerError>;
 }
 
 #[async_trait::async_trait]
@@ -154,16 +150,35 @@ impl Repository for SimpleDockerClient {
         let chunks = self.expect_ok_with_body(response)?;
         self.expect_no_docker_errors(chunks)?;
 
-        Ok(self.inspect(name, version).await?)
+        Ok(self.inspect_by_name(name, version).await?)
     }
 
-    async fn inspect(&mut self, name: &str, version: Version) -> Result<Image, DockerError> {
-        let req = Request::Get {
+    async fn inspect_by_name(
+        &mut self,
+        name: &str,
+        version: Version,
+    ) -> Result<Image, DockerError> {
+        let request = Request::Get {
             path: format!("/images/{}:{}/json", name, version),
             headers: None,
         };
 
-        let response: Response<Vec<Json>> = self.rest_client.execute(&req).await?;
+        return self.inspect(request).await;
+    }
+
+    async fn inspect_by_id(&mut self, id: Id) -> Result<Image, DockerError> {
+        let request = Request::Get {
+            path: format!("/images/{}/json", id),
+            headers: None,
+        };
+
+        return self.inspect(request).await;
+    }
+}
+
+impl SimpleDockerClient {
+    async fn inspect(&mut self, request: Request) -> Result<Image, DockerError> {
+        let response: Response<Vec<Json>> = self.rest_client.execute(&request).await?;
         let mut chunks = self.expect_ok_with_body(response)?.into_iter();
 
         match (chunks.next(), chunks.next()) {
@@ -1051,7 +1066,7 @@ mod tests {
         }
     }
 
-    mod inspect {
+    mod inspect_by_name {
         use super::super::*;
         use serde_json::json;
         use serde_json::value::Value as Json;
@@ -1082,7 +1097,7 @@ mod tests {
                 rest_client: Box::new(mock_rest_client),
             };
 
-            let result = client.inspect("foo", Version::Latest).await;
+            let result = client.inspect_by_name("foo", Version::Latest).await;
             assert!(matches!(result, Err(DockerError::MissingBodyError)));
         }
 
@@ -1111,7 +1126,7 @@ mod tests {
                 rest_client: Box::new(mock_rest_client),
             };
 
-            let result = client.inspect("foo", Version::Latest).await;
+            let result = client.inspect_by_name("foo", Version::Latest).await;
             assert!(matches!(
                 result,
                 Err(DockerError::UnexpectedResponseError {
@@ -1142,7 +1157,7 @@ mod tests {
                 rest_client: Box::new(mock_rest_client),
             };
 
-            let result = client.inspect("foo", Version::Latest).await;
+            let result = client.inspect_by_name("foo", Version::Latest).await;
             assert!(matches!(
                 result,
                 Err(DockerError::UnexpectedResponseError {
@@ -1179,7 +1194,7 @@ mod tests {
                 rest_client: Box::new(mock_rest_client),
             };
 
-            let result = client.inspect("foo", Version::Latest).await;
+            let result = client.inspect_by_name("foo", Version::Latest).await;
             assert!(matches!(
                 result,
                 Err(DockerError::UnexpectedResponseError {
@@ -1215,7 +1230,7 @@ mod tests {
                 rest_client: Box::new(mock_rest_client),
             };
 
-            let result = client.inspect("foo", Version::Latest).await;
+            let result = client.inspect_by_name("foo", Version::Latest).await;
 
             match result {
                 Err(DockerError::UnexpectedResponseError {
@@ -1262,7 +1277,7 @@ mod tests {
                 rest_client: Box::new(mock_rest_client),
             };
 
-            let result = client.inspect("foo", Version::Latest).await;
+            let result = client.inspect_by_name("foo", Version::Latest).await;
 
             match result {
                 Err(DockerError::UnexpectedResponseError {
@@ -1303,7 +1318,7 @@ mod tests {
                 rest_client: Box::new(mock_rest_client),
             };
 
-            let result = client.inspect("foo", Version::Latest).await;
+            let result = client.inspect_by_name("foo", Version::Latest).await;
 
             match result {
                 Ok(image) => {
@@ -1351,7 +1366,66 @@ mod tests {
             };
 
             let result = client
-                .inspect("foo", Version::Specific("1.2.3".to_string()))
+                .inspect_by_name("foo", Version::Specific("1.2.3".to_string()))
+                .await;
+
+            match result {
+                Ok(image) => {
+                    assert_eq!(
+                        Image {
+                            id: Id {
+                                algorithm: "alg".to_string(),
+                                hex: "123456".to_string()
+                            },
+                            tags: vec! {Tag{name: "foo".to_string(), version: "1.2.3".to_string()}}
+                        },
+                        image
+                    );
+                }
+                _ => unreachable!("Expeceted images to match!"),
+            }
+        }
+    }
+
+    mod inspect_by_id {
+        use super::super::*;
+        use serde_json::json;
+        use serde_json::value::Value as Json;
+        use simple_rest_client::MockRestClient;
+
+        #[tokio::test]
+        async fn should_inspect_by_id() {
+            let mut mock_rest_client = MockRestClient::new();
+
+            mock_rest_client
+                .expect_execute()
+                .withf(|req| {
+                    if let Request::Get { path, .. } = req {
+                        path == "/images/alg:123456/json"
+                    } else {
+                        false
+                    }
+                })
+                .times(1)
+                .return_once(|_req| {
+                    Ok(Response::<Vec<Json>>::Okay {
+                        headers: vec![],
+                        body: Some(vec![json!({
+                        "Id": "alg:123456",
+                          "RepoTags":["foo:1.2.3"],
+                        })]),
+                    })
+                });
+
+            let mut client = SimpleDockerClient {
+                rest_client: Box::new(mock_rest_client),
+            };
+
+            let result = client
+                .inspect_by_id(Id {
+                    algorithm: "alg".to_string(),
+                    hex: "123456".to_string(),
+                })
                 .await;
 
             match result {
