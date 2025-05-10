@@ -2,10 +2,11 @@ pub mod container;
 pub mod image;
 
 use serde::Deserialize;
+use serde_json::from_value;
 use serde_json::value::Value as Json;
 use simple_rest_client::log::Logger;
 use simple_rest_client::unix_domain_socket::{BuilderError, build_client};
-use simple_rest_client::{Parser, Response, RestClient, RestClientError};
+use simple_rest_client::{Parser, Request, Response, RestClient, RestClientError};
 use std::sync::Arc;
 use thiserror::Error;
 
@@ -131,6 +132,28 @@ impl SimpleDockerClient {
                 status,
                 body,
                 message: "non successful response".to_string(),
+            }),
+        }
+    }
+
+    async fn inspect<T>(&mut self, request: Request) -> Result<T, DockerError>
+    where
+        T: serde::de::DeserializeOwned,
+    {
+        let response: Response<Vec<Json>> = self.rest_client.execute(&request).await?;
+        let mut chunks = self.expect_ok_with_body(response)?.into_iter();
+
+        match (chunks.next(), chunks.next()) {
+            (None, _) => Err(DockerError::UnexpectedResponseError {
+                status: 200,
+                body: None,
+                message: "no results".to_string(),
+            }),
+            (Some(json), None) => Ok(from_value::<T>(json)?),
+            (Some(first), Some(second)) => Err(DockerError::UnexpectedResponseError {
+                status: 200,
+                body: Some(vec![first, second]),
+                message: "too many results".to_string(),
             }),
         }
     }

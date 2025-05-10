@@ -176,27 +176,6 @@ impl Repository for SimpleDockerClient {
     }
 }
 
-impl SimpleDockerClient {
-    async fn inspect(&mut self, request: Request) -> Result<Image, DockerError> {
-        let response: Response<Vec<Json>> = self.rest_client.execute(&request).await?;
-        let mut chunks = self.expect_ok_with_body(response)?.into_iter();
-
-        match (chunks.next(), chunks.next()) {
-            (None, _) => Err(DockerError::UnexpectedResponseError {
-                status: 200,
-                body: None,
-                message: "no results".to_string(),
-            }),
-            (Some(json), None) => Ok(from_value::<Image>(json)?),
-            (Some(first), Some(second)) => Err(DockerError::UnexpectedResponseError {
-                status: 200,
-                body: Some(vec![first, second]),
-                message: "too many results".to_string(),
-            }),
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     mod list {
