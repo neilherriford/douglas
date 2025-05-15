@@ -84,11 +84,25 @@ pub enum DockerError {
     #[error("Ambiguous match")]
     AmbiguousMatchError,
 
-    #[error("Ambiguous match")]
-    ParseError(#[from] serde_json::Error),
+    #[error("Parse Error")]
+    ParseError {
+        line: usize,
+        column: usize,
+        message: String,
+    },
 
     #[error("API error {0}")]
     ApiError(String),
+}
+
+impl From<serde_json::Error> for DockerError {
+    fn from(err: serde_json::Error) -> DockerError {
+        DockerError::ParseError {
+            line: err.line(),
+            column: err.column(),
+            message: err.to_string(),
+        }
+    }
 }
 
 pub struct SimpleDockerClient {
