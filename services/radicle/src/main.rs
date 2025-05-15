@@ -1,6 +1,6 @@
 use clap::{Arg, Command};
 use docker::SimpleDockerClient;
-use docker::image::Repository;
+use docker::container::Repository;
 use simple_rest_client::log::StdOutLogger;
 use std::sync::Arc;
 
@@ -39,15 +39,15 @@ async fn main() {
                         .expect("it worked");
 
                 let result = client
-                    .pull(
-                        "hello-world",
-                        docker::image::Version::Specific("linux".to_string()),
+                    .inspect_by_id(
+                        "ead56436dd67ad3ed567a044f85e3ce47482bf444ce6fc147f3698e08921103c"
+                            .to_string(),
                     )
                     .await;
 
                 match result {
                     Ok(image) => println!("{:?}", image),
-                    Err(err) => println!("🚨{}", err.to_string()),
+                    Err(err) => println!("🚨{:?}", err),
                 }
             }
         }
