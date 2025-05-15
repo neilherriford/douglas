@@ -1,3 +1,4 @@
+use crate::deserialize_id;
 use crate::{DockerError, Id, SimpleDockerClient};
 use serde::{Deserialize, Deserializer};
 use serde_json::from_value;
@@ -58,20 +59,6 @@ where
         .collect();
 
     Ok(tags)
-}
-
-fn deserialize_id<'de, D>(deserializer: D) -> Result<Id, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    let raw_id: String = Deserialize::deserialize(deserializer)?;
-    let parts: Vec<&str> = raw_id.split(':').collect();
-    let (algorithm, hex) = match parts.as_slice() {
-        [first, second] => (first.to_string(), second.to_string()),
-        _ => ("missing-algorithim".to_string(), raw_id),
-    };
-
-    Ok(Id { algorithm, hex })
 }
 
 #[async_trait::async_trait]

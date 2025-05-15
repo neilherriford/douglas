@@ -1,7 +1,7 @@
 pub mod container;
 pub mod image;
 
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 use serde_json::from_value;
 use serde_json::value::Value as Json;
 use simple_rest_client::log::Logger;
@@ -20,6 +20,20 @@ impl std::fmt::Display for Id {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}:{}", self.algorithm, self.hex)
     }
+}
+
+pub(crate) fn deserialize_id<'de, D>(deserializer: D) -> Result<Id, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let raw_id: String = Deserialize::deserialize(deserializer)?;
+    let parts: Vec<&str> = raw_id.split(':').collect();
+    let (algorithm, hex) = match parts.as_slice() {
+        [first, second] => (first.to_string(), second.to_string()),
+        _ => ("missing-algorithim".to_string(), raw_id),
+    };
+
+    Ok(Id { algorithm, hex })
 }
 
 #[derive(Error, Debug)]
@@ -155,6 +169,56 @@ impl SimpleDockerClient {
                 body: Some(vec![first, second]),
                 message: "too many results".to_string(),
             }),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    mod id_deserializer {
+        use super::super::*;
+        use serde::Deserialize;
+
+        #[derive(Debug, Deserialize)]
+        struct Wrapper {
+            #[serde(deserialize_with = "deserialize_id")]
+            id: Id,
+        }
+
+        #[test]
+        fn should_deserialize_ids() {
+            let json = r#"
+                {
+                  "id": "alg:123456"
+                }
+            "#;
+
+            let wrapper: Wrapper = serde_json::from_str(json).unwrap();
+            assert_eq!(
+                Id {
+                    algorithm: "alg".to_string(),
+                    hex: "123456".to_string()
+                },
+                wrapper.id
+            );
+        }
+
+        #[test]
+        fn should_deserialize_ids_without_alg() {
+            let json = r#"
+                {
+                  "id": "123456"
+                }
+            "#;
+
+            let wrapper: Wrapper = serde_json::from_str(json).unwrap();
+            assert_eq!(
+                Id {
+                    algorithm: "missing-algorithim".to_string(),
+                    hex: "123456".to_string()
+                },
+                wrapper.id
+            );
         }
     }
 }
