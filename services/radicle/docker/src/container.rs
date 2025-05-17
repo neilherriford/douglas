@@ -1,10 +1,17 @@
 use crate::image::{Image, Repository as ImageRepository};
 use crate::{DockerError, Id, Request, SimpleDockerClient, deserialize_id};
-use serde::{Deserialize, Deserializer};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::value::Value as Json;
+use simple_rest_client::create_path_and_query_string;
+use std::collections::HashMap;
+
+#[derive(Debug, Serialize, PartialEq)]
+struct Filter {
+    pub name: Vec<String>,
+}
 
 #[derive(Debug, Deserialize, PartialEq)]
-struct ContainerBuffer {
+struct InspectedContainer {
     #[serde(rename = "Id")]
     pub id: String,
 
@@ -27,6 +34,12 @@ struct ContainerBuffer {
 
     #[serde(rename = "Config")]
     pub config: Config,
+}
+
+#[derive(Debug, Deserialize, PartialEq)]
+struct IdentifiedContainer {
+    #[serde(rename = "Id")]
+    pub id: String,
 }
 
 #[derive(Debug, Deserialize, PartialEq)]
@@ -181,6 +194,7 @@ where
 #[async_trait::async_trait]
 pub trait Repository {
     async fn inspect_by_id(&mut self, id: String) -> Result<Container, DockerError>;
+    async fn find_by_name(&mut self, name: String) -> Result<Vec<Container>, DockerError>;
 }
 
 #[async_trait::async_trait]
@@ -191,7 +205,8 @@ impl Repository for SimpleDockerClient {
             headers: None,
         };
 
-        let buffer = self.inspect::<ContainerBuffer>(request).await?;
+        let buffer = self.inspect::<InspectedContainer>(request).await?;
+
         let image = ImageRepository::inspect_by_id(self, buffer.image_id).await?;
 
         let result = Container {
@@ -204,6 +219,27 @@ impl Repository for SimpleDockerClient {
             environment_variables: buffer.config.env,
             labels: buffer.config.labels,
         };
+
+        Ok(result)
+    }
+
+    async fn find_by_name(&mut self, name: String) -> Result<Vec<Container>, DockerError> {
+        let filter = serde_json::to_string(&Filter { name: vec![name] })?;
+        let request = Request::Get {
+            path: create_path_and_query_string(
+                "/containers/json",
+                HashMap::from([("all", "true"), ("filters", &filter)]),
+            ),
+            headers: None,
+        };
+
+        let buffers = self.inspect::<Vec<IdentifiedContainer>>(request).await?;
+        let mut result: Vec<Container> = Vec::with_capacity(buffers.len());
+
+        for buffer in buffers {
+            let container = Repository::inspect_by_id(self, buffer.id).await?;
+            result.push(container);
+        }
 
         Ok(result)
     }
@@ -607,7 +643,7 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn should_error_if() {
+        async fn should_inspect() {
             let mut mock_rest_client = MockRestClient::new();
 
             mock_rest_client
@@ -712,6 +748,435 @@ mod tests {
                     };
 
                     assert_eq!(expected, actual);
+                }
+                _ => unreachable!("Unexpeted result"),
+            }
+        }
+    }
+
+    mod find_by_name {
+        use super::super::*;
+        use crate::container::Repository;
+        use crate::image::Tag;
+        use hyper::Uri;
+        use serde_json::json;
+        use serde_json::value::Value as Json;
+        use simple_rest_client::MockRestClient;
+        use simple_rest_client::Response;
+
+        fn parse_path_and_query(path: String) -> Option<(String, Vec<(String, String)>)> {
+            let uri: Uri = path.parse().unwrap();
+
+            let parts = uri.into_parts().path_and_query.unwrap();
+
+            if let Some(query) = parts.query() {
+                let mut parameters: Vec<(String, String)> = query
+                    .split("&")
+                    .map(|assignment| {
+                        let mut chunks = assignment.split("=");
+                        match (chunks.next(), chunks.next()) {
+                            (Some(name), Some(value)) => {
+                                Some((name.to_string(), value.to_string()))
+                            }
+                            (Some(value), _) => Some((String::new(), value.to_string())),
+                            _ => None,
+                        }
+                    })
+                    .filter(|pair| pair.is_some())
+                    .map(|pair| pair.unwrap())
+                    .collect();
+
+                parameters.sort();
+
+                Some((parts.path().to_string(), parameters))
+            } else {
+                None
+            }
+        }
+
+        fn sort_vec<T: std::cmp::Ord>(mut vec: Vec<T>) -> Vec<T> {
+            vec.sort();
+            vec
+        }
+
+        #[tokio::test]
+        async fn should_err_if_no_body() {
+            let mut mock_rest_client = MockRestClient::new();
+
+            mock_rest_client
+                .expect_execute()
+                .withf(|req| {
+                    if let Request::Get { path, .. } = req {
+                        match parse_path_and_query(path.to_string()) {
+                            Some((path, parameters)) => {
+                                path == "/containers/json"
+                                    && parameters
+                                        == sort_vec(vec![
+                                            ("all".to_string(), "true".to_string()),
+                                            (
+                                                "filters".to_string(),
+                                                "%7B%22name%22%3A%5B%22foo%22%5D%7D".to_string(),
+                                            ),
+                                        ])
+                            }
+                            _ => false,
+                        }
+                    } else {
+                        false
+                    }
+                })
+                .times(1)
+                .return_once(|_req| {
+                    Ok(Response::<Vec<Json>>::Okay {
+                        headers: vec![],
+                        body: None,
+                    })
+                });
+
+            let mut client = SimpleDockerClient {
+                rest_client: Box::new(mock_rest_client),
+            };
+
+            let result = Repository::find_by_name(&mut client, "foo".to_string()).await;
+            assert!(matches!(result, Err(DockerError::MissingBodyError)));
+        }
+
+        #[tokio::test]
+        async fn should_err_if_empty_body() {
+            let mut mock_rest_client = MockRestClient::new();
+
+            mock_rest_client
+                .expect_execute()
+                .withf(|req| {
+                    if let Request::Get { path, .. } = req {
+                        match parse_path_and_query(path.to_string()) {
+                            Some((path, parameters)) => {
+                                path == "/containers/json"
+                                    && parameters
+                                        == sort_vec(vec![
+                                            ("all".to_string(), "true".to_string()),
+                                            (
+                                                "filters".to_string(),
+                                                "%7B%22name%22%3A%5B%22foo%22%5D%7D".to_string(),
+                                            ),
+                                        ])
+                            }
+                            _ => false,
+                        }
+                    } else {
+                        false
+                    }
+                })
+                .times(1)
+                .return_once(|_req| {
+                    Ok(Response::<Vec<Json>>::Okay {
+                        headers: vec![],
+                        body: Some(vec![]),
+                    })
+                });
+
+            let mut client = SimpleDockerClient {
+                rest_client: Box::new(mock_rest_client),
+            };
+
+            let result = Repository::find_by_name(&mut client, "foo".to_string()).await;
+
+            match result {
+                Err(DockerError::UnexpectedResponseError {
+                    status: 200,
+                    body: None,
+                    message: _,
+                }) => true,
+                _ => unreachable!("Expected error"),
+            };
+        }
+
+        #[tokio::test]
+        async fn should_err_if_created() {
+            let mut mock_rest_client = MockRestClient::new();
+
+            mock_rest_client
+                .expect_execute()
+                .withf(|req| {
+                    if let Request::Get { path, .. } = req {
+                        match parse_path_and_query(path.to_string()) {
+                            Some((path, parameters)) => {
+                                path == "/containers/json"
+                                    && parameters
+                                        == sort_vec(vec![
+                                            ("all".to_string(), "true".to_string()),
+                                            (
+                                                "filters".to_string(),
+                                                "%7B%22name%22%3A%5B%22foo%22%5D%7D".to_string(),
+                                            ),
+                                        ])
+                            }
+                            _ => false,
+                        }
+                    } else {
+                        false
+                    }
+                })
+                .times(1)
+                .return_once(|_req| {
+                    Ok(Response::<Vec<Json>>::Created {
+                        headers: vec![],
+                        body: Some(vec![]),
+                    })
+                });
+
+            let mut client = SimpleDockerClient {
+                rest_client: Box::new(mock_rest_client),
+            };
+
+            let result = Repository::find_by_name(&mut client, "foo".to_string()).await;
+            match result {
+                Err(DockerError::UnexpectedResponseError {
+                    status: 201,
+                    body: Some(_),
+                    message: _,
+                }) => true,
+                _ => unreachable!("Expected error"),
+            };
+        }
+
+        #[tokio::test]
+        async fn should_err_if_error() {
+            let mut mock_rest_client = MockRestClient::new();
+
+            mock_rest_client
+                .expect_execute()
+                .withf(|req| {
+                    if let Request::Get { path, .. } = req {
+                        match parse_path_and_query(path.to_string()) {
+                            Some((path, parameters)) => {
+                                path == "/containers/json"
+                                    && parameters
+                                        == sort_vec(vec![
+                                            ("all".to_string(), "true".to_string()),
+                                            (
+                                                "filters".to_string(),
+                                                "%7B%22name%22%3A%5B%22foo%22%5D%7D".to_string(),
+                                            ),
+                                        ])
+                            }
+                            _ => false,
+                        }
+                    } else {
+                        false
+                    }
+                })
+                .times(1)
+                .return_once(|_req| {
+                    Ok(Response::<Vec<Json>>::Error {
+                        headers: vec![],
+                        status: 500,
+                        body: Some(vec![]),
+                    })
+                });
+
+            let mut client = SimpleDockerClient {
+                rest_client: Box::new(mock_rest_client),
+            };
+
+            let result = Repository::find_by_name(&mut client, "foo".to_string()).await;
+            match result {
+                Err(DockerError::UnexpectedResponseError {
+                    status: 500,
+                    body: Some(_),
+                    message: _,
+                }) => true,
+                _ => unreachable!("Expected error"),
+            };
+        }
+
+        #[tokio::test]
+        async fn should_err_if_no_content() {
+            let mut mock_rest_client = MockRestClient::new();
+
+            mock_rest_client
+                .expect_execute()
+                .withf(|req| {
+                    if let Request::Get { path, .. } = req {
+                        match parse_path_and_query(path.to_string()) {
+                            Some((path, parameters)) => {
+                                path == "/containers/json"
+                                    && parameters
+                                        == sort_vec(vec![
+                                            ("all".to_string(), "true".to_string()),
+                                            (
+                                                "filters".to_string(),
+                                                "%7B%22name%22%3A%5B%22foo%22%5D%7D".to_string(),
+                                            ),
+                                        ])
+                            }
+                            _ => false,
+                        }
+                    } else {
+                        false
+                    }
+                })
+                .times(1)
+                .return_once(|_req| Ok(Response::<Vec<Json>>::NoContent { headers: vec![] }));
+
+            let mut client = SimpleDockerClient {
+                rest_client: Box::new(mock_rest_client),
+            };
+
+            let result = Repository::find_by_name(&mut client, "foo".to_string()).await;
+
+            match result {
+                Err(DockerError::UnexpectedResponseError {
+                    status: 204,
+                    body: None,
+                    message: _,
+                }) => true,
+                _ => unreachable!("Expected error"),
+            };
+        }
+
+        #[tokio::test]
+        async fn should_find_by_name() {
+            let mut mock_rest_client = MockRestClient::new();
+
+            mock_rest_client
+                .expect_execute()
+                .withf(|req| {
+                    if let Request::Get { path, .. } = req {
+                        match parse_path_and_query(path.to_string()) {
+                            Some((path, parameters)) => {
+                                path == "/containers/json"
+                                    && parameters
+                                        == sort_vec(vec![
+                                            ("all".to_string(), "true".to_string()),
+                                            (
+                                                "filters".to_string(),
+                                                "%7B%22name%22%3A%5B%22foo%22%5D%7D".to_string(),
+                                            ),
+                                        ])
+                            }
+                            _ => false,
+                        }
+                    } else {
+                        false
+                    }
+                })
+                .times(1)
+                .return_once(|_req| {
+                    Ok(Response::<Vec<Json>>::Okay {
+                        headers: vec![],
+                        body: Some(vec![json!(
+                            [
+                                {
+                                  "Id": "123456",
+                                }
+                            ]
+                        )]),
+                    })
+                });
+
+            mock_rest_client
+                .expect_execute()
+                .withf(|req| {
+                    if let Request::Get { path, .. } = req {
+                        path == "/containers/123456/json"
+                    } else {
+                        false
+                    }
+                })
+                .times(1)
+                .return_once(|_req| {
+                    Ok(Response::<Vec<Json>>::Okay {
+                        headers: vec![],
+                        body: Some(vec![json!(
+                            {
+                              "Id": "123456",
+                              "Name": "foo",
+                              "Image": "alg:654321",
+                              "State": {"Status": "exited"},
+                              "Mounts":
+                              [
+                                {
+                                  "Type": "bind",
+                                  "Source": "/bar/",
+                                  "Destination": "/baz/",
+                                  "RW": true
+                                }
+                              ],
+                              "NetworkSettings":
+                              {
+                                "Networks": { "qux": {} }
+                              },
+                              "Config":
+                              {
+                                "Env": ["quux=corge"],
+                                "Labels": {"grault": "garply"}
+                              }
+                            }
+                        )]),
+                    })
+                });
+
+            mock_rest_client
+                .expect_execute()
+                .withf(|req| {
+                    if let Request::Get { path, .. } = req {
+                        path == "/images/alg:654321/json"
+                    } else {
+                        false
+                    }
+                })
+                .times(1)
+                .return_once(|_req| {
+                    Ok(Response::<Vec<Json>>::Okay {
+                        headers: vec![],
+                        body: Some(vec![json!({
+                        "Id": "alg:654321",
+                          "RepoTags":["waldo:1.2.3"],
+                        })]),
+                    })
+                });
+
+            let mut client = SimpleDockerClient {
+                rest_client: Box::new(mock_rest_client),
+            };
+
+            let result = Repository::find_by_name(&mut client, "foo".to_string()).await;
+
+            match result {
+                Ok(actual) => {
+                    let expected = Container {
+                        id: "123456".to_string(),
+                        name: "foo".to_string(),
+                        image: Image {
+                            id: Id {
+                                algorithm: "alg".to_string(),
+                                hex: "654321".to_string(),
+                            },
+                            tags: vec![Tag {
+                                name: "waldo".to_string(),
+                                version: "1.2.3".to_string(),
+                            }],
+                        },
+                        status: Status::Exited,
+                        mounts: vec![Mount {
+                            mount_type: MountType::Bind,
+                            source: "/bar/".to_string(),
+                            destination: "/baz/".to_string(),
+                            writable: true,
+                        }],
+                        networks: vec!["qux".to_string()],
+                        environment_variables: vec![EnvironmentVariable {
+                            name: "quux".to_string(),
+                            value: "corge".to_string(),
+                        }],
+                        labels: vec![Label {
+                            name: "grault".to_string(),
+                            value: "garply".to_string(),
+                        }],
+                    };
+
+                    assert_eq!(vec![expected], actual);
                 }
                 _ => unreachable!("Unexpeted result"),
             }

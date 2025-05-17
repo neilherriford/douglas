@@ -38,15 +38,12 @@ async fn main() {
                         .await
                         .expect("it worked");
 
-                let result = client
-                    .inspect_by_id(
-                        "ead56436dd67ad3ed567a044f85e3ce47482bf444ce6fc147f3698e08921103c"
-                            .to_string(),
-                    )
-                    .await;
+                let result = client.find_by_name("authentik".to_string()).await;
 
                 match result {
-                    Ok(image) => println!("{:?}", image),
+                    Ok(obj) => {
+                        println!("✅{:?}", obj);
+                    }
                     Err(err) => println!("🚨{:?}", err),
                 }
             }
