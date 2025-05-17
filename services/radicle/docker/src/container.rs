@@ -7,6 +7,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::value::Value as Json;
 use simple_rest_client::create_path_and_query_string;
 use std::collections::HashMap;
+use std::fmt;
 
 #[derive(Debug, Serialize, PartialEq)]
 struct Filter {
@@ -98,6 +99,21 @@ pub enum Status {
     Dead,
 }
 
+impl fmt::Display for Status {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        let text = match self {
+            Status::Created => "created",
+            Status::Running => "running",
+            Status::Paused => "paused",
+            Status::Restarting => "restarting",
+            Status::Removing => "removing",
+            Status::Exited => "exited",
+            Status::Dead => "dead",
+        };
+        write!(f, "{}", text)
+    }
+}
+
 #[derive(Debug, Deserialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum MountType {
@@ -107,6 +123,20 @@ pub enum MountType {
     Tmpfs,
     Npipe,
     Cluster,
+}
+
+impl fmt::Display for MountType {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        let text = match self {
+            MountType::Bind => "bind",
+            MountType::Volume => "volume",
+            MountType::Image => "image",
+            MountType::Tmpfs => "tmpfs",
+            MountType::Npipe => "npipe",
+            MountType::Cluster => "cluster",
+        };
+        write!(f, "{}", text)
+    }
 }
 
 #[derive(Debug, PartialEq, Ord, PartialOrd, Eq)]
