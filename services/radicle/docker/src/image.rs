@@ -150,7 +150,7 @@ impl Repository for SimpleDockerClient {
             headers: None,
         };
 
-        return self.inspect(request).await;
+        return self.expect_single_chunk(request).await;
     }
 
     async fn inspect_by_id(&mut self, id: Id) -> Result<Image, DockerError> {
@@ -159,7 +159,7 @@ impl Repository for SimpleDockerClient {
             headers: None,
         };
 
-        return self.inspect(request).await;
+        return self.expect_single_chunk(request).await;
     }
 }
 

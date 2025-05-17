@@ -164,7 +164,7 @@ impl SimpleDockerClient {
         }
     }
 
-    async fn inspect<T>(&mut self, request: Request) -> Result<T, DockerError>
+    async fn expect_single_chunk<T>(&mut self, request: Request) -> Result<T, DockerError>
     where
         T: serde::de::DeserializeOwned,
     {
