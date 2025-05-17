@@ -1,5 +1,8 @@
 use crate::image::{Image, Repository as ImageRepository};
 use crate::{DockerError, Id, Request, SimpleDockerClient, deserialize_id};
+use crate::{
+    DockerError, Id, Label, Request, SimpleDockerClient, deserialize_id, deserialize_labels,
+};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::value::Value as Json;
 use simple_rest_client::create_path_and_query_string;
@@ -57,12 +60,6 @@ struct Config {
     #[serde(rename = "Labels")]
     #[serde(deserialize_with = "deserialize_labels")]
     pub labels: Vec<Label>,
-}
-
-#[derive(Debug, PartialEq)]
-pub struct Label {
-    pub name: String,
-    pub value: String,
 }
 
 #[derive(Debug, PartialEq)]
@@ -162,32 +159,6 @@ where
             }
         })
         .collect::<Result<_, D::Error>>()?;
-    Ok(result)
-}
-
-fn deserialize_labels<'de, D>(deserializer: D) -> Result<Vec<Label>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    let json: Json = Json::deserialize(deserializer)?;
-    let obj = json
-        .as_object()
-        .ok_or_else(|| serde::de::Error::custom("Expected Lables to be an object"))?;
-
-    let result = obj
-        .iter()
-        .map(|(name, value)| {
-            if let Some(value) = value.as_str() {
-                Ok(Label {
-                    name: name.as_str().to_string(),
-                    value: value.to_string(),
-                })
-            } else {
-                Err(serde::de::Error::custom("Expected value to be a string"))
-            }
-        })
-        .collect::<Result<_, D::Error>>()?;
-
     Ok(result)
 }
 

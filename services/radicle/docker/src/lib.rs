@@ -16,6 +16,38 @@ pub struct Id {
     pub hex: String,
 }
 
+#[derive(Debug, Deserialize, PartialEq)]
+pub struct Label {
+    pub name: String,
+    pub value: String,
+}
+
+pub(crate) fn deserialize_labels<'de, D>(deserializer: D) -> Result<Vec<Label>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let json: Json = Json::deserialize(deserializer)?;
+    let obj = json
+        .as_object()
+        .ok_or_else(|| serde::de::Error::custom("Expected Lables to be an object"))?;
+
+    let result = obj
+        .iter()
+        .map(|(name, value)| {
+            if let Some(value) = value.as_str() {
+                Ok(Label {
+                    name: name.as_str().to_string(),
+                    value: value.to_string(),
+                })
+            } else {
+                Err(serde::de::Error::custom("Expected value to be a string"))
+            }
+        })
+        .collect::<Result<_, D::Error>>()?;
+
+    Ok(result)
+}
+
 impl std::fmt::Display for Id {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}:{}", self.algorithm, self.hex)
