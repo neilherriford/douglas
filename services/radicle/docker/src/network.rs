@@ -16,13 +16,23 @@ pub struct Network {
 #[async_trait::async_trait]
 pub trait Repository {
     async fn inspect_by_id(&mut self, id: String) -> Result<Network, DockerError>;
+    async fn inspect_by_name(&mut self, name: String) -> Result<Network, DockerError>;
 }
 
 #[async_trait::async_trait]
 impl Repository for SimpleDockerClient {
     async fn inspect_by_id(&mut self, id: String) -> Result<Network, DockerError> {
+        self.inspect_network_by_hight(id).await
+    }
+    async fn inspect_by_name(&mut self, name: String) -> Result<Network, DockerError> {
+        self.inspect_network_by_hight(name).await
+    }
+}
+
+impl SimpleDockerClient {
+    async fn inspect_network_by_hight(&mut self, hight: String) -> Result<Network, DockerError> {
         let request = Request::Get {
-            path: format!("/networks/{}", id),
+            path: format!("/networks/{}", hight),
             headers: None,
         };
 
@@ -32,10 +42,10 @@ impl Repository for SimpleDockerClient {
 
 #[cfg(test)]
 mod tests {
-    mod inspect_by_id {
+    mod inspect_network_by_hight {
         use super::super::*;
         use crate::DockerError::ParseError;
-        use crate::network::Repository;
+
         use serde_json::json;
         use serde_json::value::Value as Json;
         use simple_rest_client::{MockRestClient, Response};
@@ -65,7 +75,9 @@ mod tests {
                 rest_client: Box::new(mock_rest_client),
             };
 
-            let result = Repository::inspect_by_id(&mut client, "10111213".to_string()).await;
+            let result = client
+                .inspect_network_by_hight("10111213".to_string())
+                .await;
             assert!(matches!(result, Err(DockerError::MissingBodyError)));
         }
 
@@ -94,7 +106,9 @@ mod tests {
                 rest_client: Box::new(mock_rest_client),
             };
 
-            let result = Repository::inspect_by_id(&mut client, "10111213".to_string()).await;
+            let result = client
+                .inspect_network_by_hight("10111213".to_string())
+                .await;
             match result {
                 Err(DockerError::UnexpectedResponseError {
                     status: 200,
@@ -132,7 +146,9 @@ mod tests {
                 rest_client: Box::new(mock_rest_client),
             };
 
-            let result = Repository::inspect_by_id(&mut client, "10111213".to_string()).await;
+            let result = client
+                .inspect_network_by_hight("10111213".to_string())
+                .await;
 
             match result {
                 Err(DockerError::UnexpectedResponseError {
@@ -171,7 +187,9 @@ mod tests {
                 rest_client: Box::new(mock_rest_client),
             };
 
-            let result = Repository::inspect_by_id(&mut client, "10111213".to_string()).await;
+            let result = client
+                .inspect_network_by_hight("10111213".to_string())
+                .await;
 
             assert!(matches!(
                 result,
@@ -208,7 +226,9 @@ mod tests {
                 rest_client: Box::new(mock_rest_client),
             };
 
-            let result = Repository::inspect_by_id(&mut client, "10111213".to_string()).await;
+            let result = client
+                .inspect_network_by_hight("10111213".to_string())
+                .await;
 
             match result {
                 Err(DockerError::UnexpectedResponseError {
@@ -242,7 +262,9 @@ mod tests {
                 rest_client: Box::new(mock_rest_client),
             };
 
-            let result = Repository::inspect_by_id(&mut client, "10111213".to_string()).await;
+            let result = client
+                .inspect_network_by_hight("10111213".to_string())
+                .await;
 
             match result {
                 Err(DockerError::UnexpectedResponseError {
@@ -282,7 +304,9 @@ mod tests {
                 rest_client: Box::new(mock_rest_client),
             };
 
-            let result = Repository::inspect_by_id(&mut client, "10111213".to_string()).await;
+            let result = client
+                .inspect_network_by_hight("10111213".to_string())
+                .await;
 
             assert!(matches!(
                 result,
@@ -325,7 +349,9 @@ mod tests {
                 rest_client: Box::new(mock_rest_client),
             };
 
-            let result = Repository::inspect_by_id(&mut client, "10111213".to_string()).await;
+            let result = client
+                .inspect_network_by_hight("10111213".to_string())
+                .await;
 
             match result {
                 Ok(actual) => {
