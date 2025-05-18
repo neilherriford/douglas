@@ -319,6 +319,39 @@ mod tests {
         }
 
         #[tokio::test]
+        async fn should_err_if_not_found() {
+            let mut mock_rest_client = MockRestClient::new();
+
+            mock_rest_client
+                .expect_execute()
+                .withf(|req| {
+                    if let Request::Get { path, .. } = req {
+                        path == "/networks/10111213"
+                    } else {
+                        false
+                    }
+                })
+                .times(1)
+                .return_once(|_req| {
+                    Ok(Response::<Vec<Json>>::Error {
+                        headers: vec![],
+                        status: 404,
+                        body: Some(vec![json!("oops")]),
+                    })
+                });
+
+            let mut client = SimpleDockerClient {
+                rest_client: Box::new(mock_rest_client),
+            };
+
+            let result = client
+                .inspect_network_by_hight("10111213".to_string())
+                .await;
+
+            assert!(matches!(result, Err(DockerError::NotFoundError)));
+        }
+
+        #[tokio::test]
         async fn should_inspect_by_id() {
             let mut mock_rest_client = MockRestClient::new();
 

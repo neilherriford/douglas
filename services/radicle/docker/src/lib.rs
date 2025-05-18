@@ -125,6 +125,9 @@ pub enum DockerError {
 
     #[error("API error {0}")]
     ApiError(String),
+
+    #[error("Not found")]
+    NotFoundError,
 }
 
 impl From<serde_json::Error> for DockerError {
@@ -188,6 +191,11 @@ impl SimpleDockerClient {
                 body: None,
                 message: "expected OK, but recieved NO CONTENT".to_string(),
             }),
+            Response::Error {
+                status: 404,
+                body: _,
+                ..
+            } => Err(DockerError::NotFoundError),
             Response::Error { status, body, .. } => Err(DockerError::UnexpectedResponseError {
                 status,
                 body,
