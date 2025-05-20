@@ -386,20 +386,17 @@ mod tests {
                 .inspect_network_by_hight("10111213".to_string())
                 .await;
 
-            match result {
-                Ok(actual) => {
-                    let expected = Network {
-                        id: "10111213".to_string(),
-                        name: "qux".to_string(),
-                        labels: vec![Label {
-                            name: "quux".to_string(),
-                            value: "corge".to_string(),
-                        }],
-                    };
-                    assert_eq!(expected, actual);
-                }
-                _ => unreachable!("Unexpeted result"),
-            }
+            assert!(matches!(
+                result,
+                Ok(Network {
+                    id,
+                    name,
+                    labels
+                }) if id == "10111213" && name == "qux" && labels == vec![Label {
+                    name: "quux".to_string(),
+                    value: "corge".to_string()
+                }]
+            ));
         }
     }
 }

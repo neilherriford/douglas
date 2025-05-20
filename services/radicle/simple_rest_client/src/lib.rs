@@ -112,6 +112,92 @@ pub trait RestClient<T: Send> {
     async fn execute(&mut self, request: &Request) -> Result<Response<T>, RestClientError>;
 }
 
+#[cfg(feature = "mock")]
+impl<T: Send + 'static> MockRestClient<T> {
+    pub fn expect_rest_call<TPredicate>(
+        &mut self,
+        request_predicate: TPredicate,
+        output: Response<T>,
+    ) where
+        TPredicate: Fn(&Request) -> bool + Send + 'static,
+    {
+        self.expect_execute()
+            .withf(move |req| request_predicate(req))
+            .times(1)
+            .return_once(|_req| Ok(output));
+    }
+
+    pub fn create_get_expectation(&self, path: &str) -> Box<dyn Fn(&Request) -> bool + Send> {
+        let expected_path = path.to_string();
+        Box::new(move |req: &Request| {
+            if let Request::Get { path, .. } = req {
+                path == &expected_path
+            } else {
+                false
+            }
+        })
+    }
+
+    pub fn expect_get_and_return_okay_with_none(&mut self, path: &str) {
+        self.expect_rest_call(
+            self.create_get_expectation(path),
+            Response::<T>::Okay {
+                headers: vec![],
+                body: None,
+            },
+        )
+    }
+
+    pub fn expect_get_and_return_okay_with_some(&mut self, path: &str, body: T) {
+        self.expect_rest_call(
+            self.create_get_expectation(path),
+            Response::<T>::Okay {
+                headers: vec![],
+                body: Some(body),
+            },
+        )
+    }
+
+    pub fn expect_get_and_return_created_with_none(&mut self, path: &str) {
+        self.expect_rest_call(
+            self.create_get_expectation(path),
+            Response::<T>::Created {
+                headers: vec![],
+                body: None,
+            },
+        )
+    }
+
+    pub fn expect_get_and_return_no_content(&mut self, path: &str) {
+        self.expect_rest_call(
+            self.create_get_expectation(path),
+            Response::<T>::NoContent { headers: vec![] },
+        )
+    }
+
+    pub fn expect_get_and_return_not_found(&mut self, path: &str) {
+        self.expect_rest_call(
+            self.create_get_expectation(path),
+            Response::<T>::Error {
+                headers: vec![],
+                status: 404,
+                body: None,
+            },
+        )
+    }
+
+    pub fn expect_get_and_return_created_with_internal_server_error(&mut self, path: &str) {
+        self.expect_rest_call(
+            self.create_get_expectation(path),
+            Response::<T>::Error {
+                headers: vec![],
+                status: 500,
+                body: None,
+            },
+        )
+    }
+}
+
 pub trait Parser<TIn, TOut>: Send + Sync + std::fmt::Debug {
     type ParseError: std::error::Error + Send + Sync + 'static;
     fn parse(&self, input: TIn) -> Result<TOut, Self::ParseError>;
