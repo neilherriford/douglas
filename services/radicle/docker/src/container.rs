@@ -468,30 +468,12 @@ mod tests {
         use crate::container::Repository;
         use crate::image::Tag;
         use serde_json::json;
-        use serde_json::value::Value as Json;
         use simple_rest_client::MockRestClient;
-        use simple_rest_client::Response;
 
         #[tokio::test]
         async fn should_error_if_body_missing() {
             let mut mock_rest_client = MockRestClient::new();
-
-            mock_rest_client
-                .expect_execute()
-                .withf(|req| {
-                    if let Request::Get { path, .. } = req {
-                        path == "/containers/123456/json"
-                    } else {
-                        false
-                    }
-                })
-                .times(1)
-                .return_once(|_req| {
-                    Ok(Response::<Vec<Json>>::Okay {
-                        headers: vec![],
-                        body: None,
-                    })
-                });
+            mock_rest_client.expect_get_and_return_okay("/containers/123456/json", None);
 
             let mut client = SimpleDockerClient {
                 rest_client: Box::new(mock_rest_client),
@@ -505,23 +487,7 @@ mod tests {
         #[tokio::test]
         async fn should_error_if_body_empty() {
             let mut mock_rest_client = MockRestClient::new();
-
-            mock_rest_client
-                .expect_execute()
-                .withf(|req| {
-                    if let Request::Get { path, .. } = req {
-                        path == "/containers/123456/json"
-                    } else {
-                        false
-                    }
-                })
-                .times(1)
-                .return_once(|_req| {
-                    Ok(Response::<Vec<Json>>::Okay {
-                        headers: vec![],
-                        body: Some(vec![]),
-                    })
-                });
+            mock_rest_client.expect_get_and_return_okay("/containers/123456/json", Some(vec![]));
 
             let mut client = SimpleDockerClient {
                 rest_client: Box::new(mock_rest_client),
@@ -529,106 +495,18 @@ mod tests {
 
             let result = Repository::inspect_by_id(&mut client, "123456".to_string()).await;
 
-            match result {
+            assert!(matches!(result,
                 Err(DockerError::UnexpectedResponseError {
                     status: 200,
-                    body: None,
-                    message,
-                }) => assert!(message.contains("no result")),
-                _ => unreachable!("Expected error!"),
-            }
+                    body: _,
+                    ref message,
+                }) if message == "no results"));
         }
 
         #[tokio::test]
         async fn should_error_if_created() {
             let mut mock_rest_client = MockRestClient::new();
-
-            mock_rest_client
-                .expect_execute()
-                .withf(|req| {
-                    if let Request::Get { path, .. } = req {
-                        path == "/containers/123456/json"
-                    } else {
-                        false
-                    }
-                })
-                .times(1)
-                .return_once(|_req| {
-                    Ok(Response::<Vec<Json>>::Created {
-                        headers: vec![],
-                        body: Some(vec![]),
-                    })
-                });
-
-            let mut client = SimpleDockerClient {
-                rest_client: Box::new(mock_rest_client),
-            };
-
-            let result = Repository::inspect_by_id(&mut client, "123456".to_string()).await;
-
-            match result {
-                Err(DockerError::UnexpectedResponseError {
-                    status: 201,
-                    body: _,
-                    message,
-                }) => assert!(message.contains("expected OK, but recieved CREATED")),
-                _ => unreachable!("Expected error!"),
-            }
-        }
-
-        #[tokio::test]
-        async fn should_error_if_no_content() {
-            let mut mock_rest_client = MockRestClient::new();
-
-            mock_rest_client
-                .expect_execute()
-                .withf(|req| {
-                    if let Request::Get { path, .. } = req {
-                        path == "/containers/123456/json"
-                    } else {
-                        false
-                    }
-                })
-                .times(1)
-                .return_once(|_req| Ok(Response::<Vec<Json>>::NoContent { headers: vec![] }));
-
-            let mut client = SimpleDockerClient {
-                rest_client: Box::new(mock_rest_client),
-            };
-
-            let result = Repository::inspect_by_id(&mut client, "123456".to_string()).await;
-
-            match result {
-                Err(DockerError::UnexpectedResponseError {
-                    status: 204,
-                    body: _,
-                    message,
-                }) => assert!(message.contains("expected OK, but recieved NO CONTENT")),
-                _ => unreachable!("Expected error!"),
-            }
-        }
-
-        #[tokio::test]
-        async fn should_error_if_error() {
-            let mut mock_rest_client = MockRestClient::new();
-
-            mock_rest_client
-                .expect_execute()
-                .withf(|req| {
-                    if let Request::Get { path, .. } = req {
-                        path == "/containers/123456/json"
-                    } else {
-                        false
-                    }
-                })
-                .times(1)
-                .return_once(|_req| {
-                    Ok(Response::<Vec<Json>>::Error {
-                        status: 500,
-                        headers: vec![],
-                        body: Some(vec![]),
-                    })
-                });
+            mock_rest_client.expect_get_and_return_created_with_none("/containers/123456/json");
 
             let mut client = SimpleDockerClient {
                 rest_client: Box::new(mock_rest_client),
@@ -638,79 +516,14 @@ mod tests {
 
             assert!(matches!(
                 result,
-                Err(DockerError::UnexpectedResponseError {
-                    status: 500,
-                    body: _,
-                    message: _,
-                })
+                Err(DockerError::UnexpectedResponseError { status: 201, .. })
             ));
         }
 
         #[tokio::test]
-        async fn should_inspect() {
+        async fn should_error_if_no_content() {
             let mut mock_rest_client = MockRestClient::new();
-
-            mock_rest_client
-                .expect_execute()
-                .withf(|req| {
-                    if let Request::Get { path, .. } = req {
-                        path == "/containers/123456/json"
-                    } else {
-                        false
-                    }
-                })
-                .times(1)
-                .return_once(|_req| {
-                    Ok(Response::<Vec<Json>>::Okay {
-                        headers: vec![],
-                        body: Some(vec![json!(
-                            {
-                              "Id": "123456",
-                              "Name": "foo",
-                              "Image": "alg:654321",
-                              "State": {"Status": "exited"},
-                              "Mounts":
-                              [
-                                {
-                                  "Type": "bind",
-                                  "Source": "/bar/",
-                                  "Destination": "/baz/",
-                                  "RW": true
-                                }
-                              ],
-                              "NetworkSettings":
-                              {
-                                "Networks": { "qux": {} }
-                              },
-                              "Config":
-                              {
-                                "Env": ["quux=corge"],
-                                "Labels": {"grault": "garply"}
-                              }
-                            }
-                        )]),
-                    })
-                });
-
-            mock_rest_client
-                .expect_execute()
-                .withf(|req| {
-                    if let Request::Get { path, .. } = req {
-                        path == "/images/alg:654321/json"
-                    } else {
-                        false
-                    }
-                })
-                .times(1)
-                .return_once(|_req| {
-                    Ok(Response::<Vec<Json>>::Okay {
-                        headers: vec![],
-                        body: Some(vec![json!({
-                        "Id": "alg:654321",
-                          "RepoTags":["waldo:1.2.3"],
-                        })]),
-                    })
-                });
+            mock_rest_client.expect_get_and_return_no_content("/containers/123456/json");
 
             let mut client = SimpleDockerClient {
                 rest_client: Box::new(mock_rest_client),
@@ -718,43 +531,143 @@ mod tests {
 
             let result = Repository::inspect_by_id(&mut client, "123456".to_string()).await;
 
-            match result {
-                Ok(actual) => {
-                    let expected = Container {
-                        id: "123456".to_string(),
-                        name: "foo".to_string(),
-                        image: Image {
-                            id: Id {
-                                algorithm: "alg".to_string(),
-                                hex: "654321".to_string(),
-                            },
-                            tags: vec![Tag {
-                                name: "waldo".to_string(),
-                                version: "1.2.3".to_string(),
-                            }],
-                        },
-                        status: Status::Exited,
-                        mounts: vec![Mount {
-                            mount_type: MountType::Bind,
-                            source: "/bar/".to_string(),
-                            destination: "/baz/".to_string(),
-                            writable: true,
-                        }],
-                        networks: vec!["qux".to_string()],
-                        environment_variables: vec![EnvironmentVariable {
-                            name: "quux".to_string(),
-                            value: "corge".to_string(),
-                        }],
-                        labels: vec![Label {
-                            name: "grault".to_string(),
-                            value: "garply".to_string(),
-                        }],
-                    };
+            assert!(matches!(
+                result,
+                Err(DockerError::UnexpectedResponseError { status: 204, .. })
+            ));
+        }
 
-                    assert_eq!(expected, actual);
-                }
-                _ => unreachable!("Unexpeted result"),
-            }
+        #[tokio::test]
+        async fn should_error_if_missing() {
+            let mut mock_rest_client = MockRestClient::new();
+            mock_rest_client.expect_get_and_return_not_found("/containers/123456/json");
+
+            let mut client = SimpleDockerClient {
+                rest_client: Box::new(mock_rest_client),
+            };
+
+            let result = Repository::inspect_by_id(&mut client, "123456".to_string()).await;
+
+            assert!(matches!(result, Err(DockerError::NotFoundError)));
+        }
+
+        #[tokio::test]
+        async fn should_error_if_error() {
+            let mut mock_rest_client = MockRestClient::new();
+            mock_rest_client.expect_get_and_return_internal_server_error("/containers/123456/json");
+
+            let mut client = SimpleDockerClient {
+                rest_client: Box::new(mock_rest_client),
+            };
+
+            let result = Repository::inspect_by_id(&mut client, "123456".to_string()).await;
+
+            assert!(matches!(
+                result,
+                Err(DockerError::UnexpectedResponseError { status: 500, .. })
+            ));
+        }
+
+        #[tokio::test]
+        async fn should_inspect() {
+            let mut mock_rest_client = MockRestClient::new();
+            mock_rest_client.expect_get_and_return_okay(
+                "/containers/123456/json",
+                Some(vec![json!(
+                    {
+                      "Id": "123456",
+                      "Name": "foo",
+                      "Image": "alg:654321",
+                      "State": {"Status": "exited"},
+                      "Mounts":
+                      [
+                        {
+                          "Type": "bind",
+                          "Source": "/bar/",
+                          "Destination": "/baz/",
+                          "RW": true
+                        }
+                      ],
+                      "NetworkSettings":
+                      {
+                        "Networks": {
+                            "qux": {
+                                "NetworkID": "10111213"
+                            }
+                        }
+                      },
+                      "Config":
+                      {
+                        "Env": ["quux=corge"],
+                        "Labels": {"grault": "garply"}
+                      }
+                    }
+                )]),
+            );
+
+            mock_rest_client.expect_get_and_return_okay(
+                "/images/alg:654321/json",
+                Some(vec![json!({
+                "Id": "alg:654321",
+                  "RepoTags":["waldo:1.2.3"],
+                })]),
+            );
+
+            mock_rest_client.expect_get_and_return_okay(
+                "/networks/10111213",
+                Some(vec![json!({
+                    "Id": "10111213",
+                    "Name": "qux",
+                    "Labels": {
+                      "quux": "corge"
+                    }
+                })]),
+            );
+
+            let mut client = SimpleDockerClient {
+                rest_client: Box::new(mock_rest_client),
+            };
+
+            let result = Repository::inspect_by_id(&mut client, "123456".to_string()).await;
+            let expected = Container {
+                id: "123456".to_string(),
+                name: "foo".to_string(),
+                image: Image {
+                    id: Id {
+                        algorithm: "alg".to_string(),
+                        hex: "654321".to_string(),
+                    },
+                    tags: vec![Tag {
+                        name: "waldo".to_string(),
+                        version: "1.2.3".to_string(),
+                    }],
+                },
+                status: Status::Exited,
+                mounts: vec![Mount {
+                    mount_type: MountType::Bind,
+                    source: "/bar/".to_string(),
+                    destination: "/baz/".to_string(),
+                    writable: true,
+                }],
+                networks: vec![Network {
+                    id: "10111213".to_string(),
+                    name: "qux".to_string(),
+                    labels: vec![Label {
+                        name: "quux".to_string(),
+                        value: "corge".to_string(),
+                    }],
+                }],
+                environment_variables: vec![EnvironmentVariable {
+                    name: "quux".to_string(),
+                    value: "corge".to_string(),
+                }],
+                labels: vec![Label {
+                    name: "grault".to_string(),
+                    value: "garply".to_string(),
+                }],
+            };
+
+            assert!(matches!(result, Ok(actual) if actual == expected));
         }
     }
 

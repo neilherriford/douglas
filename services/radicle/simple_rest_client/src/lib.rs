@@ -127,33 +127,64 @@ impl<T: Send + 'static> MockRestClient<T> {
             .return_once(|_req| Ok(output));
     }
 
+    fn parse_path_and_query(path: String) -> Option<(String, Vec<(String, String)>)> {
+        let uri: hyper::Uri = path.parse().unwrap();
+
+        let parts = uri.into_parts().path_and_query.unwrap();
+
+        if let Some(query) = parts.query() {
+            let mut parameters: Vec<(String, String)> = query
+                .split("&")
+                .map(|assignment| {
+                    let mut chunks = assignment.split("=");
+                    match (chunks.next(), chunks.next()) {
+                        (Some(name), Some(value)) => Some((name.to_string(), value.to_string())),
+                        (Some(value), _) => Some((String::new(), value.to_string())),
+                        _ => None,
+                    }
+                })
+                .filter(|pair| pair.is_some())
+                .map(|pair| pair.unwrap())
+                .collect();
+
+            parameters.sort();
+
+            Some((parts.path().to_string(), parameters))
+        } else {
+            Some((parts.path().to_string(), vec![]))
+        }
+    }
+
     pub fn create_get_expectation(&self, path: &str) -> Box<dyn Fn(&Request) -> bool + Send> {
-        let expected_path = path.to_string();
+        let path = path.to_string();
         Box::new(move |req: &Request| {
-            if let Request::Get { path, .. } = req {
-                path == &expected_path
+            if let Request::Get {
+                path: requested_path,
+                ..
+            } = req
+            {
+                let expected = MockRestClient::<T>::parse_path_and_query(path.clone());
+                let actual = MockRestClient::<T>::parse_path_and_query(requested_path.to_string());
+
+                match (expected, actual) {
+                    (
+                        Some((expected_path, expected_params)),
+                        Some((actual_path, actual_params)),
+                    ) => expected_path == actual_path && expected_params == actual_params,
+                    _ => false,
+                }
             } else {
                 false
             }
         })
     }
 
-    pub fn expect_get_and_return_okay_with_none(&mut self, path: &str) {
+    pub fn expect_get_and_return_okay(&mut self, path: &str, body: Option<T>) {
         self.expect_rest_call(
             self.create_get_expectation(path),
             Response::<T>::Okay {
                 headers: vec![],
-                body: None,
-            },
-        )
-    }
-
-    pub fn expect_get_and_return_okay_with_some(&mut self, path: &str, body: T) {
-        self.expect_rest_call(
-            self.create_get_expectation(path),
-            Response::<T>::Okay {
-                headers: vec![],
-                body: Some(body),
+                body,
             },
         )
     }
@@ -186,7 +217,7 @@ impl<T: Send + 'static> MockRestClient<T> {
         )
     }
 
-    pub fn expect_get_and_return_created_with_internal_server_error(&mut self, path: &str) {
+    pub fn expect_get_and_return_internal_server_error(&mut self, path: &str) {
         self.expect_rest_call(
             self.create_get_expectation(path),
             Response::<T>::Error {
