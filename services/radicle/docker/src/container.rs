@@ -1,5 +1,5 @@
 use crate::image::{Image, Repository as ImageRepository};
-use crate::{DockerError, Id, Request, SimpleDockerClient, deserialize_id};
+use crate::network::{Network, Repository as NetworkRepository};
 use crate::{
     DockerError, Id, Label, Request, SimpleDockerClient, deserialize_id, deserialize_labels,
 };
@@ -34,7 +34,7 @@ struct InspectedContainer {
 
     #[serde(deserialize_with = "deserialize_networks")]
     #[serde(rename = "NetworkSettings")]
-    pub networks: Vec<String>,
+    pub network_ids: Vec<String>,
 
     #[serde(rename = "Config")]
     pub config: Config,
@@ -70,7 +70,7 @@ pub struct Container {
     pub image: Image,
     pub status: Status,
     pub mounts: Vec<Mount>,
-    pub networks: Vec<String>,
+    pub networks: Vec<Network>,
     pub environment_variables: Vec<EnvironmentVariable>,
     pub labels: Vec<Label>,
 }
@@ -158,7 +158,23 @@ where
         .as_object()
         .ok_or_else(|| serde::de::Error::custom("Expected Networks to be an object"))?;
 
-    Ok(obj.keys().cloned().collect())
+    let network_ids = obj
+        .values()
+        .map(|def| {
+            let summary = def.as_object().ok_or_else(|| {
+                serde::de::Error::custom("Expected Network defintion to be an object")
+            })?;
+
+            Ok(summary
+                .get("NetworkID")
+                .ok_or_else(|| serde::de::Error::missing_field("NetworkID"))?
+                .as_str()
+                .ok_or_else(|| serde::de::Error::custom("Expected NetworkID to be a string"))?
+                .to_string())
+        })
+        .collect::<Result<_, D::Error>>()?;
+
+    Ok(network_ids)
 }
 
 fn deserialize_environment_variables<'de, D>(
@@ -209,7 +225,8 @@ impl Repository for SimpleDockerClient {
         let buffer = self
             .expect_single_chunk::<InspectedContainer>(request)
             .await?;
-        let image = ImageRepository::inspect_by_id(self, buffer.image_id).await?;
+        let image = ImageRepository::inspect_by_id(self, &buffer.image_id).await?;
+        let networks = self.inspect_networks(buffer.network_ids).await?;
 
         let result = Container {
             id: buffer.id,
@@ -217,7 +234,7 @@ impl Repository for SimpleDockerClient {
             image,
             status: buffer.state.status,
             mounts: buffer.mounts,
-            networks: buffer.networks,
+            networks,
             environment_variables: buffer.config.env,
             labels: buffer.config.labels,
         };
@@ -246,6 +263,20 @@ impl Repository for SimpleDockerClient {
         }
 
         Ok(result)
+    }
+}
+
+impl SimpleDockerClient {
+    async fn inspect_networks(
+        &mut self,
+        network_ids: Vec<String>,
+    ) -> Result<Vec<Network>, DockerError> {
+        let mut result: Vec<Network> = Vec::with_capacity(network_ids.len());
+        for network_id in network_ids {
+            result.push(NetworkRepository::inspect_by_id(self, network_id).await?);
+        }
+
+        return Ok(result);
     }
 }
 
@@ -299,8 +330,8 @@ mod tests {
                   "Wrapper":
                   {
                     "Networks": {
-                        "foo": {},
-                        "bar": {}
+                        "foo": {"NetworkID": "0"},
+                        "bar": {"NetworkID": "1"}
                     }
                   }
                 }
@@ -309,7 +340,7 @@ mod tests {
             let wrapper: Wrapper = serde_json::from_str(json).unwrap();
             let mut actual = wrapper.networks;
             actual.sort();
-            assert_eq!(vec!["bar".to_string(), "foo".to_string()], actual);
+            assert_eq!(vec!["0".to_string(), "1".to_string()], actual);
         }
     }
 
