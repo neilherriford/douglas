@@ -155,6 +155,18 @@ impl<T: Send + 'static> MockRestClient<T> {
         }
     }
 
+    fn paths_equal(expected_path: String, actual_path: String) -> bool {
+        let expected = MockRestClient::<T>::parse_path_and_query(expected_path);
+        let actual = MockRestClient::<T>::parse_path_and_query(actual_path);
+
+        match (expected, actual) {
+            (Some((expected_path, expected_params)), Some((actual_path, actual_params))) => {
+                expected_path == actual_path && expected_params == actual_params
+            }
+            _ => false,
+        }
+    }
+
     pub fn create_get_expectation(&self, path: &str) -> Box<dyn Fn(&Request) -> bool + Send> {
         let path = path.to_string();
         Box::new(move |req: &Request| {
@@ -163,16 +175,7 @@ impl<T: Send + 'static> MockRestClient<T> {
                 ..
             } = req
             {
-                let expected = MockRestClient::<T>::parse_path_and_query(path.clone());
-                let actual = MockRestClient::<T>::parse_path_and_query(requested_path.to_string());
-
-                match (expected, actual) {
-                    (
-                        Some((expected_path, expected_params)),
-                        Some((actual_path, actual_params)),
-                    ) => expected_path == actual_path && expected_params == actual_params,
-                    _ => false,
-                }
+                MockRestClient::<T>::paths_equal(path.clone(), requested_path.to_string())
             } else {
                 false
             }
@@ -220,6 +223,88 @@ impl<T: Send + 'static> MockRestClient<T> {
     pub fn expect_get_and_return_internal_server_error(&mut self, path: &str) {
         self.expect_rest_call(
             self.create_get_expectation(path),
+            Response::<T>::Error {
+                headers: vec![],
+                status: 500,
+                body: None,
+            },
+        )
+    }
+
+    pub fn create_post_expectation(
+        &self,
+        path: &str,
+        body: Option<String>,
+    ) -> Box<dyn Fn(&Request) -> bool + Send> {
+        let expected_path = path.to_string();
+        Box::new(move |req: &Request| {
+            if let Request::Post {
+                path: requested_path,
+                body: actual_body,
+                ..
+            } = req
+            {
+                body == *actual_body
+                    && MockRestClient::<T>::paths_equal(
+                        expected_path.clone(),
+                        requested_path.to_string(),
+                    )
+            } else {
+                false
+            }
+        })
+    }
+
+    pub fn expect_post_and_return_okay(
+        &mut self,
+        path: &str,
+        body: Option<String>,
+        response_body: Option<T>,
+    ) {
+        self.expect_rest_call(
+            self.create_post_expectation(path, body),
+            Response::<T>::Okay {
+                headers: vec![],
+                body: response_body,
+            },
+        )
+    }
+
+    pub fn expect_post_and_return_created_with_none(&mut self, path: &str, body: Option<String>) {
+        self.expect_rest_call(
+            self.create_post_expectation(path, body),
+            Response::<T>::Created {
+                headers: vec![],
+                body: None,
+            },
+        )
+    }
+
+    pub fn expect_post_and_return_no_content(&mut self, path: &str, body: Option<String>) {
+        self.expect_rest_call(
+            self.create_post_expectation(path, body),
+            Response::<T>::NoContent { headers: vec![] },
+        )
+    }
+
+    pub fn expect_post_and_return_not_found(&mut self, path: &str, body: Option<String>) {
+        self.expect_rest_call(
+            self.create_post_expectation(path, body),
+            Response::<T>::Error {
+                headers: vec![],
+                status: 404,
+                body: None,
+            },
+        )
+    }
+
+    pub fn expect_post_and_return_internal_server_error(
+        &mut self,
+        path: &str,
+        body: Option<String>,
+    ) {
+        self.expect_rest_call(
+            self.create_post_expectation(path, body),
             Response::<T>::Error {
                 headers: vec![],
                 status: 500,
