@@ -146,6 +146,63 @@ impl Repository for SimpleDockerClient {
 
 #[cfg(test)]
 mod tests {
+    mod tag_deserializer {
+        use super::super::*;
+        use serde::Deserialize;
+
+        #[derive(Debug, Deserialize)]
+        struct Wrapper {
+            #[serde(deserialize_with = "deserialize_tags")]
+            tags: HashSet<Tag>,
+        }
+
+        #[test]
+        fn should_split_on_colons() {
+            let json = r#"
+                {
+                  "tags": ["foo:bar", "baz:qux"]
+                }
+            "#;
+
+            let wrapper: Wrapper = serde_json::from_str(json).unwrap();
+            assert_eq!(
+                vec![
+                    Tag {
+                        name: "foo".to_string(),
+                        version: "bar".to_string()
+                    },
+                    Tag {
+                        name: "baz".to_string(),
+                        version: "qux".to_string()
+                    },
+                ]
+                .into_iter()
+                .collect::<HashSet<Tag>>(),
+                wrapper.tags
+            );
+        }
+
+        #[test]
+        fn should_combine_if_missing_colon() {
+            let json = r#"
+                {
+                  "tags": ["foo"]
+                }
+            "#;
+
+            let wrapper: Wrapper = serde_json::from_str(json).unwrap();
+            assert_eq!(
+                vec![Tag {
+                    name: "foo".to_string(),
+                    version: String::new()
+                }]
+                .into_iter()
+                .collect::<HashSet<Tag>>(),
+                wrapper.tags
+            );
+        }
+    }
+
     mod list {
         use super::super::*;
         use serde_json::json;
