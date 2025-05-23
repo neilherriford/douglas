@@ -400,7 +400,7 @@ mod tests {
         }
     }
 
-    mod inspect {
+    mod inspect_by_id {
         use super::super::*;
         use crate::container::Repository;
         use crate::image::Tag;
@@ -435,9 +435,31 @@ mod tests {
             assert!(matches!(result,
                 Err(DockerError::UnexpectedResponseError {
                     status: 200,
-                    body: _,
-                    ref message,
+                    message,
+                    ..
                 }) if message == "no results"));
+        }
+
+        #[tokio::test]
+        async fn should_error_if_body_has_multiple_chunks() {
+            let mut mock_rest_client = MockRestClient::new();
+            mock_rest_client.expect_get_and_return_okay(
+                "/containers/123456/json",
+                Some(vec![json!("too"), json!("many")]),
+            );
+
+            let mut client = SimpleDockerClient {
+                rest_client: Box::new(mock_rest_client),
+            };
+
+            let result = Repository::inspect_by_id(&mut client, "123456".to_string()).await;
+
+            assert!(matches!(result,
+                Err(DockerError::UnexpectedResponseError {
+                    status: 200,
+                     message,
+                    ..
+                }) if message == "too many results"));
         }
 
         #[tokio::test]
@@ -577,7 +599,9 @@ mod tests {
                     tags: vec![Tag {
                         name: "waldo".to_string(),
                         version: "1.2.3".to_string(),
-                    }],
+                    }]
+                    .into_iter()
+                    .collect(),
                 },
                 status: Status::Exited,
                 mounts: vec![Mount {
@@ -648,9 +672,32 @@ mod tests {
                 result,
                 Err(DockerError::UnexpectedResponseError {
                     status: 200,
-                    body: None,
                     message,
+                    ..
                 }) if message == "no results"));
+        }
+
+        #[tokio::test]
+        async fn should_err_if_too_many_chunks() {
+            let mut mock_rest_client = MockRestClient::new();
+            mock_rest_client.expect_get_and_return_okay(
+                "/containers/json?all=true&filters=%7B%22name%22%3A%5B%22foo%22%5D%7D",
+                Some(vec![json!("too"), json!("many")]),
+            );
+
+            let mut client = SimpleDockerClient {
+                rest_client: Box::new(mock_rest_client),
+            };
+
+            let result = Repository::find_by_name(&mut client, "foo".to_string()).await;
+
+            assert!(matches!(
+                result,
+                Err(DockerError::UnexpectedResponseError {
+                    status: 200,
+                    message,
+                    ..
+                }) if message == "too many results"));
         }
 
         #[tokio::test]
@@ -791,7 +838,9 @@ mod tests {
                     tags: vec![Tag {
                         name: "waldo".to_string(),
                         version: "1.2.3".to_string(),
-                    }],
+                    }]
+                    .into_iter()
+                    .collect(),
                 },
                 status: Status::Exited,
                 mounts: vec![Mount {
