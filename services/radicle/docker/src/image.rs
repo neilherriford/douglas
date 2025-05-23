@@ -157,6 +157,17 @@ mod tests {
         }
 
         #[test]
+        fn should_error_on_non_array() {
+            let json = r#"
+                {
+                  "tags": {"foo": "bar"}
+                }
+            "#;
+            let result = serde_json::from_str::<Wrapper>(json);
+            assert!(result.is_err());
+        }
+
+        #[test]
         fn should_split_on_colons() {
             let json = r#"
                 {
