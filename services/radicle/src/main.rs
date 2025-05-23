@@ -51,3 +51,58 @@ async fn main() {
         _ => todo!(),
     }
 }
+
+fn container_pretty_print(container: Container) {
+    println!("Container {{");
+    println!("  id:                      {}", container.id);
+    println!("  name:                    {}", container.name);
+    println!("  status:                  {}", container.status);
+    println!("  image: {{");
+    println!(
+        "    id: {}:{}",
+        container.image.id.algorithm, container.image.id.hex
+    );
+    println!("    tags: [");
+    for tag in container.image.tags {
+        println!("      {}:{}", tag.name, tag.version);
+    }
+    println!("    ]");
+    println!("  }}");
+    println!("  mounts   [");
+    for mount in container.mounts {
+        println!("    {{",);
+        println!("      type:     {}", mount.mount_type);
+        println!("      source:   {}", mount.source);
+        println!("      dest:     {}", mount.destination);
+        println!("      writable: {}", mount.writable);
+        println!("    }}",);
+    }
+    println!("  ]");
+    println!("  networks [");
+    for network in container.networks {
+        println!("    {{");
+        println!("      id:     {}", network.id);
+        println!("      name:   {}", network.name);
+        println!("      labels: [");
+        for label in network.labels {
+            println!("        {}: {}", label.name, label.value);
+        }
+        println!("      ]");
+        println!("    }}");
+    }
+    println!("  ]");
+    println!("  environmenment variables [");
+    for environment_variable in container.environment_variables {
+        println!(
+            "    {}={}",
+            environment_variable.name, environment_variable.value
+        );
+    }
+    println!("  ]");
+    println!("  labels: [");
+    for label in container.labels {
+        println!("    {}: {}", label.name, label.value);
+    }
+    println!("  ]");
+    println!("}}");
+}
