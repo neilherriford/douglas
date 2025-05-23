@@ -1,5 +1,6 @@
 pub mod container;
 pub mod image;
+pub mod network;
 
 use serde::{Deserialize, Deserializer};
 use serde_json::from_value;
