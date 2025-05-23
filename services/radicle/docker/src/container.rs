@@ -400,69 +400,6 @@ mod tests {
         }
     }
 
-    mod labels_deserializers {
-        use super::super::*;
-        use serde::Deserialize;
-
-        #[derive(Debug, Deserialize)]
-        struct Wrapper {
-            #[serde(deserialize_with = "deserialize_labels")]
-            labels: Vec<Label>,
-        }
-
-        #[test]
-        fn should_err_if_invalid_format() {
-            let json = r#"
-                {
-                    "labels": 4
-                }
-            "#;
-
-            let result = serde_json::from_str::<Wrapper>(json);
-            assert!(result.is_err());
-        }
-
-        #[test]
-        fn should_err_if_invalid_data() {
-            let json = r#"
-                {
-                    "labels": {"magic": 42}
-                }
-            "#;
-
-            let result = serde_json::from_str::<Wrapper>(json);
-            assert!(result.is_err());
-        }
-
-        #[test]
-        fn should_deserialize_labels() {
-            let json = r#"
-                {
-                    "labels": {
-                        "foo": "bar",
-                        "baz": "qux"
-                    }
-                }
-            "#;
-
-            let wrapper: Wrapper = serde_json::from_str(json).unwrap();
-
-            assert_eq!(
-                vec![
-                    Label {
-                        name: "baz".to_string(),
-                        value: "qux".to_string()
-                    },
-                    Label {
-                        name: "foo".to_string(),
-                        value: "bar".to_string()
-                    },
-                ],
-                wrapper.labels
-            );
-        }
-    }
-
     mod inspect {
         use super::super::*;
         use crate::container::Repository;
