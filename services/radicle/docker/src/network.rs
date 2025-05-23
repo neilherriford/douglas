@@ -105,6 +105,50 @@ impl SimpleDockerClient {
 
 #[cfg(test)]
 mod tests {
+    mod key_deserializer {
+        use super::super::*;
+        use crate::Deserialize;
+
+        #[derive(Debug, Deserialize)]
+        struct Wrapper {
+            #[serde(deserialize_with = "deserialize_keys")]
+            pub keys: Vec<String>,
+        }
+
+        #[test]
+        fn should_err_if_not_an_obj() {
+            let json = r#"
+                {
+                  "Wrapper":
+                  {
+                    "keys": []
+                  }
+                }
+            "#;
+
+            let result = serde_json::from_str::<Wrapper>(json);
+            assert!(result.is_err());
+        }
+
+        #[test]
+        fn should_collect_keys() {
+            let json = r#"
+                {
+                  "keys": {
+                    "foo": true,
+                    "bar": 123
+                  }
+                }
+            "#;
+
+            let result = serde_json::from_str::<Wrapper>(json);
+
+            assert!(
+                matches!(result, Ok(actual) if actual.keys.clone().sort() == vec!["foo", "bar"].sort())
+            )
+        }
+    }
+
     mod inspect_network_by_hight {
         use super::super::*;
         use serde_json::json;
