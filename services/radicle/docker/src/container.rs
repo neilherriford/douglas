@@ -222,9 +222,10 @@ impl Repository for SimpleDockerClient {
             headers: None,
         };
 
-        let buffer = self
-            .expect_single_chunk::<InspectedContainer>(request)
-            .await?;
+        let response = self.rest_client.execute(&request).await?;
+        let body = self.expect_ok_with_body(response)?;
+        let buffer = self.expect_single_chunk::<InspectedContainer>(body)?;
+
         let image = ImageRepository::inspect_by_id(self, &buffer.image_id).await?;
         let networks = self.inspect_networks(buffer.network_ids).await?;
 
@@ -252,9 +253,10 @@ impl Repository for SimpleDockerClient {
             headers: None,
         };
 
-        let buffers = self
-            .expect_single_chunk::<Vec<IdentifiedContainer>>(request)
-            .await?;
+        let response = self.rest_client.execute(&request).await?;
+        let body = self.expect_ok_with_body(response)?;
+        let buffers = self.expect_single_chunk::<Vec<IdentifiedContainer>>(body)?;
+
         let mut result: Vec<Container> = Vec::with_capacity(buffers.len());
 
         for buffer in buffers {
@@ -463,12 +465,7 @@ mod tests {
 
             let result = Repository::inspect_by_id(&mut client, "123456".to_string()).await;
 
-            assert!(matches!(result,
-                Err(DockerError::UnexpectedResponseError {
-                    status: 200,
-                    message,
-                    ..
-                }) if message == "no results"));
+            assert!(matches!(result, Err(DockerError::InsufficientChunksError)));
         }
 
         #[tokio::test]
@@ -485,12 +482,7 @@ mod tests {
 
             let result = Repository::inspect_by_id(&mut client, "123456".to_string()).await;
 
-            assert!(matches!(result,
-                Err(DockerError::UnexpectedResponseError {
-                    status: 200,
-                     message,
-                    ..
-                }) if message == "too many results"));
+            assert!(matches!(result, Err(DockerError::ExcessiveChunksError)));
         }
 
         #[tokio::test]
@@ -699,13 +691,7 @@ mod tests {
 
             let result = Repository::find_by_name(&mut client, "foo".to_string()).await;
 
-            assert!(matches!(
-                result,
-                Err(DockerError::UnexpectedResponseError {
-                    status: 200,
-                    message,
-                    ..
-                }) if message == "no results"));
+            assert!(matches!(result, Err(DockerError::InsufficientChunksError)));
         }
 
         #[tokio::test]
@@ -722,13 +708,7 @@ mod tests {
 
             let result = Repository::find_by_name(&mut client, "foo".to_string()).await;
 
-            assert!(matches!(
-                result,
-                Err(DockerError::UnexpectedResponseError {
-                    status: 200,
-                    message,
-                    ..
-                }) if message == "too many results"));
+            assert!(matches!(result, Err(DockerError::ExcessiveChunksError)));
         }
 
         #[tokio::test]

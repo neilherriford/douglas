@@ -101,6 +101,12 @@ pub enum DockerError {
     #[error("Missing response body")]
     MissingBodyError,
 
+    #[error("Insufficnet number of chunks in response")]
+    InsufficientChunksError,
+
+    #[error("Excessive number of chunks in response")]
+    ExcessiveChunksError,
+
     #[error("Received unexpected response with status: {status}, {message}")]
     UnexpectedResponseError {
         status: u16,
@@ -205,25 +211,16 @@ impl SimpleDockerClient {
         }
     }
 
-    async fn expect_single_chunk<T>(&mut self, request: Request) -> Result<T, DockerError>
+    fn expect_single_chunk<T>(&mut self, body: Vec<Json>) -> Result<T, DockerError>
     where
         T: serde::de::DeserializeOwned,
     {
-        let response: Response<Vec<Json>> = self.rest_client.execute(&request).await?;
-        let mut chunks = self.expect_ok_with_body(response)?.into_iter();
+        let mut chunks = body.into_iter();
 
         match (chunks.next(), chunks.next()) {
-            (None, _) => Err(DockerError::UnexpectedResponseError {
-                status: 200,
-                body: None,
-                message: "no results".to_string(),
-            }),
+            (None, _) => Err(DockerError::InsufficientChunksError),
             (Some(json), None) => Ok(from_value::<T>(json)?),
-            (Some(first), Some(second)) => Err(DockerError::UnexpectedResponseError {
-                status: 200,
-                body: Some(vec![first, second]),
-                message: "too many results".to_string(),
-            }),
+            (Some(_), Some(_)) => Err(DockerError::ExcessiveChunksError),
         }
     }
 }

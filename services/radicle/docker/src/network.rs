@@ -83,7 +83,9 @@ impl SimpleDockerClient {
             headers: None,
         };
 
-        Ok(self.expect_single_chunk::<T>(request).await?)
+        let response: Response<Vec<Json>> = self.rest_client.execute(&request).await?;
+        let body = self.expect_ok_with_body(response)?;
+        Ok(self.expect_single_chunk::<T>(body)?)
     }
 
     async fn find_connected_containers_by_hight(
@@ -183,14 +185,7 @@ mod tests {
                 .inspect_network_by_hight::<Network>("10111213".to_string())
                 .await;
 
-            assert!(matches!(
-                result,
-                Err(DockerError::UnexpectedResponseError {
-                    status: 200,
-                    message: msg,
-                    ..
-                }) if msg == "no results"
-            ));
+            assert!(matches!(result, Err(DockerError::InsufficientChunksError)));
         }
 
         #[tokio::test]
@@ -210,14 +205,7 @@ mod tests {
                 .inspect_network_by_hight::<Network>("10111213".to_string())
                 .await;
 
-            assert!(matches!(
-                result,
-                Err(DockerError::UnexpectedResponseError {
-                    status: 200,
-                    message: msg,
-                    ..
-                }) if msg == "too many results"
-            ));
+            assert!(matches!(result, Err(DockerError::ExcessiveChunksError)));
         }
 
         #[tokio::test]
@@ -382,10 +370,7 @@ mod tests {
                 .find_connected_containers_by_hight("10111213".to_string())
                 .await;
 
-            assert!(matches!(
-                result,
-                Err(DockerError::UnexpectedResponseError { status: 200, message, ..}) if message == "no results"
-            ));
+            assert!(matches!(result, Err(DockerError::InsufficientChunksError)));
         }
 
         #[tokio::test]
@@ -404,10 +389,7 @@ mod tests {
                 .find_connected_containers_by_hight("10111213".to_string())
                 .await;
 
-            assert!(matches!(
-                result,
-                Err(DockerError::UnexpectedResponseError { status: 200, message, ..}) if message == "too many results"
-            ));
+            assert!(matches!(result, Err(DockerError::ExcessiveChunksError)));
         }
 
         #[tokio::test]

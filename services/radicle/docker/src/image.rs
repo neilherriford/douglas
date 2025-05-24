@@ -95,7 +95,9 @@ impl Repository for SimpleDockerClient {
             headers: None,
         };
 
-        return self.expect_single_chunk(request).await;
+        let response = self.rest_client.execute(&request).await?;
+        let body = self.expect_ok_with_body(response)?;
+        self.expect_single_chunk(body)
     }
 
     async fn where_named(&mut self, name: &str) -> Result<Vec<Image>, DockerError> {
@@ -139,8 +141,9 @@ impl Repository for SimpleDockerClient {
             path: format!("/images/{}:{}/json", name, version),
             headers: None,
         };
-
-        return self.expect_single_chunk(request).await;
+        let response = self.rest_client.execute(&request).await?;
+        let body = self.expect_ok_with_body(response)?;
+        self.expect_single_chunk(body)
     }
 }
 
@@ -791,10 +794,7 @@ mod tests {
 
             let result = client.inspect_by_name("foo", Version::Latest).await;
 
-            assert!(matches!(
-                result,
-                Err(DockerError::UnexpectedResponseError {status: 200, message, ..}) if message == "no results"
-            ));
+            assert!(matches!(result, Err(DockerError::InsufficientChunksError)));
         }
 
         #[tokio::test]
@@ -820,10 +820,7 @@ mod tests {
 
             let result = client.inspect_by_name("foo", Version::Latest).await;
 
-            assert!(matches!(
-                result,
-                Err(DockerError::UnexpectedResponseError {status: 200, message, ..}) if message == "too many results"
-            ));
+            assert!(matches!(result, Err(DockerError::ExcessiveChunksError)));
         }
 
         #[tokio::test]
@@ -918,14 +915,7 @@ mod tests {
                 })
                 .await;
 
-            assert!(matches!(
-                result,
-                Err(DockerError::UnexpectedResponseError {
-                    status: 200,
-                    message,
-                    ..
-                }) if message == "too many results"
-            ));
+            assert!(matches!(result, Err(DockerError::ExcessiveChunksError)));
         }
 
         #[tokio::test]
@@ -963,10 +953,7 @@ mod tests {
                 })
                 .await;
 
-            assert!(matches!(
-                    result,
-                    Err(DockerError::UnexpectedResponseError {status: 200, message, ..}) if message == "no results"
-            ));
+            assert!(matches!(result, Err(DockerError::InsufficientChunksError)));
         }
 
         #[tokio::test]
@@ -988,10 +975,7 @@ mod tests {
                 })
                 .await;
 
-            assert!(matches!(
-                    result,
-                    Err(DockerError::UnexpectedResponseError {status: 200, message, ..}) if message == "too many results"
-            ));
+            assert!(matches!(result, Err(DockerError::ExcessiveChunksError)));
         }
         #[tokio::test]
         async fn should_err_if_created() {
