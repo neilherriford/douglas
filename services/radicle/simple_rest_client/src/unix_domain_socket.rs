@@ -82,7 +82,7 @@ where
         "http",
         "localhost",
         io_stream,
-        Some(vec![Header::new("host", "localhost")]),
+        vec![Header::new("host", "localhost")],
         Arc::clone(&logger),
         parser,
     );

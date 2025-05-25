@@ -219,7 +219,7 @@ impl Repository for SimpleDockerClient {
     async fn inspect_by_id(&mut self, id: String) -> Result<Container, DockerError> {
         let request = Request::Get {
             path: format!("/containers/{}/json", id),
-            headers: None,
+            headers: vec![],
         };
 
         let response = self.rest_client.execute(&request).await?;
@@ -250,7 +250,7 @@ impl Repository for SimpleDockerClient {
                 "/containers/json",
                 HashMap::from([("all", "true"), ("filters", &filter)]),
             ),
-            headers: None,
+            headers: vec![],
         };
 
         let response = self.rest_client.execute(&request).await?;

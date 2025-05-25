@@ -298,7 +298,7 @@ mod tests {
         }
     }
 
-    mod labels_deserializers {
+    mod labels_deserializer {
         use super::super::*;
         use serde::Deserialize;
 

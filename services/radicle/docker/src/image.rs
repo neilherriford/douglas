@@ -76,7 +76,7 @@ impl Repository for SimpleDockerClient {
     async fn list(&mut self) -> Result<Vec<Image>, DockerError> {
         let req = Request::Get {
             path: "/images/json".to_string(),
-            headers: None,
+            headers: vec![],
         };
 
         let response: Response<Vec<Json>> = self.rest_client.execute(&req).await?;
@@ -92,7 +92,7 @@ impl Repository for SimpleDockerClient {
     async fn inspect_by_id(&mut self, id: &Id) -> Result<Image, DockerError> {
         let request = Request::Get {
             path: format!("/images/{}/json", id),
-            headers: None,
+            headers: vec![],
         };
 
         let response = self.rest_client.execute(&request).await?;
@@ -122,7 +122,7 @@ impl Repository for SimpleDockerClient {
                 HashMap::from([("fromImage", name), ("tag", version.to_string().as_str())]),
             ),
             body: None,
-            headers: None,
+            headers: vec![],
         };
 
         let response: Response<Vec<Json>> = self.rest_client.execute(&req).await?;
@@ -139,7 +139,7 @@ impl Repository for SimpleDockerClient {
     ) -> Result<Image, DockerError> {
         let request = Request::Get {
             path: format!("/images/{}:{}/json", name, version),
-            headers: None,
+            headers: vec![],
         };
         let response = self.rest_client.execute(&request).await?;
         let body = self.expect_okay_with_body(response)?;
@@ -520,6 +520,7 @@ mod tests {
             let mut mock_rest_client = MockRestClient::new();
             mock_rest_client.expect_post_and_return_okay(
                 "/images/create?tag=latest&fromImage=foo",
+                vec![],
                 None,
                 None,
             );
@@ -538,6 +539,7 @@ mod tests {
             let mut mock_rest_client = MockRestClient::new();
             mock_rest_client.expect_post_and_return_created_with_none(
                 "/images/create?tag=latest&fromImage=foo",
+                vec![],
                 None,
             );
 
@@ -556,8 +558,11 @@ mod tests {
         #[tokio::test]
         async fn shoud_error_if_received_got_no_content() {
             let mut mock_rest_client = MockRestClient::new();
-            mock_rest_client
-                .expect_post_and_return_no_content("/images/create?tag=latest&fromImage=foo", None);
+            mock_rest_client.expect_post_and_return_no_content(
+                "/images/create?tag=latest&fromImage=foo",
+                vec![],
+                None,
+            );
 
             let mut client = SimpleDockerClient {
                 rest_client: Box::new(mock_rest_client),
@@ -576,6 +581,7 @@ mod tests {
             let mut mock_rest_client = MockRestClient::new();
             mock_rest_client.expect_post_and_return_internal_server_error(
                 "/images/create?tag=latest&fromImage=foo",
+                vec![],
                 None,
             );
 
@@ -594,8 +600,11 @@ mod tests {
         #[tokio::test]
         async fn shoud_error_if_received_missing() {
             let mut mock_rest_client = MockRestClient::new();
-            mock_rest_client
-                .expect_post_and_return_not_found("/images/create?tag=latest&fromImage=foo", None);
+            mock_rest_client.expect_post_and_return_not_found(
+                "/images/create?tag=latest&fromImage=foo",
+                vec![],
+                None,
+            );
 
             let mut client = SimpleDockerClient {
                 rest_client: Box::new(mock_rest_client),
@@ -611,6 +620,7 @@ mod tests {
             let mut mock_rest_client = MockRestClient::new();
             mock_rest_client.expect_post_and_return_okay(
                 "/images/create?tag=latest&fromImage=foo",
+                vec![],
                 None,
                 Some(vec![json!({"error":"Oops all errors"})]),
             );
@@ -629,6 +639,7 @@ mod tests {
             let mut mock_rest_client = MockRestClient::new();
             mock_rest_client.expect_post_and_return_okay(
                 "/images/create?tag=latest&fromImage=foo",
+                vec![],
                 None,
                 Some(vec![
                     json!({"status":"Pulling from library/foo","id":"latest"}),
@@ -668,6 +679,7 @@ mod tests {
             let mut mock_rest_client = MockRestClient::new();
             mock_rest_client.expect_post_and_return_okay(
                 "/images/create?tag=1.2.3&fromImage=foo",
+                vec![],
                 None,
                 Some(vec![
                     json!({"status":"Pulling from library/foo","id":"latest"}),

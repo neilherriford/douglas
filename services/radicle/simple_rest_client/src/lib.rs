@@ -31,20 +31,20 @@ pub enum RestClientError {
 pub enum Request {
     Delete {
         path: String,
-        headers: Option<Vec<Header>>,
+        headers: Vec<Header>,
     },
     Get {
         path: String,
-        headers: Option<Vec<Header>>,
+        headers: Vec<Header>,
     },
     Post {
         path: String,
-        headers: Option<Vec<Header>>,
+        headers: Vec<Header>,
         body: Option<String>,
     },
     Put {
         path: String,
-        headers: Option<Vec<Header>>,
+        headers: Vec<Header>,
         body: Option<String>,
     },
 }
@@ -234,6 +234,7 @@ impl<T: Send + 'static> MockRestClient<T> {
     pub fn create_post_expectation(
         &self,
         path: &str,
+        headers: Vec<Header>,
         body: Option<String>,
     ) -> Box<dyn Fn(&Request) -> bool + Send> {
         let expected_path = path.to_string();
@@ -241,7 +242,7 @@ impl<T: Send + 'static> MockRestClient<T> {
             if let Request::Post {
                 path: requested_path,
                 body: actual_body,
-                ..
+                headers: actual_headers,
             } = req
             {
                 body == *actual_body
@@ -249,6 +250,7 @@ impl<T: Send + 'static> MockRestClient<T> {
                         expected_path.clone(),
                         requested_path.to_string(),
                     )
+                    && *actual_headers == headers
             } else {
                 false
             }
@@ -258,11 +260,12 @@ impl<T: Send + 'static> MockRestClient<T> {
     pub fn expect_post_and_return_okay(
         &mut self,
         path: &str,
+        headers: Vec<Header>,
         body: Option<String>,
         response_body: Option<T>,
     ) {
         self.expect_rest_call(
-            self.create_post_expectation(path, body),
+            self.create_post_expectation(path, headers, body),
             Response::<T>::Okay {
                 headers: vec![],
                 body: response_body,
@@ -270,9 +273,14 @@ impl<T: Send + 'static> MockRestClient<T> {
         )
     }
 
-    pub fn expect_post_and_return_created_with_none(&mut self, path: &str, body: Option<String>) {
+    pub fn expect_post_and_return_created_with_none(
+        &mut self,
+        path: &str,
+        headers: Vec<Header>,
+        body: Option<String>,
+    ) {
         self.expect_rest_call(
-            self.create_post_expectation(path, body),
+            self.create_post_expectation(path, headers, body),
             Response::<T>::Created {
                 headers: vec![],
                 body: None,
@@ -280,16 +288,26 @@ impl<T: Send + 'static> MockRestClient<T> {
         )
     }
 
-    pub fn expect_post_and_return_no_content(&mut self, path: &str, body: Option<String>) {
+    pub fn expect_post_and_return_no_content(
+        &mut self,
+        path: &str,
+        headers: Vec<Header>,
+        body: Option<String>,
+    ) {
         self.expect_rest_call(
-            self.create_post_expectation(path, body),
+            self.create_post_expectation(path, headers, body),
             Response::<T>::NoContent { headers: vec![] },
         )
     }
 
-    pub fn expect_post_and_return_not_found(&mut self, path: &str, body: Option<String>) {
+    pub fn expect_post_and_return_not_found(
+        &mut self,
+        path: &str,
+        headers: Vec<Header>,
+        body: Option<String>,
+    ) {
         self.expect_rest_call(
-            self.create_post_expectation(path, body),
+            self.create_post_expectation(path, headers, body),
             Response::<T>::Error {
                 headers: vec![],
                 status: 404,
@@ -301,10 +319,11 @@ impl<T: Send + 'static> MockRestClient<T> {
     pub fn expect_post_and_return_internal_server_error(
         &mut self,
         path: &str,
+        headers: Vec<Header>,
         body: Option<String>,
     ) {
         self.expect_rest_call(
-            self.create_post_expectation(path, body),
+            self.create_post_expectation(path, headers, body),
             Response::<T>::Error {
                 headers: vec![],
                 status: 500,
@@ -330,7 +349,7 @@ pub struct SimpleRestClient<
     authority: String,
     io_stream: Option<TIo>,
     sender: Option<SendRequest<String>>,
-    default_headers: Option<Vec<Header>>,
+    default_headers: Vec<Header>,
     logger: Arc<dyn Logger>,
     _marker: PhantomData<TResponseBody>,
 }
@@ -342,7 +361,7 @@ impl<TIo: IoStream + 'static, TResponseBody: Send + Sync, TParser: Parser<String
         scheme: &str,
         authority: &str,
         io_stream: TIo,
-        default_headers: Option<Vec<Header>>,
+        default_headers: Vec<Header>,
         logger: Arc<dyn Logger>,
         parser: TParser,
     ) -> Self {
@@ -365,20 +384,20 @@ impl<TIo: IoStream + 'static, TResponseBody: Send + Sync, TParser: Parser<String
         let uri_builder = hyper::http::uri::Builder::new()
             .scheme(self.scheme.as_str())
             .authority(self.authority.as_str());
-        let mut request_builer = hyper::Request::builder();
-        let request_headers: &Option<Vec<Header>>;
+        let mut request_builder = hyper::Request::builder();
+        let request_headers: &Vec<Header>;
         let request_body: &Option<String>;
 
         match request {
             Request::Delete { path, headers } => {
                 let uri = uri_builder.path_and_query(path).build()?;
-                request_builer = request_builer.method("DELETE").uri(uri);
+                request_builder = request_builder.method("DELETE").uri(uri);
                 request_headers = headers;
                 request_body = &None;
             }
             Request::Get { path, headers } => {
                 let uri = uri_builder.path_and_query(path).build()?;
-                request_builer = request_builer.method("GET").uri(uri);
+                request_builder = request_builder.method("GET").uri(uri);
                 request_headers = headers;
                 request_body = &None;
             }
@@ -388,7 +407,7 @@ impl<TIo: IoStream + 'static, TResponseBody: Send + Sync, TParser: Parser<String
                 body,
             } => {
                 let uri = uri_builder.path_and_query(path).build()?;
-                request_builer = request_builer.method("POST").uri(uri);
+                request_builder = request_builder.method("POST").uri(uri);
                 request_body = body;
                 request_headers = headers;
             }
@@ -398,22 +417,19 @@ impl<TIo: IoStream + 'static, TResponseBody: Send + Sync, TParser: Parser<String
                 body,
             } => {
                 let uri = uri_builder.path_and_query(path).build()?;
-                request_builer = request_builer.method("PUT").uri(uri);
+                request_builder = request_builder.method("PUT").uri(uri);
                 request_body = body;
                 request_headers = headers;
             }
         }
 
         for headers in vec![&self.default_headers, request_headers] {
-            if let Some(headers) = headers {
-                for header in headers {
-                    request_builer =
-                        request_builer.header(header.name.clone(), header.value.clone());
-                }
+            for header in headers {
+                request_builder = request_builder.header(header.name.clone(), header.value.clone());
             }
         }
 
-        Ok(request_builer.body(request_body.clone().unwrap_or(String::new()))?)
+        Ok(request_builder.body(request_body.clone().unwrap_or(String::new()))?)
     }
 
     async fn send_request(
@@ -509,7 +525,7 @@ impl<TIo: IoStream + 'static, TResponseBody: Send + Sync, TParser: Parser<String
     fn log_request(&self, request: &Request) {
         let verb: &str;
         let request_path: &String;
-        let request_headers: &Option<Vec<Header>>;
+        let request_headers: &Vec<Header>;
         let request_body: &Option<String>;
 
         match request {
@@ -547,11 +563,7 @@ impl<TIo: IoStream + 'static, TResponseBody: Send + Sync, TParser: Parser<String
             }
         };
 
-        let headers = if let Some(headers) = request_headers {
-            self.pretty_headers(&headers)
-        } else {
-            "".to_string()
-        };
+        let headers = self.pretty_headers(&request_headers);
 
         let mut result = format!(
             "Performing '{}' on '{}://{}{}', with headers {}",
@@ -668,7 +680,7 @@ mod tests {
             "HTTP",
             "localhost",
             io,
-            None,
+            vec![],
             Arc::new(logger),
             PassthroughParser::new(),
         );
@@ -676,7 +688,7 @@ mod tests {
         let result: Result<Response<String>, _> = client
             .execute(&Request::Get {
                 path: "/".to_string(),
-                headers: None,
+                headers: vec![],
             })
             .await;
 
@@ -735,7 +747,7 @@ mod tests {
             "HTTP",
             "localhost",
             io,
-            None,
+            vec![],
             Arc::new(logger),
             PassthroughParser::new(),
         );
@@ -743,7 +755,7 @@ mod tests {
         let _: Result<Response<String>, _> = client
             .execute(&Request::Get {
                 path: "/".to_string(),
-                headers: None,
+                headers: vec![],
             })
             .await;
     }
@@ -778,7 +790,7 @@ mod tests {
             "HTTP",
             "localhost",
             io,
-            None,
+            vec![],
             Arc::new(logger),
             PassthroughParser::new(),
         );
@@ -786,7 +798,7 @@ mod tests {
         let result: Result<Response<String>, _> = client
             .execute(&Request::Get {
                 path: "/".to_string(),
-                headers: None,
+                headers: vec![],
             })
             .await;
 
@@ -824,7 +836,7 @@ mod tests {
             "HTTP",
             "localhost",
             io,
-            None,
+            vec![],
             Arc::new(logger),
             PassthroughParser::new(),
         );
@@ -832,7 +844,7 @@ mod tests {
         let result: Result<Response<String>, _> = client
             .execute(&Request::Get {
                 path: "/".to_string(),
-                headers: None,
+                headers: vec![],
             })
             .await;
 
@@ -866,7 +878,7 @@ mod tests {
             "HTTP",
             "localhost",
             io,
-            None,
+            vec![],
             Arc::new(logger),
             PassthroughParser::new(),
         );
@@ -874,7 +886,7 @@ mod tests {
         let result: Result<Response<String>, _> = client
             .execute(&Request::Get {
                 path: "/".to_string(),
-                headers: None,
+                headers: vec![],
             })
             .await;
 
@@ -914,7 +926,7 @@ mod tests {
             "HTTP",
             "localhost",
             io,
-            None,
+            vec![],
             Arc::new(logger),
             PassthroughParser::new(),
         );
@@ -922,7 +934,7 @@ mod tests {
         let result: Result<Response<String>, _> = client
             .execute(&Request::Delete {
                 path: "/".to_string(),
-                headers: None,
+                headers: vec![],
             })
             .await;
 
@@ -960,7 +972,7 @@ mod tests {
             "HTTP",
             "localhost",
             io,
-            None,
+            vec![],
             Arc::new(logger),
             PassthroughParser::new(),
         );
@@ -968,7 +980,7 @@ mod tests {
         let result: Result<Response<String>, _> = client
             .execute(&Request::Put {
                 path: "/".to_string(),
-                headers: None,
+                headers: vec![],
                 body: Some("body".to_string()),
             })
             .await;
@@ -1007,7 +1019,7 @@ mod tests {
             "HTTP",
             "localhost",
             io,
-            Some(vec![Header::new("foo", "bar")]),
+            vec![Header::new("foo", "bar")],
             Arc::new(logger),
             PassthroughParser::new(),
         );
@@ -1015,7 +1027,7 @@ mod tests {
         let result: Result<Response<String>, _> = client
             .execute(&Request::Post {
                 path: "/".to_string(),
-                headers: Some(vec![Header::new("baz", "qux")]),
+                headers: vec![Header::new("baz", "qux")],
                 body: Some("body".to_string()),
             })
             .await;

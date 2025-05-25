@@ -80,7 +80,7 @@ impl SimpleDockerClient {
     {
         let request = Request::Get {
             path: format!("/networks/{}", hight),
-            headers: None,
+            headers: vec![],
         };
 
         let response: Response<Vec<Json>> = self.rest_client.execute(&request).await?;
