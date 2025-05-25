@@ -223,7 +223,7 @@ impl Repository for SimpleDockerClient {
         };
 
         let response = self.rest_client.execute(&request).await?;
-        let body = self.expect_ok_with_body(response)?;
+        let body = self.expect_okay_with_body(response)?;
         let buffer = self.expect_single_chunk::<InspectedContainer>(body)?;
 
         let image = ImageRepository::inspect_by_id(self, &buffer.image_id).await?;
@@ -254,7 +254,7 @@ impl Repository for SimpleDockerClient {
         };
 
         let response = self.rest_client.execute(&request).await?;
-        let body = self.expect_ok_with_body(response)?;
+        let body = self.expect_okay_with_body(response)?;
         let buffers = self.expect_single_chunk::<Vec<IdentifiedContainer>>(body)?;
 
         let mut result: Vec<Container> = Vec::with_capacity(buffers.len());

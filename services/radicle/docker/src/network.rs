@@ -84,7 +84,7 @@ impl SimpleDockerClient {
         };
 
         let response: Response<Vec<Json>> = self.rest_client.execute(&request).await?;
-        let body = self.expect_ok_with_body(response)?;
+        let body = self.expect_okay_with_body(response)?;
         Ok(self.expect_single_chunk::<T>(body)?)
     }
 

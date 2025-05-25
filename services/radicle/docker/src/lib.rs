@@ -178,7 +178,10 @@ impl SimpleDockerClient {
         Ok(())
     }
 
-    fn expect_ok_with_body(&self, response: Response<Vec<Json>>) -> Result<Vec<Json>, DockerError> {
+    fn expect_okay_with_body(
+        &self,
+        response: Response<Vec<Json>>,
+    ) -> Result<Vec<Json>, DockerError> {
         match response {
             Response::Okay {
                 headers: _,

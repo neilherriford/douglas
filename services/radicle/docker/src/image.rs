@@ -80,7 +80,7 @@ impl Repository for SimpleDockerClient {
         };
 
         let response: Response<Vec<Json>> = self.rest_client.execute(&req).await?;
-        let chunks = self.expect_ok_with_body(response)?;
+        let chunks = self.expect_okay_with_body(response)?;
         chunks
             .into_iter()
             .map(from_value::<Vec<Image>>)
@@ -96,7 +96,7 @@ impl Repository for SimpleDockerClient {
         };
 
         let response = self.rest_client.execute(&request).await?;
-        let body = self.expect_ok_with_body(response)?;
+        let body = self.expect_okay_with_body(response)?;
         self.expect_single_chunk(body)
     }
 
@@ -126,7 +126,7 @@ impl Repository for SimpleDockerClient {
         };
 
         let response: Response<Vec<Json>> = self.rest_client.execute(&req).await?;
-        let chunks = self.expect_ok_with_body(response)?;
+        let chunks = self.expect_okay_with_body(response)?;
         self.expect_no_docker_errors(chunks)?;
 
         Ok(self.inspect_by_name(name, version).await?)
@@ -142,7 +142,7 @@ impl Repository for SimpleDockerClient {
             headers: None,
         };
         let response = self.rest_client.execute(&request).await?;
-        let body = self.expect_ok_with_body(response)?;
+        let body = self.expect_okay_with_body(response)?;
         self.expect_single_chunk(body)
     }
 }
