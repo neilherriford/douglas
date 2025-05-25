@@ -2,7 +2,8 @@ pub mod container;
 pub mod image;
 pub mod network;
 
-use serde::{Deserialize, Deserializer};
+use serde::ser::SerializeMap;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::from_value;
 use serde_json::value::Value as Json;
 use simple_rest_client::log::Logger;
@@ -17,10 +18,19 @@ pub struct Id {
     pub hex: String,
 }
 
-#[derive(Debug, Deserialize, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, PartialEq)]
 pub struct Label {
     pub name: String,
     pub value: String,
+}
+
+impl Label {
+    pub fn new(name: &str, value: &str) -> Self {
+        Self {
+            name: name.to_string(),
+            value: value.to_string(),
+        }
+    }
 }
 
 pub(crate) fn deserialize_labels<'de, D>(deserializer: D) -> Result<Vec<Label>, D::Error>
@@ -47,6 +57,17 @@ where
         .collect::<Result<_, D::Error>>()?;
 
     Ok(result)
+}
+
+pub(crate) fn serialize_labels<S>(labels: &Vec<Label>, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    let mut map = serializer.serialize_map(Some(labels.len()))?;
+    for label in labels {
+        map.serialize_entry(&label.name, &label.value)?;
+    }
+    map.end()
 }
 
 impl std::fmt::Display for Id {
@@ -337,6 +358,37 @@ mod tests {
                 ],
                 wrapper.labels
             );
+        }
+    }
+
+    mod labels_serializer {
+        use super::super::*;
+
+        use serde_json::Value;
+        use serde_json::json;
+
+        #[derive(Debug, Serialize)]
+        struct Wrapper {
+            #[serde(serialize_with = "serialize_labels")]
+            labels: Vec<Label>,
+        }
+
+        #[test]
+        fn should_serialize_labels() {
+            let wrapper = Wrapper {
+                labels: vec![Label::new("foo", "bar"), Label::new("baz", "qux")],
+            };
+
+            let json_str = serde_json::to_string(&wrapper).unwrap();
+            let expected = json!({
+                "labels": {
+                    "foo": "bar",
+                    "baz": "qux"
+                }
+            });
+
+            let actual: Value = serde_json::from_str(&json_str).unwrap();
+            assert_eq!(expected, actual);
         }
     }
 }
