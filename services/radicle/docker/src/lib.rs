@@ -222,11 +222,35 @@ impl SimpleDockerClient {
                 body: None,
                 message: "expected OK, but recieved NO CONTENT".to_string(),
             }),
-            Response::Error {
-                status: 404,
-                body: _,
-                ..
-            } => Err(DockerError::NotFoundError),
+            Response::Error { status: 404, .. } => Err(DockerError::NotFoundError),
+            Response::Error { status, body, .. } => Err(DockerError::UnexpectedResponseError {
+                status,
+                body,
+                message: "non successful response".to_string(),
+            }),
+        }
+    }
+
+    fn expect_created_with_body(
+        &self,
+        response: Response<Vec<Json>>,
+    ) -> Result<Vec<Json>, DockerError> {
+        match response {
+            Response::Okay { headers: _, body } => Err(DockerError::UnexpectedResponseError {
+                status: 200,
+                body,
+                message: "expected CREATED, but recieved OK".to_string(),
+            }),
+            Response::Created { body: None, .. } => Err(DockerError::MissingBodyError),
+            Response::Created {
+                body: Some(chunks), ..
+            } => Ok(chunks),
+            Response::NoContent { .. } => Err(DockerError::UnexpectedResponseError {
+                status: 204,
+                body: None,
+                message: "expected CREATED, but recieved NO CONTENT".to_string(),
+            }),
+            Response::Error { status: 404, .. } => Err(DockerError::NotFoundError),
             Response::Error { status, body, .. } => Err(DockerError::UnexpectedResponseError {
                 status,
                 body,

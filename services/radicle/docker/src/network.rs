@@ -1,9 +1,10 @@
+use crate::Response;
 use crate::container::{Container, Repository as ContainerRepository};
-use crate::{DockerError, Label, SimpleDockerClient, deserialize_labels};
+use crate::{DockerError, Label, SimpleDockerClient, deserialize_labels, serialize_labels};
 use serde::de::DeserializeOwned;
-use serde::{Deserialize, Deserializer};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::value::Value as Json;
-use simple_rest_client::Request;
+use simple_rest_client::{Header, Request};
 
 #[derive(Debug, Deserialize, PartialEq)]
 pub struct Network {
@@ -21,6 +22,21 @@ struct ConnectedContainers {
     #[serde(rename = "Containers")]
     #[serde(deserialize_with = "deserialize_keys")]
     pub container_ids: Vec<String>,
+}
+
+#[derive(Debug, Serialize, PartialEq)]
+struct CreationBody {
+    #[serde(rename = "Name")]
+    pub name: String,
+    #[serde(rename = "Labels")]
+    #[serde(serialize_with = "serialize_labels")]
+    pub labels: Vec<Label>,
+}
+
+#[derive(Debug, Deserialize, PartialEq)]
+struct CreationResponse {
+    #[serde(rename = "Id")]
+    id: String,
 }
 
 pub(crate) fn deserialize_keys<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
@@ -47,6 +63,7 @@ pub trait Repository {
         &mut self,
         network_name: String,
     ) -> Result<Vec<Container>, DockerError>;
+    async fn create(&mut self, name: &str, lables: Vec<Label>) -> Result<Network, DockerError>;
 }
 
 #[async_trait::async_trait]
@@ -70,6 +87,23 @@ impl Repository for SimpleDockerClient {
         network_name: String,
     ) -> Result<Vec<Container>, DockerError> {
         self.find_connected_containers_by_hight(network_name).await
+    }
+
+    async fn create(&mut self, name: &str, labels: Vec<Label>) -> Result<Network, DockerError> {
+        let req = Request::Post {
+            path: "/networks/create".to_string(),
+            body: Some(serde_json::to_string(&CreationBody {
+                name: name.to_string(),
+                labels,
+            })?),
+            headers: vec![Header::content_type_json()],
+        };
+
+        let response: Response<Vec<Json>> = self.rest_client.execute(&req).await?;
+        let body = self.expect_created_with_body(response)?;
+        let buffer = self.expect_single_chunk::<CreationResponse>(body)?;
+
+        self.inspect_network_by_hight(buffer.id).await
     }
 }
 
@@ -577,6 +611,186 @@ mod tests {
             }];
 
             assert!(matches!(result, Ok(actual) if actual == expected));
+        }
+    }
+
+    mod create {
+        use super::super::*;
+        use serde_json::json;
+        use simple_rest_client::MockRestClient;
+
+        #[tokio::test]
+        async fn should_err_if_okay() {
+            let mut mock_rest_client = MockRestClient::new();
+            mock_rest_client.expect_post_and_return_okay(
+                "/networks/create",
+                vec![Header::content_type_json()],
+                Some(
+                    serde_json::to_string(&CreationBody {
+                        name: "foo".to_string(),
+                        labels: vec![Label::new("bar", "baz")],
+                    })
+                    .unwrap(),
+                ),
+                None,
+            );
+
+            let mut client = SimpleDockerClient {
+                rest_client: Box::new(mock_rest_client),
+            };
+
+            let result = client.create("foo", vec![Label::new("bar", "baz")]).await;
+
+            assert!(matches!(
+                result,
+                Err(DockerError::UnexpectedResponseError { status: 200, .. })
+            ));
+        }
+
+        #[tokio::test]
+        async fn should_err_created_with_missing_body() {
+            let mut mock_rest_client = MockRestClient::new();
+            mock_rest_client.expect_post_and_return_created(
+                "/networks/create",
+                vec![Header::content_type_json()],
+                Some(
+                    serde_json::to_string(&CreationBody {
+                        name: "foo".to_string(),
+                        labels: vec![Label::new("bar", "baz")],
+                    })
+                    .unwrap(),
+                ),
+                None,
+            );
+
+            let mut client = SimpleDockerClient {
+                rest_client: Box::new(mock_rest_client),
+            };
+
+            let result = client.create("foo", vec![Label::new("bar", "baz")]).await;
+
+            assert!(matches!(result, Err(DockerError::MissingBodyError)));
+        }
+
+        #[tokio::test]
+        async fn should_err_created_with_insufficient_chunks() {
+            let mut mock_rest_client = MockRestClient::new();
+            mock_rest_client.expect_post_and_return_created(
+                "/networks/create",
+                vec![Header::content_type_json()],
+                Some(
+                    serde_json::to_string(&CreationBody {
+                        name: "foo".to_string(),
+                        labels: vec![Label::new("bar", "baz")],
+                    })
+                    .unwrap(),
+                ),
+                Some(vec![]),
+            );
+
+            let mut client = SimpleDockerClient {
+                rest_client: Box::new(mock_rest_client),
+            };
+
+            let result = client.create("foo", vec![Label::new("bar", "baz")]).await;
+
+            assert!(matches!(result, Err(DockerError::InsufficientChunksError)));
+        }
+
+        #[tokio::test]
+        async fn should_create_network() {
+            let mut mock_rest_client = MockRestClient::new();
+            mock_rest_client.expect_post_and_return_created(
+                "/networks/create",
+                vec![Header::content_type_json()],
+                Some(
+                    serde_json::to_string(&CreationBody {
+                        name: "foo".to_string(),
+                        labels: vec![Label::new("bar", "baz")],
+                    })
+                    .unwrap(),
+                ),
+                Some(vec![json!({"Id":"123456","Warning":""})]),
+            );
+
+            mock_rest_client.expect_get_and_return_okay(
+                "/networks/123456",
+                Some(vec![json!({
+                    "Id": "123456",
+                    "Name": "qux",
+                    "Labels": {
+                      "quux": "corge"
+                    }
+                })]),
+            );
+
+            let mut client = SimpleDockerClient {
+                rest_client: Box::new(mock_rest_client),
+            };
+
+            let result = client.create("foo", vec![Label::new("bar", "baz")]).await;
+            let expected = Network {
+                id: "123456".to_string(),
+                name: "qux".to_string(),
+                labels: vec![Label {
+                    name: "quux".to_string(),
+                    value: "corge".to_string(),
+                }],
+            };
+
+            assert!(matches!(result, Ok(actual) if actual == expected));
+        }
+
+        #[tokio::test]
+        async fn should_err_if_no_content() {
+            let mut mock_rest_client = MockRestClient::new();
+            mock_rest_client.expect_post_and_return_no_content(
+                "/networks/create",
+                vec![Header::content_type_json()],
+                Some(
+                    serde_json::to_string(&CreationBody {
+                        name: "foo".to_string(),
+                        labels: vec![Label::new("bar", "baz")],
+                    })
+                    .unwrap(),
+                ),
+            );
+
+            let mut client = SimpleDockerClient {
+                rest_client: Box::new(mock_rest_client),
+            };
+            let result = client.create("foo", vec![Label::new("bar", "baz")]).await;
+
+            assert!(matches!(
+                result,
+                Err(DockerError::UnexpectedResponseError { status: 204, .. })
+            ));
+        }
+
+        #[tokio::test]
+        async fn should_err_if_error() {
+            let mut mock_rest_client = MockRestClient::new();
+            mock_rest_client.expect_post_and_return_internal_server_error(
+                "/networks/create",
+                vec![Header::content_type_json()],
+                Some(
+                    serde_json::to_string(&CreationBody {
+                        name: "foo".to_string(),
+                        labels: vec![Label::new("bar", "baz")],
+                    })
+                    .unwrap(),
+                ),
+            );
+
+            let mut client = SimpleDockerClient {
+                rest_client: Box::new(mock_rest_client),
+            };
+            let result = client.create("foo", vec![Label::new("bar", "baz")]).await;
+
+            assert!(matches!(
+                result,
+                Err(DockerError::UnexpectedResponseError { status: 500, .. })
+            ));
         }
     }
 }

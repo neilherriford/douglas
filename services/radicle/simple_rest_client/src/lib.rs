@@ -76,6 +76,9 @@ pub struct Header {
 }
 
 impl Header {
+    pub fn content_type_json() -> Header {
+        Header::new("Content-type", "application/json")
+    }
     pub fn new(name: &str, value: &str) -> Self {
         Self {
             name: name.to_string(),
@@ -273,17 +276,18 @@ impl<T: Send + 'static> MockRestClient<T> {
         )
     }
 
-    pub fn expect_post_and_return_created_with_none(
+    pub fn expect_post_and_return_created(
         &mut self,
         path: &str,
         headers: Vec<Header>,
         body: Option<String>,
+        response_body: Option<T>,
     ) {
         self.expect_rest_call(
             self.create_post_expectation(path, headers, body),
             Response::<T>::Created {
                 headers: vec![],
-                body: None,
+                body: response_body,
             },
         )
     }

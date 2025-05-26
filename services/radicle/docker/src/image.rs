@@ -537,9 +537,10 @@ mod tests {
         #[tokio::test]
         async fn shoud_error_if_received_got_created() {
             let mut mock_rest_client = MockRestClient::new();
-            mock_rest_client.expect_post_and_return_created_with_none(
+            mock_rest_client.expect_post_and_return_created(
                 "/images/create?tag=latest&fromImage=foo",
                 vec![],
+                None,
                 None,
             );
 
