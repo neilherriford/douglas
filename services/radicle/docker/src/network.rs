@@ -527,14 +527,6 @@ mod tests {
                           "RW": true
                         }
                       ],
-                      "NetworkSettings":
-                      {
-                        "Networks": {
-                            "qux": {
-                                "NetworkID": "10111213"
-                            }
-                        }
-                      },
                       "Config":
                       {
                         "Env": ["quux=corge"],
@@ -552,16 +544,6 @@ mod tests {
                 })]),
             );
 
-            mock_rest_client.expect_get_and_return_okay(
-                "/networks/10111213",
-                Some(vec![json!({
-                    "Id": "10111213",
-                    "Name": "qux",
-                    "Labels": {
-                      "quux": "corge"
-                    }
-                })]),
-            );
             let mut client = SimpleDockerClient {
                 rest_client: Box::new(mock_rest_client),
             };
@@ -591,14 +573,6 @@ mod tests {
                     source: "/bar/".to_string(),
                     destination: "/baz/".to_string(),
                     writable: true,
-                }],
-                networks: vec![Network {
-                    id: "10111213".to_string(),
-                    name: "qux".to_string(),
-                    labels: vec![Label {
-                        name: "quux".to_string(),
-                        value: "corge".to_string(),
-                    }],
                 }],
                 environment_variables: vec![EnvironmentVariable {
                     name: "quux".to_string(),

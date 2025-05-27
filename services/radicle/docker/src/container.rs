@@ -1,5 +1,4 @@
 use crate::image::{Image, Repository as ImageRepository};
-use crate::network::{Network, Repository as NetworkRepository};
 use crate::{
     DockerError, Id, Label, Request, SimpleDockerClient, deserialize_id, deserialize_labels,
 };
@@ -31,10 +30,6 @@ struct InspectedContainer {
 
     #[serde(rename = "Mounts")]
     pub mounts: Vec<Mount>,
-
-    #[serde(deserialize_with = "deserialize_networks")]
-    #[serde(rename = "NetworkSettings")]
-    pub network_ids: Vec<String>,
 
     #[serde(rename = "Config")]
     pub config: Config,
@@ -70,7 +65,6 @@ pub struct Container {
     pub image: Image,
     pub status: Status,
     pub mounts: Vec<Mount>,
-    pub networks: Vec<Network>,
     pub environment_variables: Vec<EnvironmentVariable>,
     pub labels: Vec<Label>,
 }
@@ -145,38 +139,6 @@ pub struct EnvironmentVariable {
     pub value: String,
 }
 
-fn deserialize_networks<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    let json: Json = Json::deserialize(deserializer)?;
-    let networks = json
-        .get("Networks")
-        .ok_or_else(|| serde::de::Error::missing_field("Networks"))?;
-
-    let obj = networks
-        .as_object()
-        .ok_or_else(|| serde::de::Error::custom("Expected Networks to be an object"))?;
-
-    let network_ids = obj
-        .values()
-        .map(|def| {
-            let summary = def.as_object().ok_or_else(|| {
-                serde::de::Error::custom("Expected Network defintion to be an object")
-            })?;
-
-            Ok(summary
-                .get("NetworkID")
-                .ok_or_else(|| serde::de::Error::missing_field("NetworkID"))?
-                .as_str()
-                .ok_or_else(|| serde::de::Error::custom("Expected NetworkID to be a string"))?
-                .to_string())
-        })
-        .collect::<Result<_, D::Error>>()?;
-
-    Ok(network_ids)
-}
-
 fn deserialize_environment_variables<'de, D>(
     deserializer: D,
 ) -> Result<Vec<EnvironmentVariable>, D::Error>
@@ -227,7 +189,6 @@ impl Repository for SimpleDockerClient {
         let buffer = self.expect_single_chunk::<InspectedContainer>(body)?;
 
         let image = ImageRepository::inspect_by_id(self, &buffer.image_id).await?;
-        let networks = self.inspect_networks(buffer.network_ids).await?;
 
         let result = Container {
             id: buffer.id,
@@ -235,7 +196,6 @@ impl Repository for SimpleDockerClient {
             image,
             status: buffer.state.status,
             mounts: buffer.mounts,
-            networks,
             environment_variables: buffer.config.env,
             labels: buffer.config.labels,
         };
@@ -268,84 +228,8 @@ impl Repository for SimpleDockerClient {
     }
 }
 
-impl SimpleDockerClient {
-    async fn inspect_networks(
-        &mut self,
-        network_ids: Vec<String>,
-    ) -> Result<Vec<Network>, DockerError> {
-        let mut result: Vec<Network> = Vec::with_capacity(network_ids.len());
-        for network_id in network_ids {
-            result.push(NetworkRepository::inspect_by_id(self, network_id).await?);
-        }
-
-        return Ok(result);
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    mod networks_deserializer {
-        use super::super::*;
-        use serde::Deserialize;
-
-        #[derive(Debug, Deserialize)]
-        struct Wrapper {
-            #[serde(deserialize_with = "deserialize_networks")]
-            #[serde(rename = "Wrapper")]
-            networks: Vec<String>,
-        }
-
-        #[test]
-        fn should_err_if_missing_networks() {
-            let json = r#"
-                {
-                  "Wrapper":
-                  {
-                    "Oops": {}
-                  }
-                }
-            "#;
-
-            let result = serde_json::from_str::<Wrapper>(json);
-            assert!(result.is_err());
-        }
-
-        #[test]
-        fn should_err_if_networks_is_not_an_object() {
-            let json = r#"
-                {
-                  "Wrapper":
-                  {
-                    "Networks": true
-                  }
-                }
-            "#;
-
-            let result = serde_json::from_str::<Wrapper>(json);
-            assert!(result.is_err());
-        }
-
-        #[test]
-        fn should_deserialize_netowrks() {
-            let json = r#"
-                {
-                  "Wrapper":
-                  {
-                    "Networks": {
-                        "foo": {"NetworkID": "0"},
-                        "bar": {"NetworkID": "1"}
-                    }
-                  }
-                }
-            "#;
-
-            let wrapper: Wrapper = serde_json::from_str(json).unwrap();
-            let mut actual = wrapper.networks;
-            actual.sort();
-            assert_eq!(vec!["0".to_string(), "1".to_string()], actual);
-        }
-    }
-
     mod environment_variables_deserializer {
         use super::super::*;
         use serde::Deserialize;
@@ -570,14 +454,6 @@ mod tests {
                           "RW": true
                         }
                       ],
-                      "NetworkSettings":
-                      {
-                        "Networks": {
-                            "qux": {
-                                "NetworkID": "10111213"
-                            }
-                        }
-                      },
                       "Config":
                       {
                         "Env": ["quux=corge"],
@@ -592,17 +468,6 @@ mod tests {
                 Some(vec![json!({
                 "Id": "alg:654321",
                   "RepoTags":["waldo:1.2.3"],
-                })]),
-            );
-
-            mock_rest_client.expect_get_and_return_okay(
-                "/networks/10111213",
-                Some(vec![json!({
-                    "Id": "10111213",
-                    "Name": "qux",
-                    "Labels": {
-                      "quux": "corge"
-                    }
                 })]),
             );
 
@@ -632,14 +497,6 @@ mod tests {
                     source: "/bar/".to_string(),
                     destination: "/baz/".to_string(),
                     writable: true,
-                }],
-                networks: vec![Network {
-                    id: "10111213".to_string(),
-                    name: "qux".to_string(),
-                    labels: vec![Label {
-                        name: "quux".to_string(),
-                        value: "corge".to_string(),
-                    }],
                 }],
                 environment_variables: vec![EnvironmentVariable {
                     name: "quux".to_string(),
@@ -793,14 +650,6 @@ mod tests {
                           "RW": true
                         }
                       ],
-                      "NetworkSettings":
-                      {
-                        "Networks": {
-                            "qux": {
-                                "NetworkID": "10111213"
-                            }
-                        }
-                      },
                       "Config":
                       {
                         "Env": ["quux=corge"],
@@ -816,19 +665,6 @@ mod tests {
                     {
                       "Id": "alg:654321",
                       "RepoTags":["waldo:1.2.3"],
-                    }
-                )]),
-            );
-
-            mock_rest_client.expect_get_and_return_okay(
-                "/networks/10111213",
-                Some(vec![json!(
-                    {
-                        "Id": "10111213",
-                        "Name": "qux",
-                        "Labels": {
-                          "quux": "corge"
-                        }
                     }
                 )]),
             );
@@ -859,14 +695,6 @@ mod tests {
                     source: "/bar/".to_string(),
                     destination: "/baz/".to_string(),
                     writable: true,
-                }],
-                networks: vec![Network {
-                    id: "10111213".to_string(),
-                    name: "qux".to_string(),
-                    labels: vec![Label {
-                        name: "quux".to_string(),
-                        value: "corge".to_string(),
-                    }],
                 }],
                 environment_variables: vec![EnvironmentVariable {
                     name: "quux".to_string(),
