@@ -118,7 +118,7 @@ impl SimpleDockerClient {
         };
 
         let response: Response<Vec<Json>> = self.rest_client.execute(&request).await?;
-        let body = self.expect_okay_with_body(response)?;
+        let body = self.expect_okay(response)?;
         Ok(self.expect_single_chunk::<T>(body)?)
     }
 
@@ -189,22 +189,6 @@ mod tests {
         use super::super::*;
         use serde_json::json;
         use simple_rest_client::MockRestClient;
-
-        #[tokio::test]
-        async fn should_err_if_missing_body() {
-            let mut mock_rest_client = MockRestClient::new();
-            mock_rest_client.expect_get_and_return_okay("/networks/10111213", None);
-
-            let mut client = SimpleDockerClient {
-                rest_client: Box::new(mock_rest_client),
-            };
-
-            let result = client
-                .inspect_network_by_hight::<Network>("10111213".to_string())
-                .await;
-
-            assert!(matches!(result, Err(DockerError::MissingBodyError)));
-        }
 
         #[tokio::test]
         async fn should_err_if_empty_body() {
@@ -375,21 +359,6 @@ mod tests {
         use crate::image::{Image, Tag};
         use serde_json::json;
         use simple_rest_client::MockRestClient;
-
-        #[tokio::test]
-        async fn should_err_if_missing_body() {
-            let mut mock_rest_client = MockRestClient::new();
-            mock_rest_client.expect_get_and_return_okay("/networks/10111213", None);
-
-            let mut client = SimpleDockerClient {
-                rest_client: Box::new(mock_rest_client),
-            };
-
-            let result = client
-                .find_connected_containers_by_hight("10111213".to_string())
-                .await;
-            assert!(matches!(result, Err(DockerError::MissingBodyError)));
-        }
 
         #[tokio::test]
         async fn should_err_if_empty_body() {
@@ -619,31 +588,6 @@ mod tests {
                 result,
                 Err(DockerError::UnexpectedResponseError { status: 200, .. })
             ));
-        }
-
-        #[tokio::test]
-        async fn should_err_created_with_missing_body() {
-            let mut mock_rest_client = MockRestClient::new();
-            mock_rest_client.expect_post_and_return_created(
-                "/networks/create",
-                vec![Header::content_type_json()],
-                Some(
-                    serde_json::to_string(&CreationBody {
-                        name: "foo".to_string(),
-                        labels: vec![Label::new("bar", "baz")],
-                    })
-                    .unwrap(),
-                ),
-                None,
-            );
-
-            let mut client = SimpleDockerClient {
-                rest_client: Box::new(mock_rest_client),
-            };
-
-            let result = client.create("foo", vec![Label::new("bar", "baz")]).await;
-
-            assert!(matches!(result, Err(DockerError::MissingBodyError)));
         }
 
         #[tokio::test]

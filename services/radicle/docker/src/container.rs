@@ -185,9 +185,8 @@ impl Repository for SimpleDockerClient {
         };
 
         let response = self.rest_client.execute(&request).await?;
-        let body = self.expect_okay_with_body(response)?;
+        let body = self.expect_okay(response)?;
         let buffer = self.expect_single_chunk::<InspectedContainer>(body)?;
-
         let image = ImageRepository::inspect_by_id(self, &buffer.image_id).await?;
 
         let result = Container {
@@ -214,7 +213,7 @@ impl Repository for SimpleDockerClient {
         };
 
         let response = self.rest_client.execute(&request).await?;
-        let body = self.expect_okay_with_body(response)?;
+        let body = self.expect_okay(response)?;
         let buffers = self.expect_single_chunk::<Vec<IdentifiedContainer>>(body)?;
 
         let mut result: Vec<Container> = Vec::with_capacity(buffers.len());
@@ -323,20 +322,6 @@ mod tests {
         use crate::image::Tag;
         use serde_json::json;
         use simple_rest_client::MockRestClient;
-
-        #[tokio::test]
-        async fn should_error_if_body_missing() {
-            let mut mock_rest_client = MockRestClient::new();
-            mock_rest_client.expect_get_and_return_okay("/containers/123456/json", None);
-
-            let mut client = SimpleDockerClient {
-                rest_client: Box::new(mock_rest_client),
-            };
-
-            let result = Repository::inspect_by_id(&mut client, "123456".to_string()).await;
-
-            assert!(matches!(result, Err(DockerError::MissingBodyError)))
-        }
 
         #[tokio::test]
         async fn should_error_if_body_empty() {
@@ -518,21 +503,6 @@ mod tests {
         use crate::image::Tag;
         use serde_json::json;
         use simple_rest_client::MockRestClient;
-
-        #[tokio::test]
-        async fn should_err_if_no_body() {
-            let mut mock_rest_client = MockRestClient::new();
-            mock_rest_client.expect_get_and_return_okay(
-                "/containers/json?all=true&filters=%7B%22name%22%3A%5B%22foo%22%5D%7D",
-                None,
-            );
-            let mut client = SimpleDockerClient {
-                rest_client: Box::new(mock_rest_client),
-            };
-
-            let result = Repository::find_by_name(&mut client, "foo".to_string()).await;
-            assert!(matches!(result, Err(DockerError::MissingBodyError)));
-        }
 
         #[tokio::test]
         async fn should_err_if_empty_body() {

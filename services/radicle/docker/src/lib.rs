@@ -119,9 +119,6 @@ impl Parser<String, Vec<Json>> for ChunkedJsonParser {
 
 #[derive(Error, Debug)]
 pub enum DockerError {
-    #[error("Missing response body")]
-    MissingBodyError,
-
     #[error("Insufficnet number of chunks in response")]
     InsufficientChunksError,
 
@@ -199,19 +196,13 @@ impl SimpleDockerClient {
         Ok(())
     }
 
-    fn expect_okay_with_body(
-        &self,
-        response: Response<Vec<Json>>,
-    ) -> Result<Vec<Json>, DockerError> {
+    fn expect_okay(&self, response: Response<Vec<Json>>) -> Result<Vec<Json>, DockerError> {
         match response {
-            Response::Okay {
-                headers: _,
-                body: Some(chunks),
-            } => Ok(chunks),
-            Response::Okay {
-                headers: _,
-                body: None,
-            } => Err(DockerError::MissingBodyError),
+            Response::Okay { body, .. } => Ok(if let Some(chunks) = body {
+                chunks
+            } else {
+                vec![]
+            }),
             Response::Created { body, .. } => Err(DockerError::UnexpectedResponseError {
                 status: 201,
                 body,
@@ -231,20 +222,18 @@ impl SimpleDockerClient {
         }
     }
 
-    fn expect_created_with_body(
-        &self,
-        response: Response<Vec<Json>>,
-    ) -> Result<Vec<Json>, DockerError> {
+    fn expect_created(&self, response: Response<Vec<Json>>) -> Result<Vec<Json>, DockerError> {
         match response {
             Response::Okay { headers: _, body } => Err(DockerError::UnexpectedResponseError {
                 status: 200,
                 body,
                 message: "expected CREATED, but recieved OK".to_string(),
             }),
-            Response::Created { body: None, .. } => Err(DockerError::MissingBodyError),
-            Response::Created {
-                body: Some(chunks), ..
-            } => Ok(chunks),
+            Response::Created { body, .. } => Ok(if let Some(chunks) = body {
+                chunks
+            } else {
+                vec![]
+            }),
             Response::NoContent { .. } => Err(DockerError::UnexpectedResponseError {
                 status: 204,
                 body: None,
