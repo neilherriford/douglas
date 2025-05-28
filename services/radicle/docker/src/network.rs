@@ -69,9 +69,11 @@ pub trait Repository {
 #[async_trait::async_trait]
 impl Repository for SimpleDockerClient {
     async fn inspect_by_id(&mut self, id: String) -> Result<Network, DockerError> {
+        self.expect_non_empty_string_argument("id", &id)?;
         self.inspect_network_by_hight::<Network>(id).await
     }
     async fn inspect_by_name(&mut self, name: String) -> Result<Network, DockerError> {
+        self.expect_non_empty_string_argument("name", &name)?;
         self.inspect_network_by_hight::<Network>(name).await
     }
 
@@ -79,6 +81,7 @@ impl Repository for SimpleDockerClient {
         &mut self,
         network_id: String,
     ) -> Result<Vec<Container>, DockerError> {
+        self.expect_non_empty_string_argument("network_id", &network_id)?;
         self.find_connected_containers_by_hight(network_id).await
     }
 
@@ -86,6 +89,7 @@ impl Repository for SimpleDockerClient {
         &mut self,
         network_name: String,
     ) -> Result<Vec<Container>, DockerError> {
+        self.expect_non_empty_string_argument("network_name", &network_name)?;
         self.find_connected_containers_by_hight(network_name).await
     }
 
@@ -108,6 +112,21 @@ impl Repository for SimpleDockerClient {
 }
 
 impl SimpleDockerClient {
+    fn expect_non_empty_string_argument(
+        &self,
+        argument_name: &str,
+        argument: &String,
+    ) -> Result<(), DockerError> {
+        if argument.len() == 0 {
+            Err(DockerError::InvalidArgumentError {
+                name: argument_name.to_string(),
+                given: argument.to_string(),
+                message: "Cannot be blank".to_string(),
+            })
+        } else {
+            Ok(())
+        }
+    }
     async fn inspect_network_by_hight<T>(&mut self, hight: String) -> Result<T, DockerError>
     where
         T: DeserializeOwned,
@@ -182,6 +201,104 @@ mod tests {
             assert!(
                 matches!(result, Ok(actual) if actual.keys.clone().sort() == vec!["foo", "bar"].sort())
             )
+        }
+    }
+
+    mod inspect_by_id {
+        use super::super::*;
+        use simple_rest_client::MockRestClient;
+
+        #[tokio::test]
+        async fn should_err_if_id_is_empty() {
+            let mock_rest_client = MockRestClient::new();
+            let mut client = SimpleDockerClient {
+                rest_client: Box::new(mock_rest_client),
+            };
+
+            let result = Repository::inspect_by_id(&mut client, String::new()).await;
+
+            assert!(matches!(
+                result,
+                Err(DockerError::InvalidArgumentError {
+                    name,
+                    given,
+                    ..
+                }) if name == "id" && given == String::new()
+            ));
+        }
+    }
+
+    mod find_connected_containers_by_id {
+        use super::super::*;
+        use simple_rest_client::MockRestClient;
+
+        #[tokio::test]
+        async fn should_err_if_id_is_empty() {
+            let mock_rest_client = MockRestClient::new();
+            let mut client = SimpleDockerClient {
+                rest_client: Box::new(mock_rest_client),
+            };
+
+            let result =
+                Repository::find_connected_containers_by_id(&mut client, String::new()).await;
+
+            assert!(matches!(
+                result,
+                Err(DockerError::InvalidArgumentError {
+                    name,
+                    given,
+                    ..
+                }) if name == "network_id" && given == String::new()
+            ));
+        }
+    }
+
+    mod find_connected_containers_by_name {
+        use super::super::*;
+        use simple_rest_client::MockRestClient;
+
+        #[tokio::test]
+        async fn should_err_if_id_is_empty() {
+            let mock_rest_client = MockRestClient::new();
+            let mut client = SimpleDockerClient {
+                rest_client: Box::new(mock_rest_client),
+            };
+
+            let result =
+                Repository::find_connected_containers_by_name(&mut client, String::new()).await;
+
+            assert!(matches!(
+                result,
+                Err(DockerError::InvalidArgumentError {
+                    name,
+                    given,
+                    ..
+                }) if name == "network_name" && given == String::new()
+            ));
+        }
+    }
+
+    mod inspect_by_name {
+        use super::super::*;
+        use simple_rest_client::MockRestClient;
+
+        #[tokio::test]
+        async fn should_err_if_id_is_empty() {
+            let mock_rest_client = MockRestClient::new();
+            let mut client = SimpleDockerClient {
+                rest_client: Box::new(mock_rest_client),
+            };
+
+            let result = Repository::inspect_by_name(&mut client, String::new()).await;
+
+            assert!(matches!(
+                result,
+                Err(DockerError::InvalidArgumentError {
+                    name,
+                    given,
+                    ..
+                }) if name == "name" && given == String::new()
+            ));
         }
     }
 

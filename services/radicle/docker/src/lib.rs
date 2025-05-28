@@ -153,6 +153,13 @@ pub enum DockerError {
 
     #[error("Not found")]
     NotFoundError,
+
+    #[error("Invalid argument, '{name}: {given}' {message}")]
+    InvalidArgumentError {
+        name: String,
+        given: String,
+        message: String,
+    },
 }
 
 impl From<serde_json::Error> for DockerError {
