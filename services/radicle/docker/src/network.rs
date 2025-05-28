@@ -39,6 +39,12 @@ struct CreationResponse {
     id: String,
 }
 
+#[derive(Debug, Serialize, PartialEq)]
+struct ConnectionBody {
+    #[serde(rename = "Container")]
+    container_id: String,
+}
+
 pub(crate) fn deserialize_keys<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
 where
     D: Deserializer<'de>,
@@ -64,6 +70,7 @@ pub trait Repository {
         network_name: String,
     ) -> Result<Vec<Container>, DockerError>;
     async fn create(&mut self, name: &str, lables: Vec<Label>) -> Result<Network, DockerError>;
+    async fn connect(&mut self, network: Network, container: Container) -> Result<(), DockerError>;
 }
 
 #[async_trait::async_trait]
@@ -104,29 +111,28 @@ impl Repository for SimpleDockerClient {
         };
 
         let response: Response<Vec<Json>> = self.rest_client.execute(&req).await?;
-        let body = self.expect_created_with_body(response)?;
+        let body = self.expect_created(response)?;
         let buffer = self.expect_single_chunk::<CreationResponse>(body)?;
 
         self.inspect_network_by_hight(buffer.id).await
     }
+
+    async fn connect(&mut self, network: Network, container: Container) -> Result<(), DockerError> {
+        let req = Request::Post {
+            path: format!("/networks/{}/connect", network.id),
+            body: Some(serde_json::to_string(&ConnectionBody {
+                container_id: container.id,
+            })?),
+            headers: vec![Header::content_type_json()],
+        };
+
+        let response: Response<Vec<Json>> = self.rest_client.execute(&req).await?;
+        self.expect_okay(response)?;
+        Ok(())
+    }
 }
 
 impl SimpleDockerClient {
-    fn expect_non_empty_string_argument(
-        &self,
-        argument_name: &str,
-        argument: &String,
-    ) -> Result<(), DockerError> {
-        if argument.len() == 0 {
-            Err(DockerError::InvalidArgumentError {
-                name: argument_name.to_string(),
-                given: argument.to_string(),
-                message: "Cannot be blank".to_string(),
-            })
-        } else {
-            Ok(())
-        }
-    }
     async fn inspect_network_by_hight<T>(&mut self, hight: String) -> Result<T, DockerError>
     where
         T: DeserializeOwned,
@@ -826,6 +832,248 @@ mod tests {
                 result,
                 Err(DockerError::UnexpectedResponseError { status: 500, .. })
             ));
+        }
+    }
+
+    mod connect {
+        use super::super::*;
+        use crate::{Id, container::Status, image::Image};
+        use simple_rest_client::MockRestClient;
+        use std::collections::HashSet;
+
+        #[tokio::test]
+        async fn should_err_if_created() {
+            let mut mock_rest_client = MockRestClient::new();
+            mock_rest_client.expect_post_and_return_created(
+                "/networks/123456/connect",
+                vec![Header::content_type_json()],
+                Some(
+                    serde_json::to_string(&ConnectionBody {
+                        container_id: "654321".to_string(),
+                    })
+                    .unwrap(),
+                ),
+                Some(vec![]),
+            );
+
+            let mut client = SimpleDockerClient {
+                rest_client: Box::new(mock_rest_client),
+            };
+
+            let network = Network {
+                id: "123456".to_string(),
+                name: "foo".to_string(),
+                labels: vec![],
+            };
+
+            let container = Container {
+                id: "654321".to_string(),
+                name: "bar".to_string(),
+                image: Image {
+                    id: Id {
+                        algorithm: "alg".to_string(),
+                        hex: "101112".to_string(),
+                    },
+                    tags: HashSet::new(),
+                },
+                status: Status::Dead,
+                mounts: vec![],
+                environment_variables: vec![],
+                labels: vec![],
+            };
+
+            let result = client.connect(network, container).await;
+
+            assert!(matches!(
+                result,
+                Err(DockerError::UnexpectedResponseError { status: 201, .. })
+            ));
+        }
+
+        #[tokio::test]
+        async fn should_err_if_no_content() {
+            let mut mock_rest_client = MockRestClient::new();
+            mock_rest_client.expect_post_and_return_no_content(
+                "/networks/123456/connect",
+                vec![Header::content_type_json()],
+                Some(
+                    serde_json::to_string(&ConnectionBody {
+                        container_id: "654321".to_string(),
+                    })
+                    .unwrap(),
+                ),
+            );
+
+            let mut client = SimpleDockerClient {
+                rest_client: Box::new(mock_rest_client),
+            };
+
+            let network = Network {
+                id: "123456".to_string(),
+                name: "foo".to_string(),
+                labels: vec![],
+            };
+
+            let container = Container {
+                id: "654321".to_string(),
+                name: "bar".to_string(),
+                image: Image {
+                    id: Id {
+                        algorithm: "alg".to_string(),
+                        hex: "101112".to_string(),
+                    },
+                    tags: HashSet::new(),
+                },
+                status: Status::Dead,
+                mounts: vec![],
+                environment_variables: vec![],
+                labels: vec![],
+            };
+
+            let result = client.connect(network, container).await;
+
+            assert!(matches!(
+                result,
+                Err(DockerError::UnexpectedResponseError { status: 204, .. })
+            ));
+        }
+
+        #[tokio::test]
+        async fn should_err_if_err() {
+            let mut mock_rest_client = MockRestClient::new();
+            mock_rest_client.expect_post_and_return_internal_server_error(
+                "/networks/123456/connect",
+                vec![Header::content_type_json()],
+                Some(
+                    serde_json::to_string(&ConnectionBody {
+                        container_id: "654321".to_string(),
+                    })
+                    .unwrap(),
+                ),
+            );
+
+            let mut client = SimpleDockerClient {
+                rest_client: Box::new(mock_rest_client),
+            };
+
+            let network = Network {
+                id: "123456".to_string(),
+                name: "foo".to_string(),
+                labels: vec![],
+            };
+
+            let container = Container {
+                id: "654321".to_string(),
+                name: "bar".to_string(),
+                image: Image {
+                    id: Id {
+                        algorithm: "alg".to_string(),
+                        hex: "101112".to_string(),
+                    },
+                    tags: HashSet::new(),
+                },
+                status: Status::Dead,
+                mounts: vec![],
+                environment_variables: vec![],
+                labels: vec![],
+            };
+
+            let result = client.connect(network, container).await;
+
+            assert!(matches!(
+                result,
+                Err(DockerError::UnexpectedResponseError { status: 500, .. })
+            ));
+        }
+
+        #[tokio::test]
+        async fn should_err_if_not_found() {
+            let mut mock_rest_client = MockRestClient::new();
+            mock_rest_client.expect_post_and_return_not_found(
+                "/networks/123456/connect",
+                vec![Header::content_type_json()],
+                Some(
+                    serde_json::to_string(&ConnectionBody {
+                        container_id: "654321".to_string(),
+                    })
+                    .unwrap(),
+                ),
+            );
+
+            let mut client = SimpleDockerClient {
+                rest_client: Box::new(mock_rest_client),
+            };
+
+            let network = Network {
+                id: "123456".to_string(),
+                name: "foo".to_string(),
+                labels: vec![],
+            };
+
+            let container = Container {
+                id: "654321".to_string(),
+                name: "bar".to_string(),
+                image: Image {
+                    id: Id {
+                        algorithm: "alg".to_string(),
+                        hex: "101112".to_string(),
+                    },
+                    tags: HashSet::new(),
+                },
+                status: Status::Dead,
+                mounts: vec![],
+                environment_variables: vec![],
+                labels: vec![],
+            };
+
+            let result = client.connect(network, container).await;
+
+            assert!(matches!(result, Err(DockerError::NotFoundError)));
+        }
+
+        #[tokio::test]
+        async fn should_connect() {
+            let mut mock_rest_client = MockRestClient::new();
+            mock_rest_client.expect_post_and_return_okay(
+                "/networks/123456/connect",
+                vec![Header::content_type_json()],
+                Some(
+                    serde_json::to_string(&ConnectionBody {
+                        container_id: "654321".to_string(),
+                    })
+                    .unwrap(),
+                ),
+                Some(vec![]),
+            );
+
+            let mut client = SimpleDockerClient {
+                rest_client: Box::new(mock_rest_client),
+            };
+
+            let network = Network {
+                id: "123456".to_string(),
+                name: "foo".to_string(),
+                labels: vec![],
+            };
+
+            let container = Container {
+                id: "654321".to_string(),
+                name: "bar".to_string(),
+                image: Image {
+                    id: Id {
+                        algorithm: "alg".to_string(),
+                        hex: "101112".to_string(),
+                    },
+                    tags: HashSet::new(),
+                },
+                status: Status::Dead,
+                mounts: vec![],
+                environment_variables: vec![],
+                labels: vec![],
+            };
+
+            let result = client.connect(network, container).await;
+            assert!(matches!(result, Ok(())));
         }
     }
 }
