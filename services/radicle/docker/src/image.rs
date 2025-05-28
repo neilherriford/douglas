@@ -90,6 +90,9 @@ impl Repository for SimpleDockerClient {
     }
 
     async fn inspect_by_id(&mut self, id: &Id) -> Result<Image, DockerError> {
+        self.expect_non_empty_string_argument("id.algorithm", &id.algorithm)?;
+        self.expect_non_empty_string_argument("id.hex", &id.hex)?;
+
         let request = Request::Get {
             path: format!("/images/{}/json", id),
             headers: vec![],
@@ -137,6 +140,8 @@ impl Repository for SimpleDockerClient {
         name: &str,
         version: Version,
     ) -> Result<Image, DockerError> {
+        self.expect_non_empty_string_argument("name", &name.to_string())?;
+
         let request = Request::Get {
             path: format!("/images/{}:{}/json", name, version),
             headers: vec![],
@@ -687,8 +692,28 @@ mod tests {
 
     mod inspect_by_name {
         use super::super::*;
+        use crate::image::Version;
         use serde_json::json;
         use simple_rest_client::MockRestClient;
+
+        #[tokio::test]
+        async fn should_err_if_name_is_empty() {
+            let mock_rest_client = MockRestClient::new();
+            let mut client = SimpleDockerClient {
+                rest_client: Box::new(mock_rest_client),
+            };
+
+            let result = Repository::inspect_by_name(&mut client, "", Version::Latest).await;
+
+            assert!(matches!(
+                result,
+                Err(DockerError::InvalidArgumentError {
+                    name,
+                    given,
+                    ..
+                }) if name == "name" && given == String::new()
+            ));
+        }
 
         #[tokio::test]
         async fn should_error_if_created() {
@@ -862,6 +887,58 @@ mod tests {
         use super::super::*;
         use serde_json::json;
         use simple_rest_client::MockRestClient;
+
+        #[tokio::test]
+        async fn should_err_if_hex_is_empty() {
+            let mock_rest_client = MockRestClient::new();
+            let mut client = SimpleDockerClient {
+                rest_client: Box::new(mock_rest_client),
+            };
+
+            let result = Repository::inspect_by_id(
+                &mut client,
+                &Id {
+                    algorithm: "alg".to_string(),
+                    hex: String::new(),
+                },
+            )
+            .await;
+
+            assert!(matches!(
+                result,
+                Err(DockerError::InvalidArgumentError {
+                    name,
+                    given,
+                    ..
+                }) if name == "id.hex" && given == String::new()
+            ));
+        }
+
+        #[tokio::test]
+        async fn should_err_if_alg_is_empty() {
+            let mock_rest_client = MockRestClient::new();
+            let mut client = SimpleDockerClient {
+                rest_client: Box::new(mock_rest_client),
+            };
+
+            let result = Repository::inspect_by_id(
+                &mut client,
+                &Id {
+                    algorithm: String::new(),
+                    hex: "123456".to_string(),
+                },
+            )
+            .await;
+
+            assert!(matches!(
+                result,
+                Err(DockerError::InvalidArgumentError {
+                    name,
+                    given,
+                    ..
+                }) if name == "id.algorithm" && given == String::new()
+            ));
+        }
 
         #[tokio::test]
         async fn should_err_if_multiple_chunks() {

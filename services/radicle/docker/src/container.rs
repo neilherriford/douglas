@@ -179,6 +179,8 @@ pub trait Repository {
 #[async_trait::async_trait]
 impl Repository for SimpleDockerClient {
     async fn inspect_by_id(&mut self, id: String) -> Result<Container, DockerError> {
+        self.expect_non_empty_string_argument("id", &id)?;
+
         let request = Request::Get {
             path: format!("/containers/{}/json", id),
             headers: vec![],
@@ -322,6 +324,25 @@ mod tests {
         use crate::image::Tag;
         use serde_json::json;
         use simple_rest_client::MockRestClient;
+
+        #[tokio::test]
+        async fn should_err_if_id_is_empty() {
+            let mock_rest_client = MockRestClient::new();
+            let mut client = SimpleDockerClient {
+                rest_client: Box::new(mock_rest_client),
+            };
+
+            let result = Repository::inspect_by_id(&mut client, String::new()).await;
+
+            assert!(matches!(
+                result,
+                Err(DockerError::InvalidArgumentError {
+                    name,
+                    given,
+                    ..
+                }) if name == "id" && given == String::new()
+            ));
+        }
 
         #[tokio::test]
         async fn should_error_if_body_empty() {

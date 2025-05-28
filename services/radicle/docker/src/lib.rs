@@ -188,6 +188,22 @@ impl SimpleDockerClient {
         })
     }
 
+    fn expect_non_empty_string_argument(
+        &self,
+        argument_name: &str,
+        argument: &String,
+    ) -> Result<(), DockerError> {
+        if argument.len() == 0 {
+            Err(DockerError::InvalidArgumentError {
+                name: argument_name.to_string(),
+                given: argument.to_string(),
+                message: "Cannot be blank".to_string(),
+            })
+        } else {
+            Ok(())
+        }
+    }
+
     fn expect_no_docker_errors(&self, responses: Vec<Json>) -> Result<(), DockerError> {
         for response in responses {
             if let Some(message) = response.get("error") {
