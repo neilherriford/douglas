@@ -335,6 +335,24 @@ impl<T: Send + 'static> MockRestClient<T> {
             },
         )
     }
+
+    pub fn expect_post_and_return(
+        &mut self,
+        path: &str,
+        headers: Vec<Header>,
+        body: Option<String>,
+        status: u16,
+        response_body: Option<T>,
+    ) {
+        self.expect_rest_call(
+            self.create_post_expectation(path, headers, body),
+            Response::<T>::Error {
+                headers: vec![],
+                status,
+                body: response_body,
+            },
+        )
+    }
 }
 
 pub trait Parser<TIn, TOut>: Send + Sync + std::fmt::Debug {

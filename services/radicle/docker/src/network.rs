@@ -45,6 +45,11 @@ struct ConnectionBody {
     container_id: String,
 }
 
+#[derive(Debug, Deserialize, PartialEq)]
+struct ConnectionError {
+    message: String,
+}
+
 pub(crate) fn deserialize_keys<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
 where
     D: Deserializer<'de>,
@@ -70,7 +75,16 @@ pub trait Repository {
         network_name: String,
     ) -> Result<Vec<Container>, DockerError>;
     async fn create(&mut self, name: &str, lables: Vec<Label>) -> Result<Network, DockerError>;
-    async fn connect(&mut self, network: Network, container: Container) -> Result<(), DockerError>;
+    async fn connect(
+        &mut self,
+        network: &Network,
+        container: &Container,
+    ) -> Result<(), DockerError>;
+    async fn disconnect(
+        &mut self,
+        network: &Network,
+        container: &Container,
+    ) -> Result<(), DockerError>;
 }
 
 #[async_trait::async_trait]
@@ -117,17 +131,42 @@ impl Repository for SimpleDockerClient {
         self.inspect_network_by_hight(buffer.id).await
     }
 
-    async fn connect(&mut self, network: Network, container: Container) -> Result<(), DockerError> {
+    async fn connect(
+        &mut self,
+        network: &Network,
+        container: &Container,
+    ) -> Result<(), DockerError> {
         let req = Request::Post {
             path: format!("/networks/{}/connect", network.id),
             body: Some(serde_json::to_string(&ConnectionBody {
-                container_id: container.id,
+                container_id: container.id.to_string(),
             })?),
             headers: vec![Header::content_type_json()],
         };
 
         let response: Response<Vec<Json>> = self.rest_client.execute(&req).await?;
         self.expect_okay(response)?;
+        Ok(())
+    }
+
+    async fn disconnect(
+        &mut self,
+        network: &Network,
+        container: &Container,
+    ) -> Result<(), DockerError> {
+        let req = Request::Post {
+            path: format!("/networks/{}/disconnect", network.id),
+            body: Some(serde_json::to_string(&ConnectionBody {
+                container_id: container.id.to_string(),
+            })?),
+            headers: vec![Header::content_type_json()],
+        };
+
+        let response: Response<Vec<Json>> = self.rest_client.execute(&req).await?;
+
+        if !self.is_already_disconnected(&response) {
+            self.expect_okay(response)?;
+        }
         Ok(())
     }
 }
@@ -161,6 +200,25 @@ impl SimpleDockerClient {
         }
 
         Ok(result)
+    }
+
+    fn is_already_disconnected(&mut self, response: &Response<Vec<Json>>) -> bool {
+        if let Response::Error {
+            status: 500,
+            body: Some(chunks),
+            ..
+        } = response
+        {
+            if let Ok(connection_error) =
+                self.expect_single_chunk::<ConnectionError>(chunks.to_vec())
+            {
+                if connection_error.message.contains("not connected") {
+                    return true;
+                }
+            }
+        }
+
+        false
     }
 }
 
@@ -882,7 +940,7 @@ mod tests {
                 labels: vec![],
             };
 
-            let result = client.connect(network, container).await;
+            let result = client.connect(&network, &container).await;
 
             assert!(matches!(
                 result,
@@ -930,7 +988,7 @@ mod tests {
                 labels: vec![],
             };
 
-            let result = client.connect(network, container).await;
+            let result = client.connect(&network, &container).await;
 
             assert!(matches!(
                 result,
@@ -978,7 +1036,7 @@ mod tests {
                 labels: vec![],
             };
 
-            let result = client.connect(network, container).await;
+            let result = client.connect(&network, &container).await;
 
             assert!(matches!(
                 result,
@@ -1026,7 +1084,7 @@ mod tests {
                 labels: vec![],
             };
 
-            let result = client.connect(network, container).await;
+            let result = client.connect(&network, &container).await;
 
             assert!(matches!(result, Err(DockerError::NotFoundError)));
         }
@@ -1072,7 +1130,297 @@ mod tests {
                 labels: vec![],
             };
 
-            let result = client.connect(network, container).await;
+            let result = client.connect(&network, &container).await;
+            assert!(matches!(result, Ok(())));
+        }
+    }
+
+    mod disconnect {
+        use super::super::*;
+        use crate::{Id, container::Status, image::Image};
+        use serde_json::json;
+        use simple_rest_client::MockRestClient;
+        use std::collections::HashSet;
+
+        #[tokio::test]
+        async fn should_return_err_if_no_content() {
+            let mut mock_rest_client = MockRestClient::new();
+            mock_rest_client.expect_post_and_return_no_content(
+                "/networks/123456/disconnect",
+                vec![Header::content_type_json()],
+                Some(
+                    serde_json::to_string(&ConnectionBody {
+                        container_id: "654321".to_string(),
+                    })
+                    .unwrap(),
+                ),
+            );
+
+            let mut client = SimpleDockerClient {
+                rest_client: Box::new(mock_rest_client),
+            };
+
+            let network = Network {
+                id: "123456".to_string(),
+                name: "foo".to_string(),
+                labels: vec![],
+            };
+
+            let container = Container {
+                id: "654321".to_string(),
+                name: "bar".to_string(),
+                image: Image {
+                    id: Id {
+                        algorithm: "alg".to_string(),
+                        hex: "101112".to_string(),
+                    },
+                    tags: HashSet::new(),
+                },
+                status: Status::Dead,
+                mounts: vec![],
+                environment_variables: vec![],
+                labels: vec![],
+            };
+
+            let result = client.disconnect(&network, &container).await;
+
+            assert!(matches!(
+                result,
+                Err(DockerError::UnexpectedResponseError { status: 204, .. })
+            ));
+        }
+
+        #[tokio::test]
+        async fn should_return_err_if_created() {
+            let mut mock_rest_client = MockRestClient::new();
+            mock_rest_client.expect_post_and_return_created(
+                "/networks/123456/disconnect",
+                vec![Header::content_type_json()],
+                Some(
+                    serde_json::to_string(&ConnectionBody {
+                        container_id: "654321".to_string(),
+                    })
+                    .unwrap(),
+                ),
+                None,
+            );
+
+            let mut client = SimpleDockerClient {
+                rest_client: Box::new(mock_rest_client),
+            };
+
+            let network = Network {
+                id: "123456".to_string(),
+                name: "foo".to_string(),
+                labels: vec![],
+            };
+
+            let container = Container {
+                id: "654321".to_string(),
+                name: "bar".to_string(),
+                image: Image {
+                    id: Id {
+                        algorithm: "alg".to_string(),
+                        hex: "101112".to_string(),
+                    },
+                    tags: HashSet::new(),
+                },
+                status: Status::Dead,
+                mounts: vec![],
+                environment_variables: vec![],
+                labels: vec![],
+            };
+
+            let result = client.disconnect(&network, &container).await;
+
+            assert!(matches!(
+                result,
+                Err(DockerError::UnexpectedResponseError { status: 201, .. })
+            ));
+        }
+
+        #[tokio::test]
+        async fn should_return_err_if_err() {
+            let mut mock_rest_client = MockRestClient::new();
+            mock_rest_client.expect_post_and_return_internal_server_error(
+                "/networks/123456/disconnect",
+                vec![Header::content_type_json()],
+                Some(
+                    serde_json::to_string(&ConnectionBody {
+                        container_id: "654321".to_string(),
+                    })
+                    .unwrap(),
+                ),
+            );
+
+            let mut client = SimpleDockerClient {
+                rest_client: Box::new(mock_rest_client),
+            };
+
+            let network = Network {
+                id: "123456".to_string(),
+                name: "foo".to_string(),
+                labels: vec![],
+            };
+
+            let container = Container {
+                id: "654321".to_string(),
+                name: "bar".to_string(),
+                image: Image {
+                    id: Id {
+                        algorithm: "alg".to_string(),
+                        hex: "101112".to_string(),
+                    },
+                    tags: HashSet::new(),
+                },
+                status: Status::Dead,
+                mounts: vec![],
+                environment_variables: vec![],
+                labels: vec![],
+            };
+
+            let result = client.disconnect(&network, &container).await;
+
+            assert!(matches!(
+                result,
+                Err(DockerError::UnexpectedResponseError { status: 500, .. })
+            ));
+        }
+
+        #[tokio::test]
+        async fn should_return_not_found() {
+            let mut mock_rest_client = MockRestClient::new();
+            mock_rest_client.expect_post_and_return_not_found(
+                "/networks/123456/disconnect",
+                vec![Header::content_type_json()],
+                Some(
+                    serde_json::to_string(&ConnectionBody {
+                        container_id: "654321".to_string(),
+                    })
+                    .unwrap(),
+                ),
+            );
+
+            let mut client = SimpleDockerClient {
+                rest_client: Box::new(mock_rest_client),
+            };
+
+            let network = Network {
+                id: "123456".to_string(),
+                name: "foo".to_string(),
+                labels: vec![],
+            };
+
+            let container = Container {
+                id: "654321".to_string(),
+                name: "bar".to_string(),
+                image: Image {
+                    id: Id {
+                        algorithm: "alg".to_string(),
+                        hex: "101112".to_string(),
+                    },
+                    tags: HashSet::new(),
+                },
+                status: Status::Dead,
+                mounts: vec![],
+                environment_variables: vec![],
+                labels: vec![],
+            };
+
+            let result = client.disconnect(&network, &container).await;
+            assert!(matches!(result, Err(DockerError::NotFoundError)));
+        }
+
+        #[tokio::test]
+        async fn should_disconnect_container() {
+            let mut mock_rest_client = MockRestClient::new();
+            mock_rest_client.expect_post_and_return_okay(
+                "/networks/123456/disconnect",
+                vec![Header::content_type_json()],
+                Some(
+                    serde_json::to_string(&ConnectionBody {
+                        container_id: "654321".to_string(),
+                    })
+                    .unwrap(),
+                ),
+                Some(vec![]),
+            );
+
+            let mut client = SimpleDockerClient {
+                rest_client: Box::new(mock_rest_client),
+            };
+
+            let network = Network {
+                id: "123456".to_string(),
+                name: "foo".to_string(),
+                labels: vec![],
+            };
+
+            let container = Container {
+                id: "654321".to_string(),
+                name: "bar".to_string(),
+                image: Image {
+                    id: Id {
+                        algorithm: "alg".to_string(),
+                        hex: "101112".to_string(),
+                    },
+                    tags: HashSet::new(),
+                },
+                status: Status::Dead,
+                mounts: vec![],
+                environment_variables: vec![],
+                labels: vec![],
+            };
+
+            let result = client.disconnect(&network, &container).await;
+            assert!(matches!(result, Ok(())));
+        }
+
+        #[tokio::test]
+        async fn should_disconnect_container_even_if_already_disconnected() {
+            let mut mock_rest_client = MockRestClient::new();
+            mock_rest_client.expect_post_and_return(
+                "/networks/123456/disconnect",
+                vec![Header::content_type_json()],
+                Some(
+                    serde_json::to_string(&ConnectionBody {
+                        container_id: "654321".to_string(),
+                    })
+                    .unwrap(),
+                ),
+                500,
+                Some(vec![
+                    json!({"message":"container 654321 is not connected to the network foo"}),
+                ]),
+            );
+
+            let mut client = SimpleDockerClient {
+                rest_client: Box::new(mock_rest_client),
+            };
+
+            let network = Network {
+                id: "123456".to_string(),
+                name: "foo".to_string(),
+                labels: vec![],
+            };
+
+            let container = Container {
+                id: "654321".to_string(),
+                name: "bar".to_string(),
+                image: Image {
+                    id: Id {
+                        algorithm: "alg".to_string(),
+                        hex: "101112".to_string(),
+                    },
+                    tags: HashSet::new(),
+                },
+                status: Status::Dead,
+                mounts: vec![],
+                environment_variables: vec![],
+                labels: vec![],
+            };
+
+            let result = client.disconnect(&network, &container).await;
             assert!(matches!(result, Ok(())));
         }
     }
