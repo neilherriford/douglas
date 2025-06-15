@@ -1,7 +1,7 @@
 use crate::{Header, Logger, Parser, RestClient, SimpleRestClient};
 use hyper_util::rt::TokioIo;
 use std::fmt::Formatter;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use thiserror::Error;
 
@@ -14,7 +14,7 @@ use tokio::net::UnixStream;
 
 pub struct IoStream {
     stream: TokioIo<UnixStream>,
-    socket_file_path: String,
+    socket_file_path: PathBuf,
 }
 
 impl Read for IoStream {
@@ -53,7 +53,11 @@ impl Write for IoStream {
 
 impl std::fmt::Display for IoStream {
     fn fmt(&self, f: &mut Formatter<'_>) -> Result<(), std::fmt::Error> {
-        write!(f, "({})", self.socket_file_path)
+        write!(
+            f,
+            "({})",
+            self.socket_file_path.to_str().ok_or(std::fmt::Error)?
+        )
     }
 }
 impl crate::IoStream for IoStream {}
@@ -65,17 +69,17 @@ pub enum BuilderError {
 }
 
 pub async fn build_client<T>(
-    socket_file_path: String,
+    socket_file_path: &Path,
     logger: Arc<dyn Logger>,
     parser: impl Parser<String, T> + 'static,
 ) -> Result<impl RestClient<T>, BuilderError>
 where
     T: Send + Sync,
 {
-    let unix_stream = UnixStream::connect(Path::new(&socket_file_path)).await?;
+    let unix_stream = UnixStream::connect(socket_file_path).await?;
     let io_stream = IoStream {
         stream: TokioIo::new(unix_stream),
-        socket_file_path,
+        socket_file_path: socket_file_path.to_path_buf(),
     };
 
     let result = SimpleRestClient::new(

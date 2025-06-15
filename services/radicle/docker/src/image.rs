@@ -224,8 +224,10 @@ mod tests {
 
     mod list {
         use super::super::*;
+        use crate::file_system::MockFileSystem;
         use serde_json::json;
         use simple_rest_client::MockRestClient;
+        use std::path::Path;
 
         #[tokio::test]
         async fn should_error_on_created() {
@@ -234,6 +236,8 @@ mod tests {
 
             let mut client = SimpleDockerClient {
                 rest_client: Box::new(mock_rest_client),
+                mount_root: Path::new("/").to_path_buf(),
+                fs: Box::new(MockFileSystem::new()),
             };
 
             let result = client.list().await;
@@ -251,6 +255,8 @@ mod tests {
 
             let mut client = SimpleDockerClient {
                 rest_client: Box::new(mock_rest_client),
+                mount_root: Path::new("/").to_path_buf(),
+                fs: Box::new(MockFileSystem::new()),
             };
 
             let result = client.list().await;
@@ -268,6 +274,8 @@ mod tests {
 
             let mut client = SimpleDockerClient {
                 rest_client: Box::new(mock_rest_client),
+                mount_root: Path::new("/").to_path_buf(),
+                fs: Box::new(MockFileSystem::new()),
             };
 
             let result = client.list().await;
@@ -285,6 +293,8 @@ mod tests {
 
             let mut client = SimpleDockerClient {
                 rest_client: Box::new(mock_rest_client),
+                mount_root: Path::new("/").to_path_buf(),
+                fs: Box::new(MockFileSystem::new()),
             };
 
             let result = client.list().await;
@@ -319,6 +329,8 @@ mod tests {
 
             let mut client = SimpleDockerClient {
                 rest_client: Box::new(mock_rest_client),
+                mount_root: Path::new("/").to_path_buf(),
+                fs: Box::new(MockFileSystem::new()),
             };
 
             let result = client.list().await;
@@ -342,8 +354,10 @@ mod tests {
 
     mod where_named {
         use super::super::*;
+        use crate::file_system::MockFileSystem;
         use serde_json::json;
         use simple_rest_client::MockRestClient;
+        use std::path::Path;
 
         #[tokio::test]
         async fn should_find_none_when_no_name_tags() {
@@ -355,6 +369,8 @@ mod tests {
 
             let mut client = SimpleDockerClient {
                 rest_client: Box::new(mock_rest_client),
+                mount_root: Path::new("/").to_path_buf(),
+                fs: Box::new(MockFileSystem::new()),
             };
 
             let result = client.where_named("bar").await;
@@ -372,6 +388,8 @@ mod tests {
 
             let mut client = SimpleDockerClient {
                 rest_client: Box::new(mock_rest_client),
+                mount_root: Path::new("/").to_path_buf(),
+                fs: Box::new(MockFileSystem::new()),
             };
 
             let result = client.where_named("bar").await;
@@ -389,6 +407,8 @@ mod tests {
 
             let mut client = SimpleDockerClient {
                 rest_client: Box::new(mock_rest_client),
+                mount_root: Path::new("/").to_path_buf(),
+                fs: Box::new(MockFileSystem::new()),
             };
 
             let result = client.where_named("foo").await;
@@ -421,6 +441,8 @@ mod tests {
 
             let mut client = SimpleDockerClient {
                 rest_client: Box::new(mock_rest_client),
+                mount_root: Path::new("/").to_path_buf(),
+                fs: Box::new(MockFileSystem::new()),
             };
 
             let result = client.where_named("foo").await;
@@ -460,6 +482,8 @@ mod tests {
 
             let mut client = SimpleDockerClient {
                 rest_client: Box::new(mock_rest_client),
+                mount_root: Path::new("/").to_path_buf(),
+                fs: Box::new(MockFileSystem::new()),
             };
 
             let result = client.where_named("foo").await;
@@ -503,8 +527,10 @@ mod tests {
 
     mod pull {
         use super::super::*;
+        use crate::file_system::MockFileSystem;
         use serde_json::json;
         use simple_rest_client::MockRestClient;
+        use std::path::Path;
 
         #[tokio::test]
         async fn shoud_error_if_received_got_created() {
@@ -518,6 +544,8 @@ mod tests {
 
             let mut client = SimpleDockerClient {
                 rest_client: Box::new(mock_rest_client),
+                mount_root: Path::new("/").to_path_buf(),
+                fs: Box::new(MockFileSystem::new()),
             };
 
             let result = client.pull("foo", Version::Latest).await;
@@ -539,6 +567,8 @@ mod tests {
 
             let mut client = SimpleDockerClient {
                 rest_client: Box::new(mock_rest_client),
+                mount_root: Path::new("/").to_path_buf(),
+                fs: Box::new(MockFileSystem::new()),
             };
 
             let result = client.pull("foo", Version::Latest).await;
@@ -560,6 +590,8 @@ mod tests {
 
             let mut client = SimpleDockerClient {
                 rest_client: Box::new(mock_rest_client),
+                mount_root: Path::new("/").to_path_buf(),
+                fs: Box::new(MockFileSystem::new()),
             };
 
             let result = client.pull("foo", Version::Latest).await;
@@ -581,6 +613,8 @@ mod tests {
 
             let mut client = SimpleDockerClient {
                 rest_client: Box::new(mock_rest_client),
+                mount_root: Path::new("/").to_path_buf(),
+                fs: Box::new(MockFileSystem::new()),
             };
 
             let result = client.pull("foo", Version::Latest).await;
@@ -600,6 +634,8 @@ mod tests {
 
             let mut client = SimpleDockerClient {
                 rest_client: Box::new(mock_rest_client),
+                mount_root: Path::new("/").to_path_buf(),
+                fs: Box::new(MockFileSystem::new()),
             };
 
             let result = client.pull("foo", Version::Latest).await;
@@ -628,6 +664,8 @@ mod tests {
 
             let mut client = SimpleDockerClient {
                 rest_client: Box::new(mock_rest_client),
+                mount_root: Path::new("/").to_path_buf(),
+                fs: Box::new(MockFileSystem::new()),
             };
 
             let result = client.pull("foo", Version::Latest).await;
@@ -668,6 +706,8 @@ mod tests {
 
             let mut client = SimpleDockerClient {
                 rest_client: Box::new(mock_rest_client),
+                mount_root: Path::new("/").to_path_buf(),
+                fs: Box::new(MockFileSystem::new()),
             };
 
             let result = client
@@ -692,15 +732,19 @@ mod tests {
 
     mod inspect_by_name {
         use super::super::*;
+        use crate::file_system::MockFileSystem;
         use crate::image::Version;
         use serde_json::json;
         use simple_rest_client::MockRestClient;
+        use std::path::Path;
 
         #[tokio::test]
         async fn should_err_if_name_is_empty() {
             let mock_rest_client = MockRestClient::new();
             let mut client = SimpleDockerClient {
                 rest_client: Box::new(mock_rest_client),
+                mount_root: Path::new("/").to_path_buf(),
+                fs: Box::new(MockFileSystem::new()),
             };
 
             let result = Repository::inspect_by_name(&mut client, "", Version::Latest).await;
@@ -721,6 +765,8 @@ mod tests {
             mock_rest_client.expect_get_and_return_created_with_none("/images/foo:latest/json");
             let mut client = SimpleDockerClient {
                 rest_client: Box::new(mock_rest_client),
+                mount_root: Path::new("/").to_path_buf(),
+                fs: Box::new(MockFileSystem::new()),
             };
 
             let result = client.inspect_by_name("foo", Version::Latest).await;
@@ -737,6 +783,8 @@ mod tests {
 
             let mut client = SimpleDockerClient {
                 rest_client: Box::new(mock_rest_client),
+                mount_root: Path::new("/").to_path_buf(),
+                fs: Box::new(MockFileSystem::new()),
             };
 
             let result = client.inspect_by_name("foo", Version::Latest).await;
@@ -753,6 +801,8 @@ mod tests {
 
             let mut client = SimpleDockerClient {
                 rest_client: Box::new(mock_rest_client),
+                mount_root: Path::new("/").to_path_buf(),
+                fs: Box::new(MockFileSystem::new()),
             };
 
             let result = client.inspect_by_name("foo", Version::Latest).await;
@@ -769,6 +819,8 @@ mod tests {
 
             let mut client = SimpleDockerClient {
                 rest_client: Box::new(mock_rest_client),
+                mount_root: Path::new("/").to_path_buf(),
+                fs: Box::new(MockFileSystem::new()),
             };
 
             let result = client.inspect_by_name("foo", Version::Latest).await;
@@ -782,6 +834,8 @@ mod tests {
 
             let mut client = SimpleDockerClient {
                 rest_client: Box::new(mock_rest_client),
+                mount_root: Path::new("/").to_path_buf(),
+                fs: Box::new(MockFileSystem::new()),
             };
 
             let result = client.inspect_by_name("foo", Version::Latest).await;
@@ -808,6 +862,8 @@ mod tests {
 
             let mut client = SimpleDockerClient {
                 rest_client: Box::new(mock_rest_client),
+                mount_root: Path::new("/").to_path_buf(),
+                fs: Box::new(MockFileSystem::new()),
             };
 
             let result = client.inspect_by_name("foo", Version::Latest).await;
@@ -828,6 +884,8 @@ mod tests {
 
             let mut client = SimpleDockerClient {
                 rest_client: Box::new(mock_rest_client),
+                mount_root: Path::new("/").to_path_buf(),
+                fs: Box::new(MockFileSystem::new()),
             };
 
             let result = client.inspect_by_name("foo", Version::Latest).await;
@@ -860,6 +918,8 @@ mod tests {
 
             let mut client = SimpleDockerClient {
                 rest_client: Box::new(mock_rest_client),
+                mount_root: Path::new("/").to_path_buf(),
+                fs: Box::new(MockFileSystem::new()),
             };
 
             let result = client
@@ -885,14 +945,18 @@ mod tests {
 
     mod inspect_by_id {
         use super::super::*;
+        use crate::file_system::MockFileSystem;
         use serde_json::json;
         use simple_rest_client::MockRestClient;
+        use std::path::Path;
 
         #[tokio::test]
         async fn should_err_if_hex_is_empty() {
             let mock_rest_client = MockRestClient::new();
             let mut client = SimpleDockerClient {
                 rest_client: Box::new(mock_rest_client),
+                mount_root: Path::new("/").to_path_buf(),
+                fs: Box::new(MockFileSystem::new()),
             };
 
             let result = Repository::inspect_by_id(
@@ -919,6 +983,8 @@ mod tests {
             let mock_rest_client = MockRestClient::new();
             let mut client = SimpleDockerClient {
                 rest_client: Box::new(mock_rest_client),
+                mount_root: Path::new("/").to_path_buf(),
+                fs: Box::new(MockFileSystem::new()),
             };
 
             let result = Repository::inspect_by_id(
@@ -950,6 +1016,8 @@ mod tests {
 
             let mut client = SimpleDockerClient {
                 rest_client: Box::new(mock_rest_client),
+                mount_root: Path::new("/").to_path_buf(),
+                fs: Box::new(MockFileSystem::new()),
             };
 
             let result = client
@@ -969,6 +1037,8 @@ mod tests {
 
             let mut client = SimpleDockerClient {
                 rest_client: Box::new(mock_rest_client),
+                mount_root: Path::new("/").to_path_buf(),
+                fs: Box::new(MockFileSystem::new()),
             };
 
             let result = client
@@ -991,6 +1061,8 @@ mod tests {
 
             let mut client = SimpleDockerClient {
                 rest_client: Box::new(mock_rest_client),
+                mount_root: Path::new("/").to_path_buf(),
+                fs: Box::new(MockFileSystem::new()),
             };
 
             let result = client
@@ -1009,6 +1081,8 @@ mod tests {
 
             let mut client = SimpleDockerClient {
                 rest_client: Box::new(mock_rest_client),
+                mount_root: Path::new("/").to_path_buf(),
+                fs: Box::new(MockFileSystem::new()),
             };
 
             let result = client
@@ -1031,6 +1105,8 @@ mod tests {
 
             let mut client = SimpleDockerClient {
                 rest_client: Box::new(mock_rest_client),
+                mount_root: Path::new("/").to_path_buf(),
+                fs: Box::new(MockFileSystem::new()),
             };
 
             let result = client
@@ -1053,6 +1129,8 @@ mod tests {
 
             let mut client = SimpleDockerClient {
                 rest_client: Box::new(mock_rest_client),
+                mount_root: Path::new("/").to_path_buf(),
+                fs: Box::new(MockFileSystem::new()),
             };
 
             let result = client
@@ -1075,6 +1153,8 @@ mod tests {
 
             let mut client = SimpleDockerClient {
                 rest_client: Box::new(mock_rest_client),
+                mount_root: Path::new("/").to_path_buf(),
+                fs: Box::new(MockFileSystem::new()),
             };
 
             let result = client
@@ -1100,6 +1180,8 @@ mod tests {
 
             let mut client = SimpleDockerClient {
                 rest_client: Box::new(mock_rest_client),
+                mount_root: Path::new("/").to_path_buf(),
+                fs: Box::new(MockFileSystem::new()),
             };
 
             let result = client

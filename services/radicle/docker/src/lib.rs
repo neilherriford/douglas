@@ -1,7 +1,9 @@
 pub mod container;
+pub mod file_system;
 pub mod image;
 pub mod network;
 
+use file_system::FileSystem;
 use serde::ser::SerializeMap;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::from_value;
@@ -9,6 +11,7 @@ use serde_json::value::Value as Json;
 use simple_rest_client::log::Logger;
 use simple_rest_client::unix_domain_socket::{BuilderError, build_client};
 use simple_rest_client::{Parser, Request, Response, RestClient, RestClientError};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use thiserror::Error;
 
@@ -160,6 +163,12 @@ pub enum DockerError {
         given: String,
         message: String,
     },
+
+    #[error("IO Error: {0}")]
+    IoError(#[from] std::io::Error),
+
+    #[error("Invalid path")]
+    PathError { path: PathBuf, message: String },
 }
 
 impl From<serde_json::Error> for DockerError {
@@ -174,17 +183,32 @@ impl From<serde_json::Error> for DockerError {
 
 pub struct SimpleDockerClient {
     rest_client: Box<dyn RestClient<Vec<Json>> + Send>,
+    mount_root: PathBuf,
+    fs: Box<dyn FileSystem + Send>,
 }
 
 impl SimpleDockerClient {
     pub async fn build(
-        socket_file_path: String,
+        socket_file: &'static Path,
+        mount_root: &Path,
+        file_system: impl FileSystem + Send + 'static,
         logger: Arc<dyn Logger>,
     ) -> Result<Self, DockerError> {
-        let client = build_client(socket_file_path, logger, ChunkedJsonParser::new()).await?;
+        let client = build_client(socket_file, logger, ChunkedJsonParser::new()).await?;
+
+        let mount_root = file_system.canonicalize(mount_root)?;
+
+        if mount_root.is_file() {
+            return Err(DockerError::PathError {
+                path: mount_root,
+                message: "Expected directory".to_string(),
+            });
+        }
 
         Ok(Self {
             rest_client: Box::new(client),
+            mount_root,
+            fs: Box::new(file_system),
         })
     }
 
