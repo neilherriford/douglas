@@ -1,6 +1,7 @@
 pub mod container;
 pub mod file_system;
 pub mod image;
+pub mod mount;
 pub mod network;
 
 use file_system::FileSystem;
