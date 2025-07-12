@@ -5,6 +5,7 @@ use std::fmt::Debug;
 pub trait Logger: Send + Sync + Debug {
     fn debug(&self, message: &str);
     fn info(&self, message: &str);
+    fn warn(&self, message: &str);
     fn error(&self, message: &str);
 }
 
@@ -21,8 +22,13 @@ impl Logger for StdOutLogger {
     fn debug(&self, message: &str) {
         println!("{} {}", "[dbg]".yellow().bold(), message)
     }
+
     fn info(&self, message: &str) {
         println!("{} {}", "[inf]".cyan().bold(), message)
+    }
+
+    fn warn(&self, message: &str) {
+        println!("{} {}", "[wrn]".magenta().bold(), message)
     }
 
     fn error(&self, message: &str) {
@@ -42,5 +48,6 @@ impl SilentLogger {
 impl Logger for SilentLogger {
     fn debug(&self, _message: &str) {}
     fn info(&self, _message: &str) {}
+    fn warn(&self, _message: &str) {}
     fn error(&self, _message: &str) {}
 }

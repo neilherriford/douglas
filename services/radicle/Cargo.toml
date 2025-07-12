@@ -6,13 +6,21 @@ publish = false
 
 [dependencies]
 docker = { path = "./docker" }
+credentials = { path = "./credentials" }
+file_system = { path = "./file_system" }
 simple_rest_client = { path = "./simple_rest_client" }
+log = { path = "./log" }
 clap = "4.5.32"
 tokio = {version = "1.44.1", features = ["full"]}
 
-
 [workspace]
 members = [
-    "./simple_rest_client",
-    "./docker",
+    "simple_rest_client",
+    "docker",
+    "credentials",
+    "log",
+    "file_system",
 ]
+
+[patch.crates-io]
+users = { git = "https://github.com/neilherriford/rust-users", branch = "fix/macos_misaligned-pointer-dereference" }

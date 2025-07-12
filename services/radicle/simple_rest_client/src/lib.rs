@@ -1,9 +1,8 @@
-pub mod log;
 pub mod unix_domain_socket;
 
-use crate::log::Logger;
 use http_body_util::BodyExt;
 use hyper::client::conn::http1::SendRequest;
+use log::Logger;
 use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::sync::Arc;
@@ -642,8 +641,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::log::MockLogger;
     use hyper_util::rt::TokioIo;
+    use log::MockLogger;
     use mockall::predicate::str::contains;
 
     use thiserror::Error;
