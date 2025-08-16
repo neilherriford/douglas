@@ -1,3 +1,4 @@
+#[cfg(feature = "mock")]
 use mockall::predicate;
 #[cfg(feature = "mock")]
 use std::os::unix::process::ExitStatusExt;
@@ -60,7 +61,6 @@ impl MockOs {
             })
             .times(1)
             .return_once(move |_, _| Ok(given_output));
-        self
     }
 
     pub fn expect_exit_with(&mut self, code: i32) -> &mut Self {

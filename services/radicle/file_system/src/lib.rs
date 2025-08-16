@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+#[cfg(feature = "mock")]
 use mockall::predicate;
 use std::ffi::OsString;
 use std::fs::{
