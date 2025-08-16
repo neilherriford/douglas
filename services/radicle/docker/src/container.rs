@@ -13,6 +13,16 @@ struct Filter {
     pub name: Vec<String>,
 }
 
+// #[derive(Debug, Serialize, PartialEq)]
+// struct CreationBody {
+//     #[serde(rename = "Image")]
+//     image: String,
+//     #[serde(rename = "Env")]
+//     env: Vec<String>,
+//     mounts: Vec<VersionedMount>,
+//     labels: HashMap<String, String>,
+// }
+
 #[derive(Debug, Deserialize, PartialEq)]
 struct InspectedContainer {
     #[serde(rename = "Id")]
@@ -174,7 +184,18 @@ where
 pub trait Repository {
     async fn inspect_by_id(&mut self, id: String) -> Result<Container, DockerError>;
     async fn find_by_name(&mut self, name: String) -> Result<Vec<Container>, DockerError>;
+    // async fn create(
+    //     &mut self,
+    //     name: String,
+    //     image: Image,
+    //     mounts: Vec<VersionedMount>,
+    //     environment_variables: Vec<EnvironmentVariable>,
+    //     labels: Vec<Label>,
+    // ) -> Result<Container, DockerError>;
 }
+
+// static NAME_PATTERN: Lazy<Regex> =
+//     Lazy::new(|| Regex::new(r"^/?[a-zA-Z0-9][a-zA-Z0-9_.-]+$").unwrap());
 
 #[async_trait::async_trait]
 impl Repository for SimpleDockerClient {
@@ -227,6 +248,44 @@ impl Repository for SimpleDockerClient {
 
         Ok(result)
     }
+
+    // async fn create(
+    //     &mut self,
+    //     name: String,
+    //     image: Image,
+    //     mounts: Vec<VersionedMount>,
+    //     environment_variables: Vec<EnvironmentVariable>,
+    //     labels: Vec<Label>,
+    // ) -> Result<Container, DockerError> {
+    //     if !NAME_PATTERN.is_match(name) {
+    //         return Err(DockerError::InvalidArgumentError {
+    //             name: "name".to_string(),
+    //             given: name,
+    //             message: "Invalid container name".to_string(),
+    //         });
+    //     }
+
+    //     let request = Request::Post {
+    //         path: simple_rest_client::create_path_and_query_string(
+    //             "/containers/create",
+    //             HashMap::from([("name", name)]),
+    //         ),
+    //         headers: vec![],
+    //         body: Some(serde_json::to_string(&CreationBody {
+    //             name: name.to_string(),
+    //             labels,
+    //         })?),
+    //     };
+
+    //     let req = Request::Post {
+    //         path: simple_rest_client::create_path_and_query_string(
+    //             "/images/create",
+    //             HashMap::from([("fromImage", name), ("tag", version.to_string().as_str())]),
+    //         ),
+    //         body: None,
+    //         headers: vec![],
+    //     };
+    // }
 }
 
 #[cfg(test)]
@@ -325,14 +384,12 @@ mod tests {
         use crate::image::Tag;
         use serde_json::json;
         use simple_rest_client::MockRestClient;
-        use std::path::Path;
 
         #[tokio::test]
         async fn should_err_if_id_is_empty() {
             let mock_rest_client = MockRestClient::new();
             let mut client = SimpleDockerClient {
                 rest_client: Box::new(mock_rest_client),
-                mount_root: Path::new("/").to_path_buf(),
             };
 
             let result = Repository::inspect_by_id(&mut client, String::new()).await;
@@ -354,7 +411,6 @@ mod tests {
 
             let mut client = SimpleDockerClient {
                 rest_client: Box::new(mock_rest_client),
-                mount_root: Path::new("/").to_path_buf(),
             };
 
             let result = Repository::inspect_by_id(&mut client, "123456".to_string()).await;
@@ -372,7 +428,6 @@ mod tests {
 
             let mut client = SimpleDockerClient {
                 rest_client: Box::new(mock_rest_client),
-                mount_root: Path::new("/").to_path_buf(),
             };
 
             let result = Repository::inspect_by_id(&mut client, "123456".to_string()).await;
@@ -387,7 +442,6 @@ mod tests {
 
             let mut client = SimpleDockerClient {
                 rest_client: Box::new(mock_rest_client),
-                mount_root: Path::new("/").to_path_buf(),
             };
 
             let result = Repository::inspect_by_id(&mut client, "123456".to_string()).await;
@@ -405,7 +459,6 @@ mod tests {
 
             let mut client = SimpleDockerClient {
                 rest_client: Box::new(mock_rest_client),
-                mount_root: Path::new("/").to_path_buf(),
             };
 
             let result = Repository::inspect_by_id(&mut client, "123456".to_string()).await;
@@ -423,7 +476,6 @@ mod tests {
 
             let mut client = SimpleDockerClient {
                 rest_client: Box::new(mock_rest_client),
-                mount_root: Path::new("/").to_path_buf(),
             };
 
             let result = Repository::inspect_by_id(&mut client, "123456".to_string()).await;
@@ -438,7 +490,6 @@ mod tests {
 
             let mut client = SimpleDockerClient {
                 rest_client: Box::new(mock_rest_client),
-                mount_root: Path::new("/").to_path_buf(),
             };
 
             let result = Repository::inspect_by_id(&mut client, "123456".to_string()).await;
@@ -488,7 +539,6 @@ mod tests {
 
             let mut client = SimpleDockerClient {
                 rest_client: Box::new(mock_rest_client),
-                mount_root: Path::new("/").to_path_buf(),
             };
 
             let result = Repository::inspect_by_id(&mut client, "123456".to_string()).await;
@@ -534,7 +584,6 @@ mod tests {
         use crate::image::Tag;
         use serde_json::json;
         use simple_rest_client::MockRestClient;
-        use std::path::Path;
 
         #[tokio::test]
         async fn should_err_if_empty_body() {
@@ -546,7 +595,6 @@ mod tests {
 
             let mut client = SimpleDockerClient {
                 rest_client: Box::new(mock_rest_client),
-                mount_root: Path::new("/").to_path_buf(),
             };
 
             let result = Repository::find_by_name(&mut client, "foo".to_string()).await;
@@ -564,7 +612,6 @@ mod tests {
 
             let mut client = SimpleDockerClient {
                 rest_client: Box::new(mock_rest_client),
-                mount_root: Path::new("/").to_path_buf(),
             };
 
             let result = Repository::find_by_name(&mut client, "foo".to_string()).await;
@@ -581,7 +628,6 @@ mod tests {
 
             let mut client = SimpleDockerClient {
                 rest_client: Box::new(mock_rest_client),
-                mount_root: Path::new("/").to_path_buf(),
             };
 
             let result = Repository::find_by_name(&mut client, "foo".to_string()).await;
@@ -601,7 +647,6 @@ mod tests {
 
             let mut client = SimpleDockerClient {
                 rest_client: Box::new(mock_rest_client),
-                mount_root: Path::new("/").to_path_buf(),
             };
 
             let result = Repository::find_by_name(&mut client, "foo".to_string()).await;
@@ -621,7 +666,6 @@ mod tests {
 
             let mut client = SimpleDockerClient {
                 rest_client: Box::new(mock_rest_client),
-                mount_root: Path::new("/").to_path_buf(),
             };
 
             let result = Repository::find_by_name(&mut client, "foo".to_string()).await;
@@ -678,7 +722,6 @@ mod tests {
 
             let mut client = SimpleDockerClient {
                 rest_client: Box::new(mock_rest_client),
-                mount_root: Path::new("/").to_path_buf(),
             };
 
             let result = Repository::find_by_name(&mut client, "foo".to_string()).await;

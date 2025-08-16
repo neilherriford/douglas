@@ -5,13 +5,15 @@ edition = "2024"
 publish = false
 
 [dependencies]
-docker = { path = "./docker" }
-credentials = { path = "./credentials" }
-file_system = { path = "./file_system" }
-simple_rest_client = { path = "./simple_rest_client" }
-log = { path = "./log" }
+bract = { path = "./bract" }
 clap = "4.5.32"
-tokio = {version = "1.44.1", features = ["full"]}
+credentials = { path = "./credentials" }
+docker = { path = "./docker" }
+file_system = { path = "./file_system" }
+log = { path = "./log" }
+os = { path = "./os" }
+simple_rest_client = { path = "./simple_rest_client" }
+tokio = { version = "1.44.1", features = ["full"] }
 
 [workspace]
 members = [
@@ -20,6 +22,8 @@ members = [
     "credentials",
     "log",
     "file_system",
+    "os",
+    "bract",
 ]
 
 [patch.crates-io]

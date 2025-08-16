@@ -1,6 +1,5 @@
 pub mod container;
 pub mod image;
-pub mod mount;
 pub mod network;
 
 use file_system::FileSystemError;
@@ -186,7 +185,6 @@ impl From<serde_json::Error> for DockerError {
 
 pub struct SimpleDockerClient {
     rest_client: Box<dyn RestClient<Vec<Json>> + Send>,
-    mount_root: PathBuf,
 }
 
 impl SimpleDockerClient {
@@ -206,8 +204,6 @@ impl SimpleDockerClient {
 
         Ok(Self {
             rest_client: Box::new(client),
-            mount_root: mount_root.to_path_buf(),
-            // directory: Box::new(directory),
         })
     }
 

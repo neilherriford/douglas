@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use mockall::automock;
+use mockall::predicate;
 use std::ffi::OsString;
 use std::fs::{
     File, Metadata, Permissions as Perms, create_dir_all, metadata, read_dir, read_link,
@@ -7,10 +7,8 @@ use std::fs::{
 };
 use std::io::Write;
 use std::os::unix::fs::{PermissionsExt, chown, symlink};
-
 use std::path::{Path, PathBuf};
 use thiserror::Error;
-
 use users::{get_group_by_name, get_user_by_name};
 
 #[derive(Error, Debug)]
@@ -30,11 +28,12 @@ pub enum FileSystemError {
 }
 
 #[repr(u32)]
-#[derive(PartialEq, Eq, Debug)]
+#[derive(PartialEq, Eq, Debug, Copy, Clone)]
 pub enum Modes {
-    None = 0,
-    OwnerReadWrite = 0o600,
-    OwnerAndGroupReadWrite = 0o660,
+    None,
+    OwnerReadWrite,
+    OwnerReadWriteGroupRead,
+    OwnerReadWriteGroupReadWrite,
     Other(u32),
 }
 
@@ -43,33 +42,17 @@ impl From<Modes> for u32 {
         match value {
             Modes::None => 0,
             Modes::OwnerReadWrite => 0o600,
-            Modes::OwnerAndGroupReadWrite => 0o660,
-            Modes::Other(value) => value,
-        }
-    }
-}
-
-impl From<&Modes> for u32 {
-    fn from(value: &Modes) -> Self {
-        match value {
-            Modes::None => 0,
-            Modes::OwnerReadWrite => 0o600,
-            Modes::OwnerAndGroupReadWrite => 0o660,
-            Modes::Other(value) => *value,
+            Modes::OwnerReadWriteGroupRead => 0o640,
+            Modes::OwnerReadWriteGroupReadWrite => 0o660,
+            Modes::Other(v) => v,
         }
     }
 }
 
 impl std::fmt::Display for Modes {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let value = match self {
-            Modes::None => 0,
-            Modes::OwnerReadWrite => 0o600,
-            Modes::OwnerAndGroupReadWrite => 0o660,
-            Modes::Other(value) => *value,
-        };
-
-        write!(f, "0o{:o}", value)
+        let mode: u32 = self.clone().into();
+        write!(f, "0o{:o}", mode)
     }
 }
 
@@ -121,22 +104,48 @@ impl Entry {
     }
 }
 
-#[automock]
+#[cfg_attr(feature = "mock", mockall::automock)]
 pub trait FileWriter {
     fn write_all(&self, path: &Path, contents: String) -> Result<(), FileSystemError>;
 }
 
-#[automock]
+#[cfg_attr(feature = "mock", mockall::automock)]
 pub trait FileReader {
     fn read_all(&self, path: &Path) -> Result<String, FileSystemError>;
 }
 
-#[automock]
+#[cfg(feature = "mock")]
+impl MockFileReader {
+    pub fn given_can_read_all_with_contents(&mut self, path: &str, contents: &str) {
+        let path = path.to_string();
+        let path = PathBuf::from(path);
+        let contents = contents.to_string();
+
+        self.expect_read_all()
+            .with(predicate::eq(path.clone()))
+            .returning(move |_| Ok(contents.clone()));
+    }
+}
+
+#[cfg_attr(feature = "mock", mockall::automock)]
 pub trait FileDeleter {
     fn delete(&self, path: &Path) -> Result<(), FileSystemError>;
 }
 
-#[automock]
+#[cfg(feature = "mock")]
+impl MockFileDeleter {
+    pub fn expect_file_to_be_deleted(&mut self, path: &str) -> &mut Self {
+        let path = path.to_string();
+        let path = PathBuf::from(path);
+
+        self.expect_delete()
+            .with(predicate::eq(path.clone()))
+            .returning(|_| Ok(()));
+        self
+    }
+}
+
+#[cfg_attr(feature = "mock", mockall::automock)]
 pub trait FileRenamer {
     fn rename(&self, from: &Path, to: &Path) -> Result<(), FileSystemError>;
 }
@@ -202,7 +211,7 @@ impl FileRenamer for LocalFileRenamer {
     }
 }
 
-#[automock]
+#[cfg_attr(feature = "mock", mockall::automock)]
 pub trait Permissions {
     fn change_user_and_group_ownership(
         &self,
@@ -240,12 +249,57 @@ impl Permissions for LocalPermissions {
     }
 
     fn change_mode(&self, path: &Path, mode: &Modes) -> Result<(), FileSystemError> {
-        Ok(set_permissions(path, Perms::from_mode(mode.into()))?)
+        Ok(set_permissions(
+            path,
+            Perms::from_mode(mode.clone().into()),
+        )?)
+    }
+}
+
+#[cfg(feature = "mock")]
+impl MockPermissions {
+    pub fn expect_ownership_to_be_set(
+        &mut self,
+        path: &str,
+        user_name: &str,
+        group_name: &str,
+    ) -> &mut Self {
+        let path = path.to_string();
+        let path = PathBuf::from(path);
+        let user_name = user_name.to_string();
+        let group_name = group_name.to_string();
+
+        self.expect_change_user_and_group_ownership()
+            .with(
+                predicate::eq(path.clone()),
+                predicate::eq(user_name),
+                predicate::eq(group_name),
+            )
+            .returning(|_, _, _| Ok(()));
+
+        self
+    }
+    pub fn expect_ownership_and_mode_to_be_set(
+        &mut self,
+        path: &str,
+        user_name: &str,
+        group_name: &str,
+        mode: Modes,
+    ) -> &mut Self {
+        self.expect_ownership_to_be_set(path, user_name, group_name);
+
+        let path = path.to_string();
+        let path = PathBuf::from(path);
+        self.expect_change_mode()
+            .with(predicate::eq(path.clone()), predicate::eq(mode))
+            .returning(|_, _| Ok(()));
+
+        self
     }
 }
 
 #[async_trait]
-#[automock]
+#[cfg_attr(feature = "mock", mockall::automock)]
 pub trait Listener {
     async fn accept(
         &self,
@@ -261,7 +315,7 @@ impl Listener for tokio::net::UnixListener {
     }
 }
 
-#[automock]
+#[cfg_attr(feature = "mock", mockall::automock)]
 pub trait UnixDomainSocket {
     fn bind(
         &self,
@@ -286,7 +340,24 @@ impl UnixDomainSocket for LocalUnixDomainSocket {
     }
 }
 
-#[automock]
+#[cfg(feature = "mock")]
+impl MockUnixDomainSocket {
+    pub fn expect_bind_with<F>(&mut self, path: &str, factory: F) -> &mut Self
+    where
+        F: Fn() -> Box<dyn Listener + Send + Sync + 'static> + Send + 'static,
+    {
+        let path = path.to_string();
+        let path = PathBuf::from(path);
+
+        self.expect_bind()
+            .with(predicate::eq(path.clone()))
+            .returning(move |_| Ok(factory()));
+
+        self
+    }
+}
+
+#[cfg_attr(feature = "mock", mockall::automock)]
 pub trait Links {
     fn create(&self, from: &Path, to: &Path) -> Result<(), FileSystemError>;
     fn read(&self, path: &Path) -> Result<PathBuf, FileSystemError>;
@@ -310,7 +381,38 @@ impl Links for LocalLinks {
     }
 }
 
-#[automock]
+#[cfg(feature = "mock")]
+impl MockLinks {
+    pub fn given_symlink(&mut self, from: &str, to: &str) -> &mut Self {
+        let from = from.to_string();
+        let from = PathBuf::from(from);
+
+        let to = to.to_string();
+        let to = PathBuf::from(to);
+
+        self.expect_read()
+            .with(predicate::eq(from.clone()))
+            .returning(move |_| Ok(to.clone()));
+
+        self
+    }
+
+    pub fn expect_create_with(&mut self, from: &str, to: &str) -> &mut Self {
+        let from = from.to_string();
+        let from = PathBuf::from(from);
+
+        let to = to.to_string();
+        let to = PathBuf::from(to);
+
+        self.expect_create()
+            .with(predicate::eq(from.clone()), predicate::eq(to.clone()))
+            .returning(|_, _| Ok(()));
+
+        self
+    }
+}
+
+#[cfg_attr(feature = "mock", mockall::automock)]
 pub trait Inspect {
     fn is_directory(&self, path: &Path) -> bool;
     fn read_metadata(&self, path: &Path) -> Result<Entry, FileSystemError>;
@@ -345,28 +447,30 @@ impl Inspect for LocalInspect {
     }
 }
 
-#[automock]
-pub trait Directory {
+#[cfg_attr(feature = "mock", mockall::automock)]
+pub trait Folder {
     fn canonicalize(&self, path: &Path) -> Result<PathBuf, FileSystemError>;
-    fn create_dir_all(&self, path: &Path) -> Result<PathBuf, FileSystemError>;
+    fn create_recursively(&self, path: &Path) -> Result<PathBuf, FileSystemError>;
     fn entries(&self, path: &Path) -> Result<Vec<Entry>, FileSystemError>;
+    fn exists(&self, path: &Path) -> bool;
+    fn pop(&self, path: &Path) -> Option<String>;
 }
 
-pub struct LocalDirectory {}
+pub struct LocalFolder {}
 
-impl LocalDirectory {
+impl LocalFolder {
     pub fn new() -> Self {
         Self {}
     }
 }
 
-impl Directory for LocalDirectory {
+impl Folder for LocalFolder {
     fn canonicalize(&self, path: &Path) -> Result<PathBuf, FileSystemError> {
         Ok(path.canonicalize()?)
     }
 
-    fn create_dir_all(&self, path: &Path) -> Result<PathBuf, FileSystemError> {
-        create_dir_all(path)?;
+    fn create_recursively(&self, path: &Path) -> Result<PathBuf, FileSystemError> {
+        create_dir_all(&path)?;
         self.canonicalize(path)
     }
 
@@ -379,5 +483,79 @@ impl Directory for LocalDirectory {
         }));
 
         Ok(result)
+    }
+
+    fn exists(&self, path: &Path) -> bool {
+        path.exists() && path.is_dir()
+    }
+
+    fn pop(&self, path: &Path) -> Option<String> {
+        if let Some(name) = path.file_name() {
+            Some(name.to_string_lossy().to_string())
+        } else {
+            None
+        }
+    }
+}
+
+#[cfg(feature = "mock")]
+impl MockFolder {
+    pub fn given_folder(&mut self, path: &str, exists: bool) -> &mut Self {
+        let path = path.to_string();
+        let path = PathBuf::from(path);
+
+        self.expect_exists()
+            .with(predicate::eq(path.clone()))
+            .return_const(exists);
+
+        self
+    }
+
+    pub fn given_folder_exists(&mut self, path: &str) -> &mut Self {
+        self.given_folder(path, true)
+    }
+
+    pub fn given_folder_does_not_exist(&mut self, path: &str) -> &mut Self {
+        self.given_folder(path, false)
+    }
+
+    pub fn given_folder_entries(&mut self, path: &str, entries: Vec<Entry>) -> &mut Self {
+        let path = path.to_string();
+        let path = PathBuf::from(path);
+
+        self.expect_entries()
+            .with(predicate::eq(path.clone()))
+            .returning(move |_| Ok(entries.clone()));
+
+        self
+    }
+
+    pub fn expect_create_folder_recursively_with(&mut self, path: &str) -> &mut Self {
+        let path = path.to_string();
+        let path = PathBuf::from(path);
+
+        self.expect_create_recursively()
+            .with(predicate::eq(path.clone()))
+            .returning(|p| Ok(p.to_path_buf()));
+
+        self
+    }
+}
+#[cfg(feature = "mock")]
+impl Entry {
+    pub fn create_file_entry(name: &str) -> Self {
+        Self {
+            is_link: false,
+            kind: EntryKind::File,
+            name: name.to_string(),
+        }
+    }
+
+    pub fn create_folder(name: &str) -> Self {
+        Self {
+            is_link: false,
+            kind: EntryKind::Directory,
+            name: name.to_string(),
+        }
     }
 }

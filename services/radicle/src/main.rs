@@ -1,11 +1,16 @@
+use bract::Server;
 use clap::{Arg, Command};
-use docker::SimpleDockerClient;
-use docker::container::Repository;
-use simple_rest_client::log::StdOutLogger;
+
+use file_system::{
+    LocalFileDeleter, LocalFileReader, LocalFileWriter, LocalFolder, LocalLinks, LocalPermissions,
+    LocalUnixDomainSocket,
+};
+use log::StdOutLogger;
+use os::Unix;
+use std::path::Path;
 use std::sync::Arc;
 
-#[tokio::main]
-async fn main() {
+fn main() {
     let cmd_bootstrap: &str = "bootstrap";
 
     let matches = Command::new("radicle")
@@ -31,78 +36,70 @@ async fn main() {
     match matches.subcommand() {
         Some((_cmd_bootstrap, sub_matches)) => {
             if sub_matches.get_flag("start") {
-                let logger = StdOutLogger::new();
+                let result = Server::new(
+                    Arc::new(StdOutLogger::new()),
+                    Arc::new(LocalFileReader::new()),
+                    Arc::new(LocalFileWriter::new()),
+                    Arc::new(LocalFileDeleter::new()),
+                    Arc::new(LocalFolder::new()),
+                    Arc::new(LocalLinks::new()),
+                    Arc::new(Unix::new()),
+                    Arc::new(LocalPermissions::new()),
+                    Arc::new(LocalUnixDomainSocket::new()),
+                    Path::new("/tmp/doug.token"),
+                    Path::new("/tmp/smelly.sock"),
+                    Path::new("/tmp/mounts"),
+                )
+                .start();
 
-                let mut client =
-                    SimpleDockerClient::build("/var/run/docker.sock".to_string(), Arc::new(logger))
-                        .await
-                        .expect("it worked");
+                println!("survey sez: {:?}", result);
 
-                let result = client.find_by_name("authentik".to_string()).await;
-
-                match result {
-                    Ok(obj) => {
-                        println!("✅{:?}", obj);
-                    }
-                    Err(err) => println!("🚨{:?}", err),
-                }
+                // let result = Permissions::new(os, directory).start().await;
+                // println!("{:?}", result);
             }
         }
         _ => todo!(),
     }
 }
 
-fn container_pretty_print(container: Container) {
-    println!("Container {{");
-    println!("  id:                      {}", container.id);
-    println!("  name:                    {}", container.name);
-    println!("  status:                  {}", container.status);
-    println!("  image: {{");
-    println!(
-        "    id: {}:{}",
-        container.image.id.algorithm, container.image.id.hex
-    );
-    println!("    tags: [");
-    for tag in container.image.tags {
-        println!("      {}:{}", tag.name, tag.version);
-    }
-    println!("    ]");
-    println!("  }}");
-    println!("  mounts   [");
-    for mount in container.mounts {
-        println!("    {{",);
-        println!("      type:     {}", mount.mount_type);
-        println!("      source:   {}", mount.source);
-        println!("      dest:     {}", mount.destination);
-        println!("      writable: {}", mount.writable);
-        println!("    }}",);
-    }
-    println!("  ]");
-    println!("  networks [");
-    for network in container.networks {
-        println!("    {{");
-        println!("      id:     {}", network.id);
-        println!("      name:   {}", network.name);
-        println!("      labels: [");
-        for label in network.labels {
-            println!("        {}: {}", label.name, label.value);
-        }
-        println!("      ]");
-        println!("    }}");
-    }
-    println!("  ]");
-    println!("  environmenment variables [");
-    for environment_variable in container.environment_variables {
-        println!(
-            "    {}={}",
-            environment_variable.name, environment_variable.value
-        );
-    }
-    println!("  ]");
-    println!("  labels: [");
-    for label in container.labels {
-        println!("    {}: {}", label.name, label.value);
-    }
-    println!("  ]");
-    println!("}}");
-}
+// fn container_pretty_print(container: Container) {
+//     println!("Container {{");
+//     println!("  id:                      {}", container.id);
+//     println!("  name:                    {}", container.name);
+//     println!("  status:                  {}", container.status);
+//     println!("  image: {{");
+//     println!(
+//         "    id: {}:{}",
+//         container.image.id.algorithm, container.image.id.hex
+//     );
+//     println!("    tags: [");
+//     for tag in container.image.tags {
+//         println!("      {}:{}", tag.name, tag.version);
+//     }
+//     println!("    ]");
+//     println!("  }}");
+//     println!("  mounts   [");
+//     for mount in container.mounts {
+//         println!("    {{",);
+//         println!("      type:     {}", mount.mount_type);
+//         println!("      source:   {}", mount.source);
+//         println!("      dest:     {}", mount.destination);
+//         println!("      writable: {}", mount.writable);
+//         println!("    }}",);
+//     }
+//     println!("  ]");
+//     println!("  environmenment variables [");
+//     for environment_variable in container.environment_variables {
+//         println!(
+//             "    {}={}",
+//             environment_variable.name, environment_variable.value
+//         );
+//     }
+//     println!("  ]");
+//     println!("  labels: [");
+//     for label in container.labels {
+//         println!("    {}: {}", label.name, label.value);
+//     }
+//     println!("  ]");
+//     println!("}}");
+// }
