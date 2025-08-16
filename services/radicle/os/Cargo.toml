@@ -1,0 +1,14 @@
+[package]
+name = "os"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+default = []
+mock = ["mockall"]
+
+[dependencies]
+thiserror = "1"
+mockall = { version = "0.13.1", optional = true }
+users = "=0.11"
+nix = { version = "0.30.1", features = ["signal", "user"] }
