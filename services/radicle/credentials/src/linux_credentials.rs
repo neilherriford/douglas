@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 pub(crate) struct LinuxCredentials {
     os: Arc<dyn Os + Sync + Send + 'static>,
-    queries: Box<dyn Queries>,
+    queries: Box<dyn Queries + Sync + Send + 'static>,
 }
 
 impl LinuxCredentials {
