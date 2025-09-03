@@ -1,4 +1,4 @@
-use crate::constants::{RADICLE_GROUP, ROOT};
+// use crate::constants::{RADICLE_GROUP, ROOT};
 use file_system::{FileWriter, Modes, Permissions};
 use log::Logger;
 use os::Os;
@@ -13,6 +13,7 @@ pub(super) struct TokenRefresher {
     permissions: Arc<dyn Permissions + Sync + Send + 'static>,
     file_writer: Arc<dyn FileWriter + Sync + Send + 'static>,
     os: Arc<dyn Os>,
+    service_group_name: String,
 }
 
 impl TokenRefresher {
@@ -22,6 +23,7 @@ impl TokenRefresher {
         permissions: Arc<dyn Permissions + Sync + Send + 'static>,
         file_writer: Arc<dyn FileWriter + Sync + Send + 'static>,
         os: Arc<dyn Os + Sync + Send + 'static>,
+        service_group_name: &str,
     ) -> Self {
         Self {
             log,
@@ -29,6 +31,7 @@ impl TokenRefresher {
             permissions,
             file_writer,
             os,
+            service_group_name: service_group_name.to_string(),
         }
     }
 
@@ -40,8 +43,8 @@ impl TokenRefresher {
 
         self.assert_ok(self.permissions.change_user_and_group_ownership(
             &self.token_path,
-            ROOT,
-            RADICLE_GROUP,
+            credentials::ROOT_USER_NAME,
+            &self.service_group_name,
         ));
 
         self.assert_ok(
@@ -101,6 +104,7 @@ mod tests {
                 Arc::new(permissions),
                 Arc::new(file_writer),
                 Arc::new(os),
+                "service-group-name",
             );
             let result = catch_unwind(AssertUnwindSafe(|| {
                 refresher.refresh();
@@ -129,7 +133,7 @@ mod tests {
                 .with(
                     predicate::eq(Path::new("/tmp/token")),
                     predicate::eq("root"),
-                    predicate::eq("doug-radicle"),
+                    predicate::eq("service-group-name"),
                 )
                 .returning(|_, _, _| Err(FileSystemError::ExpectedFileError));
             os.expect_exit_with(-1);
@@ -140,6 +144,7 @@ mod tests {
                 Arc::new(permissions),
                 Arc::new(file_writer),
                 Arc::new(os),
+                "service-group-name",
             );
             let result = catch_unwind(AssertUnwindSafe(|| {
                 refresher.refresh();
@@ -163,7 +168,7 @@ mod tests {
                 .expect_write_all()
                 .with(predicate::eq(Path::new("/tmp/token")), predicate::always())
                 .returning(|_, _| Ok(()));
-            permissions.expect_ownership_to_be_set("/tmp/token", "root", "doug-radicle");
+            permissions.expect_ownership_to_be_set("/tmp/token", "root", "service-group-name");
             permissions
                 .expect_change_mode()
                 .with(
@@ -179,6 +184,7 @@ mod tests {
                 Arc::new(permissions),
                 Arc::new(file_writer),
                 Arc::new(os),
+                "service-group-name",
             );
             let result = catch_unwind(AssertUnwindSafe(|| {
                 refresher.refresh();
@@ -205,7 +211,7 @@ mod tests {
             permissions.expect_ownership_and_mode_to_be_set(
                 "/tmp/token",
                 "root",
-                "doug-radicle",
+                "service-group-name",
                 Modes::OwnerReadWriteGroupRead,
             );
 
@@ -215,6 +221,7 @@ mod tests {
                 Arc::new(permissions),
                 Arc::new(file_writer),
                 Arc::new(os),
+                "service-group-name",
             )
             .refresh();
         }

@@ -1,8 +1,8 @@
 use super::ClientErrorDisplay;
-use super::mount_path_factory::MountPathFactory;
-use crate::constants::ROOT;
+use super::mount_path_factory::{MountPathFactory, MountPathVersionError};
 use crate::encoding::safe_prefixed_credential_name;
 use crate::version::Version;
+use crate::{Mount, Service};
 use credentials::Credentials;
 use file_system::{EntryKind, FileDeleter, FileSystemError, Folder, Links, Modes, Permissions};
 use std::fmt::Debug;
@@ -24,6 +24,8 @@ pub(super) enum VersionManagerError {
     IoError(#[from] std::io::Error),
     #[error("File system error: {0}")]
     FileSystemError(#[from] FileSystemError),
+    #[error("Mount path version error {0}")]
+    MountPathVersionError(#[from] MountPathVersionError),
 }
 
 impl ClientErrorDisplay for VersionManagerError {
@@ -34,6 +36,9 @@ impl ClientErrorDisplay for VersionManagerError {
             }
             VersionManagerError::VersionAlreadyExists(version) => {
                 format!("Mount already exists at version {}", version).to_string()
+            }
+            VersionManagerError::MountPathVersionError(error) => {
+                format!("Could not derive mount path {}", error).to_string()
             }
             _ => "Could not create mount.".to_string(),
         }
@@ -184,7 +189,12 @@ impl VersionManager {
 
         if !self.folder.exists(&mount_root) {
             self.folder.create_recursively(&mount_root)?;
-            self.set_ownership(&mount_root, ROOT, ROOT, Modes::OwnerReadWrite)?;
+            self.set_ownership(
+                &mount_root,
+                credentials::ROOT_USER_NAME,
+                credentials::ROOT_GROUP_NAME,
+                Modes::OwnerReadWrite,
+            )?;
         }
 
         Ok(())
@@ -245,6 +255,42 @@ impl VersionManager {
         )?;
         Ok(true)
     }
+
+    pub fn list(&self) -> Result<Vec<Service>, VersionManagerError> {
+        let mut services = Vec::<Service>::new();
+
+        for service in self
+            .folder
+            .entries(self.mount_paths.root_path().as_path())?
+            .iter()
+            .filter(|entry| entry.kind == EntryKind::Directory)
+        {
+            let mut mounts = Vec::<Mount>::new();
+
+            for mount in self
+                .folder
+                .entries(&self.mount_paths.service_path(&service.name))?
+                .iter()
+                .filter(|entry| entry.kind == EntryKind::Directory)
+            {
+                let available = self.versions(&service.name, &mount.name)?;
+                let active = self
+                    .mount_paths
+                    .active_version(&service.name, &mount.name)?;
+                mounts.push(Mount {
+                    name: mount.name.to_string(),
+                    active,
+                    available,
+                });
+            }
+            services.push(Service {
+                name: service.name.to_string(),
+                mounts,
+            });
+        }
+
+        Ok(services)
+    }
 }
 
 #[cfg(test)]
@@ -277,6 +323,11 @@ mod tests {
     }
 
     mod create {
+        use super::create_version_manager;
+        use crate::Version;
+        use crate::server::version_manager::VersionManagerError;
+        use credentials::MockCredentials;
+        use file_system::FileSystemError;
         use file_system::{MockFileDeleter, MockFolder, MockLinks, MockPermissions, Modes};
         use mockall::predicate;
         use std::path::Path;
@@ -349,12 +400,6 @@ mod tests {
                 Modes::OwnerReadWriteGroupReadWrite,
             );
         }
-
-        use super::create_version_manager;
-        use crate::Version;
-        use crate::server::version_manager::VersionManagerError;
-        use credentials::MockCredentials;
-        use file_system::FileSystemError;
 
         #[test]
         fn should_error_is_service_user_doesnt_exist() {
@@ -1414,7 +1459,7 @@ mod tests {
                         vec![
                             Entry::create_file_entry("foo"),
                             Entry::create_file_entry("bar"),
-                            Entry::create_folder("baz"),
+                            Entry::create_directory("baz"),
                         ],
                     );
 
@@ -1447,9 +1492,9 @@ mod tests {
                         vec![
                             Entry::create_file_entry("foo"),
                             Entry::create_file_entry("bar"),
-                            Entry::create_folder("baz"),
-                            Entry::create_folder("v0"),
-                            Entry::create_folder("v1"),
+                            Entry::create_directory("baz"),
+                            Entry::create_directory("v0"),
+                            Entry::create_directory("v1"),
                         ],
                     );
 
@@ -1465,6 +1510,188 @@ mod tests {
 
                 assert!(matches!(actual, Ok(versions) if versions == vec![Version(0), Version(1)]));
             }
+        }
+    }
+
+    mod list {
+        use std::path::Path;
+
+        use credentials::MockCredentials;
+        use file_system::{
+            Entry, FileSystemError, MockFileDeleter, MockFolder, MockLinks, MockPermissions,
+        };
+        use mockall::predicate;
+
+        use crate::{Mount, Service, Version, server::version_manager::VersionManagerError};
+
+        use super::create_version_manager;
+
+        #[test]
+        fn should_error_if_services_not_enumerable() {
+            let mut folder = MockFolder::new();
+            let links = MockLinks::new();
+            let file_deleter = MockFileDeleter::new();
+            let permissions = MockPermissions::new();
+            let credentials = MockCredentials::new();
+            let mount_root = Path::new("/tmp/mount_root");
+
+            folder
+                .expect_entries()
+                .with(predicate::eq(Path::new("/tmp/mount_root")))
+                .returning(|_| Err(FileSystemError::ExpectedFileError));
+
+            let actual = create_version_manager(
+                folder,
+                links,
+                file_deleter,
+                permissions,
+                credentials,
+                &mount_root,
+            )
+            .list();
+
+            assert!(matches!(
+                actual,
+                Err(VersionManagerError::FileSystemError(_))
+            ));
+        }
+
+        #[test]
+        fn should_error_if_mounts_not_enumerable() {
+            let mut folder = MockFolder::new();
+            let links = MockLinks::new();
+            let file_deleter = MockFileDeleter::new();
+            let permissions = MockPermissions::new();
+            let credentials = MockCredentials::new();
+            let mount_root = Path::new("/tmp/mount_root");
+
+            folder.given_folder_entries(
+                "/tmp/mount_root",
+                vec![Entry::create_directory("foo-service")],
+            );
+
+            folder
+                .expect_entries()
+                .with(predicate::eq(Path::new("/tmp/mount_root/foo-service")))
+                .returning(|_| Err(FileSystemError::ExpectedFileError));
+
+            let actual = create_version_manager(
+                folder,
+                links,
+                file_deleter,
+                permissions,
+                credentials,
+                &mount_root,
+            )
+            .list();
+
+            assert!(matches!(
+                actual,
+                Err(VersionManagerError::FileSystemError(_))
+            ));
+        }
+
+        #[test]
+        fn should_error_if_versions_could_not_be_retrieved() {
+            let mut folder = MockFolder::new();
+            let links = MockLinks::new();
+            let file_deleter = MockFileDeleter::new();
+            let permissions = MockPermissions::new();
+            let credentials = MockCredentials::new();
+            let mount_root = Path::new("/tmp/mount_root");
+
+            folder
+                .given_folder_exists("/tmp/mount_root")
+                .given_folder_entries(
+                    "/tmp/mount_root",
+                    vec![Entry::create_directory("foo-service")],
+                )
+                .given_folder_exists("/tmp/mount_root/foo-service/bar-mount")
+                .given_folder_entries(
+                    "/tmp/mount_root/foo-service",
+                    vec![Entry::create_directory("bar-mount")],
+                );
+
+            folder
+                .expect_entries()
+                .with(predicate::eq(Path::new(
+                    "/tmp/mount_root/foo-service/bar-mount",
+                )))
+                .returning(|_| Err(FileSystemError::ExpectedFileError));
+
+            let actual = create_version_manager(
+                folder,
+                links,
+                file_deleter,
+                permissions,
+                credentials,
+                &mount_root,
+            )
+            .list();
+
+            assert!(matches!(
+                actual,
+                Err(VersionManagerError::FileSystemError(_))
+            ));
+        }
+
+        #[test]
+        fn should_list() {
+            let mut folder = MockFolder::new();
+            let mut links = MockLinks::new();
+            let file_deleter = MockFileDeleter::new();
+            let permissions = MockPermissions::new();
+            let credentials = MockCredentials::new();
+            let mount_root = Path::new("/tmp/mount_root");
+
+            folder
+                .given_folder_exists("/tmp/mount_root")
+                .given_folder_entries(
+                    "/tmp/mount_root",
+                    vec![Entry::create_directory("foo-service")],
+                )
+                .given_folder_exists("/tmp/mount_root/foo-service/bar-mount")
+                .given_folder_entries(
+                    "/tmp/mount_root/foo-service",
+                    vec![Entry::create_directory("bar-mount")],
+                )
+                .given_folder_entries(
+                    "/tmp/mount_root/foo-service/bar-mount",
+                    vec![
+                        Entry::create_directory("current"),
+                        Entry::create_directory("v0"),
+                    ],
+                )
+                .given_folder_exists("/tmp/mount_root/foo-service/bar-mount/current")
+                .given_folder_exists("/tmp/mount_root/foo-service/bar-mount/v0")
+                .expect_pop_with("/tmp/mount_root/foo-service/bar-mount/v0", "v0");
+
+            links.given_symlink(
+                "/tmp/mount_root/foo-service/bar-mount/current",
+                "/tmp/mount_root/foo-service/bar-mount/v0",
+            );
+
+            let actual = create_version_manager(
+                folder,
+                links,
+                file_deleter,
+                permissions,
+                credentials,
+                &mount_root,
+            )
+            .list();
+
+            let expected = vec![Service {
+                mounts: vec![Mount {
+                    name: "bar-mount".to_string(),
+                    active: Version(0),
+                    available: vec![Version(0)],
+                }],
+                name: "foo-service".to_string(),
+            }];
+
+            assert!(actual.is_ok());
+            assert_eq!(actual.unwrap(), expected);
         }
     }
 }

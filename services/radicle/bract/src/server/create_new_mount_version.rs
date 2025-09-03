@@ -353,8 +353,10 @@ mod tests {
                     Modes::OwnerReadWriteGroupReadWrite,
                 );
 
-            folder
-                .given_folder_entries("/tmp/mount_root/bar/baz", vec![Entry::create_folder("v0")]);
+            folder.given_folder_entries(
+                "/tmp/mount_root/bar/baz",
+                vec![Entry::create_directory("v0")],
+            );
 
             file_deleter.expect_file_to_be_deleted("/tmp/mount_root/bar/baz/current");
             links.expect_create_with(

@@ -1,17 +1,17 @@
-use super::active_mount_version::ActiveMountVersion;
 use super::create_credentials::CreateCredentials;
 use super::create_listener::CreateListener;
 use super::create_mount::CreateMount;
 use super::create_new_mount_version::CreateNewMountVersion;
-use super::create_system_credentials::CreateSystemCredentials;
 use super::list_mount_versions::ListMountVersions;
 use super::mount_path_factory::MountPathFactory;
 use super::set_mount_version::SetMountVersion;
+use super::shutdown::Shutdown;
 use super::token_refresher::TokenRefresher;
 use super::token_validator::TokenValidator;
 use super::version_manager::VersionManager;
+use super::{active_mount_version::ActiveMountVersion, status::Status};
 use crate::{Request, Response};
-use credentials::{Credentials, CredentialsError, create_for_target};
+use credentials::{Credentials, CredentialsError};
 use file_system::{
     FileDeleter, FileReader, FileSystemError, FileWriter, Folder, Links, Listener, Permissions,
     UnixDomainSocket,
@@ -24,6 +24,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 use thiserror::Error;
+use tokio::sync::broadcast::{self, Sender};
 use tokio::time;
 use tokio_serde::Framed as SerdeFramed;
 use tokio_serde::formats::Json;
@@ -36,6 +37,9 @@ struct RequestHandler {
     create_new_mount_version: CreateNewMountVersion,
     list_mount_versions: ListMountVersions,
     set_mount_version: SetMountVersion,
+    status: Status,
+    shutdown: Shutdown,
+    shutdown_sender: Sender<()>,
 }
 
 impl RequestHandler {
@@ -49,6 +53,8 @@ impl RequestHandler {
         permissions: Arc<dyn Permissions + Sync + Send + 'static>,
         token_path: &Path,
         mount_root: &Path,
+        marker_group_name: &str,
+        shutdown_sender: Sender<()>,
     ) -> Self {
         let token_validator = Arc::new(TokenValidator::new(
             Arc::clone(&log),
@@ -81,6 +87,7 @@ impl RequestHandler {
                 Arc::clone(&log),
                 Arc::clone(&token_validator),
                 Arc::clone(&credentials),
+                marker_group_name,
             ),
             create_mount: CreateMount::new(
                 Arc::clone(&log),
@@ -102,6 +109,15 @@ impl RequestHandler {
                 Arc::clone(&token_validator),
                 Arc::clone(&version_manager),
             ),
+            status: Status::new(
+                Arc::clone(&log),
+                Arc::clone(&token_validator),
+                Arc::clone(&version_manager),
+                &token_path,
+                &mount_root,
+            ),
+            shutdown: Shutdown::new(Arc::clone(&log), Arc::clone(&token_validator)),
+            shutdown_sender,
         }
     }
 
@@ -145,6 +161,10 @@ impl RequestHandler {
             } => self
                 .set_mount_version
                 .perform(token, service_name, mount_name, version),
+            Request::Status { token } => self.status.perform(token),
+            Request::Shutdown { token } => {
+                self.shutdown.perform(token, self.shutdown_sender.clone())
+            }
         }
     }
 }
@@ -153,6 +173,8 @@ impl RequestHandler {
 pub enum ServerError {
     #[error("Must be root")]
     NotRootError,
+    #[error("Not initialized, must run init before starting Bract")]
+    NotInitialized,
     #[error("OS error {0}")]
     OsError(#[from] OsError),
     #[error("FileSystemError: {0}")]
@@ -171,9 +193,12 @@ pub struct Server {
     log: Arc<dyn Logger + Sync + Send + 'static>,
     request_handler: Arc<RequestHandler>,
     token_refresher: Arc<TokenRefresher>,
-    create_system_directory_entries: CreateSystemCredentials,
     create_listener: CreateListener,
-    credentials: Arc<dyn Credentials + 'static>,
+    credentials: Arc<dyn Credentials + Send + Sync + 'static>,
+    service_user_name: String,
+    service_group_name: String,
+    marker_group_name: String,
+    shutdown_sender: Sender<()>,
 }
 
 impl Server {
@@ -187,11 +212,16 @@ impl Server {
         os: Arc<dyn Os + Sync + Send + 'static>,
         permissions: Arc<dyn Permissions + Sync + Send + 'static>,
         unix_domain_socket: Arc<dyn UnixDomainSocket + 'static>,
+        credentials: Arc<dyn Credentials + Send + Sync + 'static>,
         token_path: &Path,
         socket_path: &Path,
         mount_root: &Path,
+        service_user_name: &str,
+        service_group_name: &str,
+        marker_group_name: &str,
     ) -> Self {
-        let credentials = create_for_target(Arc::clone(&os));
+        let (shutdown_sender, _) = broadcast::channel::<()>(1);
+
         Self {
             log: Arc::clone(&log),
             request_handler: Arc::new(RequestHandler::new(
@@ -204,6 +234,8 @@ impl Server {
                 Arc::clone(&permissions),
                 token_path,
                 mount_root,
+                marker_group_name,
+                shutdown_sender.clone(),
             )),
             token_refresher: Arc::new(TokenRefresher::new(
                 Arc::clone(&log),
@@ -211,40 +243,58 @@ impl Server {
                 Arc::clone(&permissions),
                 file_writer,
                 Arc::clone(&os),
+                service_group_name,
             )),
-            create_system_directory_entries: CreateSystemCredentials::new(
-                Arc::clone(&log),
-                Arc::clone(&credentials),
-            ),
             create_listener: CreateListener::new(
                 Arc::clone(&log),
                 socket_path,
                 Arc::clone(&file_deleter),
                 Arc::clone(&permissions),
                 unix_domain_socket,
+                service_group_name,
             ),
-            credentials,
+            credentials: Arc::clone(&credentials),
+            service_user_name: service_user_name.to_string(),
+            service_group_name: service_group_name.to_string(),
+            marker_group_name: marker_group_name.to_string(),
+            shutdown_sender,
         }
     }
 
     pub fn start(&self) -> Result<(), ServerError> {
-        self.log.info("Starting server");
+        self.log.info("Starting server…");
+        self.log.info("Verifying permissions");
         self.assert_root()?;
-        self.create_system_directory_entries.create()?;
+
+        self.log.info("Verifying initialization complete");
+        self.assert_initalized()?;
+        self.log.info("Refreshing token");
+        self.token_refresher.refresh();
+
         let log = Arc::clone(&self.log);
 
         let rt = tokio::runtime::Runtime::new()?;
         rt.block_on(async {
+            log.info("Creating listner");
             let listener = self.create_listener.create()?;
 
-            let token_refresh = Self::token_refresh_task(Arc::clone(&self.token_refresher));
+            let token_refresh = Self::token_refresh_task(
+                Arc::clone(&self.token_refresher),
+                self.shutdown_sender.subscribe(),
+            );
             let request_handler = Self::request_handler_task(
                 listener,
                 Arc::clone(&log),
                 Arc::clone(&self.request_handler),
             );
+            log.info("Started!");
 
-            tokio::try_join!(token_refresh, request_handler)?;
+            tokio::select! {
+                r = token_refresh => r?,
+                r = request_handler => r?,
+            }
+
+            log.info("Shutting down");
 
             Ok(())
         })
@@ -256,6 +306,7 @@ impl Server {
         handler: Arc<RequestHandler>,
     ) -> Result<(), ServerError> {
         log.info("Listening…");
+
         loop {
             let (socket, _) = listener.accept().await?;
             let log = Arc::clone(&log);
@@ -269,7 +320,7 @@ impl Server {
                 match transport.next().await {
                     Some(Ok(request)) => {
                         log.info(&format!("Received request {}", request));
-                        let response = handler.handle(request);
+                        let response = handler.handle(request.clone());
                         let _ = transport.send(response).await;
                         log.info("Completed request");
                     }
@@ -289,11 +340,21 @@ impl Server {
         }
     }
 
-    async fn token_refresh_task(token_refresher: Arc<TokenRefresher>) -> Result<(), ServerError> {
+    async fn token_refresh_task(
+        token_refresher: Arc<TokenRefresher>,
+        mut shutdown_rceiver: broadcast::Receiver<()>,
+    ) -> Result<(), ServerError> {
         loop {
-            token_refresher.refresh();
-            time::sleep(Duration::from_secs(FIVE_MINUTES)).await;
+            tokio::select! {
+                _ = time::sleep(Duration::from_secs(FIVE_MINUTES)) => {
+                    token_refresher.refresh();
+                },
+                _ = shutdown_rceiver.recv() => {
+                    break;
+                }
+            }
         }
+        Ok(())
     }
 
     fn assert_root(&self) -> Result<(), ServerError> {
@@ -302,6 +363,17 @@ impl Server {
         } else {
             self.log.error("Not root!");
             Err(ServerError::NotRootError)
+        }
+    }
+
+    fn assert_initalized(&self) -> Result<(), ServerError> {
+        if self.credentials.user_exists(&self.service_user_name)
+            && self.credentials.group_exists(&self.service_group_name)
+            && self.credentials.group_exists(&self.marker_group_name)
+        {
+            Ok(())
+        } else {
+            Err(ServerError::NotInitialized)
         }
     }
 }

@@ -24,7 +24,12 @@ pub enum CredentialsError {
     GroupNotFoundError { name: String },
     #[error("OS error '{0}'")]
     IoError(#[from] OsError),
+    #[error("General error '{0}'")]
+    GeneralError(String),
 }
+
+pub static ROOT_USER_NAME: &str = "root";
+pub static ROOT_GROUP_NAME: &str = "root";
 
 #[cfg_attr(feature = "mock", automock)]
 pub trait Credentials {
@@ -37,12 +42,13 @@ pub trait Credentials {
     ) -> Result<(), CredentialsError>;
     fn user_exists(&self, name: &str) -> bool;
     fn delete_user(&self, name: &str) -> Result<(), CredentialsError>;
-
     fn create_group(&self, name: &str) -> Result<(), CredentialsError>;
     fn group_exists(&self, name: &str) -> bool;
     fn group_memberships(&self, name: &str) -> Vec<String>;
     fn get_group_id(&self, name: &str) -> Option<u32>;
     fn delete_group(&self, name: &str) -> Result<(), CredentialsError>;
+    fn list_users(&self) -> Result<Vec<String>, CredentialsError>;
+    fn join_group(&self, user_name: &str, group_name: &str) -> Result<(), CredentialsError>;
 }
 
 #[cfg(feature = "mock")]
@@ -93,6 +99,55 @@ impl MockCredentials {
     ) -> &mut Self {
         self.given_user_does_not_exist(user_name)
             .given_group_does_not_exist(group_name)
+    }
+
+    pub fn given_is_root(&mut self) -> &mut Self {
+        self.expect_is_root().return_const(true);
+        self
+    }
+
+    pub fn given_is_not_root(&mut self) -> &mut Self {
+        self.expect_is_root().return_const(false);
+        self
+    }
+
+    pub fn expect_group_created_named(&mut self, name: &str) -> &mut Self {
+        let name = name.to_string();
+        self.expect_create_group()
+            .with(predicate::eq(name))
+            .returning(|_| Ok(()));
+        self
+    }
+
+    pub fn expect_user_created_named(
+        &mut self,
+        name: &str,
+        primary_group_name: &str,
+        group_names: Vec<&str>,
+    ) -> &mut Self {
+        let name = name.to_string();
+        let primary_group = primary_group_name.to_string();
+        let group_names: Vec<String> = group_names.iter().map(|name| name.to_string()).collect();
+
+        self.expect_create_user()
+            .with(
+                predicate::eq(name),
+                predicate::eq(primary_group),
+                predicate::eq(group_names),
+            )
+            .returning(|_, _, _| Ok(()));
+
+        self
+    }
+    pub fn expect_join_group_with(&mut self, name: &str, group_name: &str) -> &mut Self {
+        let name = name.to_string();
+        let group_name = group_name.to_string();
+
+        self.expect_join_group()
+            .with(predicate::eq(name), predicate::eq(group_name))
+            .returning(|_, _| Ok(()));
+
+        self
     }
 }
 

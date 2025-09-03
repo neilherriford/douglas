@@ -3,8 +3,8 @@ use async_trait::async_trait;
 use mockall::predicate;
 use std::ffi::OsString;
 use std::fs::{
-    File, Metadata, Permissions as Perms, create_dir_all, metadata, read_dir, read_link,
-    read_to_string, remove_file, rename, set_permissions,
+    File, Metadata, OpenOptions, Permissions as Perms, create_dir_all, metadata, read_dir,
+    read_link, read_to_string, remove_file, rename, set_permissions,
 };
 use std::io::Write;
 use std::os::unix::fs::{PermissionsExt, chown, symlink};
@@ -14,6 +14,8 @@ use users::{get_group_by_name, get_user_by_name};
 
 #[derive(Error, Debug)]
 pub enum FileSystemError {
+    #[error("Parent not found for path: {0}")]
+    ParentNotFoundError(PathBuf),
     #[error("IO error: {0}")]
     IoError(#[from] std::io::Error),
     #[error("Not found {0}")]
@@ -162,6 +164,28 @@ impl LocalFileWriter {
 impl FileWriter for LocalFileWriter {
     fn write_all(&self, path: &Path, contents: String) -> Result<(), FileSystemError> {
         let mut file = File::create(&path)?;
+        file.write_all(contents.as_bytes())?;
+
+        Ok(())
+    }
+}
+
+#[cfg_attr(feature = "mock", mockall::automock)]
+pub trait FileAppender {
+    fn append(&self, path: &Path, contents: String) -> Result<(), FileSystemError>;
+}
+
+pub struct LocalFileAppender {}
+
+impl LocalFileAppender {
+    pub fn new() -> Self {
+        Self {}
+    }
+}
+
+impl FileAppender for LocalFileAppender {
+    fn append(&self, path: &Path, contents: String) -> Result<(), FileSystemError> {
+        let mut file = OpenOptions::new().create(true).append(true).open(path)?;
         file.write_all(contents.as_bytes())?;
 
         Ok(())
@@ -455,6 +479,8 @@ pub trait Folder {
     fn entries(&self, path: &Path) -> Result<Vec<Entry>, FileSystemError>;
     fn exists(&self, path: &Path) -> bool;
     fn pop(&self, path: &Path) -> Option<String>;
+    fn executable_root(&self) -> Result<PathBuf, FileSystemError>;
+    fn create_file(&self, path: &Path, name: &str) -> Result<(File, PathBuf), FileSystemError>;
 }
 
 pub struct LocalFolder {}
@@ -496,6 +522,25 @@ impl Folder for LocalFolder {
         } else {
             None
         }
+    }
+
+    fn executable_root(&self) -> Result<PathBuf, FileSystemError> {
+        let exe_path = std::env::current_exe()?;
+        let path = exe_path.as_path();
+
+        match path.parent() {
+            Some(path) => Ok(path.to_path_buf()),
+            None => Err(FileSystemError::ParentNotFoundError(exe_path)),
+        }
+    }
+
+    fn create_file(&self, path: &Path, name: &str) -> Result<(File, PathBuf), FileSystemError> {
+        self.create_recursively(&path)?;
+        let mut path = path.to_path_buf();
+        path.push(name);
+
+        let file = File::create(path.clone())?;
+        Ok((file, path))
     }
 }
 
@@ -541,7 +586,30 @@ impl MockFolder {
 
         self
     }
+
+    pub fn expect_pop_with(&mut self, path: &str, result: &str) -> &mut Self {
+        let path = path.to_string();
+        let path = PathBuf::from(path);
+        let result = result.to_string();
+
+        self.expect_pop()
+            .with(predicate::eq(path.clone()))
+            .returning(move |_| Some(result.to_string()));
+
+        self
+    }
+
+    pub fn given_executable_root(&mut self, path: &str) -> &mut Self {
+        let path = path.to_string();
+        let path = PathBuf::from(path);
+
+        self.expect_executable_root()
+            .returning(move || Ok(path.clone()));
+
+        self
+    }
 }
+
 #[cfg(feature = "mock")]
 impl Entry {
     pub fn create_file_entry(name: &str) -> Self {
@@ -552,7 +620,7 @@ impl Entry {
         }
     }
 
-    pub fn create_folder(name: &str) -> Self {
+    pub fn create_directory(name: &str) -> Self {
         Self {
             is_link: false,
             kind: EntryKind::Directory,

@@ -37,7 +37,7 @@ impl MockOs {
     pub fn expect_execute_with_output_with_empty_success(
         &mut self,
         command: &str,
-        args: Vec<String>,
+        args: Vec<&str>,
     ) -> &mut Self {
         self.expect_execute_with_output_for(command, args, "", "", 0);
         self
@@ -46,13 +46,13 @@ impl MockOs {
     pub fn expect_execute_with_output_for(
         &mut self,
         command: &str,
-        args: Vec<String>,
+        args: Vec<&str>,
         stdout: &str,
         stderr: &str,
         status_code: i32,
     ) -> &mut Self {
         let expected_command = command.to_string();
-        let expected_args = args.clone();
+        let expected_args: Vec<String> = args.iter().map(|arg| arg.to_string()).collect();
         let given_output = self.make_fake_output(stdout, stderr, status_code);
 
         self.expect_execute_with_output()

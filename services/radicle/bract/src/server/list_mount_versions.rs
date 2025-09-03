@@ -148,7 +148,7 @@ mod tests {
                 .given_folder_exists("/tmp/mount_root/bar/baz/")
                 .given_folder_entries(
                     "/tmp/mount_root/bar/baz/",
-                    vec![Entry::create_folder("v0"), Entry::create_folder("v1")],
+                    vec![Entry::create_directory("v0"), Entry::create_directory("v1")],
                 );
 
             let actual = build(

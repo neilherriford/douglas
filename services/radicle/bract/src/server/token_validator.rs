@@ -29,7 +29,7 @@ impl TokenValidator {
     where
         F: FnOnce() -> Response,
     {
-        self.log.info("Verifying token");
+        self.log.info("Verifying token…");
 
         let expected = or_log_and_return_error!(
             self.log => warn,
@@ -38,6 +38,7 @@ impl TokenValidator {
         let valid = token.as_bytes().ct_eq(expected.as_bytes()).unwrap_u8() == 1;
 
         if valid {
+            self.log.info("Verified!");
             perform()
         } else {
             self.log.warn("Invalid token");

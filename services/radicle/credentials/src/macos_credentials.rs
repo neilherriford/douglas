@@ -80,10 +80,10 @@ impl MacOSCredentials {
     fn execute(
         &self,
         operation: Operation,
-        path: String,
+        path: &str,
         args: Vec<String>,
     ) -> Result<Output, CredentialsError> {
-        let mut arguments = vec![".".to_string(), operation.to_string(), path];
+        let mut arguments = vec![".".to_string(), operation.to_string(), path.to_string()];
         for arg in &args {
             arguments.push(arg.to_string())
         }
@@ -100,18 +100,18 @@ impl MacOSCredentials {
         attribute: ObjectAttribute,
     ) -> Result<Output, CredentialsError> {
         let path = format!("/{}", kind);
-        self.execute(Operation::List, path, vec![attribute.to_string()])
+        self.execute(Operation::List, &path, vec![attribute.to_string()])
     }
 
     fn create_object(&self, name: &str, kind: ObjectKind) -> Result<(), CredentialsError> {
         let path = self.named_object_path(name, kind);
-        self.execute(Operation::Create, path, vec![])?;
+        self.execute(Operation::Create, &path, vec![])?;
         Ok(())
     }
 
     fn delete_object(&self, name: &str, kind: ObjectKind) -> Result<(), CredentialsError> {
         let path = self.named_object_path(name, kind);
-        self.execute(Operation::Delete, path, vec![])?;
+        self.execute(Operation::Delete, &path, vec![])?;
         Ok(())
     }
 
@@ -123,7 +123,7 @@ impl MacOSCredentials {
         value: String,
     ) -> Result<(), CredentialsError> {
         let path = self.named_object_path(name, kind);
-        self.execute(Operation::Create, path, vec![attribute.to_string(), value])?;
+        self.execute(Operation::Create, &path, vec![attribute.to_string(), value])?;
         Ok(())
     }
 
@@ -162,7 +162,7 @@ impl MacOSCredentials {
         return result;
     }
 
-    fn add_to_group(&self, user_name: &str, group_name: String) -> Result<(), CredentialsError> {
+    fn add_to_group(&self, user_name: &str, group_name: &str) -> Result<(), CredentialsError> {
         if self.group_exists(&group_name) {
             self.set_object_attribute(
                 &group_name,
@@ -171,7 +171,9 @@ impl MacOSCredentials {
                 user_name.to_string(),
             )
         } else {
-            Err(CredentialsError::GroupNotFoundError { name: group_name })
+            Err(CredentialsError::GroupNotFoundError {
+                name: group_name.to_string(),
+            })
         }
     }
 }
@@ -210,7 +212,7 @@ impl Credentials for MacOSCredentials {
 
         let existing = self.group_memberships(name);
         for group_name in group_names.iter().filter(|name| !existing.contains(name)) {
-            self.add_to_group(name, group_name.to_string())?;
+            self.add_to_group(name, group_name)?;
         }
 
         Ok(())
@@ -264,6 +266,30 @@ impl Credentials for MacOSCredentials {
         }
         self.delete_object(name, ObjectKind::Group)?;
         Ok(())
+    }
+
+    fn list_users(&self) -> Result<Vec<String>, CredentialsError> {
+        let output = self.execute(Operation::List, "/Users", vec![])?;
+        if let Ok(lines) = String::from_utf8(output.stdout) {
+            Ok(lines
+                .split("\n")
+                .filter_map(|name| {
+                    if name.len() == 0 {
+                        None
+                    } else {
+                        Some(name.to_string())
+                    }
+                })
+                .collect())
+        } else {
+            Err(CredentialsError::GeneralError(
+                "Error listing users".to_string(),
+            ))
+        }
+    }
+
+    fn join_group(&self, user_name: &str, group_name: &str) -> Result<(), CredentialsError> {
+        self.add_to_group(user_name, group_name)
     }
 }
 
@@ -379,13 +405,7 @@ mod tests {
 
             os.expect_execute_with_output_with_empty_success(
                 "dscl",
-                vec![
-                    ".".to_string(),
-                    "-create".to_string(),
-                    "/Groups/qux".to_string(),
-                    "GroupMembership".to_string(),
-                    "foo".to_string(),
-                ],
+                vec![".", "-create", "/Groups/qux", "GroupMembership", "foo"],
             );
 
             let actual = MacOSCredentials {
@@ -408,12 +428,7 @@ mod tests {
 
             os.expect_execute_with_output_with_empty_success(
                 "dscl",
-                vec![
-                    ".".to_string(),
-                    "-list".to_string(),
-                    "/Users".to_string(),
-                    "UniqueID".to_string(),
-                ],
+                vec![".", "-list", "/Users", "UniqueID"],
             );
 
             queries
@@ -444,12 +459,7 @@ mod tests {
 
             os.expect_execute_with_output_for(
                 "dscl",
-                vec![
-                    ".".to_string(),
-                    "-list".to_string(),
-                    "/Users".to_string(),
-                    "UniqueID".to_string(),
-                ],
+                vec![".", "-list", "/Users", "UniqueID"],
                 r#"
 bar        501
 baz        502
@@ -466,54 +476,32 @@ qux        504
 
             os.expect_execute_with_output_with_empty_success(
                 "dscl",
-                vec![
-                    ".".to_string(),
-                    "-create".to_string(),
-                    "/Users/foo".to_string(),
-                ],
+                vec![".", "-create", "/Users/foo"],
             );
             os.expect_execute_with_output_with_empty_success(
                 "dscl",
-                vec![
-                    ".".to_string(),
-                    "-create".to_string(),
-                    "/Users/foo".to_string(),
-                    "UniqueID".to_string(),
-                    "503".to_string(),
-                ],
+                vec![".", "-create", "/Users/foo", "UniqueID", "503"],
+            );
+
+            os.expect_execute_with_output_with_empty_success(
+                "dscl",
+                vec![".", "-create", "/Users/foo", "UserShell", "/usr/bin/false"],
             );
 
             os.expect_execute_with_output_with_empty_success(
                 "dscl",
                 vec![
-                    ".".to_string(),
-                    "-create".to_string(),
-                    "/Users/foo".to_string(),
-                    "UserShell".to_string(),
-                    "/usr/bin/false".to_string(),
+                    ".",
+                    "-create",
+                    "/Users/foo",
+                    "NFSHomeDirectory",
+                    "/var/empty",
                 ],
             );
 
             os.expect_execute_with_output_with_empty_success(
                 "dscl",
-                vec![
-                    ".".to_string(),
-                    "-create".to_string(),
-                    "/Users/foo".to_string(),
-                    "NFSHomeDirectory".to_string(),
-                    "/var/empty".to_string(),
-                ],
-            );
-
-            os.expect_execute_with_output_with_empty_success(
-                "dscl",
-                vec![
-                    ".".to_string(),
-                    "-create".to_string(),
-                    "/Users/foo".to_string(),
-                    "PrimaryGroupID".to_string(),
-                    "1234".to_string(),
-                ],
+                vec![".", "-create", "/Users/foo", "PrimaryGroupID", "1234"],
             );
 
             queries
@@ -594,11 +582,7 @@ qux        504
 
             os.expect_execute_with_output_with_empty_success(
                 "dscl",
-                vec![
-                    ".".to_string(),
-                    "-delete".to_string(),
-                    "/Users/foo".to_string(),
-                ],
+                vec![".", "-delete", "/Users/foo"],
             );
 
             let actual = MacOSCredentials {
@@ -648,12 +632,7 @@ qux        504
 
             os.expect_execute_with_output_for(
                 "dscl",
-                vec![
-                    ".".to_string(),
-                    "-list".to_string(),
-                    "/Groups".to_string(),
-                    "PrimaryGroupID".to_string(),
-                ],
+                vec![".", "-list", "/Groups", "PrimaryGroupID"],
                 r#"
 bar        501
 baz        502
@@ -665,22 +644,12 @@ qux        504
 
             os.expect_execute_with_output_with_empty_success(
                 "dscl",
-                vec![
-                    ".".to_string(),
-                    "-create".to_string(),
-                    "/Groups/foo".to_string(),
-                ],
+                vec![".", "-create", "/Groups/foo"],
             );
 
             os.expect_execute_with_output_with_empty_success(
                 "dscl",
-                vec![
-                    ".".to_string(),
-                    "-create".to_string(),
-                    "/Groups/foo".to_string(),
-                    "PrimaryGroupID".to_string(),
-                    "503".to_string(),
-                ],
+                vec![".", "-create", "/Groups/foo", "PrimaryGroupID", "503"],
             );
 
             let actual = MacOSCredentials {
@@ -809,11 +778,7 @@ qux        504
 
             os.expect_execute_with_output_with_empty_success(
                 "dscl",
-                vec![
-                    ".".to_string(),
-                    "-delete".to_string(),
-                    "/Groups/foo".to_string(),
-                ],
+                vec![".", "-delete", "/Groups/foo"],
             );
 
             let actual = MacOSCredentials {
@@ -822,6 +787,67 @@ qux        504
             }
             .delete_group("foo");
             assert!(matches!(actual, Ok(())));
+        }
+    }
+
+    mod list_users {
+        use std::sync::Arc;
+
+        use mockall::predicate;
+        use os::{MockOs, OsError};
+
+        use crate::{
+            Credentials, CredentialsError, macos_credentials::MacOSCredentials,
+            queries::MockQueries,
+        };
+
+        #[test]
+        fn should_error_if_list_failed() {
+            let mut os = MockOs::new();
+            let queries = MockQueries::new();
+
+            os.expect_execute_with_output()
+                .with(
+                    predicate::eq("dscl".to_string()),
+                    predicate::eq(vec![
+                        ".".to_string(),
+                        "-list".to_string(),
+                        "/Users".to_string(),
+                    ]),
+                )
+                .returning(|_, _| Err(OsError::IoError(std::io::Error::other("oops"))));
+
+            let actual = MacOSCredentials {
+                os: Arc::new(os),
+                queries: Box::new(queries),
+            }
+            .list_users();
+
+            assert!(matches!(actual, Err(CredentialsError::IoError(_))));
+        }
+
+        #[test]
+        fn should_list() {
+            let mut os = MockOs::new();
+            let queries = MockQueries::new();
+
+            os.expect_execute_with_output_for(
+                "dscl",
+                vec![".", "-list", "/Users"],
+                "foo\nbar\n",
+                "",
+                0,
+            );
+
+            let actual = MacOSCredentials {
+                os: Arc::new(os),
+                queries: Box::new(queries),
+            }
+            .list_users();
+
+            assert!(
+                matches!(actual, Ok(users) if users == vec!["foo".to_string(), "bar".to_string()])
+            );
         }
     }
 }

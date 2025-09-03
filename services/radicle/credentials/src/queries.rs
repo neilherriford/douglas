@@ -45,9 +45,11 @@ impl Queries for LocalQueries {
     fn is_root(&self) -> bool {
         nix::unistd::Uid::effective().is_root()
     }
+
     fn user_exists(&self, name: &str) -> bool {
         get_user_by_name(name).is_some()
     }
+
     fn group_exists(&self, name: &str) -> bool {
         get_group_by_name(name).is_some()
     }

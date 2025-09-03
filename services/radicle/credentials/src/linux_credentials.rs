@@ -114,6 +114,33 @@ impl Credentials for LinuxCredentials {
         self.os.execute("groupdel", vec![name.to_string()])?;
         Ok(())
     }
+
+    fn list_users(&self) -> Result<Vec<String>, CredentialsError> {
+        let output = self
+            .os
+            .execute_with_output("getent", vec!["passwd".to_string()])?;
+
+        if let Ok(output) = String::from_utf8(output.stdout) {
+            Ok(output
+                .split("\n")
+                .map(|line| {
+                    if let Some((user, _)) = line.split_once(":") {
+                        user.to_string()
+                    } else {
+                        line.to_string()
+                    }
+                })
+                .collect())
+        } else {
+            return Err(CredentialsError::GeneralError(
+                "Could not list users".to_string(),
+            ));
+        }
+    }
+
+    fn join_group(&self, user_name: &str, group_name: &str) -> Result<(), CredentialsError> {
+        self.add_to_group(user_name, group_name)
+    }
 }
 
 #[cfg(test)]
@@ -718,6 +745,60 @@ mod tests {
             }
             .delete_group("foo");
             assert!(matches!(actual, Ok(())));
+        }
+    }
+
+    mod list_users {
+        use crate::{
+            Credentials, CredentialsError, linux_credentials::LinuxCredentials,
+            queries::MockQueries,
+        };
+        use mockall::predicate;
+        use os::{MockOs, OsError};
+        use std::sync::Arc;
+
+        #[test]
+        fn should_error_if_command_fails() {
+            let mut os = MockOs::new();
+            let queries = MockQueries::new();
+
+            os.expect_execute_with_output()
+                .with(
+                    predicate::eq("getent"),
+                    predicate::eq(vec!["passwd".to_string()]),
+                )
+                .returning(|_, _| Err(OsError::IoError(std::io::Error::other("oops"))));
+            let actual = LinuxCredentials {
+                os: Arc::new(os),
+                queries: Box::new(queries),
+            }
+            .list_users();
+
+            assert!(matches!(actual, Err(CredentialsError::IoError(_))));
+        }
+
+        #[test]
+        fn should_list_users() {
+            let mut os = MockOs::new();
+            let queries = MockQueries::new();
+
+            os.expect_execute_with_output_for(
+                "getent",
+                vec!["passwd"],
+                "foo:bar:baz\nbar:baz:qux",
+                "",
+                0,
+            );
+
+            let actual = LinuxCredentials {
+                os: Arc::new(os),
+                queries: Box::new(queries),
+            }
+            .list_users();
+
+            assert!(
+                matches!(actual, Ok(users) if users == vec!["foo".to_string(), "bar".to_string()])
+            );
         }
     }
 }
