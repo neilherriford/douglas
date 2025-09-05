@@ -2,9 +2,10 @@ use async_trait::async_trait;
 #[cfg(feature = "mock")]
 use mockall::predicate;
 use std::ffi::OsString;
+use std::fs::OpenOptions;
 use std::fs::{
-    File, Metadata, OpenOptions, Permissions as Perms, create_dir_all, metadata, read_dir,
-    read_link, read_to_string, remove_file, rename, set_permissions,
+    File, Metadata, Permissions as Perms, create_dir_all, metadata, read_dir, read_link,
+    read_to_string, remove_file, rename, set_permissions,
 };
 use std::io::Write;
 use std::os::unix::fs::{PermissionsExt, chown, symlink};

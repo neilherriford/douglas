@@ -1,14 +1,14 @@
-use bract::Response;
+use crate::Response;
 use mockall::automock;
 use serde_json::{Value, json};
 use std::fmt::Display;
 
 #[automock]
-pub trait BractResponseFormatter {
+pub trait ResponseFormatter {
     fn format(&self, response: Response) -> String;
 }
 
-pub struct PlainBractResponseFormatter {}
+pub struct PlainResponseFormatter {}
 
 enum Bullet {
     Circle,
@@ -27,7 +27,7 @@ impl Display for Bullet {
     }
 }
 
-impl PlainBractResponseFormatter {
+impl PlainResponseFormatter {
     pub fn new() -> Self {
         Self {}
     }
@@ -40,28 +40,28 @@ impl PlainBractResponseFormatter {
     }
 }
 
-impl BractResponseFormatter for PlainBractResponseFormatter {
+impl ResponseFormatter for PlainResponseFormatter {
     fn format(&self, response: Response) -> String {
         match response {
-            Response::CredentialsCreated { user, group } => {
+            Response::BractResponse(bract::Response::CredentialsCreated { user, group }) => {
                 format!("Credentials created:\n  {}\n  {}", user, group)
             }
-            Response::MountSet { version, path } => {
+            Response::BractResponse(bract::Response::MountSet { version, path }) => {
                 format!("Mount set to {} ({:?})", version, path)
             }
-            Response::MountVersionsListed(versions) => {
+            Response::BractResponse(bract::Response::MountVersionsListed(versions)) => {
                 let mut result = String::from("Mount versions:\n");
                 for version in versions {
                     result += &self.create_bullet_line(2, Bullet::Circle, &version.to_string());
                 }
                 result.to_string()
             }
-            Response::InvalidToken => "Invalid Token".to_string(),
-            Response::Status {
+            Response::BractResponse(bract::Response::InvalidToken) => "Invalid Token".to_string(),
+            Response::BractResponse(bract::Response::Status {
                 token_path,
                 mount_root,
                 services,
-            } => {
+            }) => {
                 let mut result = format!(
                     "Status: OK\n  Token path: {:?}\n  Mount root: {:?}\n  Services:\n",
                     token_path, mount_root
@@ -84,51 +84,54 @@ impl BractResponseFormatter for PlainBractResponseFormatter {
                 }
                 result
             }
-            Response::Error(error) => format!("Error!\n{:?}", error),
-            Response::ShuttingDown => "Shutting down".to_string(),
-            Response::Stopped => "Stopped".to_string(),
+            Response::Error(error) | Response::BractResponse(bract::Response::Error(error)) => {
+                format!("Error!\n{:?}", error)
+            }
+            Response::BractResponse(bract::Response::ShuttingDown) => "Shutting down".to_string(),
+            Response::BractResponse(bract::Response::Stopped) => "Stopped".to_string(),
+            Response::Okay => "🆗 Ok!".to_string(),
         }
     }
 }
 
-pub struct JsonBractResponseFormatter {}
+pub struct JsonResponseFormatter {}
 
-impl JsonBractResponseFormatter {
+impl JsonResponseFormatter {
     pub fn new() -> Self {
         Self {}
     }
 }
 
-impl BractResponseFormatter for JsonBractResponseFormatter {
+impl ResponseFormatter for JsonResponseFormatter {
     fn format(&self, response: Response) -> String {
         let value = match response {
-            Response::CredentialsCreated { user, group } => json!({
+            Response::BractResponse(bract::Response::CredentialsCreated { user, group }) => json!({
                 "response": "CredentialsCreated",
                 "data": json!({
                     "user": user,
                     "group": group,
                 })
             }),
-            Response::MountSet { version, path } => json!({
+            Response::BractResponse(bract::Response::MountSet { version, path }) => json!({
                 "response": "MountSet",
                 "data": json!({
                     "version": version.to_string(),
                     "path": path.to_string_lossy(),
                 })
             }),
-            Response::MountVersionsListed(versions) => json!({
+            Response::BractResponse(bract::Response::MountVersionsListed(versions)) => json!({
                 "response": "MountVersionsListed",
                 "data": versions,
             }),
-            Response::InvalidToken => json!({
+            Response::BractResponse(bract::Response::InvalidToken) => json!({
                 "response": "InvalidToken",
                 "data": Value::Null,
             }),
-            Response::Status {
+            Response::BractResponse(bract::Response::Status {
                 token_path,
                 mount_root,
                 services,
-            } => json!({
+            }) => json!({
                 "response": "Status",
                 "data": json!({
                     "token_path": token_path.to_string_lossy(),
@@ -136,18 +139,22 @@ impl BractResponseFormatter for JsonBractResponseFormatter {
                     "services": services,
                 })
             }),
-            Response::Error(err) => json!({
+            Response::Error(err) | Response::BractResponse(bract::Response::Error(err)) => json!({
                 "response": "Error",
                 "data": json!({
                     "message": format!("{:?}",err )
                 })
             }),
-            Response::ShuttingDown => json!({
+            Response::BractResponse(bract::Response::ShuttingDown) => json!({
                 "response": "ShuttingDown",
                 "data": Value::Null,
             }),
-            Response::Stopped => json!({
+            Response::BractResponse(bract::Response::Stopped) => json!({
                 "response": "Stopped",
+                "data": Value::Null,
+            }),
+            Response::Okay => json!({
+                "response": "Okay",
                 "data": Value::Null,
             }),
         };

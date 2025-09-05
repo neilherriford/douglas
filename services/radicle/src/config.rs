@@ -12,6 +12,7 @@ pub struct Config {
     pub operator_group: String,
     pub mount_root_path: PathBuf,
     pub log_path: PathBuf,
+    pub docker_socket_path: PathBuf,
 }
 
 #[derive(Error, Debug)]
@@ -33,19 +34,19 @@ pub trait ConfigWriter {
 }
 
 pub struct LocalConfigRepository {
-    folder: Arc<dyn Folder>,
-    permissions: Arc<dyn Permissions>,
-    file_writer: Arc<dyn FileWriter>,
+    folder: Arc<dyn Folder + Send + Sync + 'static>,
+    permissions: Arc<dyn Permissions + Send + Sync + 'static>,
+    file_writer: Arc<dyn FileWriter + Send + Sync + 'static>,
     #[allow(dead_code)]
-    file_reader: Arc<dyn FileReader>,
+    file_reader: Arc<dyn FileReader + Send + Sync + 'static>,
 }
 
 impl LocalConfigRepository {
     pub fn new(
-        folder: Arc<dyn Folder>,
-        permissions: Arc<dyn Permissions>,
-        file_reader: Arc<dyn FileReader>,
-        file_writer: Arc<dyn FileWriter>,
+        folder: Arc<dyn Folder + Send + Sync + 'static>,
+        permissions: Arc<dyn Permissions + Send + Sync + 'static>,
+        file_reader: Arc<dyn FileReader + Send + Sync + 'static>,
+        file_writer: Arc<dyn FileWriter + Send + Sync + 'static>,
     ) -> Self {
         Self {
             folder,
@@ -136,7 +137,10 @@ mod tests {
             FileSystemError, MockFileReader, MockFileWriter, MockFolder, MockPermissions, Modes,
         };
         use mockall::predicate;
-        use std::{path::Path, sync::Arc};
+        use std::{
+            path::{Path, PathBuf},
+            sync::Arc,
+        };
 
         #[test]
         fn should_error_if_config_path_could_not_be_determined() {
@@ -158,8 +162,9 @@ mod tests {
             .save(&crate::config::Config {
                 operator_user: "foo-operator".to_string(),
                 operator_group: "foo-group".to_string(),
-                mount_root_path: Path::new("/tmp/mount").to_path_buf(),
+                mount_root_path: PathBuf::from("/tmp/mount"),
                 log_path: Path::new("/tmp/log").to_path_buf(),
+                docker_socket_path: PathBuf::from("/tmp/docker.socket"),
             });
 
             assert!(matches!(
@@ -193,8 +198,9 @@ mod tests {
             .save(&crate::config::Config {
                 operator_user: "foo-operator".to_string(),
                 operator_group: "foo-group".to_string(),
-                mount_root_path: Path::new("/tmp/mount").to_path_buf(),
+                mount_root_path: PathBuf::from("/tmp/mount"),
                 log_path: Path::new("/tmp/log").to_path_buf(),
+                docker_socket_path: PathBuf::from("/tmp/docker.socket"),
             });
 
             assert!(matches!(
@@ -237,8 +243,9 @@ mod tests {
             .save(&crate::config::Config {
                 operator_user: "foo-operator".to_string(),
                 operator_group: "foo-group".to_string(),
-                mount_root_path: Path::new("/tmp/mount").to_path_buf(),
+                mount_root_path: PathBuf::from("/tmp/mount"),
                 log_path: Path::new("/tmp/log").to_path_buf(),
+                docker_socket_path: PathBuf::from("/tmp/docker.socket"),
             });
 
             assert!(matches!(
@@ -285,8 +292,9 @@ mod tests {
             .save(&crate::config::Config {
                 operator_user: "foo-operator".to_string(),
                 operator_group: "foo-group".to_string(),
-                mount_root_path: Path::new("/tmp/mount").to_path_buf(),
+                mount_root_path: PathBuf::from("/tmp/mount"),
                 log_path: Path::new("/tmp/log").to_path_buf(),
+                docker_socket_path: PathBuf::from("/tmp/docker.socket"),
             });
 
             assert!(matches!(
@@ -327,8 +335,9 @@ mod tests {
             .save(&crate::config::Config {
                 operator_user: "foo-operator".to_string(),
                 operator_group: "foo-group".to_string(),
-                mount_root_path: Path::new("/tmp/mount").to_path_buf(),
+                mount_root_path: PathBuf::from("/tmp/mount"),
                 log_path: Path::new("/tmp/log").to_path_buf(),
+                docker_socket_path: PathBuf::from("/tmp/docker.socket"),
             });
 
             assert!(matches!(actual, Ok(())));
@@ -434,7 +443,8 @@ mod tests {
               "operator_user": "foo",
               "operator_group": "bar",
               "mount_root_path": "/tmp/mounts",
-              "log_path": "/tmp/logs"
+              "log_path": "/tmp/logs",
+              "docker_socket_path": "/tmp/docker.socket"
             }
             "#;
 
@@ -454,6 +464,7 @@ mod tests {
                 mount_root_path: PathBuf::from("/tmp/mounts"),
                 operator_group: "bar".to_string(),
                 operator_user: "foo".to_string(),
+                docker_socket_path: PathBuf::from("/tmp/docker.socket"),
             };
 
             assert!(matches!(actual, Ok(config) if config == expected));

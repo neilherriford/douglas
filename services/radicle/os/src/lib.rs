@@ -1,5 +1,7 @@
 #[cfg(feature = "mock")]
 use mockall::predicate;
+use nix::sys::signal::kill;
+use nix::unistd::Pid;
 #[cfg(feature = "mock")]
 use std::os::unix::process::ExitStatusExt;
 use std::process::{Command, Output};
@@ -15,13 +17,15 @@ pub enum OsError {
         code: Option<i32>,
         args: Vec<String>,
     },
+    #[error("Encountered error #{0}")]
+    ErrorNumber(i32),
 }
 
 #[cfg_attr(feature = "mock", mockall::automock)]
 pub trait Os: Send + Sync {
     fn execute(&self, command: &str, args: Vec<String>) -> Result<(), OsError>;
     fn execute_with_output(&self, command: &str, args: Vec<String>) -> Result<Output, OsError>;
-
+    fn is_active_pid(&self, pid: i32) -> Result<bool, OsError>;
     fn exit(&self, code: i32);
 }
 
@@ -72,6 +76,24 @@ impl MockOs {
 
         self
     }
+
+    pub fn given_pid_is_active(&mut self, pid: i32) -> &mut Self {
+        self.expect_is_active_pid()
+            .with(predicate::eq(pid))
+            .once()
+            .returning(|_| Ok(true));
+
+        self
+    }
+
+    pub fn given_pid_is_not_active(&mut self, pid: i32) -> &mut Self {
+        self.expect_is_active_pid()
+            .with(predicate::eq(pid))
+            .once()
+            .returning(|_| Ok(false));
+
+        self
+    }
 }
 
 #[derive(Clone)]
@@ -105,5 +127,14 @@ impl Os for Unix {
 
     fn exit(&self, code: i32) {
         std::process::exit(code);
+    }
+
+    fn is_active_pid(&self, pid: i32) -> Result<bool, OsError> {
+        match kill(Pid::from_raw(pid), None) {
+            Ok(_) => Ok(true),
+            Err(nix::errno::Errno::ESRCH) => Ok(false), // No such process
+            Err(nix::errno::Errno::EPERM) => Ok(true),  // Process exists, but we lack permission
+            Err(errno) => Err(OsError::ErrorNumber(errno as i32)),
+        }
     }
 }

@@ -1,28 +1,26 @@
 mod bract_path_factory;
-mod bract_response_formatter;
 mod config;
 mod constants;
 mod file_logger;
 mod init_command;
+mod response_formatter;
 mod start_bract_command;
 #[macro_use]
 mod macros;
 
-use bract::{Client, Response, client::Request};
+use bract::{Client, client::Request};
 use bract_path_factory::BractPathFactory;
-use bract_response_formatter::{
-    BractResponseFormatter, JsonBractResponseFormatter, PlainBractResponseFormatter,
-};
 use clap::{Parser, Subcommand, ValueEnum};
 use config::LocalConfigRepository;
 use credentials::{Credentials, create_for_target};
 use file_system::{
-    LocalFileAppender, LocalFileDeleter, LocalFileReader, LocalFileWriter, LocalFolder, LocalLinks,
-    LocalPermissions, LocalUnixDomainSocket,
+    FileReader, FileWriter, Folder, Links, LocalFileAppender, LocalFileDeleter, LocalFileReader,
+    LocalFileWriter, LocalFolder, LocalLinks, LocalPermissions, LocalUnixDomainSocket, Permissions,
 };
 use init_command::InitCommand;
 use log::{Logger, StdOutLogger};
-use os::Unix;
+use os::{Os, Unix};
+use response_formatter::{JsonResponseFormatter, PlainResponseFormatter, ResponseFormatter};
 use start_bract_command::StartBractCommand;
 use std::{path::Path, sync::Arc};
 use tokio::runtime::Runtime;
@@ -70,6 +68,9 @@ enum Commands {
         #[arg(long, help = "Required: Location where douglas will write logs")]
         log_path: String,
 
+        #[arg(long, help = "Required: The Docker socket location")]
+        docker_socket_path: String,
+
         #[arg(
             long,
             default_value_t = true,
@@ -93,6 +94,19 @@ enum Commands {
     Shutdown,
 }
 
+#[derive(Debug)]
+pub enum Response {
+    BractResponse(bract::Response),
+    Okay,
+    Error(String),
+}
+
+impl From<bract::Response> for Response {
+    fn from(f: bract::Response) -> Self {
+        Response::BractResponse(f)
+    }
+}
+
 fn main() {
     let stdout_log = Arc::new(StdOutLogger::new());
     let os = Arc::new(Unix::new());
@@ -109,9 +123,9 @@ fn main() {
     ));
     let bract_path_factory = Arc::new(BractPathFactory::new(folder.clone()));
     let cli = Cli::parse();
-    let bract_response_formatter: Box<dyn BractResponseFormatter> = match cli.output_style {
-        OutputStyle::Plain => Box::new(PlainBractResponseFormatter::new()),
-        OutputStyle::Json => Box::new(JsonBractResponseFormatter::new()),
+    let bract_response_formatter: Box<dyn ResponseFormatter> = match cli.output_style {
+        OutputStyle::Plain => Box::new(PlainResponseFormatter::new()),
+        OutputStyle::Json => Box::new(JsonResponseFormatter::new()),
     };
 
     match cli.command {
@@ -120,10 +134,11 @@ fn main() {
             service_group,
             mount_root_path,
             log_path,
+            docker_socket_path,
             daemonize,
         } => {
             println!("🌲 Initializing douglas…");
-            let result = init(
+            let success = init(
                 &bract_response_formatter,
                 stdout_log.clone(),
                 credentials.clone(),
@@ -134,29 +149,23 @@ fn main() {
                 service_group,
                 mount_root_path,
                 log_path,
+                docker_socket_path,
             );
-            match result {
-                Ok(()) => {
-                    println!("🆗 Initialized!");
-                    let log_to_std_out = !daemonize;
-                    start_bract(
-                        bract_response_formatter,
-                        stdout_log,
-                        os,
-                        credentials,
-                        folder,
-                        permissions,
-                        file_reader,
-                        file_writer,
-                        bract_path_factory,
-                        daemonize,
-                        log_to_std_out,
-                    );
-                }
-                Err(err) => {
-                    eprintln!("Error initializing: {}", err);
-                    std::process::exit(-1);
-                }
+            if success {
+                let log_to_std_out = !daemonize;
+                start_bract(
+                    bract_response_formatter,
+                    stdout_log,
+                    os,
+                    credentials,
+                    folder,
+                    permissions,
+                    file_reader,
+                    file_writer,
+                    bract_path_factory,
+                    daemonize,
+                    log_to_std_out,
+                );
             }
         }
         Commands::Start { daemonize } => {
@@ -201,7 +210,7 @@ fn main() {
 }
 
 fn init(
-    response_formatter: &Box<dyn BractResponseFormatter>,
+    response_formatter: &Box<dyn ResponseFormatter>,
     stdout_log: Arc<StdOutLogger>,
     credentials: Arc<dyn Credentials + Send + Sync>,
     folder: Arc<LocalFolder>,
@@ -211,9 +220,11 @@ fn init(
     service_group: String,
     mount_root_path: String,
     log_path: String,
-) -> Result<(), init_command::InitCommandError> {
+    docker_socket_path: String,
+) -> bool {
     let mount_root_path = Path::new(&mount_root_path);
     let log_path = Path::new(&log_path);
+    let docker_socket_path = Path::new(&docker_socket_path);
 
     let result = InitCommand::new(
         stdout_log.clone(),
@@ -221,6 +232,7 @@ fn init(
         &service_group,
         &mount_root_path,
         &log_path,
+        &docker_socket_path,
         credentials.clone(),
         folder.clone(),
         permissions.clone(),
@@ -228,52 +240,62 @@ fn init(
     )
     .run();
 
-    println!("{}", response_formatter.format(Response::Stopped));
-
-    result
+    match result {
+        Ok(()) => {
+            println!("{}", response_formatter.format(Response::Okay));
+            true
+        }
+        Err(err) => {
+            eprintln!(
+                "{:?}",
+                response_formatter.format(Response::Error(format!("{:?}", err)))
+            );
+            false
+        }
+    }
 }
 
 fn start_bract(
-    response_formatter: Box<dyn BractResponseFormatter>,
-    stdout_log: Arc<StdOutLogger>,
-    os: Arc<Unix>,
+    response_formatter: Box<dyn ResponseFormatter>,
+    stdout_log: Arc<dyn Logger + Send + Sync + 'static>,
+    os: Arc<dyn Os + Send + Sync + 'static>,
     credentials: Arc<dyn Credentials + Send + Sync>,
-    folder: Arc<LocalFolder>,
-    permissions: Arc<LocalPermissions>,
-    file_reader: Arc<LocalFileReader>,
-    file_writer: Arc<LocalFileWriter>,
+    folder: Arc<dyn Folder + Send + Sync + 'static>,
+    permissions: Arc<dyn Permissions + Send + Sync + 'static>,
+    file_reader: Arc<dyn FileReader + Send + Sync + 'static>,
+    file_writer: Arc<dyn FileWriter + Send + Sync + 'static>,
     bract_path_factory: Arc<BractPathFactory>,
     daemonize: bool,
     log_to_std_out: bool,
 ) {
     let config_respository = Arc::new(LocalConfigRepository::new(
-        folder.clone(),
-        permissions.clone(),
-        file_reader.clone(),
-        file_writer.clone(),
+        Arc::clone(&folder),
+        Arc::clone(&permissions),
+        Arc::clone(&file_reader),
+        Arc::clone(&file_writer),
     ));
     let file_deleter = Arc::new(LocalFileDeleter::new());
     let file_appender = Arc::new(LocalFileAppender::new());
-    let links = Arc::new(LocalLinks::new());
+    let links: Arc<dyn Links + Send + Sync + 'static> = Arc::new(LocalLinks::new());
     let unix_domain_socket = Arc::new(LocalUnixDomainSocket::new());
 
     let override_logger: Option<Arc<dyn Logger + Send + Sync + 'static>> = if log_to_std_out {
-        Some(stdout_log.clone())
+        Some(Arc::clone(&stdout_log))
     } else {
         None
     };
 
     let start_bract = StartBractCommand::new(
-        credentials.clone(),
-        folder.clone(),
+        Arc::clone(&credentials),
+        Arc::clone(&folder),
         config_respository,
-        file_reader.clone(),
-        file_writer.clone(),
+        Arc::clone(&file_reader),
+        Arc::clone(&file_writer),
         file_deleter,
         file_appender,
-        links.clone(),
-        os.clone(),
-        permissions.clone(),
+        Arc::clone(&links),
+        Arc::clone(&os),
+        Arc::clone(&permissions),
         unix_domain_socket,
         daemonize,
         Arc::clone(&bract_path_factory),
@@ -281,7 +303,10 @@ fn start_bract(
 
     stdout_log.info("Starting Bract…");
     match start_bract.run(override_logger) {
-        Ok(_) => println!("{}", response_formatter.format(Response::Stopped)),
+        Ok(_) => println!(
+            "{}",
+            response_formatter.format(bract::Response::Stopped.into())
+        ),
         Err(err) => println!(
             "{}",
             response_formatter.format(Response::Error(format!("{}", err)))
@@ -290,7 +315,7 @@ fn start_bract(
 }
 
 fn status(
-    response_formatter: Box<dyn BractResponseFormatter>,
+    response_formatter: Box<dyn ResponseFormatter>,
     stdout_log: Arc<StdOutLogger>,
     file_reader: Arc<LocalFileReader>,
     socket_path: std::path::PathBuf,
@@ -306,12 +331,12 @@ fn status(
     let rt = Runtime::new().unwrap();
     rt.block_on(async {
         let response = or_print_and_exit_with_error!(client.request(Request::Status).await);
-        println!("{}", response_formatter.format(response));
+        println!("{}", response_formatter.format(response.into()));
     });
 }
 
 fn shutdown(
-    response_formatter: Box<dyn BractResponseFormatter>,
+    response_formatter: Box<dyn ResponseFormatter>,
     stdout_log: Arc<StdOutLogger>,
     file_reader: Arc<LocalFileReader>,
     socket_path: std::path::PathBuf,
@@ -327,6 +352,6 @@ fn shutdown(
     let rt = Runtime::new().unwrap();
     rt.block_on(async {
         let response = or_print_and_exit_with_error!(client.request(Request::Shutdown).await);
-        println!("{}", response_formatter.format(response));
+        println!("{}", response_formatter.format(response.into()));
     });
 }
