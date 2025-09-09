@@ -2,3 +2,5 @@
 ./certs
 **/target/**
 ./mounts/openbao/data/**
+**/ssh-host-keys/*
+**/ssh-keys/*
