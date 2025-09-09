@@ -1,5 +1,5 @@
 {
-  description = "douglas Live CD [NixOS(AVF/UTM) with Docker, Rust, VirtioFS/9p share]";
+  description = "douglas-dev Live CD";
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-25.05";
 
