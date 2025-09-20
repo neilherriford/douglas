@@ -36,6 +36,7 @@ sudo apt install -y \
 # Create a build user
 sudo useradd -m builder
 echo "builder ALL=(ALL) NOPASSWD:ALL" | sudo tee -a /etc/sudoers
+echo "builder:password" | chpasswd
 sudo su - builder
 cd ~
 
@@ -58,7 +59,7 @@ nix-channel --update
 Then build the files in this working directory with:
 
 ```bash
-nix build .#live-iso
+nix build .#build-large
 ```
 
 This creates a bootable live cd to use!
