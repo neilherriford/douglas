@@ -1,7 +1,6 @@
-use super::ClientErrorDisplay;
 use super::mount_path_factory::MountPathFactory;
 use super::token_validator::TokenValidator;
-use crate::Response;
+use super::{ClientErrorDisplay, Response};
 use log::Logger;
 use std::sync::Arc;
 
@@ -34,6 +33,7 @@ impl ActiveMountVersion {
                 self.mount_paths.active_version(&service_name, &mount_name)
             );
             Response::MountSet {
+                name: mount_name.to_string(),
                 version,
                 path: self
                     .mount_paths
@@ -49,8 +49,10 @@ mod tests {
     mod active_mount_version {
         use super::super::ActiveMountVersion;
         use crate::{
-            Response, Version,
-            server::{mount_path_factory::MountPathFactory, token_validator::TokenValidator},
+            Version,
+            server::{
+                Response, mount_path_factory::MountPathFactory, token_validator::TokenValidator,
+            },
         };
         use file_system::{MockFileReader, MockFolder, MockLinks};
         use log::MockLogger;
@@ -125,8 +127,8 @@ mod tests {
             log.expect_info().return_const(());
             file_reader.given_can_read_all_with_contents("/tmp/token", "token");
             folder
-                .given_folder_exists("/tmp/mount_root/bar/baz/current")
-                .given_folder_exists("/tmp/mount_root/bar/baz/v5");
+                .given_exists("/tmp/mount_root/bar/baz/current")
+                .given_exists("/tmp/mount_root/bar/baz/v5");
             links.given_symlink(
                 "/tmp/mount_root/bar/baz/current",
                 "/tmp/mount_root/bar/baz/v5",
@@ -150,9 +152,10 @@ mod tests {
             assert!(matches!(
                     actual,
                     Response::MountSet {
+                        name,
                         version,
                         path
-                    } if version == Version(5) && path == Path::new("/tmp/mount_root/bar/baz/current")));
+                    } if name == "baz" && version == Version(5) && path == Path::new("/tmp/mount_root/bar/baz/current")));
         }
     }
 }

@@ -9,8 +9,8 @@ use super::shutdown::Shutdown;
 use super::token_refresher::TokenRefresher;
 use super::token_validator::TokenValidator;
 use super::version_manager::VersionManager;
+use super::{Request, Response};
 use super::{active_mount_version::ActiveMountVersion, status::Status};
-use crate::{Request, Response};
 use credentials::{Credentials, CredentialsError};
 use file_system::{
     FileDeleter, FileReader, FileSystemError, FileWriter, Folder, Links, Listener, Permissions,
@@ -193,7 +193,7 @@ pub struct Server {
     log: Arc<dyn Logger + Sync + Send + 'static>,
     request_handler: Arc<RequestHandler>,
     token_refresher: Arc<TokenRefresher>,
-    create_listener: CreateListener,
+    listener_factory: CreateListener,
     credentials: Arc<dyn Credentials + Send + Sync + 'static>,
     service_user_name: String,
     service_group_name: String,
@@ -245,7 +245,7 @@ impl Server {
                 Arc::clone(&os),
                 service_group_name,
             )),
-            create_listener: CreateListener::new(
+            listener_factory: CreateListener::new(
                 Arc::clone(&log),
                 socket_path,
                 Arc::clone(&file_deleter),
@@ -273,10 +273,14 @@ impl Server {
 
         let log = Arc::clone(&self.log);
 
-        let rt = tokio::runtime::Runtime::new()?;
+        let rt = tokio::runtime::Runtime::new()
+            .inspect_err(|e| self.log.error(&format!("Runtime error: {e}")))?;
         rt.block_on(async {
             log.info("Creating listner");
-            let listener = self.create_listener.create()?;
+            let listener = self
+                .listener_factory
+                .create()
+                .inspect_err(|e| self.log.error(&format!("{e}")))?;
 
             let token_refresh = Self::token_refresh_task(
                 Arc::clone(&self.token_refresher),
@@ -290,8 +294,8 @@ impl Server {
             log.info("Started!");
 
             tokio::select! {
-                r = token_refresh => r?,
-                r = request_handler => r?,
+                r = token_refresh => r.inspect_err(|e| self.log.error(&format!("{e}")))?,
+                r = request_handler => r.inspect_err(|e| self.log.error(&format!("{e}")))?,
             }
 
             log.info("Shutting down");

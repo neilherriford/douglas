@@ -1,6 +1,7 @@
 pub mod container;
 pub mod image;
 pub mod network;
+pub mod status;
 
 use file_system::FileSystemError;
 use log::Logger;

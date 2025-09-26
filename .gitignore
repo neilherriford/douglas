@@ -5,3 +5,4 @@
 **/ssh-host-keys/*
 **/ssh-keys/*
 douglas-dev.iso
+**/cargo-test*.profraw

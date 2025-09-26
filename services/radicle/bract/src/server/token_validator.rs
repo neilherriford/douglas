@@ -1,5 +1,4 @@
-use super::ClientErrorDisplay;
-use crate::Response;
+use super::{ClientErrorDisplay, Response};
 use file_system::FileReader;
 use log::Logger;
 use std::path::{Path, PathBuf};
@@ -50,8 +49,9 @@ impl TokenValidator {
 #[cfg(test)]
 mod tests {
     mod token_validator {
+        use crate::server::Response;
+
         use super::super::TokenValidator;
-        use crate::Response;
         use file_system::{FileSystemError, MockFileReader};
         use log::MockLogger;
         use mockall::predicate;

@@ -111,16 +111,18 @@ impl Entry {
 #[cfg_attr(feature = "mock", mockall::automock)]
 pub trait FileWriter {
     fn write_all(&self, path: &Path, contents: String) -> Result<(), FileSystemError>;
+    fn exists(&self, path: &Path) -> bool;
 }
 
 #[cfg_attr(feature = "mock", mockall::automock)]
 pub trait FileReader {
     fn read_all(&self, path: &Path) -> Result<String, FileSystemError>;
+    fn exists(&self, path: &Path) -> bool;
 }
 
 #[cfg(feature = "mock")]
 impl MockFileReader {
-    pub fn given_can_read_all_with_contents(&mut self, path: &str, contents: &str) {
+    pub fn given_can_read_all_with_contents(&mut self, path: &str, contents: &str) -> &mut Self {
         let path = path.to_string();
         let path = PathBuf::from(path);
         let contents = contents.to_string();
@@ -128,6 +130,8 @@ impl MockFileReader {
         self.expect_read_all()
             .with(predicate::eq(path.clone()))
             .returning(move |_| Ok(contents.clone()));
+
+        self
     }
 }
 
@@ -169,11 +173,16 @@ impl FileWriter for LocalFileWriter {
 
         Ok(())
     }
+
+    fn exists(&self, path: &Path) -> bool {
+        path.exists()
+    }
 }
 
 #[cfg_attr(feature = "mock", mockall::automock)]
 pub trait FileAppender {
     fn append(&self, path: &Path, contents: String) -> Result<(), FileSystemError>;
+    fn exists(&self, path: &Path) -> bool;
 }
 
 pub struct LocalFileAppender {}
@@ -191,6 +200,10 @@ impl FileAppender for LocalFileAppender {
 
         Ok(())
     }
+
+    fn exists(&self, path: &Path) -> bool {
+        path.exists()
+    }
 }
 
 pub struct LocalFileReader {}
@@ -204,6 +217,9 @@ impl LocalFileReader {
 impl FileReader for LocalFileReader {
     fn read_all(&self, path: &Path) -> Result<String, FileSystemError> {
         Ok(read_to_string(path)?)
+    }
+    fn exists(&self, path: &Path) -> bool {
+        path.exists()
     }
 }
 
@@ -558,11 +574,11 @@ impl MockFolder {
         self
     }
 
-    pub fn given_folder_exists(&mut self, path: &str) -> &mut Self {
+    pub fn given_exists(&mut self, path: &str) -> &mut Self {
         self.given_folder(path, true)
     }
 
-    pub fn given_folder_does_not_exist(&mut self, path: &str) -> &mut Self {
+    pub fn given_does_not_exist(&mut self, path: &str) -> &mut Self {
         self.given_folder(path, false)
     }
 
@@ -627,5 +643,18 @@ impl Entry {
             kind: EntryKind::Directory,
             name: name.to_string(),
         }
+    }
+}
+
+#[cfg(feature = "mock")]
+impl MockFileWriter {
+    pub fn expect_write_to_file_with_something(&mut self, path: &str) -> &mut Self {
+        let path = Path::new(path);
+        let path = path.to_path_buf();
+
+        self.expect_write_all()
+            .with(predicate::eq(path.clone()), predicate::always())
+            .returning(|_, _| Ok(()));
+        self
     }
 }

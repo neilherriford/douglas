@@ -1,5 +1,4 @@
-use super::{ClientErrorDisplay, token_validator::TokenValidator};
-use crate::Response;
+use super::{ClientErrorDisplay, Response, token_validator::TokenValidator};
 use crate::encoding::safe_prefixed_credential_name;
 use credentials::{Credentials, CredentialsError};
 use log::Logger;

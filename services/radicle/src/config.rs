@@ -25,7 +25,7 @@ pub enum ConfigRepositoryError {
 
 #[automock]
 pub trait ConfigReader {
-    fn load(&self) -> Result<Config, ConfigRepositoryError>;
+    fn read(&self) -> Result<Config, ConfigRepositoryError>;
 }
 
 #[automock]
@@ -37,7 +37,6 @@ pub struct LocalConfigRepository {
     folder: Arc<dyn Folder + Send + Sync + 'static>,
     permissions: Arc<dyn Permissions + Send + Sync + 'static>,
     file_writer: Arc<dyn FileWriter + Send + Sync + 'static>,
-    #[allow(dead_code)]
     file_reader: Arc<dyn FileReader + Send + Sync + 'static>,
 }
 
@@ -64,7 +63,7 @@ impl LocalConfigRepository {
 }
 
 impl ConfigReader for LocalConfigRepository {
-    fn load(&self) -> Result<Config, ConfigRepositoryError> {
+    fn read(&self) -> Result<Config, ConfigRepositoryError> {
         let path = self.config_path()?;
         let data = self.file_reader.read_all(path.as_path())?;
         let config: Config = serde_json::from_str(&data)?;
@@ -95,7 +94,7 @@ impl ConfigWriter for LocalConfigRepository {
 #[cfg(test)]
 impl MockConfigReader {
     pub fn given_config(&mut self, config: Config) -> &mut Self {
-        self.expect_load().returning_st(move || Ok(config.clone()));
+        self.expect_read().returning_st(move || Ok(config.clone()));
         return self;
     }
 }
@@ -373,7 +372,7 @@ mod tests {
                 Arc::new(file_reader),
                 Arc::new(file_writer),
             )
-            .load();
+            .read();
 
             assert!(matches!(
                 actual,
@@ -400,7 +399,7 @@ mod tests {
                 Arc::new(file_reader),
                 Arc::new(file_writer),
             )
-            .load();
+            .read();
 
             assert!(matches!(
                 actual,
@@ -424,7 +423,7 @@ mod tests {
                 Arc::new(file_reader),
                 Arc::new(file_writer),
             )
-            .load();
+            .read();
 
             assert!(matches!(
                 actual,
@@ -457,7 +456,7 @@ mod tests {
                 Arc::new(file_reader),
                 Arc::new(file_writer),
             )
-            .load();
+            .read();
 
             let expected = Config {
                 log_path: PathBuf::from("/tmp/logs"),

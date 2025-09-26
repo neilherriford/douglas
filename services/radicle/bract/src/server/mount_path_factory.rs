@@ -220,7 +220,7 @@ mod tests {
             let links = MockLinks::new();
             let root = Path::new("/tmp/mount_root");
 
-            folder.given_folder_does_not_exist("/tmp/mount_root/foo%20service/bar%3Amount/current");
+            folder.given_does_not_exist("/tmp/mount_root/foo%20service/bar%3Amount/current");
             let actual = build(&root, Arc::new(folder), Arc::new(links))
                 .active_version("foo service", "bar:mount");
 
@@ -233,7 +233,7 @@ mod tests {
             let mut links = MockLinks::new();
             let root = Path::new("/tmp/mount_root");
 
-            folder.given_folder_exists("/tmp/mount_root/foo%20service/bar%3Amount/current");
+            folder.given_exists("/tmp/mount_root/foo%20service/bar%3Amount/current");
 
             links
                 .expect_read()
@@ -258,8 +258,8 @@ mod tests {
             let root = Path::new("/tmp/mount_root");
 
             folder
-                .given_folder_exists("/tmp/mount_root/foo%20service/bar%3Amount/current")
-                .given_folder_does_not_exist("/tmp/mount_root/foo%20service/bar%3Amount/oops");
+                .given_exists("/tmp/mount_root/foo%20service/bar%3Amount/current")
+                .given_does_not_exist("/tmp/mount_root/foo%20service/bar%3Amount/oops");
             links.given_symlink(
                 "/tmp/mount_root/foo%20service/bar%3Amount/current",
                 "/tmp/mount_root/foo%20service/bar%3Amount/oops",
@@ -278,8 +278,8 @@ mod tests {
             let root = Path::new("/tmp/mount_root");
 
             folder
-                .given_folder_exists("/tmp/mount_root/foo%20service/bar%3Amount/current")
-                .given_folder_exists("/tmp/mount_root/foo%20service/bar%3Amount/oops");
+                .given_exists("/tmp/mount_root/foo%20service/bar%3Amount/current")
+                .given_exists("/tmp/mount_root/foo%20service/bar%3Amount/oops");
 
             folder
                 .expect_pop()
@@ -309,8 +309,8 @@ mod tests {
             let root = Path::new("/tmp/mount_root");
 
             folder
-                .given_folder_exists("/tmp/mount_root/foo%20service/bar%3Amount/current")
-                .given_folder_exists("/tmp/mount_root/foo%20service/bar%3Amount/oops");
+                .given_exists("/tmp/mount_root/foo%20service/bar%3Amount/current")
+                .given_exists("/tmp/mount_root/foo%20service/bar%3Amount/oops");
 
             folder
                 .expect_pop()
@@ -340,8 +340,8 @@ mod tests {
             let root = Path::new("/tmp/mount_root");
 
             folder
-                .given_folder_exists("/tmp/mount_root/foo%20service/bar%3Amount/current")
-                .given_folder_exists("/tmp/mount_root/foo%20service/bar%3Amount/v5");
+                .given_exists("/tmp/mount_root/foo%20service/bar%3Amount/current")
+                .given_exists("/tmp/mount_root/foo%20service/bar%3Amount/v5");
 
             folder
                 .expect_pop()

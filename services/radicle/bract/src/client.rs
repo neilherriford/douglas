@@ -1,9 +1,10 @@
-use crate::Request as ServerRequest;
-use crate::Response;
-use crate::Version;
-use file_system::{FileReader, FileSystemError};
+use crate::server::{Request as ServerRequest, Response as ServerResponse};
+use crate::{Mount, Service, Version};
+use file_system::FileReader;
 use futures::{SinkExt, StreamExt};
 use log::Logger;
+use serde::Serialize;
+use std::io::ErrorKind;
 use std::{
     path::{Path, PathBuf},
     sync::Arc,
@@ -14,130 +15,48 @@ use tokio_serde::Framed as SerdeFramed;
 use tokio_serde::formats::Json;
 use tokio_util::codec::{Framed, LengthDelimitedCodec};
 
-#[derive(Debug)]
-pub enum Request {
-    ActiveMountVersion {
-        service_name: String,
-        mount_name: String,
-    },
-    CreateCredentials {
-        service_name: String,
-    },
-    CreateMount {
-        service_name: String,
-        mount_name: String,
-    },
-    CreateNewMountVersion {
-        service_name: String,
-        mount_name: String,
-    },
-    ListMountVersions {
-        service_name: String,
-        mount_name: String,
-    },
-    SetMountVersion {
-        service_name: String,
-        mount_name: String,
-        version: Version,
-    },
-    Status,
-    Shutdown,
-}
-
-struct ServerRequestFactory {
-    file_reader: Arc<dyn FileReader + Sync + Send + 'static>,
-    token_path: PathBuf,
-}
-
-impl ServerRequestFactory {
-    pub fn new(
-        file_reader: Arc<dyn FileReader + Sync + Send + 'static>,
-        token_path: &Path,
-    ) -> Self {
-        Self {
-            file_reader: Arc::clone(&file_reader),
-            token_path: token_path.to_path_buf(),
-        }
-    }
-
-    pub fn create(&self, request: Request) -> Result<ServerRequest, FileSystemError> {
-        let token = self.file_reader.read_all(self.token_path.as_path())?;
-
-        match request {
-            Request::ActiveMountVersion {
-                service_name,
-                mount_name,
-            } => Ok(ServerRequest::ActiveMountVersion {
-                token,
-                service_name,
-                mount_name,
-            }),
-            Request::CreateCredentials { service_name } => Ok(ServerRequest::CreateCredentials {
-                token,
-                service_name,
-            }),
-            Request::CreateMount {
-                service_name,
-                mount_name,
-            } => Ok(ServerRequest::CreateMount {
-                token,
-                service_name,
-                mount_name,
-            }),
-            Request::CreateNewMountVersion {
-                service_name,
-                mount_name,
-            } => Ok(ServerRequest::CreateNewMountVersion {
-                token,
-                service_name,
-                mount_name,
-            }),
-            Request::ListMountVersions {
-                service_name,
-                mount_name,
-            } => Ok(ServerRequest::ListMountVersions {
-                token,
-                service_name,
-                mount_name,
-            }),
-            Request::SetMountVersion {
-                service_name,
-                mount_name,
-                version,
-            } => Ok(ServerRequest::SetMountVersion {
-                token,
-                service_name,
-                mount_name,
-                version,
-            }),
-            Request::Status => Ok(ServerRequest::Status { token }),
-            Request::Shutdown => Ok(ServerRequest::Shutdown { token }),
-        }
-    }
-}
-
 #[derive(Error, Debug)]
 pub enum ClientError {
+    #[error("Missing token. Has the system been initialized?")]
+    MissingToken,
+    #[error("Invalid token")]
+    InvalidToken,
+    #[error("Connection refused.  Is douglas running?")]
+    ConnectionRefused,
     #[error("Server closed connection without responding")]
     NoResponse,
-    #[error("FileSystemError: {0}")]
-    FileSystemError(#[from] FileSystemError),
-    #[error("IO error: {0}")]
-    IoError(#[from] std::io::Error),
+    #[error("Server returned an unexpected response")]
+    UnexpectedResponse,
+    #[error("Error: {0}")]
+    Error(String),
 }
 
-pub struct Client {
-    server_request_factory: Arc<ServerRequestFactory>,
-    log: Arc<dyn Logger + Sync + Send + 'static>,
-    socket_path: PathBuf,
+#[derive(Debug)]
+pub struct Credential {
+    pub user: String,
+    pub group: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct Status {
+    pub token_path: PathBuf,
+    pub mount_root: PathBuf,
+    pub services: Vec<Service>,
 }
 
 type Transport = SerdeFramed<
     Framed<UnixStream, LengthDelimitedCodec>,
-    Response,
+    ServerResponse,
     ServerRequest,
-    Json<Response, ServerRequest>,
+    Json<ServerResponse, ServerRequest>,
 >;
+
+pub struct Client {
+    log: Arc<dyn Logger + Sync + Send + 'static>,
+    file_reader: Arc<dyn FileReader + Sync + Send + 'static>,
+    socket_path: PathBuf,
+    token_path: PathBuf,
+}
 
 impl Client {
     pub fn new(
@@ -148,29 +67,248 @@ impl Client {
     ) -> Self {
         Self {
             log: Arc::clone(&log),
-            server_request_factory: Arc::new(ServerRequestFactory::new(file_reader, token_path)),
+            file_reader,
+            token_path: token_path.to_path_buf(),
             socket_path: socket_path.to_path_buf(),
         }
     }
 
-    pub async fn request(&self, request: Request) -> Result<Response, ClientError> {
-        let request = self.server_request_factory.create(request)?;
-        let stream = UnixStream::connect(self.socket_path.as_path()).await?;
+    fn get_token(&self) -> Result<String, ClientError> {
+        let token_path = self.token_path.as_path();
+        if !self.file_reader.exists(token_path) {
+            return Err(ClientError::MissingToken);
+        }
 
-        let length_delimited = Framed::new(stream, LengthDelimitedCodec::new());
-        let mut transport: Transport = SerdeFramed::new(length_delimited, Json::default());
+        match self.file_reader.read_all(token_path) {
+            Ok(token) => Ok(token),
+            Err(err) => Err(ClientError::Error(format!("{:?}", err))),
+        }
+    }
 
-        transport.send(request).await?;
+    fn create_client_error_from_response(&self, response: ServerResponse) -> ClientError {
+        match response {
+            ServerResponse::Error(err) => ClientError::Error(err),
+            ServerResponse::InvalidToken => ClientError::InvalidToken,
+            _ => ClientError::UnexpectedResponse,
+        }
+    }
 
-        if let Some(resp) = transport.next().await {
-            match resp {
-                Ok(response) => Ok(response),
-                Err(err) => Err(err.into()),
-            }
+    pub async fn active_mount_version(
+        &self,
+        service_name: &str,
+        mount_name: &str,
+    ) -> Result<Mount, ClientError> {
+        let response = self
+            .request(ServerRequest::ActiveMountVersion {
+                token: self.get_token()?,
+                service_name: service_name.to_string(),
+                mount_name: mount_name.to_string(),
+            })
+            .await?;
+
+        if let ServerResponse::MountSet {
+            name,
+            version,
+            path,
+        } = response
+        {
+            Ok(Mount {
+                name,
+                version,
+                path,
+            })
         } else {
-            self.log
-                .error("Server closed connection without responding");
-            Err(ClientError::NoResponse)
+            Err(self.create_client_error_from_response(response))
+        }
+    }
+
+    pub async fn create_credentials(&self, service_name: &str) -> Result<Credential, ClientError> {
+        let response = self
+            .request(ServerRequest::CreateCredentials {
+                token: self.get_token()?,
+                service_name: service_name.to_string(),
+            })
+            .await?;
+
+        if let ServerResponse::CredentialsCreated { user, group } = response {
+            Ok(Credential { user, group })
+        } else {
+            Err(self.create_client_error_from_response(response))
+        }
+    }
+
+    pub async fn create_mount(
+        &self,
+        service_name: &str,
+        mount_name: &str,
+    ) -> Result<Mount, ClientError> {
+        let response = self
+            .request(ServerRequest::CreateMount {
+                token: self.get_token()?,
+                service_name: service_name.to_string(),
+                mount_name: mount_name.to_string(),
+            })
+            .await?;
+
+        if let ServerResponse::MountSet {
+            name,
+            version,
+            path,
+        } = response
+        {
+            Ok(Mount {
+                name,
+                version,
+                path,
+            })
+        } else {
+            Err(self.create_client_error_from_response(response))
+        }
+    }
+
+    pub async fn create_new_mount_version(
+        &self,
+        service_name: &str,
+        mount_name: &str,
+    ) -> Result<Mount, ClientError> {
+        let response = self
+            .request(ServerRequest::CreateNewMountVersion {
+                token: self.get_token()?,
+                service_name: service_name.to_string(),
+                mount_name: mount_name.to_string(),
+            })
+            .await?;
+
+        if let ServerResponse::MountSet {
+            name,
+            version,
+            path,
+        } = response
+        {
+            Ok(Mount {
+                name,
+                version,
+                path,
+            })
+        } else {
+            Err(self.create_client_error_from_response(response))
+        }
+    }
+
+    pub async fn list_mount_versions(
+        &self,
+        service_name: &str,
+        mount_name: &str,
+    ) -> Result<Vec<Version>, ClientError> {
+        let response = self
+            .request(ServerRequest::ListMountVersions {
+                token: self.get_token()?,
+                service_name: service_name.to_string(),
+                mount_name: mount_name.to_string(),
+            })
+            .await?;
+
+        if let ServerResponse::MountVersionsListed(versions) = response {
+            Ok(versions)
+        } else {
+            Err(self.create_client_error_from_response(response))
+        }
+    }
+
+    pub async fn set_mount_version(
+        &self,
+        service_name: &str,
+        mount_name: &str,
+        version: Version,
+    ) -> Result<Mount, ClientError> {
+        let response = self
+            .request(ServerRequest::SetMountVersion {
+                token: self.get_token()?,
+                service_name: service_name.to_string(),
+                mount_name: mount_name.to_string(),
+                version,
+            })
+            .await?;
+
+        if let ServerResponse::MountSet {
+            name,
+            version,
+            path,
+        } = response
+        {
+            Ok(Mount {
+                name,
+                version,
+                path,
+            })
+        } else {
+            Err(self.create_client_error_from_response(response))
+        }
+    }
+
+    pub async fn status(&self) -> Result<Status, ClientError> {
+        let response = self
+            .request(ServerRequest::Status {
+                token: self.get_token()?,
+            })
+            .await?;
+
+        if let ServerResponse::Status {
+            token_path,
+            mount_root,
+            services,
+        } = response
+        {
+            Ok(Status {
+                token_path,
+                mount_root,
+                services,
+            })
+        } else {
+            Err(self.create_client_error_from_response(response))
+        }
+    }
+
+    pub async fn shutdown(&self) -> Result<(), ClientError> {
+        let response = self
+            .request(ServerRequest::Shutdown {
+                token: self.get_token()?,
+            })
+            .await?;
+
+        if let ServerResponse::ShuttingDown = response {
+            Ok(())
+        } else {
+            Err(self.create_client_error_from_response(response))
+        }
+    }
+
+    async fn request(&self, request: ServerRequest) -> Result<ServerResponse, ClientError> {
+        match UnixStream::connect(self.socket_path.as_path()).await {
+            Ok(stream) => {
+                let length_delimited = Framed::new(stream, LengthDelimitedCodec::new());
+                let mut transport: Transport = SerdeFramed::new(length_delimited, Json::default());
+
+                if let Err(err) = transport.send(request).await {
+                    return Err(ClientError::Error(format!("{:?}", err)));
+                }
+
+                if let Some(resp) = transport.next().await {
+                    match resp {
+                        Ok(response) => Ok(response),
+                        Err(err) => Err(ClientError::Error(format!("{:?}", err))),
+                    }
+                } else {
+                    self.log
+                        .error("Server closed connection without responding");
+                    Err(ClientError::NoResponse)
+                }
+            }
+            Err(err) => match err.kind() {
+                ErrorKind::NotFound => Err(ClientError::MissingToken),
+                ErrorKind::ConnectionRefused => Err(ClientError::ConnectionRefused),
+                _ => Err(ClientError::Error(format!("{:?}", err))),
+            },
         }
     }
 }

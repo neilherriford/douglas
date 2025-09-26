@@ -1,7 +1,6 @@
-use super::ClientErrorDisplay;
 use super::token_validator::TokenValidator;
 use super::version_manager::VersionManager;
-use crate::Response;
+use super::{ClientErrorDisplay, Response};
 use crate::version::Version;
 use log::Logger;
 use std::sync::Arc;
@@ -57,6 +56,7 @@ impl CreateNewMountVersion {
             );
 
             Response::MountSet {
+                name: mount_name,
                 version: new_version,
                 path,
             }
@@ -69,9 +69,9 @@ mod tests {
     mod create_new_mount_version {
         use super::super::CreateNewMountVersion;
         use crate::{
-            Response, Version,
+            Version,
             server::{
-                mount_path_factory::MountPathFactory, token_validator::TokenValidator,
+                Response, mount_path_factory::MountPathFactory, token_validator::TokenValidator,
                 version_manager::VersionManager,
             },
         };
@@ -174,11 +174,11 @@ mod tests {
             file_reader.given_can_read_all_with_contents("/tmp/token", "token");
             credentials.given_user_and_group_exist("doug-bar", "doug-bar");
             folder
-                .given_folder_does_not_exist("/tmp/mount_root/")
-                .given_folder_does_not_exist("/tmp/mount_root/bar")
-                .given_folder_does_not_exist("/tmp/mount_root/bar/baz")
-                .given_folder_does_not_exist("/tmp/mount_root/bar/baz/current")
-                .given_folder_does_not_exist("/tmp/mount_root/bar/baz/v0")
+                .given_does_not_exist("/tmp/mount_root/")
+                .given_does_not_exist("/tmp/mount_root/bar")
+                .given_does_not_exist("/tmp/mount_root/bar/baz")
+                .given_does_not_exist("/tmp/mount_root/bar/baz/current")
+                .given_does_not_exist("/tmp/mount_root/bar/baz/v0")
                 .expect_create_folder_recursively_with("/tmp/mount_root")
                 .expect_create_folder_recursively_with("/tmp/mount_root/bar")
                 .expect_create_folder_recursively_with("/tmp/mount_root/bar/baz")
@@ -235,9 +235,10 @@ mod tests {
             .create("token".to_string(), "bar".to_string(), "baz".to_string());
 
             assert!(matches!(actual, Response::MountSet {
+                    name,
                     version,
                     path
-                } if version == Version(0) && path == Path::new("/tmp/mount_root/bar/baz/current")));
+                } if name == "baz" && version == Version(0) && path == Path::new("/tmp/mount_root/bar/baz/current")));
         }
 
         #[test]
@@ -256,11 +257,11 @@ mod tests {
             file_reader.given_can_read_all_with_contents("/tmp/token", "token");
             credentials.given_user_and_group_exist("doug-bar", "doug-bar");
             folder
-                .given_folder_exists("/tmp/mount_root/")
-                .given_folder_does_not_exist("/tmp/mount_root/bar")
-                .given_folder_does_not_exist("/tmp/mount_root/bar/baz")
-                .given_folder_does_not_exist("/tmp/mount_root/bar/baz/current")
-                .given_folder_does_not_exist("/tmp/mount_root/bar/baz/v0")
+                .given_exists("/tmp/mount_root/")
+                .given_does_not_exist("/tmp/mount_root/bar")
+                .given_does_not_exist("/tmp/mount_root/bar/baz")
+                .given_does_not_exist("/tmp/mount_root/bar/baz/current")
+                .given_does_not_exist("/tmp/mount_root/bar/baz/v0")
                 .expect_create_folder_recursively_with("/tmp/mount_root/bar")
                 .expect_create_folder_recursively_with("/tmp/mount_root/bar/baz")
                 .expect_create_folder_recursively_with("/tmp/mount_root/bar/baz/v0");
@@ -310,9 +311,10 @@ mod tests {
             .create("token".to_string(), "bar".to_string(), "baz".to_string());
 
             assert!(matches!(actual, Response::MountSet {
+                    name,
                     version,
                     path
-                } if version == Version(0) && path == Path::new("/tmp/mount_root/bar/baz/current")));
+                } if name == "baz" && version == Version(0) && path == Path::new("/tmp/mount_root/bar/baz/current")));
         }
 
         #[test]
@@ -331,12 +333,12 @@ mod tests {
             file_reader.given_can_read_all_with_contents("/tmp/token", "token");
             credentials.given_user_and_group_exist("doug-bar", "doug-bar");
             folder
-                .given_folder_exists("/tmp/mount_root/")
-                .given_folder_exists("/tmp/mount_root/bar")
-                .given_folder_exists("/tmp/mount_root/bar/baz")
-                .given_folder_exists("/tmp/mount_root/bar/baz/current")
-                .given_folder_exists("/tmp/mount_root/bar/baz/v0")
-                .given_folder_does_not_exist("/tmp/mount_root/bar/baz/v1")
+                .given_exists("/tmp/mount_root/")
+                .given_exists("/tmp/mount_root/bar")
+                .given_exists("/tmp/mount_root/bar/baz")
+                .given_exists("/tmp/mount_root/bar/baz/current")
+                .given_exists("/tmp/mount_root/bar/baz/v0")
+                .given_does_not_exist("/tmp/mount_root/bar/baz/v1")
                 .expect_create_folder_recursively_with("/tmp/mount_root/bar/baz/v1");
 
             permissions
@@ -378,9 +380,10 @@ mod tests {
             .create("token".to_string(), "bar".to_string(), "baz".to_string());
 
             assert!(matches!(actual, Response::MountSet {
+                name,
                     version,
                     path
-                } if version == Version(1) && path == Path::new("/tmp/mount_root/bar/baz/current")));
+                } if name == "baz" && version == Version(1) && path == Path::new("/tmp/mount_root/bar/baz/current")));
         }
     }
 }

@@ -13,7 +13,7 @@ macro_rules! or_log_and_return_error {
 #[cfg(test)]
 mod tests {
     mod or_log_and_return_error {
-        use crate::Response;
+        use super::super::super::Response;
         use log::{Logger, MockLogger};
         use mockall::mock;
 

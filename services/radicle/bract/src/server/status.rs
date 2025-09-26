@@ -1,8 +1,6 @@
-use super::ClientErrorDisplay;
 use super::token_validator::TokenValidator;
 use super::version_manager::VersionManager;
-
-use crate::Response;
+use super::{ClientErrorDisplay, Response};
 use log::Logger;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -53,7 +51,8 @@ impl Status {
 mod tests {
     mod status {
         use super::super::*;
-        use crate::{Mount, Service, Version, server::mount_path_factory::MountPathFactory};
+        use crate::Mount;
+        use crate::{Service, Version, server::mount_path_factory::MountPathFactory};
         use credentials::MockCredentials;
         use file_system::{
             Entry, MockFileDeleter, MockFileReader, MockFolder, MockLinks, MockPermissions,
@@ -174,7 +173,7 @@ mod tests {
                         Entry::create_directory("baz-mount"),
                     ],
                 )
-                .given_folder_exists("/tmp/mount_root/foo-service/bar-mount")
+                .given_exists("/tmp/mount_root/foo-service/bar-mount")
                 .given_folder_entries(
                     "/tmp/mount_root/foo-service/bar-mount",
                     vec![
@@ -182,9 +181,9 @@ mod tests {
                         Entry::create_directory("v0"),
                     ],
                 )
-                .given_folder_exists("/tmp/mount_root/foo-service/bar-mount/current")
-                .given_folder_exists("/tmp/mount_root/foo-service/bar-mount/v0")
-                .given_folder_exists("/tmp/mount_root/foo-service/baz-mount")
+                .given_exists("/tmp/mount_root/foo-service/bar-mount/current")
+                .given_exists("/tmp/mount_root/foo-service/bar-mount/v0")
+                .given_exists("/tmp/mount_root/foo-service/baz-mount")
                 .given_folder_entries(
                     "/tmp/mount_root/foo-service/baz-mount",
                     vec![
@@ -193,16 +192,16 @@ mod tests {
                         Entry::create_directory("v1"),
                     ],
                 )
-                .given_folder_exists("/tmp/mount_root/foo-service/baz-mount/current")
-                .given_folder_exists("/tmp/mount_root/foo-service/baz-mount/v0")
-                .given_folder_exists("/tmp/mount_root/foo-service/baz-mount/v1");
+                .given_exists("/tmp/mount_root/foo-service/baz-mount/current")
+                .given_exists("/tmp/mount_root/foo-service/baz-mount/v0")
+                .given_exists("/tmp/mount_root/foo-service/baz-mount/v1");
 
             folder
                 .given_folder_entries(
                     "/tmp/mount_root/bar-service",
                     vec![Entry::create_directory("qux-mount")],
                 )
-                .given_folder_exists("/tmp/mount_root/bar-service/qux-mount")
+                .given_exists("/tmp/mount_root/bar-service/qux-mount")
                 .given_folder_entries(
                     "/tmp/mount_root/bar-service/qux-mount",
                     vec![
@@ -210,8 +209,8 @@ mod tests {
                         Entry::create_directory("v0"),
                     ],
                 )
-                .given_folder_exists("/tmp/mount_root/bar-service/qux-mount/current")
-                .given_folder_exists("/tmp/mount_root/bar-service/qux-mount/v0");
+                .given_exists("/tmp/mount_root/bar-service/qux-mount/current")
+                .given_exists("/tmp/mount_root/bar-service/qux-mount/v0");
 
             links
                 .given_symlink(
@@ -254,13 +253,15 @@ mod tests {
                         name: "foo-service".to_string(),
                         mounts: vec![
                             Mount {
-                                active: Version(0),
-                                available: vec![Version(0)],
+                                path: Path::new("/tmp/mount_root/foo-service/bar-mount/current")
+                                    .to_path_buf(),
+                                version: Version(0),
                                 name: "bar-mount".to_string(),
                             },
                             Mount {
-                                active: Version(1),
-                                available: vec![Version(0), Version(1)],
+                                path: Path::new("/tmp/mount_root/foo-service/baz-mount/current")
+                                    .to_path_buf(),
+                                version: Version(1),
                                 name: "baz-mount".to_string(),
                             },
                         ],
@@ -268,8 +269,9 @@ mod tests {
                     Service {
                         name: "bar-service".to_string(),
                         mounts: vec![Mount {
-                            active: Version(0),
-                            available: vec![Version(0)],
+                            path: Path::new("/tmp/mount_root/bar-service/qux-mount/current")
+                                .to_path_buf(),
+                            version: Version(0),
                             name: "qux-mount".to_string(),
                         }],
                     },

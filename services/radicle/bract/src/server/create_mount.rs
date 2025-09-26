@@ -1,7 +1,6 @@
-use super::ClientErrorDisplay;
 use super::token_validator::TokenValidator;
 use super::version_manager::VersionManager;
-use crate::Response;
+use super::{ClientErrorDisplay, Response};
 use crate::version::Version;
 use log::Logger;
 use std::sync::Arc;
@@ -42,6 +41,7 @@ impl CreateMount {
             );
 
             Response::MountSet {
+                name: mount_name,
                 version,
                 path: active_path.to_path_buf(),
             }
@@ -53,9 +53,10 @@ impl CreateMount {
 mod tests {
     mod create_mount {
         use super::super::CreateMount;
+        use crate::Version;
+        use crate::server::Response;
         use crate::server::create_mount::{TokenValidator, VersionManager};
         use crate::server::mount_path_factory::MountPathFactory;
-        use crate::{Response, Version};
         use credentials::MockCredentials;
         use file_system::{
             MockFileDeleter, MockFileReader, MockFolder, MockLinks, MockPermissions, Modes,
@@ -152,11 +153,11 @@ mod tests {
             file_reader.given_can_read_all_with_contents("/tmp/token", "token");
             credentials.given_user_and_group_exist("doug-bar", "doug-bar");
             folder
-                .given_folder_exists("/tmp/mount_root/")
-                .given_folder_exists("/tmp/mount_root/bar")
-                .given_folder_does_not_exist("/tmp/mount_root/bar/baz")
-                .given_folder_does_not_exist("/tmp/mount_root/bar/baz/current")
-                .given_folder_does_not_exist("/tmp/mount_root/bar/baz/v0")
+                .given_exists("/tmp/mount_root/")
+                .given_exists("/tmp/mount_root/bar")
+                .given_does_not_exist("/tmp/mount_root/bar/baz")
+                .given_does_not_exist("/tmp/mount_root/bar/baz/current")
+                .given_does_not_exist("/tmp/mount_root/bar/baz/v0")
                 .expect_create_folder_recursively_with("/tmp/mount_root/bar/")
                 .expect_create_folder_recursively_with("/tmp/mount_root/bar/baz")
                 .expect_create_folder_recursively_with("/tmp/mount_root/bar/baz/v0");
@@ -208,9 +209,10 @@ mod tests {
             .create("token".to_string(), "bar".to_string(), "baz".to_string());
 
             assert!(matches!(actual, Response::MountSet {
+                    name,
                     version,
                     path
-                } if version == Version(0) && path == Path::new("/tmp/mount_root/bar/baz/current")));
+                } if name == "baz" && version == Version(0) && path == Path::new("/tmp/mount_root/bar/baz/current")));
         }
     }
 }

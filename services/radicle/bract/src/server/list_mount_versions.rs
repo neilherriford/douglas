@@ -1,7 +1,6 @@
-use super::ClientErrorDisplay;
 use super::token_validator::TokenValidator;
 use super::version_manager::VersionManager;
-use crate::Response;
+use super::{ClientErrorDisplay, Response};
 use log::Logger;
 use std::sync::Arc;
 
@@ -43,9 +42,9 @@ mod tests {
     mod list_mount_versions {
         use super::super::ListMountVersions;
         use crate::{
-            Response, Version,
+            Version,
             server::{
-                mount_path_factory::MountPathFactory, token_validator::TokenValidator,
+                Response, mount_path_factory::MountPathFactory, token_validator::TokenValidator,
                 version_manager::VersionManager,
             },
         };
@@ -145,7 +144,7 @@ mod tests {
             log.expect_info().return_const(());
             file_reader.given_can_read_all_with_contents("/tmp/token", "token");
             folder
-                .given_folder_exists("/tmp/mount_root/bar/baz/")
+                .given_exists("/tmp/mount_root/bar/baz/")
                 .given_folder_entries(
                     "/tmp/mount_root/bar/baz/",
                     vec![Entry::create_directory("v0"), Entry::create_directory("v1")],

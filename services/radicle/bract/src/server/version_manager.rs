@@ -1,8 +1,9 @@
 use super::ClientErrorDisplay;
 use super::mount_path_factory::{MountPathFactory, MountPathVersionError};
+use crate::Mount;
+use crate::Service;
 use crate::encoding::safe_prefixed_credential_name;
 use crate::version::Version;
-use crate::{Mount, Service};
 use credentials::Credentials;
 use file_system::{EntryKind, FileDeleter, FileSystemError, Folder, Links, Modes, Permissions};
 use std::fmt::Debug;
@@ -273,14 +274,17 @@ impl VersionManager {
                 .iter()
                 .filter(|entry| entry.kind == EntryKind::Directory)
             {
-                let available = self.versions(&service.name, &mount.name)?;
-                let active = self
+                let version = self
                     .mount_paths
                     .active_version(&service.name, &mount.name)?;
+                let path = self
+                    .mount_paths
+                    .active_version_path(&service.name, &mount.name);
+
                 mounts.push(Mount {
                     name: mount.name.to_string(),
-                    active,
-                    available,
+                    path,
+                    version,
                 });
             }
             services.push(Service {
@@ -461,7 +465,7 @@ mod tests {
             let mount_root = Path::new("/tmp/mount_root");
 
             credentials.given_user_and_group_exist("doug-foo", "doug-foo");
-            folder.given_folder_does_not_exist("/tmp/mount_root");
+            folder.given_does_not_exist("/tmp/mount_root");
             folder
                 .expect_create_recursively()
                 .with(predicate::eq(Path::new("/tmp/mount_root")))
@@ -494,7 +498,7 @@ mod tests {
 
             credentials.given_user_and_group_exist("doug-foo", "doug-foo");
             folder
-                .given_folder_does_not_exist("/tmp/mount_root")
+                .given_does_not_exist("/tmp/mount_root")
                 .expect_create_folder_recursively_with("/tmp/mount_root");
             permissions
                 .expect_change_user_and_group_ownership()
@@ -532,9 +536,9 @@ mod tests {
 
             credentials.given_user_and_group_exist("doug-foo", "doug-foo");
             folder
-                .given_folder_exists("/tmp/mount_root")
-                .given_folder_does_not_exist("/tmp/mount_root/foo")
-                .given_folder_does_not_exist("/tmp/mount_root/foo/bar")
+                .given_exists("/tmp/mount_root")
+                .given_does_not_exist("/tmp/mount_root/foo")
+                .given_does_not_exist("/tmp/mount_root/foo/bar")
                 .expect_create_folder_recursively_with("/tmp/mount_root")
                 .expect_create_folder_recursively_with("/tmp/mount_root/foo");
 
@@ -574,9 +578,9 @@ mod tests {
 
             credentials.given_user_and_group_exist("doug-foo", "doug-foo");
             folder
-                .given_folder_exists("/tmp/mount_root")
-                .given_folder_does_not_exist("/tmp/mount_root/foo")
-                .given_folder_does_not_exist("/tmp/mount_root/foo/bar");
+                .given_exists("/tmp/mount_root")
+                .given_does_not_exist("/tmp/mount_root/foo")
+                .given_does_not_exist("/tmp/mount_root/foo/bar");
 
             expect_create_service_directory(&mut folder, &mut permissions, "/tmp/mount_root/foo");
             folder
@@ -611,9 +615,9 @@ mod tests {
 
             credentials.given_user_and_group_exist("doug-foo", "doug-foo");
             folder
-                .given_folder_exists("/tmp/mount_root")
-                .given_folder_does_not_exist("/tmp/mount_root/foo")
-                .given_folder_does_not_exist("/tmp/mount_root/foo/bar")
+                .given_exists("/tmp/mount_root")
+                .given_does_not_exist("/tmp/mount_root/foo")
+                .given_does_not_exist("/tmp/mount_root/foo/bar")
                 .expect_create_folder_recursively_with("/tmp/mount_root/foo/bar");
 
             expect_create_service_directory(&mut folder, &mut permissions, "/tmp/mount_root/foo");
@@ -653,9 +657,9 @@ mod tests {
 
             credentials.given_user_and_group_exist("doug-foo", "doug-foo");
             folder
-                .given_folder_exists("/tmp/mount_root")
-                .given_folder_does_not_exist("/tmp/mount_root/foo")
-                .given_folder_does_not_exist("/tmp/mount_root/foo/bar")
+                .given_exists("/tmp/mount_root")
+                .given_does_not_exist("/tmp/mount_root/foo")
+                .given_does_not_exist("/tmp/mount_root/foo/bar")
                 .expect_create_folder_recursively_with("/tmp/mount_root/foo/bar");
 
             expect_create_service_directory(&mut folder, &mut permissions, "/tmp/mount_root/foo");
@@ -699,10 +703,10 @@ mod tests {
 
             credentials.given_user_and_group_exist("doug-foo", "doug-foo");
             folder
-                .given_folder_exists("/tmp/mount_root")
-                .given_folder_exists("/tmp/mount_root/foo")
-                .given_folder_exists("/tmp/mount_root/foo/bar")
-                .given_folder_exists("/tmp/mount_root/foo/bar/v0");
+                .given_exists("/tmp/mount_root")
+                .given_exists("/tmp/mount_root/foo")
+                .given_exists("/tmp/mount_root/foo/bar")
+                .given_exists("/tmp/mount_root/foo/bar/v0");
 
             let actual = create_version_manager(
                 folder,
@@ -730,10 +734,10 @@ mod tests {
 
             credentials.given_user_and_group_exist("doug-foo", "doug-foo");
             folder
-                .given_folder_exists("/tmp/mount_root/")
-                .given_folder_exists("/tmp/mount_root/foo")
-                .given_folder_exists("/tmp/mount_root/foo/bar")
-                .given_folder_does_not_exist("/tmp/mount_root/foo/bar/v0");
+                .given_exists("/tmp/mount_root/")
+                .given_exists("/tmp/mount_root/foo")
+                .given_exists("/tmp/mount_root/foo/bar")
+                .given_does_not_exist("/tmp/mount_root/foo/bar/v0");
 
             folder
                 .expect_create_recursively()
@@ -767,10 +771,10 @@ mod tests {
 
             credentials.given_user_and_group_exist("doug-foo", "doug-foo");
             folder
-                .given_folder_exists("/tmp/mount_root")
-                .given_folder_exists("/tmp/mount_root/foo")
-                .given_folder_exists("/tmp/mount_root/foo/bar")
-                .given_folder_does_not_exist("/tmp/mount_root/foo/bar/v0")
+                .given_exists("/tmp/mount_root")
+                .given_exists("/tmp/mount_root/foo")
+                .given_exists("/tmp/mount_root/foo/bar")
+                .given_does_not_exist("/tmp/mount_root/foo/bar/v0")
                 .expect_create_folder_recursively_with("/tmp/mount_root/foo/bar/v0");
 
             permissions
@@ -809,10 +813,10 @@ mod tests {
 
             credentials.given_user_and_group_exist("doug-foo", "doug-foo");
             folder
-                .given_folder_exists("/tmp/mount_root")
-                .given_folder_exists("/tmp/mount_root/foo")
-                .given_folder_exists("/tmp/mount_root/foo/bar")
-                .given_folder_does_not_exist("/tmp/mount_root/foo/bar/v0")
+                .given_exists("/tmp/mount_root")
+                .given_exists("/tmp/mount_root/foo")
+                .given_exists("/tmp/mount_root/foo/bar")
+                .given_does_not_exist("/tmp/mount_root/foo/bar/v0")
                 .expect_create_folder_recursively_with("/tmp/mount_root/foo/bar/v0");
 
             permissions.expect_ownership_to_be_set(
@@ -855,11 +859,11 @@ mod tests {
 
             credentials.given_user_and_group_exist("doug-foo", "doug-foo");
             folder
-                .given_folder_exists("/tmp/mount_root")
-                .given_folder_exists("/tmp/mount_root/foo")
-                .given_folder_exists("/tmp/mount_root/foo/bar")
-                .given_folder_exists("/tmp/mount_root/foo/bar/current")
-                .given_folder_does_not_exist("/tmp/mount_root/foo/bar/v0");
+                .given_exists("/tmp/mount_root")
+                .given_exists("/tmp/mount_root/foo")
+                .given_exists("/tmp/mount_root/foo/bar")
+                .given_exists("/tmp/mount_root/foo/bar/current")
+                .given_does_not_exist("/tmp/mount_root/foo/bar/v0");
             expect_version_folder_created(&mut folder, &mut permissions);
 
             file_deleter
@@ -894,11 +898,11 @@ mod tests {
 
             credentials.given_user_and_group_exist("doug-foo", "doug-foo");
             folder
-                .given_folder_exists("/tmp/mount_root")
-                .given_folder_exists("/tmp/mount_root/foo")
-                .given_folder_exists("/tmp/mount_root/foo/bar")
-                .given_folder_exists("/tmp/mount_root/foo/bar/current")
-                .given_folder_does_not_exist("/tmp/mount_root/foo/bar/v0");
+                .given_exists("/tmp/mount_root")
+                .given_exists("/tmp/mount_root/foo")
+                .given_exists("/tmp/mount_root/foo/bar")
+                .given_exists("/tmp/mount_root/foo/bar/current")
+                .given_does_not_exist("/tmp/mount_root/foo/bar/v0");
             expect_version_folder_created(&mut folder, &mut permissions);
 
             file_deleter.expect_file_to_be_deleted("/tmp/mount_root/foo/bar/current");
@@ -938,11 +942,11 @@ mod tests {
 
             credentials.given_user_and_group_exist("doug-foo", "doug-foo");
             folder
-                .given_folder_exists("/tmp/mount_root")
-                .given_folder_exists("/tmp/mount_root/foo")
-                .given_folder_exists("/tmp/mount_root/foo/bar")
-                .given_folder_exists("/tmp/mount_root/foo/bar/current")
-                .given_folder_does_not_exist("/tmp/mount_root/foo/bar/v0");
+                .given_exists("/tmp/mount_root")
+                .given_exists("/tmp/mount_root/foo")
+                .given_exists("/tmp/mount_root/foo/bar")
+                .given_exists("/tmp/mount_root/foo/bar/current")
+                .given_does_not_exist("/tmp/mount_root/foo/bar/v0");
             expect_version_folder_created(&mut folder, &mut permissions);
             expect_current_version_recreated(&mut file_deleter, &mut links);
 
@@ -982,11 +986,11 @@ mod tests {
 
             credentials.given_user_and_group_exist("doug-foo", "doug-foo");
             folder
-                .given_folder_exists("/tmp/mount_root")
-                .given_folder_exists("/tmp/mount_root/foo")
-                .given_folder_exists("/tmp/mount_root/foo/bar")
-                .given_folder_exists("/tmp/mount_root/foo/bar/current")
-                .given_folder_does_not_exist("/tmp/mount_root/foo/bar/v0");
+                .given_exists("/tmp/mount_root")
+                .given_exists("/tmp/mount_root/foo")
+                .given_exists("/tmp/mount_root/foo/bar")
+                .given_exists("/tmp/mount_root/foo/bar/current")
+                .given_does_not_exist("/tmp/mount_root/foo/bar/v0");
             expect_version_folder_created(&mut folder, &mut permissions);
             expect_current_version_recreated(&mut file_deleter, &mut links);
 
@@ -1030,11 +1034,11 @@ mod tests {
 
             credentials.given_user_and_group_exist("doug-foo", "doug-foo");
             folder
-                .given_folder_does_not_exist("/tmp/mount_root")
-                .given_folder_does_not_exist("/tmp/mount_root/foo")
-                .given_folder_does_not_exist("/tmp/mount_root/foo/bar")
-                .given_folder_does_not_exist("/tmp/mount_root/foo/bar/current")
-                .given_folder_does_not_exist("/tmp/mount_root/foo/bar/v0");
+                .given_does_not_exist("/tmp/mount_root")
+                .given_does_not_exist("/tmp/mount_root/foo")
+                .given_does_not_exist("/tmp/mount_root/foo/bar")
+                .given_does_not_exist("/tmp/mount_root/foo/bar/current")
+                .given_does_not_exist("/tmp/mount_root/foo/bar/v0");
 
             expect_create_root(&mut folder, &mut permissions);
             expect_create_service_and_mount_root(&mut folder, &mut permissions);
@@ -1134,7 +1138,7 @@ mod tests {
                 let mount_root = Path::new("/tmp/mount_root");
 
                 credentials.given_user_and_group_exist("doug-foo", "doug-foo");
-                folder.given_folder_exists("/tmp/mount_root/foo/bar/current");
+                folder.given_exists("/tmp/mount_root/foo/bar/current");
                 file_deleter
                     .expect_delete()
                     .with(predicate::eq(Path::new("/tmp/mount_root/foo/bar/current")))
@@ -1166,7 +1170,7 @@ mod tests {
                 let mount_root = Path::new("/tmp/mount_root");
 
                 credentials.given_user_and_group_exist("doug-foo", "doug-foo");
-                folder.given_folder_exists("/tmp/mount_root/foo/bar/current");
+                folder.given_exists("/tmp/mount_root/foo/bar/current");
                 file_deleter.expect_file_to_be_deleted("/tmp/mount_root/foo/bar/current");
 
                 links
@@ -1203,7 +1207,7 @@ mod tests {
                 let mount_root = Path::new("/tmp/mount_root");
 
                 credentials.given_user_and_group_exist("doug-foo", "doug-foo");
-                folder.given_folder_exists("/tmp/mount_root/foo/bar/current");
+                folder.given_exists("/tmp/mount_root/foo/bar/current");
                 file_deleter.expect_file_to_be_deleted("/tmp/mount_root/foo/bar/current");
                 links.expect_create_with(
                     "/tmp/mount_root/foo/bar/v0",
@@ -1246,10 +1250,10 @@ mod tests {
 
                 credentials.given_user_and_group_exist("doug-foo", "doug-foo");
                 folder
-                    .given_folder_exists("/tmp/mount_root")
-                    .given_folder_exists("/tmp/mount_root/foo")
-                    .given_folder_exists("/tmp/mount_root/foo/bar")
-                    .given_folder_exists("/tmp/mount_root/foo/bar/current");
+                    .given_exists("/tmp/mount_root")
+                    .given_exists("/tmp/mount_root/foo")
+                    .given_exists("/tmp/mount_root/foo/bar")
+                    .given_exists("/tmp/mount_root/foo/bar/current");
                 file_deleter.expect_file_to_be_deleted("/tmp/mount_root/foo/bar/current");
                 links.expect_create_with(
                     "/tmp/mount_root/foo/bar/v0",
@@ -1296,10 +1300,10 @@ mod tests {
 
                 credentials.given_user_and_group_exist("doug-foo", "doug-foo");
                 folder
-                    .given_folder_exists("/tmp/mount_root")
-                    .given_folder_exists("/tmp/mount_root/foo")
-                    .given_folder_exists("/tmp/mount_root/foo/bar")
-                    .given_folder_exists("/tmp/mount_root/foo/bar/current");
+                    .given_exists("/tmp/mount_root")
+                    .given_exists("/tmp/mount_root/foo")
+                    .given_exists("/tmp/mount_root/foo/bar")
+                    .given_exists("/tmp/mount_root/foo/bar/current");
                 expect_current_version_recreated(&mut file_deleter, &mut links);
 
                 permissions.expect_ownership_and_mode_to_be_set(
@@ -1340,7 +1344,7 @@ mod tests {
                 let credentials = MockCredentials::new();
                 let mount_root = Path::new("/tmp/mount_root");
 
-                folder.given_folder_does_not_exist("/tmp/mount_root/foo/bar");
+                folder.given_does_not_exist("/tmp/mount_root/foo/bar");
 
                 let actual = create_version_manager(
                     folder,
@@ -1364,7 +1368,7 @@ mod tests {
                 let credentials = MockCredentials::new();
                 let mount_root = Path::new("/tmp/mount_root");
 
-                folder.given_folder_exists("/tmp/mount_root/foo/bar");
+                folder.given_exists("/tmp/mount_root/foo/bar");
 
                 let actual = create_version_manager(
                     folder,
@@ -1396,7 +1400,7 @@ mod tests {
                 let credentials = MockCredentials::new();
                 let mount_root = Path::new("/tmp/mount_root");
 
-                folder.given_folder_does_not_exist("/tmp/mount_root/foo%20service/bar%3Amount");
+                folder.given_does_not_exist("/tmp/mount_root/foo%20service/bar%3Amount");
 
                 let actual = create_version_manager(
                     folder,
@@ -1421,7 +1425,7 @@ mod tests {
                 let mount_root = Path::new("/tmp/mount_root");
 
                 folder
-                    .given_folder_exists("/tmp/mount_root/foo%20service/bar%3Amount")
+                    .given_exists("/tmp/mount_root/foo%20service/bar%3Amount")
                     .given_folder_entries(
                         "/tmp/mount_root/foo%20service/bar%3Amount",
                         vec![
@@ -1453,7 +1457,7 @@ mod tests {
                 let mount_root = Path::new("/tmp/mount_root");
 
                 folder
-                    .given_folder_exists("/tmp/mount_root/foo%20service/bar%3Amount")
+                    .given_exists("/tmp/mount_root/foo%20service/bar%3Amount")
                     .given_folder_entries(
                         "/tmp/mount_root/foo%20service/bar%3Amount",
                         vec![
@@ -1486,7 +1490,7 @@ mod tests {
                 let mount_root = Path::new("/tmp/mount_root");
 
                 folder
-                    .given_folder_exists("/tmp/mount_root/foo%20service/bar%3Amount")
+                    .given_exists("/tmp/mount_root/foo%20service/bar%3Amount")
                     .given_folder_entries(
                         "/tmp/mount_root/foo%20service/bar%3Amount",
                         vec![
@@ -1514,17 +1518,15 @@ mod tests {
     }
 
     mod list {
-        use std::path::Path;
-
+        use super::create_version_manager;
+        use crate::Mount;
+        use crate::{Service, Version, server::version_manager::VersionManagerError};
         use credentials::MockCredentials;
         use file_system::{
             Entry, FileSystemError, MockFileDeleter, MockFolder, MockLinks, MockPermissions,
         };
         use mockall::predicate;
-
-        use crate::{Mount, Service, Version, server::version_manager::VersionManagerError};
-
-        use super::create_version_manager;
+        use std::path::Path;
 
         #[test]
         fn should_error_if_services_not_enumerable() {
@@ -1594,23 +1596,30 @@ mod tests {
         #[test]
         fn should_error_if_versions_could_not_be_retrieved() {
             let mut folder = MockFolder::new();
-            let links = MockLinks::new();
+            let mut links = MockLinks::new();
             let file_deleter = MockFileDeleter::new();
             let permissions = MockPermissions::new();
             let credentials = MockCredentials::new();
             let mount_root = Path::new("/tmp/mount_root");
 
             folder
-                .given_folder_exists("/tmp/mount_root")
+                .given_exists("/tmp/mount_root")
                 .given_folder_entries(
                     "/tmp/mount_root",
                     vec![Entry::create_directory("foo-service")],
                 )
-                .given_folder_exists("/tmp/mount_root/foo-service/bar-mount")
+                .given_exists("/tmp/mount_root/foo-service/bar-mount")
                 .given_folder_entries(
                     "/tmp/mount_root/foo-service",
                     vec![Entry::create_directory("bar-mount")],
-                );
+                )
+                .given_exists("/tmp/mount_root/foo-service/bar-mount/current")
+                .given_does_not_exist("/tmp/mount_root/foo-service/bar-mount/oops");
+
+            links.given_symlink(
+                "/tmp/mount_root/foo-service/bar-mount/current",
+                "/tmp/mount_root/foo-service/bar-mount/oops",
+            );
 
             folder
                 .expect_entries()
@@ -1631,7 +1640,7 @@ mod tests {
 
             assert!(matches!(
                 actual,
-                Err(VersionManagerError::FileSystemError(_))
+                Err(VersionManagerError::MountPathVersionError(_))
             ));
         }
 
@@ -1645,12 +1654,12 @@ mod tests {
             let mount_root = Path::new("/tmp/mount_root");
 
             folder
-                .given_folder_exists("/tmp/mount_root")
+                .given_exists("/tmp/mount_root")
                 .given_folder_entries(
                     "/tmp/mount_root",
                     vec![Entry::create_directory("foo-service")],
                 )
-                .given_folder_exists("/tmp/mount_root/foo-service/bar-mount")
+                .given_exists("/tmp/mount_root/foo-service/bar-mount")
                 .given_folder_entries(
                     "/tmp/mount_root/foo-service",
                     vec![Entry::create_directory("bar-mount")],
@@ -1662,8 +1671,8 @@ mod tests {
                         Entry::create_directory("v0"),
                     ],
                 )
-                .given_folder_exists("/tmp/mount_root/foo-service/bar-mount/current")
-                .given_folder_exists("/tmp/mount_root/foo-service/bar-mount/v0")
+                .given_exists("/tmp/mount_root/foo-service/bar-mount/current")
+                .given_exists("/tmp/mount_root/foo-service/bar-mount/v0")
                 .expect_pop_with("/tmp/mount_root/foo-service/bar-mount/v0", "v0");
 
             links.given_symlink(
@@ -1684,8 +1693,8 @@ mod tests {
             let expected = vec![Service {
                 mounts: vec![Mount {
                     name: "bar-mount".to_string(),
-                    active: Version(0),
-                    available: vec![Version(0)],
+                    version: Version(0),
+                    path: Path::new("/tmp/mount_root/foo-service/bar-mount/current").to_path_buf(),
                 }],
                 name: "foo-service".to_string(),
             }];

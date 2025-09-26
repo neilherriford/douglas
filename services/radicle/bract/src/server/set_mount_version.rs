@@ -1,7 +1,6 @@
-use super::ClientErrorDisplay;
 use super::token_validator::TokenValidator;
 use super::version_manager::VersionManager;
-use crate::Response;
+use super::{ClientErrorDisplay, Response};
 use crate::version::Version;
 use log::Logger;
 use std::sync::Arc;
@@ -47,7 +46,11 @@ impl SetMountVersion {
                 )
             );
 
-            Response::MountSet { version, path }
+            Response::MountSet {
+                name: mount_name,
+                version,
+                path,
+            }
         })
     }
 }
@@ -166,7 +169,7 @@ mod tests {
                 .returning(|_| Ok("token".to_string()));
 
             credentials.given_user_and_group_exist("doug-bar", "doug-bar");
-            folder.given_folder_exists("/tmp/mount_root/bar/baz/current");
+            folder.given_exists("/tmp/mount_root/bar/baz/current");
             file_deleter
                 .expect_delete()
                 .with(predicate::eq(Path::new("/tmp/mount_root/bar/baz/current")))
@@ -216,9 +219,10 @@ mod tests {
             assert!(matches!(
                 actual,
                 Response::MountSet {
+                    name,
                     version,
                     path
-                } if version == Version(0) && path == Path::new("/tmp/mount_root/bar/baz/current")));
+                } if name == "baz" && version == Version(0) && path == Path::new("/tmp/mount_root/bar/baz/current")));
         }
     }
 }

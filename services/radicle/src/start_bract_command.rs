@@ -1,8 +1,8 @@
 use crate::{
     bract_path_factory::BractPathFactory,
     config::{Config, ConfigReader, ConfigRepositoryError},
-    constants,
-    file_logger::FileLogger,
+    constants, douglas_logger_factory,
+    verbose_printer::VerbosePrinter,
 };
 use bract::{Server, ServerError};
 use credentials::Credentials;
@@ -51,8 +51,14 @@ pub struct StartBractCommand {
     os: Arc<dyn Os + Sync + Send + 'static>,
     permissions: Arc<dyn Permissions + Sync + Send + 'static>,
     unix_domain_socket: Arc<dyn UnixDomainSocket + 'static>,
-    daemonize: bool,
     bract_path_factory: Arc<BractPathFactory>,
+    logger: BractLogger,
+    verbose_printer: Arc<dyn VerbosePrinter>,
+}
+
+pub enum BractLogger {
+    Use(Arc<dyn Logger + Send + Sync>),
+    WriteToFile,
 }
 
 impl StartBractCommand {
@@ -68,13 +74,13 @@ impl StartBractCommand {
         os: Arc<dyn Os + Sync + Send + 'static>,
         permissions: Arc<dyn Permissions + Sync + Send + 'static>,
         unix_domain_socket: Arc<dyn UnixDomainSocket + 'static>,
-        daemonize: bool,
         bract_path_factory: Arc<BractPathFactory>,
+        logger: BractLogger,
+        verbose_printer: Arc<dyn VerbosePrinter>,
     ) -> Self {
         Self {
             credentials,
             config_reader,
-            daemonize,
             folder,
             file_reader,
             file_writer,
@@ -85,19 +91,29 @@ impl StartBractCommand {
             permissions,
             unix_domain_socket,
             bract_path_factory,
+            logger,
+            verbose_printer,
         }
     }
 
-    pub fn run(
-        &self,
-        override_logger: Option<Arc<dyn Logger + Send + Sync + 'static>>,
-    ) -> Result<(), StartBractCommandError> {
+    pub fn perform(&self, daemonize: bool) -> Result<(), StartBractCommandError> {
+        self.verbose_printer.print("🌲 Starting bract…");
+        self.verbose_printer.print_indented(1, "Starting…");
+        self.verbose_printer
+            .print_indented(1, "Verifiying credentials…");
         self.assert_root()?;
-        self.assert_not_running()?;
-        let config = self.config_reader.load()?;
-        let server = self.create_server(&config, override_logger)?;
+        self.verbose_printer
+            .print_indented(1, "Checking if bract is already running…");
+        self.assert_not_running(daemonize)?;
+        self.verbose_printer.print_indented(1, "Loading config…");
+        let config = self.config_reader.read()?;
+        self.verbose_printer
+            .print_indented(1, "Initializing server…");
 
-        if self.daemonize {
+        let server = self.create_server(&config)?;
+        if daemonize {
+            self.verbose_printer
+                .print_indented(1, "Starting daemonizeds…");
             self.run_detached(server, &config)?;
         } else {
             server.start()?
@@ -114,26 +130,18 @@ impl StartBractCommand {
         }
     }
 
-    fn create_server(
-        &self,
-        config: &Config,
-        override_logger: Option<Arc<dyn Logger + Send + Sync + 'static>>,
-    ) -> Result<Server, StartBractCommandError> {
-        let log: Arc<dyn Logger + Sync + Send + 'static> = if let Some(log) = override_logger {
-            log
-        } else {
-            let mut log_path = config.log_path.to_path_buf();
-            log_path.push("douglas.log");
-            let log_path = log_path.as_path();
-            Arc::new(FileLogger::new(
-                log_path,
+    fn create_server(&self, config: &Config) -> Result<Server, StartBractCommandError> {
+        let logger = match &self.logger {
+            BractLogger::Use(logger) => Arc::clone(&logger),
+            BractLogger::WriteToFile => douglas_logger_factory::create(
+                &config,
                 Arc::clone(&self.file_appender),
                 Arc::clone(&self.permissions),
-            ))
+            ),
         };
 
         Ok(Server::new(
-            Arc::clone(&log),
+            logger,
             Arc::clone(&self.file_reader),
             Arc::clone(&self.file_writer),
             Arc::clone(&self.file_deleter),
@@ -170,7 +178,7 @@ impl StartBractCommand {
             .stdout(stdout)
             .stderr(stderr);
 
-        println!("🆗 Douglas bract started!");
+        self.verbose_printer.print("🆗 Douglas bract started!");
         match daemonize.start() {
             Ok(_) => {
                 self.set_permissions_to_service_readable(&pid_file_path)?;
@@ -202,12 +210,16 @@ impl StartBractCommand {
             .change_mode(path, &Modes::OwnerReadWriteGroupRead)
     }
 
-    fn assert_not_running(&self) -> Result<(), StartBractCommandError> {
-        if !self.daemonize {
+    fn assert_not_running(&self, daemonize: bool) -> Result<(), StartBractCommandError> {
+        if !daemonize {
             return Ok(());
         }
 
         let (_, pid_file_path) = self.working_directory_and_pid_file_path()?;
+
+        if !self.folder.exists(pid_file_path.as_path()) {
+            return Ok(());
+        }
 
         let pid = self.file_reader.read_all(&pid_file_path)?;
         if let Some(pid) = pid.lines().next() {
@@ -215,7 +227,7 @@ impl StartBractCommand {
                 Ok(pid) => pid,
                 Err(_) => {
                     return Err(StartBractCommandError::GeneralError(format!(
-                        "Unexpectd PID format: {}",
+                        "Unexpected PID format: {}",
                         pid
                     )));
                 }
@@ -237,8 +249,11 @@ impl StartBractCommand {
 
 #[cfg(test)]
 mod tests {
-    use super::StartBractCommand;
-    use crate::{bract_path_factory::BractPathFactory, config::MockConfigReader};
+    use super::{BractLogger, StartBractCommand};
+    use crate::{
+        bract_path_factory::BractPathFactory, config::MockConfigReader,
+        verbose_printer::MockVerbosePrinter,
+    };
     use credentials::Credentials;
     use file_system::{
         MockFileAppender, MockFileDeleter, MockFileReader, MockFileWriter, MockFolder, MockLinks,
@@ -259,7 +274,8 @@ mod tests {
         os: Arc<MockOs>,
         permissions: Arc<MockPermissions>,
         unix_domain_socket: Arc<MockUnixDomainSocket>,
-        daemonize: bool,
+        verbose_printer: Arc<MockVerbosePrinter>,
+        logger: BractLogger,
     ) -> StartBractCommand {
         StartBractCommand::new(
             Arc::clone(&credentials),
@@ -273,32 +289,30 @@ mod tests {
             os.clone(),
             permissions.clone(),
             unix_domain_socket.clone(),
-            daemonize,
             Arc::new(BractPathFactory::new(folder.clone())),
+            logger,
+            verbose_printer.clone(),
         )
     }
 
-    mod run {
+    mod perform {
         use super::build;
         use crate::{
-            config::{Config, ConfigRepositoryError, MockConfigReader},
-            start_bract_command::StartBractCommandError,
+            config::{ConfigRepositoryError, MockConfigReader},
+            start_bract_command::{BractLogger, StartBractCommandError},
+            verbose_printer::MockVerbosePrinter,
         };
         use credentials::MockCredentials;
         use file_system::{
             FileSystemError, MockFileAppender, MockFileDeleter, MockFileReader, MockFileWriter,
             MockFolder, MockLinks, MockPermissions, MockUnixDomainSocket,
         };
-        use log::MockLogger;
-        use mockall::predicate;
-        use os::{MockOs, OsError};
-        use std::{
-            path::{Path, PathBuf},
-            sync::Arc,
-        };
+        use log::{Logger, MockLogger};
+        use os::MockOs;
+        use std::sync::Arc;
 
         #[test]
-        fn should_fail_if_not_root() {
+        fn should_error_if_not_root() {
             let mut credentials = MockCredentials::new();
             let folder = MockFolder::new();
             let config_reader = MockConfigReader::new();
@@ -310,7 +324,11 @@ mod tests {
             let os = MockOs::new();
             let permissions = MockPermissions::new();
             let unix_domain_socket = MockUnixDomainSocket::new();
+            let mut verbose_printer = MockVerbosePrinter::new();
+            let logger = MockLogger::new();
 
+            verbose_printer.expect_print().return_const(());
+            verbose_printer.expect_print_indented().return_const(());
             credentials.given_is_not_root();
 
             let actual = build(
@@ -325,19 +343,20 @@ mod tests {
                 Arc::new(os),
                 Arc::new(permissions),
                 Arc::new(unix_domain_socket),
-                true,
+                Arc::new(verbose_printer),
+                BractLogger::Use(Arc::new(logger) as Arc<dyn Logger + Send + Sync>),
             )
-            .run(None);
+            .perform(false);
 
-            assert!(matches!(actual, Err(StartBractCommandError::NotRootError)))
+            assert!(matches!(actual, Err(StartBractCommandError::NotRootError)));
         }
 
         #[test]
-        fn should_error_if_pid_path_could_not_be_derived() {
+        fn should_err_if_pid_is_invalid_when_running_daemonized() {
             let mut credentials = MockCredentials::new();
             let mut folder = MockFolder::new();
             let config_reader = MockConfigReader::new();
-            let file_reader = MockFileReader::new();
+            let mut file_reader = MockFileReader::new();
             let file_writer = MockFileWriter::new();
             let file_deleter = MockFileDeleter::new();
             let file_appender = MockFileAppender::new();
@@ -345,137 +364,15 @@ mod tests {
             let os = MockOs::new();
             let permissions = MockPermissions::new();
             let unix_domain_socket = MockUnixDomainSocket::new();
+            let mut verbose_printer = MockVerbosePrinter::new();
+            let logger = MockLogger::new();
 
+            verbose_printer.expect_print().return_const(());
+            verbose_printer.expect_print_indented().return_const(());
             credentials.given_is_root();
-
             folder
-                .expect_executable_root()
-                .returning(|| Err(FileSystemError::ExpectedFileError));
-
-            let actual = build(
-                Arc::new(credentials),
-                Arc::new(folder),
-                Arc::new(config_reader),
-                Arc::new(file_reader),
-                Arc::new(file_writer),
-                Arc::new(file_deleter),
-                Arc::new(file_appender),
-                Arc::new(links),
-                Arc::new(os),
-                Arc::new(permissions),
-                Arc::new(unix_domain_socket),
-                true,
-            )
-            .run(None);
-
-            assert!(matches!(
-                actual,
-                Err(StartBractCommandError::FileSystemError(_))
-            ))
-        }
-
-        #[test]
-        fn should_error_if_pid_file_could_not_be_read() {
-            let mut credentials = MockCredentials::new();
-            let mut folder = MockFolder::new();
-            let config_reader = MockConfigReader::new();
-            let mut file_reader = MockFileReader::new();
-            let file_writer = MockFileWriter::new();
-            let file_deleter = MockFileDeleter::new();
-            let file_appender = MockFileAppender::new();
-            let links = MockLinks::new();
-            let os = MockOs::new();
-            let permissions = MockPermissions::new();
-            let unix_domain_socket = MockUnixDomainSocket::new();
-
-            credentials.given_is_root();
-
-            folder.given_executable_root("/tmp");
-            file_reader
-                .expect_read_all()
-                .with(predicate::eq(Path::new("/tmp/bract.pid")))
-                .returning(|_| Err(FileSystemError::ExpectedFileError));
-
-            let actual = build(
-                Arc::new(credentials),
-                Arc::new(folder),
-                Arc::new(config_reader),
-                Arc::new(file_reader),
-                Arc::new(file_writer),
-                Arc::new(file_deleter),
-                Arc::new(file_appender),
-                Arc::new(links),
-                Arc::new(os),
-                Arc::new(permissions),
-                Arc::new(unix_domain_socket),
-                true,
-            )
-            .run(None);
-
-            assert!(matches!(
-                actual,
-                Err(StartBractCommandError::FileSystemError(_))
-            ))
-        }
-
-        #[test]
-        fn should_error_if_pid_blank() {
-            let mut credentials = MockCredentials::new();
-            let mut folder = MockFolder::new();
-            let config_reader = MockConfigReader::new();
-            let mut file_reader = MockFileReader::new();
-            let file_writer = MockFileWriter::new();
-            let file_deleter = MockFileDeleter::new();
-            let file_appender = MockFileAppender::new();
-            let links = MockLinks::new();
-            let os = MockOs::new();
-            let permissions = MockPermissions::new();
-            let unix_domain_socket = MockUnixDomainSocket::new();
-
-            credentials.given_is_root();
-
-            folder.given_executable_root("/tmp");
-            file_reader.given_can_read_all_with_contents("/tmp/bract.pid", "");
-
-            let actual = build(
-                Arc::new(credentials),
-                Arc::new(folder),
-                Arc::new(config_reader),
-                Arc::new(file_reader),
-                Arc::new(file_writer),
-                Arc::new(file_deleter),
-                Arc::new(file_appender),
-                Arc::new(links),
-                Arc::new(os),
-                Arc::new(permissions),
-                Arc::new(unix_domain_socket),
-                true,
-            )
-            .run(None);
-
-            assert!(matches!(
-                actual,
-                Err(StartBractCommandError::GeneralError(_))
-            ))
-        }
-
-        #[test]
-        fn should_error_if_pid_is_not_a_number() {
-            let mut credentials = MockCredentials::new();
-            let mut folder = MockFolder::new();
-            let config_reader = MockConfigReader::new();
-            let mut file_reader = MockFileReader::new();
-            let file_writer = MockFileWriter::new();
-            let file_deleter = MockFileDeleter::new();
-            let file_appender = MockFileAppender::new();
-            let links = MockLinks::new();
-            let os = MockOs::new();
-            let permissions = MockPermissions::new();
-            let unix_domain_socket = MockUnixDomainSocket::new();
-
-            credentials.given_is_root();
-
-            folder.given_executable_root("/tmp");
+                .given_executable_root("/tmp")
+                .given_exists("/tmp/bract.pid");
             file_reader.given_can_read_all_with_contents("/tmp/bract.pid", "oops");
 
             let actual = build(
@@ -490,18 +387,20 @@ mod tests {
                 Arc::new(os),
                 Arc::new(permissions),
                 Arc::new(unix_domain_socket),
-                true,
+                Arc::new(verbose_printer),
+                BractLogger::Use(Arc::new(logger) as Arc<dyn Logger + Send + Sync>),
             )
-            .run(None);
+            .perform(true);
 
             assert!(matches!(
                 actual,
-                Err(StartBractCommandError::GeneralError(_))
-            ))
+                Err(StartBractCommandError::GeneralError(text))
+                if text == "Unexpected PID format: oops"
+            ));
         }
 
         #[test]
-        fn should_error_if_signal_fails() {
+        fn should_err_if_already_running_when_running_daemonized() {
             let mut credentials = MockCredentials::new();
             let mut folder = MockFolder::new();
             let config_reader = MockConfigReader::new();
@@ -513,51 +412,15 @@ mod tests {
             let mut os = MockOs::new();
             let permissions = MockPermissions::new();
             let unix_domain_socket = MockUnixDomainSocket::new();
+            let mut verbose_printer = MockVerbosePrinter::new();
+            let logger = MockLogger::new();
 
+            verbose_printer.expect_print().return_const(());
+            verbose_printer.expect_print_indented().return_const(());
             credentials.given_is_root();
-
-            folder.given_executable_root("/tmp");
-            file_reader.given_can_read_all_with_contents("/tmp/bract.pid", "12345");
-            os.expect_is_active_pid()
-                .with(predicate::eq(12345))
-                .returning(|_| Err(OsError::ErrorNumber(-12345)));
-
-            let actual = build(
-                Arc::new(credentials),
-                Arc::new(folder),
-                Arc::new(config_reader),
-                Arc::new(file_reader),
-                Arc::new(file_writer),
-                Arc::new(file_deleter),
-                Arc::new(file_appender),
-                Arc::new(links),
-                Arc::new(os),
-                Arc::new(permissions),
-                Arc::new(unix_domain_socket),
-                true,
-            )
-            .run(None);
-
-            assert!(matches!(actual, Err(StartBractCommandError::OsError(_))))
-        }
-
-        #[test]
-        fn should_error_if_already_running() {
-            let mut credentials = MockCredentials::new();
-            let mut folder = MockFolder::new();
-            let config_reader = MockConfigReader::new();
-            let mut file_reader = MockFileReader::new();
-            let file_writer = MockFileWriter::new();
-            let file_deleter = MockFileDeleter::new();
-            let file_appender = MockFileAppender::new();
-            let links = MockLinks::new();
-            let mut os = MockOs::new();
-            let permissions = MockPermissions::new();
-            let unix_domain_socket = MockUnixDomainSocket::new();
-
-            credentials.given_is_root();
-
-            folder.given_executable_root("/tmp");
+            folder
+                .given_executable_root("/tmp")
+                .given_exists("/tmp/bract.pid");
             file_reader.given_can_read_all_with_contents("/tmp/bract.pid", "12345");
             os.given_pid_is_active(12345);
 
@@ -573,18 +436,19 @@ mod tests {
                 Arc::new(os),
                 Arc::new(permissions),
                 Arc::new(unix_domain_socket),
-                true,
+                Arc::new(verbose_printer),
+                BractLogger::Use(Arc::new(logger) as Arc<dyn Logger + Send + Sync>),
             )
-            .run(None);
+            .perform(true);
 
             assert!(matches!(
                 actual,
                 Err(StartBractCommandError::AlreadyRunning)
-            ))
+            ));
         }
 
         #[test]
-        fn should_err_if_config_cannot_be_read() {
+        fn should_error_if_config_read_failed() {
             let mut credentials = MockCredentials::new();
             let folder = MockFolder::new();
             let mut config_reader = MockConfigReader::new();
@@ -596,9 +460,13 @@ mod tests {
             let os = MockOs::new();
             let permissions = MockPermissions::new();
             let unix_domain_socket = MockUnixDomainSocket::new();
+            let mut verbose_printer = MockVerbosePrinter::new();
+            let logger = MockLogger::new();
 
+            verbose_printer.expect_print().return_const(());
+            verbose_printer.expect_print_indented().return_const(());
             credentials.given_is_root();
-            config_reader.expect_load().returning(|| {
+            config_reader.expect_read().returning(|| {
                 Err(ConfigRepositoryError::FileSystemError(
                     FileSystemError::ExpectedFileError,
                 ))
@@ -616,171 +484,15 @@ mod tests {
                 Arc::new(os),
                 Arc::new(permissions),
                 Arc::new(unix_domain_socket),
-                false,
+                Arc::new(verbose_printer),
+                BractLogger::Use(Arc::new(logger) as Arc<dyn Logger + Send + Sync>),
             )
-            .run(None);
+            .perform(false);
 
             assert!(matches!(
                 actual,
                 Err(StartBractCommandError::ConfigRepositoryError(_))
-            ))
-        }
-
-        #[test]
-        fn should_err_if_server_could_not_be_created() {
-            let mut credentials = MockCredentials::new();
-            let mut folder = MockFolder::new();
-            let mut config_reader = MockConfigReader::new();
-            let file_reader = MockFileReader::new();
-            let file_writer = MockFileWriter::new();
-            let file_deleter = MockFileDeleter::new();
-            let file_appender = MockFileAppender::new();
-            let links = MockLinks::new();
-            let os = MockOs::new();
-            let permissions = MockPermissions::new();
-            let unix_domain_socket = MockUnixDomainSocket::new();
-
-            credentials.given_is_root();
-            config_reader.given_config(Config {
-                operator_user: "foo".to_string(),
-                operator_group: "bar".to_string(),
-                mount_root_path: PathBuf::from("/tmp/mounts"),
-                log_path: PathBuf::from("/tmp/logs"),
-                docker_socket_path: PathBuf::from("/tmp/docker.socket"),
-            });
-            folder
-                .expect_executable_root()
-                .returning(|| Err(FileSystemError::ExpectedFileError));
-
-            let actual = build(
-                Arc::new(credentials),
-                Arc::new(folder),
-                Arc::new(config_reader),
-                Arc::new(file_reader),
-                Arc::new(file_writer),
-                Arc::new(file_deleter),
-                Arc::new(file_appender),
-                Arc::new(links),
-                Arc::new(os),
-                Arc::new(permissions),
-                Arc::new(unix_domain_socket),
-                false,
-            )
-            .run(None);
-
-            assert!(matches!(
-                actual,
-                Err(StartBractCommandError::FileSystemError(_))
-            ))
-        }
-
-        #[test]
-        fn should_err_if_std_out_log_could_not_be_created() {
-            let mut credentials = MockCredentials::new();
-            let mut folder = MockFolder::new();
-            let mut config_reader = MockConfigReader::new();
-            let mut file_reader = MockFileReader::new();
-            let file_writer = MockFileWriter::new();
-            let file_deleter = MockFileDeleter::new();
-            let file_appender = MockFileAppender::new();
-            let links = MockLinks::new();
-            let mut os = MockOs::new();
-            let permissions = MockPermissions::new();
-            let unix_domain_socket = MockUnixDomainSocket::new();
-
-            credentials.given_is_root();
-            config_reader.given_config(Config {
-                operator_user: "foo".to_string(),
-                operator_group: "bar".to_string(),
-                mount_root_path: PathBuf::from("/tmp/mounts"),
-                log_path: PathBuf::from("/tmp/logs"),
-                docker_socket_path: PathBuf::from("/tmp/docker.socket"),
-            });
-            folder.given_executable_root("/tmp");
-            file_reader.given_can_read_all_with_contents("/tmp/bract.pid", "12345");
-            os.given_pid_is_not_active(12345);
-
-            folder
-                .expect_create_file()
-                .with(
-                    predicate::eq(Path::new("/tmp/logs/")),
-                    predicate::eq("douglas-bract.out"),
-                )
-                .returning(|_, _| Err(FileSystemError::ExpectedFileError));
-
-            let actual = build(
-                Arc::new(credentials),
-                Arc::new(folder),
-                Arc::new(config_reader),
-                Arc::new(file_reader),
-                Arc::new(file_writer),
-                Arc::new(file_deleter),
-                Arc::new(file_appender),
-                Arc::new(links),
-                Arc::new(os),
-                Arc::new(permissions),
-                Arc::new(unix_domain_socket),
-                true,
-            )
-            .run(None);
-
-            assert!(matches!(
-                actual,
-                Err(StartBractCommandError::FileSystemError(_))
-            ))
-        }
-
-        #[test]
-        fn should_use_override_logger() {
-            let mut credentials = MockCredentials::new();
-            let mut folder = MockFolder::new();
-            let mut config_reader = MockConfigReader::new();
-            let file_reader = MockFileReader::new();
-            let file_writer = MockFileWriter::new();
-            let file_deleter = MockFileDeleter::new();
-            let file_appender = MockFileAppender::new();
-            let links = MockLinks::new();
-            let os = MockOs::new();
-            let permissions = MockPermissions::new();
-            let unix_domain_socket = MockUnixDomainSocket::new();
-            let mut override_logger = MockLogger::new();
-
-            credentials
-                .given_is_root()
-                .given_user_does_not_exist("doug-radicle");
-
-            config_reader.given_config(Config {
-                operator_user: "foo".to_string(),
-                operator_group: "bar".to_string(),
-                mount_root_path: PathBuf::from("/tmp/mounts"),
-                log_path: PathBuf::from("/tmp/logs"),
-                docker_socket_path: PathBuf::from("/tmp/docker.socket"),
-            });
-            folder.given_executable_root("/tmp");
-
-            override_logger.expect_info().return_const(());
-            let override_logger = Arc::new(override_logger);
-
-            let actual = build(
-                Arc::new(credentials),
-                Arc::new(folder),
-                Arc::new(config_reader),
-                Arc::new(file_reader),
-                Arc::new(file_writer),
-                Arc::new(file_deleter),
-                Arc::new(file_appender),
-                Arc::new(links),
-                Arc::new(os),
-                Arc::new(permissions),
-                Arc::new(unix_domain_socket),
-                false,
-            )
-            .run(Some(override_logger.clone()));
-
-            assert!(matches!(
-                actual,
-                Err(StartBractCommandError::BractServerError(_))
-            ))
+            ));
         }
     }
 }
