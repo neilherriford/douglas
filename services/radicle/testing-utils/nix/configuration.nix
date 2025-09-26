@@ -13,7 +13,7 @@ let
       (builtins.attrNames (builtins.readDir userKeysDir));
 
   # Version information for your dev image
-  devImageVersion = "0.0.1";
+  devImageVersion = "0.0.2c";
   devImageDate = "2025-09-11";
   devImageName = "Douglas Development Environment";
 
@@ -40,6 +40,7 @@ let
     curl
     jq
     docker
+    socat
 
     # Additional useful development tools
     tree
@@ -260,7 +261,7 @@ in
   ];
 
   ######################### USER CONFIGURATION #########################
-  users.users.douglas = {
+  users.users.dev = {
     isNormalUser = true;
     extraGroups = [ "wheel" "docker" ];
     initialPassword = "password";
