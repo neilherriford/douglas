@@ -1,5 +1,10 @@
-*.env
-./var/*
-
-volumes/postgresql/**/*
-volumes/registry/**/*
+.env
+./certs
+**/target/**
+./mounts/openbao/data/**
+**/ssh-host-keys/*
+**/ssh-keys/*
+douglas-dev.iso
+**/cargo-test*.profraw
+journal.md
+journal.markdown

@@ -1,5 +1,5 @@
-FROM node:21.6
+FROM node:23.6.0-slim
 WORKDIR /usr/src/app
-COPY ./hello-world/package.json ./hello-world/app.js .
+COPY ./package.json ./app.js .
 RUN npm install
 CMD ["npm", "start"]

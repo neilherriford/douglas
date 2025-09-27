@@ -11,3 +11,11 @@ const server = http.createServer(function (request, response) {
 server.listen(port)
 
 console.log(`Server running at http://localhost: ${port}`)
+
+process.on('SIGINT', () => {
+  console.log('Stopping...');
+  server.close(() => {
+    console.log('Stopped');
+    process.exit(0); // Ensure the process exits
+  });
+});

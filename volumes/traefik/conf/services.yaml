@@ -1,0 +1,6 @@
+http:
+  services:
+    authentik-forward:
+      loadBalancer:
+        servers:
+          - url: http://authentik-server:9000/outpost.goauthentik.io
