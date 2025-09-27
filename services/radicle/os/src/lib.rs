@@ -96,7 +96,7 @@ impl MockOs {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct Unix {}
 
 impl Unix {

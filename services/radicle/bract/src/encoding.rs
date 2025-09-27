@@ -34,7 +34,7 @@ const FS_NON_ALPHANUMERIC: &AsciiSet = &CONTROLS
     .add(b'~');
 
 pub fn safe_file_system_name(name: &str) -> String {
-    utf8_percent_encode(&name, FS_NON_ALPHANUMERIC).to_string()
+    utf8_percent_encode(name, FS_NON_ALPHANUMERIC).to_string()
 }
 
 pub fn safe_prefixed_credential_name(name: &str) -> (String, String) {

@@ -20,11 +20,11 @@ pub struct ShutdownCommand {
 #[derive(Error, Debug)]
 pub enum ShutdownError {
     #[error("Client error: {0}")]
-    CLientError(#[from] ClientError),
+    CLient(#[from] ClientError),
     #[error("Configuration error: {0}")]
-    ConfigRepositoryError(#[from] ConfigRepositoryError),
+    ConfigRepository(#[from] ConfigRepositoryError),
     #[error("File system error '{0}'")]
-    FileSystemError(#[from] FileSystemError),
+    FileSystem(#[from] FileSystemError),
 }
 
 impl ShutdownCommand {

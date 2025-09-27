@@ -77,7 +77,7 @@ impl VersionManager {
     pub fn is_initialized(&self, service_name: &str, mount_name: &str) -> bool {
         self.folder.exists(
             self.mount_paths
-                .mount_path(&service_name, &mount_name)
+                .mount_path(service_name, mount_name)
                 .as_path(),
         )
     }
@@ -88,17 +88,17 @@ impl VersionManager {
         mount_name: &str,
         version: Version,
     ) -> Result<PathBuf, VersionManagerError> {
-        let (user_name, group_name) = safe_prefixed_credential_name(&service_name);
+        let (user_name, group_name) = safe_prefixed_credential_name(service_name);
         self.assert_credentials(&user_name, &group_name)?;
 
         self.initialize_mount_root()?;
         self.create_service_path(
-            &self.mount_paths.service_path(&service_name),
+            &self.mount_paths.service_path(service_name),
             &user_name,
             &group_name,
         )?;
         self.create_service_path(
-            &self.mount_paths.mount_path(&service_name, &mount_name),
+            &self.mount_paths.mount_path(service_name, mount_name),
             &user_name,
             &group_name,
         )?;
@@ -115,7 +115,7 @@ impl VersionManager {
             .mount_paths
             .active_version_path(service_name, mount_name);
 
-        self.set_active_version(&service_name, &active_path, &version_path)
+        self.set_active_version(service_name, &active_path, &version_path)
     }
 
     fn assert_credentials(
@@ -138,7 +138,7 @@ impl VersionManager {
         mount_name: &str,
         version: Version,
     ) -> Result<PathBuf, VersionManagerError> {
-        let (user_name, group_name) = safe_prefixed_credential_name(&service_name);
+        let (user_name, group_name) = safe_prefixed_credential_name(service_name);
         self.assert_credentials(&user_name, &group_name)?;
 
         let version_path = self
@@ -149,11 +149,7 @@ impl VersionManager {
             .mount_paths
             .active_version_path(service_name, mount_name);
 
-        self.set_active_version(
-            &service_name,
-            &active_path.as_path(),
-            &version_path.as_path(),
-        )
+        self.set_active_version(service_name, active_path.as_path(), version_path.as_path())
     }
 
     pub fn versions(
@@ -188,10 +184,10 @@ impl VersionManager {
         let mount_root = self.mount_paths.root_path();
         let mount_root = mount_root.as_path();
 
-        if !self.folder.exists(&mount_root) {
-            self.folder.create_recursively(&mount_root)?;
+        if !self.folder.exists(mount_root) {
+            self.folder.create_recursively(mount_root)?;
             self.set_ownership(
-                &mount_root,
+                mount_root,
                 credentials::ROOT_USER_NAME,
                 credentials::ROOT_GROUP_NAME,
                 Modes::OwnerReadWrite,
@@ -207,15 +203,15 @@ impl VersionManager {
         active_path: &Path,
         version_path: &Path,
     ) -> Result<PathBuf, VersionManagerError> {
-        let (user_name, group_name) = safe_prefixed_credential_name(&service_name);
+        let (user_name, group_name) = safe_prefixed_credential_name(service_name);
 
-        if self.folder.exists(&active_path) {
-            self.file_deleter.delete(&active_path)?;
+        if self.folder.exists(active_path) {
+            self.file_deleter.delete(active_path)?;
         }
 
-        self.links.create(&version_path, &active_path)?;
+        self.links.create(version_path, active_path)?;
         self.set_ownership(
-            &active_path,
+            active_path,
             &user_name,
             &group_name,
             Modes::OwnerReadWriteGroupReadWrite,
@@ -232,26 +228,25 @@ impl VersionManager {
         mode: Modes,
     ) -> Result<(), FileSystemError> {
         self.permissions
-            .change_user_and_group_ownership(&path, user_name, group_name)?;
-        self.permissions.change_mode(&path, &mode)
+            .change_user_and_group_ownership(path, user_name, group_name)?;
+        self.permissions.change_mode(path, &mode)
     }
 
     fn create_service_path(
         &self,
-        path: &PathBuf,
+        path: &Path,
         user_name: &str,
         group_name: &str,
     ) -> Result<bool, FileSystemError> {
-        let path = path.as_path();
         if self.folder.exists(path) {
             return Ok(false);
         }
 
-        self.folder.create_recursively(&path)?;
+        self.folder.create_recursively(path)?;
         self.set_ownership(
-            &path,
-            &user_name,
-            &group_name,
+            path,
+            user_name,
+            group_name,
             Modes::OwnerReadWriteGroupReadWrite,
         )?;
         Ok(true)
@@ -314,7 +309,7 @@ mod tests {
     ) -> VersionManager {
         let folder = Arc::new(folder);
         let links = Arc::new(links);
-        let mount_path_factory = MountPathFactory::new(&mount_root, folder.clone(), links.clone());
+        let mount_path_factory = MountPathFactory::new(mount_root, folder.clone(), links.clone());
 
         VersionManager::new(
             Arc::new(mount_path_factory),
@@ -422,7 +417,7 @@ mod tests {
                 file_deleter,
                 permissions,
                 credentials,
-                &mount_root,
+                mount_root,
             )
             .create("foo", "bar", Version(0));
 
@@ -448,7 +443,7 @@ mod tests {
                 file_deleter,
                 permissions,
                 credentials,
-                &mount_root,
+                mount_root,
             )
             .create("foo", "bar", Version(0));
 
@@ -477,7 +472,7 @@ mod tests {
                 file_deleter,
                 permissions,
                 credentials,
-                &mount_root,
+                mount_root,
             )
             .create("foo", "bar", Version(0));
 
@@ -515,7 +510,7 @@ mod tests {
                 file_deleter,
                 permissions,
                 credentials,
-                &mount_root,
+                mount_root,
             )
             .create("foo", "bar", Version(0));
 
@@ -557,7 +552,7 @@ mod tests {
                 file_deleter,
                 permissions,
                 credentials,
-                &mount_root,
+                mount_root,
             )
             .create("foo", "bar", Version(0));
 
@@ -594,7 +589,7 @@ mod tests {
                 file_deleter,
                 permissions,
                 credentials,
-                &mount_root,
+                mount_root,
             )
             .create("foo", "bar", Version(0));
 
@@ -636,7 +631,7 @@ mod tests {
                 file_deleter,
                 permissions,
                 credentials,
-                &mount_root,
+                mount_root,
             )
             .create("foo", "bar", Version(0));
 
@@ -682,7 +677,7 @@ mod tests {
                 file_deleter,
                 permissions,
                 credentials,
-                &mount_root,
+                mount_root,
             )
             .create("foo", "bar", Version(0));
 
@@ -714,7 +709,7 @@ mod tests {
                 file_deleter,
                 permissions,
                 credentials,
-                &mount_root,
+                mount_root,
             )
             .create("foo", "bar", Version(0));
 
@@ -750,7 +745,7 @@ mod tests {
                 file_deleter,
                 permissions,
                 credentials,
-                &mount_root,
+                mount_root,
             )
             .create("foo", "bar", Version(0));
 
@@ -792,7 +787,7 @@ mod tests {
                 file_deleter,
                 permissions,
                 credentials,
-                &mount_root,
+                mount_root,
             )
             .create("foo", "bar", Version(0));
 
@@ -838,7 +833,7 @@ mod tests {
                 file_deleter,
                 permissions,
                 credentials,
-                &mount_root,
+                mount_root,
             )
             .create("foo", "bar", Version(0));
 
@@ -877,7 +872,7 @@ mod tests {
                 file_deleter,
                 permissions,
                 credentials,
-                &mount_root,
+                mount_root,
             )
             .create("foo", "bar", Version(0));
 
@@ -921,7 +916,7 @@ mod tests {
                 file_deleter,
                 permissions,
                 credentials,
-                &mount_root,
+                mount_root,
             )
             .create("foo", "bar", Version(0));
 
@@ -965,7 +960,7 @@ mod tests {
                 file_deleter,
                 permissions,
                 credentials,
-                &mount_root,
+                mount_root,
             )
             .create("foo", "bar", Version(0));
 
@@ -1013,7 +1008,7 @@ mod tests {
                 file_deleter,
                 permissions,
                 credentials,
-                &mount_root,
+                mount_root,
             )
             .create("foo", "bar", Version(0));
 
@@ -1058,7 +1053,7 @@ mod tests {
                 file_deleter,
                 permissions,
                 credentials,
-                &mount_root,
+                mount_root,
             )
             .create("foo", "bar", Version(0));
 
@@ -1095,7 +1090,7 @@ mod tests {
                     file_deleter,
                     permissions,
                     credentials,
-                    &mount_root,
+                    mount_root,
                 )
                 .activate("foo", "bar", Version(0));
 
@@ -1121,7 +1116,7 @@ mod tests {
                     file_deleter,
                     permissions,
                     credentials,
-                    &mount_root,
+                    mount_root,
                 )
                 .activate("foo", "bar", Version(0));
 
@@ -1150,7 +1145,7 @@ mod tests {
                     file_deleter,
                     permissions,
                     credentials,
-                    &mount_root,
+                    mount_root,
                 )
                 .activate("foo", "bar", Version(0));
 
@@ -1187,7 +1182,7 @@ mod tests {
                     file_deleter,
                     permissions,
                     credentials,
-                    &mount_root,
+                    mount_root,
                 )
                 .activate("foo", "bar", Version(0));
 
@@ -1229,7 +1224,7 @@ mod tests {
                     file_deleter,
                     permissions,
                     credentials,
-                    &mount_root,
+                    mount_root,
                 )
                 .activate("foo", "bar", Version(0));
 
@@ -1279,7 +1274,7 @@ mod tests {
                     file_deleter,
                     permissions,
                     credentials,
-                    &mount_root,
+                    mount_root,
                 )
                 .activate("foo", "bar", Version(0));
 
@@ -1319,7 +1314,7 @@ mod tests {
                     file_deleter,
                     permissions,
                     credentials,
-                    &mount_root,
+                    mount_root,
                 )
                 .activate("foo", "bar", Version(0));
 
@@ -1352,11 +1347,11 @@ mod tests {
                     file_deleter,
                     permissions,
                     credentials,
-                    &mount_root,
+                    mount_root,
                 )
                 .is_initialized("foo", "bar");
 
-                assert_eq!(false, actual);
+                assert!(!actual);
             }
 
             #[test]
@@ -1376,11 +1371,11 @@ mod tests {
                     file_deleter,
                     permissions,
                     credentials,
-                    &mount_root,
+                    mount_root,
                 )
                 .is_initialized("foo", "bar");
 
-                assert_eq!(true, actual);
+                assert!(actual);
             }
         }
 
@@ -1408,7 +1403,7 @@ mod tests {
                     file_deleter,
                     permissions,
                     credentials,
-                    &mount_root,
+                    mount_root,
                 )
                 .versions("foo service", "bar:mount");
 
@@ -1440,7 +1435,7 @@ mod tests {
                     file_deleter,
                     permissions,
                     credentials,
-                    &mount_root,
+                    mount_root,
                 )
                 .versions("foo service", "bar:mount");
 
@@ -1473,7 +1468,7 @@ mod tests {
                     file_deleter,
                     permissions,
                     credentials,
-                    &mount_root,
+                    mount_root,
                 )
                 .versions("foo service", "bar:mount");
 
@@ -1508,7 +1503,7 @@ mod tests {
                     file_deleter,
                     permissions,
                     credentials,
-                    &mount_root,
+                    mount_root,
                 )
                 .versions("foo service", "bar:mount");
 
@@ -1548,7 +1543,7 @@ mod tests {
                 file_deleter,
                 permissions,
                 credentials,
-                &mount_root,
+                mount_root,
             )
             .list();
 
@@ -1583,7 +1578,7 @@ mod tests {
                 file_deleter,
                 permissions,
                 credentials,
-                &mount_root,
+                mount_root,
             )
             .list();
 
@@ -1634,7 +1629,7 @@ mod tests {
                 file_deleter,
                 permissions,
                 credentials,
-                &mount_root,
+                mount_root,
             )
             .list();
 
@@ -1686,7 +1681,7 @@ mod tests {
                 file_deleter,
                 permissions,
                 credentials,
-                &mount_root,
+                mount_root,
             )
             .list();
 

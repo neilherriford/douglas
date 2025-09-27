@@ -39,6 +39,7 @@ pub struct InitCommand {
 }
 
 impl InitCommand {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         service_user: &str,
         service_group: &str,
@@ -95,14 +96,14 @@ impl InitCommand {
 
         self.verbose_printer
             .print_indented(1, "Creating mount path…");
-        self.create_system_path(&self.mount_root_path.as_path())?;
+        self.create_system_path(self.mount_root_path.as_path())?;
 
         self.verbose_printer
             .print_indented(1, "Setting mount path ownership and permissions…");
-        self.set_ownership_and_permissions(&self.mount_root_path.as_path())?;
+        self.set_ownership_and_permissions(self.mount_root_path.as_path())?;
 
         self.verbose_printer.print_indented(1, "Creating log path…");
-        self.create_system_path(&self.log_path.as_path())?;
+        self.create_system_path(self.log_path.as_path())?;
 
         self.verbose_printer.print_indented(1, "Writing config…");
         self.write_config()?;
@@ -158,7 +159,7 @@ impl InitCommand {
     }
 
     fn create_system_path(&self, path: &Path) -> Result<(), InitCommandError> {
-        self.folder.create_recursively(&path)?;
+        self.folder.create_recursively(path)?;
         Ok(())
     }
 
@@ -199,7 +200,7 @@ mod tests {
     use credentials::MockCredentials;
     use file_system::{MockFolder, MockPermissions};
     use std::{path::Path, sync::Arc};
-
+    #[allow(clippy::too_many_arguments)]
     fn build(
         service_user: &str,
         service_group: &str,

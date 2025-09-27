@@ -123,7 +123,7 @@ mod tests {
                 Arc::new(logger),
                 Arc::new(credentials),
                 Arc::new(file_reader),
-                &token_path,
+                token_path,
             )
             .create("oops".to_string(), "foo".to_string());
 
@@ -150,7 +150,7 @@ mod tests {
                 Arc::new(logger),
                 Arc::new(credentials),
                 Arc::new(file_reader),
-                &token_path,
+                token_path,
             )
             .create("oops".to_string(), "foo".to_string());
 
@@ -174,7 +174,7 @@ mod tests {
                 Arc::new(logger),
                 Arc::new(credentials),
                 Arc::new(file_reader),
-                &token_path,
+                token_path,
             )
             .create("token".to_string(), "foo".to_string());
 
@@ -202,7 +202,7 @@ mod tests {
                 Arc::new(logger),
                 Arc::new(credentials),
                 Arc::new(file_reader),
-                &token_path,
+                token_path,
             )
             .create("token".to_string(), "foo".to_string());
 
@@ -235,7 +235,7 @@ mod tests {
                 Arc::new(logger),
                 Arc::new(credentials),
                 Arc::new(file_reader),
-                &token_path,
+                token_path,
             )
             .create("token".to_string(), "foo".to_string());
 
@@ -268,7 +268,7 @@ mod tests {
                 Arc::new(logger),
                 Arc::new(credentials),
                 Arc::new(file_reader),
-                &token_path,
+                token_path,
             )
             .create("token".to_string(), "foo".to_string());
 
@@ -277,7 +277,7 @@ mod tests {
                     Response::CredentialsCreated {
                         user,
                         group
-                    } if user =="doug-foo".to_string() && group == "doug-foo".to_string()));
+                    } if user =="doug-foo" && group == "doug-foo"));
         }
     }
 }

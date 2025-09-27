@@ -78,24 +78,16 @@ impl ConfigWriter for LocalConfigRepository {
         let path = path.as_path();
         let json = serde_json::to_string_pretty(config)?;
 
-        self.file_writer.write_all(&path, json)?;
+        self.file_writer.write_all(path, json)?;
         self.permissions.change_user_and_group_ownership(
-            &path,
+            path,
             &config.operator_user,
             &config.operator_group,
         )?;
         self.permissions
-            .change_mode(&path, &Modes::OwnerReadWriteGroupReadWrite)?;
+            .change_mode(path, &Modes::OwnerReadWriteGroupReadWrite)?;
 
         Ok(())
-    }
-}
-
-#[cfg(test)]
-impl MockConfigReader {
-    pub fn given_config(&mut self, config: Config) -> &mut Self {
-        self.expect_read().returning_st(move || Ok(config.clone()));
-        return self;
     }
 }
 

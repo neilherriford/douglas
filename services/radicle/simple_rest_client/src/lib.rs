@@ -87,7 +87,7 @@ impl Header {
 }
 
 pub fn create_path_and_query_string(path: &str, parameters: HashMap<&str, &str>) -> String {
-    if parameters.len() == 0 {
+    if parameters.is_empty() {
         path.to_string()
     } else {
         let encoded_params = parameters
@@ -137,7 +137,7 @@ impl<T: Send + 'static> MockRestClient<T> {
         if let Some(query) = parts.query() {
             let mut parameters: Vec<(String, String)> = query
                 .split("&")
-                .map(|assignment| {
+                .filter_map(|assignment| {
                     let mut chunks = assignment.split("=");
                     match (chunks.next(), chunks.next()) {
                         (Some(name), Some(value)) => Some((name.to_string(), value.to_string())),
@@ -145,8 +145,6 @@ impl<T: Send + 'static> MockRestClient<T> {
                         _ => None,
                     }
                 })
-                .filter(|pair| pair.is_some())
-                .map(|pair| pair.unwrap())
                 .collect();
 
             parameters.sort();
@@ -393,7 +391,7 @@ impl<TIo: IoStream + 'static, TResponseBody: Send + Sync, TParser: Parser<String
             sender: None,
             default_headers,
             logger,
-            parser: parser,
+            parser,
             _marker: PhantomData,
         }
     }
@@ -444,13 +442,13 @@ impl<TIo: IoStream + 'static, TResponseBody: Send + Sync, TParser: Parser<String
             }
         }
 
-        for headers in vec![&self.default_headers, request_headers] {
+        for headers in [&self.default_headers, request_headers] {
             for header in headers {
                 request_builder = request_builder.header(header.name.clone(), header.value.clone());
             }
         }
 
-        Ok(request_builder.body(request_body.clone().unwrap_or(String::new()))?)
+        Ok(request_builder.body(request_body.clone().unwrap_or_default())?)
     }
 
     async fn send_request(
@@ -475,7 +473,7 @@ impl<TIo: IoStream + 'static, TResponseBody: Send + Sync, TParser: Parser<String
         }
 
         let response = self.sender.as_mut().unwrap().send_request(request).await?;
-        Ok(self.build_response_from_hyper_response(response).await?)
+        self.build_response_from_hyper_response(response).await
     }
 
     async fn build_response_from_hyper_response(
@@ -524,18 +522,18 @@ impl<TIo: IoStream + 'static, TResponseBody: Send + Sync, TParser: Parser<String
         while let Some(next) = hyper_response.frame().await {
             let frame = next?;
             if let Some(chunk) = frame.data_ref() {
-                buffer.push_str(&String::from_utf8(chunk.to_vec()).unwrap());
+                buffer.push_str(core::str::from_utf8(chunk).unwrap());
             }
         }
 
-        if buffer.len() == 0 {
+        if buffer.is_empty() {
             Ok(None)
         } else {
             Ok(Some(buffer))
         }
     }
 
-    fn pretty_headers(&self, headers: &Vec<Header>) -> String {
+    fn pretty_headers(&self, headers: &[Header]) -> String {
         headers
             .iter()
             .map(|header| format!("'{}={}'", header.name, header.value))
@@ -584,7 +582,7 @@ impl<TIo: IoStream + 'static, TResponseBody: Send + Sync, TParser: Parser<String
             }
         };
 
-        let headers = self.pretty_headers(&request_headers);
+        let headers = self.pretty_headers(request_headers);
 
         let mut result = format!(
             "Performing '{}' on '{}://{}{}', with headers {}",
@@ -601,7 +599,7 @@ impl<TIo: IoStream + 'static, TResponseBody: Send + Sync, TParser: Parser<String
     fn log_response(
         &self,
         status_code: u16,
-        response_headers: &Vec<Header>,
+        response_headers: &[Header],
         response_body: &Option<String>,
     ) {
         let mut result = format!(
@@ -632,7 +630,7 @@ where
         request: &Request,
     ) -> Result<Response<TResponseBody>, RestClientError> {
         self.log_request(request);
-        let hyper_request = self.build_hyper_request(&request)?;
+        let hyper_request = self.build_hyper_request(request)?;
         let response: Response<TResponseBody> = self.send_request(hyper_request).await?;
         Ok(response)
     }
@@ -713,7 +711,7 @@ mod tests {
             })
             .await;
 
-        assert_eq!(result.is_ok(), true);
+        assert!(result.is_ok());
 
         let res = result.unwrap();
 
@@ -823,7 +821,7 @@ mod tests {
             })
             .await;
 
-        assert_eq!(result.is_ok(), true);
+        assert!(result.is_ok());
 
         let res = result.unwrap();
 
@@ -869,7 +867,7 @@ mod tests {
             })
             .await;
 
-        assert_eq!(result.is_ok(), true);
+        assert!(result.is_ok());
 
         let res = result.unwrap();
 
@@ -911,7 +909,7 @@ mod tests {
             })
             .await;
 
-        assert_eq!(result.is_ok(), true);
+        assert!(result.is_ok());
 
         let res = result.unwrap();
 
@@ -959,7 +957,7 @@ mod tests {
             })
             .await;
 
-        assert_eq!(result.is_ok(), true);
+        assert!(result.is_ok());
 
         let res = result.unwrap();
 
@@ -1006,7 +1004,7 @@ mod tests {
             })
             .await;
 
-        assert_eq!(result.is_ok(), true);
+        assert!(result.is_ok());
 
         let res = result.unwrap();
 
@@ -1053,7 +1051,7 @@ mod tests {
             })
             .await;
 
-        assert_eq!(result.is_ok(), true);
+        assert!(result.is_ok());
 
         let res = result.unwrap();
 

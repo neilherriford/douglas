@@ -50,13 +50,11 @@ impl FileLogger {
                     constants::RADICLE_GROUP,
                 ) {
                     eprintln!("Failed to set permissions on log file! {}", err);
-                } else {
-                    if let Err(err) = self
-                        .permissions
-                        .change_mode(&self.path, &Modes::OwnerReadWriteGroupRead)
-                    {
-                        eprintln!("Failed to set mode on log file! {}", err);
-                    }
+                } else if let Err(err) = self
+                    .permissions
+                    .change_mode(&self.path, &Modes::OwnerReadWriteGroupRead)
+                {
+                    eprintln!("Failed to set mode on log file! {}", err);
                 };
             });
         }

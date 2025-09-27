@@ -99,7 +99,7 @@ pub enum ChunkedJsonParserError {
     Json(#[from] serde_json::Error),
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct ChunkedJsonParser {}
 
 impl ChunkedJsonParser {
@@ -114,7 +114,7 @@ impl Parser<String, Vec<Json>> for ChunkedJsonParser {
     fn parse(&self, input: String) -> Result<Vec<Json>, Self::ParseError> {
         input
             .split("\r\n")
-            .filter(|chunk| chunk.len() > 0)
+            .filter(|chunk| !chunk.is_empty())
             .map(|chunk| serde_json::from_str(chunk).map_err(|e| e.into()))
             .collect()
     }
@@ -213,7 +213,7 @@ impl SimpleDockerClient {
         argument_name: &str,
         argument: &String,
     ) -> Result<(), DockerError> {
-        if argument.len() == 0 {
+        if argument.is_empty() {
             Err(DockerError::InvalidArgumentError {
                 name: argument_name.to_string(),
                 given: argument.to_string(),
@@ -241,11 +241,7 @@ impl SimpleDockerClient {
 
     fn expect_okay(&self, response: Response<Vec<Json>>) -> Result<Vec<Json>, DockerError> {
         match response {
-            Response::Okay { body, .. } => Ok(if let Some(chunks) = body {
-                chunks
-            } else {
-                vec![]
-            }),
+            Response::Okay { body, .. } => Ok(body.unwrap_or_default()),
             Response::Created { body, .. } => Err(DockerError::UnexpectedResponseError {
                 status: 201,
                 body,
@@ -272,11 +268,8 @@ impl SimpleDockerClient {
                 body,
                 message: "expected CREATED, but recieved OK".to_string(),
             }),
-            Response::Created { body, .. } => Ok(if let Some(chunks) = body {
-                chunks
-            } else {
-                vec![]
-            }),
+            Response::Created { body, .. } => Ok(body.unwrap_or_default()),
+
             Response::NoContent { .. } => Err(DockerError::UnexpectedResponseError {
                 status: 204,
                 body: None,

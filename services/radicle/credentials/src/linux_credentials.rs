@@ -132,9 +132,9 @@ impl Credentials for LinuxCredentials {
                 })
                 .collect())
         } else {
-            return Err(CredentialsError::GeneralError(
+            Err(CredentialsError::GeneralError(
                 "Could not list users".to_string(),
-            ));
+            ))
         }
     }
 
@@ -164,7 +164,7 @@ mod tests {
             }
             .is_root();
 
-            assert_eq!(false, actual);
+            assert!(!actual);
         }
     }
 
@@ -260,7 +260,7 @@ mod tests {
             .create_user("foo", "bar", vec!["baz".to_string()]);
 
             assert!(
-                matches!(actual, Err(CredentialsError::GroupNotFoundError { name }) if name == "baz".to_string() )
+                matches!(actual, Err(CredentialsError::GroupNotFoundError { name }) if name == "baz" )
             );
         }
 
@@ -431,7 +431,7 @@ mod tests {
             }
             .user_exists("foo");
 
-            assert_eq!(false, actual);
+            assert!(!actual);
         }
     }
 
@@ -614,7 +614,7 @@ mod tests {
             }
             .group_exists("foo");
 
-            assert_eq!(false, actual);
+            assert!(!actual);
         }
     }
 

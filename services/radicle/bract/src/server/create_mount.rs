@@ -66,6 +66,7 @@ mod tests {
         use std::path::Path;
         use std::sync::Arc;
 
+        #[allow(clippy::too_many_arguments)]
         fn build(
             token_path: &Path,
             mount_root: &Path,
@@ -123,8 +124,8 @@ mod tests {
             file_reader.given_can_read_all_with_contents("/tmp/token", "token");
 
             let instance = build(
-                &Path::new("/tmp/token"),
-                &Path::new("/tmp/mount_root"),
+                Path::new("/tmp/token"),
+                Path::new("/tmp/mount_root"),
                 Arc::new(logger),
                 Arc::new(file_reader),
                 Arc::new(file_deleter),
@@ -196,8 +197,8 @@ mod tests {
             );
 
             let actual = build(
-                &Path::new("/tmp/token"),
-                &Path::new("/tmp/mount_root"),
+                Path::new("/tmp/token"),
+                Path::new("/tmp/mount_root"),
                 Arc::new(logger),
                 Arc::new(file_reader),
                 Arc::new(file_deleter),

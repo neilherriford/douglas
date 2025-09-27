@@ -159,13 +159,13 @@ impl MacOSCredentials {
             result += 1;
         }
 
-        return result;
+        result
     }
 
     fn add_to_group(&self, user_name: &str, group_name: &str) -> Result<(), CredentialsError> {
-        if self.group_exists(&group_name) {
+        if self.group_exists(group_name) {
             self.set_object_attribute(
-                &group_name,
+                group_name,
                 ObjectKind::Group,
                 ObjectAttribute::GroupMembership,
                 user_name.to_string(),
@@ -274,7 +274,7 @@ impl Credentials for MacOSCredentials {
             Ok(lines
                 .split("\n")
                 .filter_map(|name| {
-                    if name.len() == 0 {
+                    if name.is_empty() {
                         None
                     } else {
                         Some(name.to_string())
@@ -317,7 +317,7 @@ mod tests {
             }
             .is_root();
 
-            assert_eq!(false, actual);
+            assert!(!actual);
         }
     }
 
@@ -379,7 +379,7 @@ mod tests {
             .create_user("foo", "bar", vec!["qux".to_string()]);
 
             assert!(
-                matches!(actual, Err(CredentialsError::GroupNotFoundError { name }) if name == "qux".to_string() )
+                matches!(actual, Err(CredentialsError::GroupNotFoundError { name }) if name == "qux" )
             );
         }
 
@@ -443,7 +443,7 @@ mod tests {
             .create_user("foo", "bar", vec![]);
 
             assert!(
-                matches!(actual, Err(CredentialsError::GroupNotFoundError { name }) if name == "bar".to_string() )
+                matches!(actual, Err(CredentialsError::GroupNotFoundError { name }) if name == "bar" )
             );
         }
 
@@ -542,7 +542,7 @@ qux        504
             }
             .user_exists("foo");
 
-            assert_eq!(false, actual);
+            assert!(!actual);
         }
     }
 
@@ -684,7 +684,7 @@ qux        504
             }
             .group_exists("foo");
 
-            assert_eq!(false, actual);
+            assert!(!actual);
         }
     }
 

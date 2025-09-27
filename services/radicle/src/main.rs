@@ -155,9 +155,9 @@ fn main() {
             let init_result = InitCommand::new(
                 &service_user,
                 &service_group,
-                &Path::new(&mount_root_path),
-                &Path::new(&log_path),
-                &Path::new(&docker_socket_path),
+                Path::new(&mount_root_path),
+                Path::new(&log_path),
+                Path::new(&docker_socket_path),
                 credentials.clone(),
                 folder.clone(),
                 permissions.clone(),

@@ -11,6 +11,7 @@ pub(crate) trait Queries {
     fn group_exists(&self, name: &str) -> bool;
 }
 
+#[derive(Default)]
 pub(crate) struct LocalQueries {}
 
 impl LocalQueries {
@@ -35,11 +36,7 @@ impl Queries for LocalQueries {
     }
 
     fn get_group_id(&self, name: &str) -> Option<u32> {
-        if let Some(group) = get_group_by_name(name) {
-            Some(group.gid())
-        } else {
-            None
-        }
+        get_group_by_name(name).map(|group| group.gid())
     }
 
     fn is_root(&self) -> bool {

@@ -61,6 +61,7 @@ mod tests {
         use mockall::predicate;
         use std::path::Path;
 
+        #[allow(clippy::too_many_arguments)]
         fn build(
             token_path: &Path,
             mount_root: &Path,
@@ -97,8 +98,8 @@ mod tests {
                 logger.clone(),
                 token_validator.clone(),
                 version_manager.clone(),
-                &token_path,
-                &mount_root,
+                token_path,
+                mount_root,
             )
         }
 
@@ -124,8 +125,8 @@ mod tests {
                 .return_const(());
 
             let actual = build(
-                &token_path,
-                &mount_root,
+                token_path,
+                mount_root,
                 Arc::new(log),
                 Arc::new(file_reader),
                 Arc::new(file_deleter),
@@ -233,8 +234,8 @@ mod tests {
                 .expect_pop_with("/tmp/mount_root/bar-service/qux-mount/v0", "v0");
 
             let actual = build(
-                &token_path,
-                &mount_root,
+                token_path,
+                mount_root,
                 Arc::new(log),
                 Arc::new(file_reader),
                 Arc::new(file_deleter),

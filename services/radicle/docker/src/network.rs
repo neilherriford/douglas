@@ -183,7 +183,7 @@ impl SimpleDockerClient {
 
         let response: Response<Vec<Json>> = self.rest_client.execute(&request).await?;
         let body = self.expect_okay(response)?;
-        Ok(self.expect_single_chunk::<T>(body)?)
+        self.expect_single_chunk::<T>(body)
     }
 
     async fn find_connected_containers_by_hight(
@@ -224,9 +224,21 @@ impl SimpleDockerClient {
 
 #[cfg(test)]
 mod tests {
+    fn sorted_eq<T>(left: &[T], right: &[T]) -> bool
+    where
+        T: Clone + std::cmp::Ord,
+    {
+        let mut left_sorted = left.to_vec();
+        let mut right_sorted = right.to_vec();
+        left_sorted.sort();
+        right_sorted.sort();
+        left_sorted == right_sorted
+    }
+
     mod key_deserializer {
         use super::super::*;
         use crate::Deserialize;
+        use tests::sorted_eq;
 
         #[derive(Debug, Deserialize)]
         struct Wrapper {
@@ -263,7 +275,7 @@ mod tests {
             let result = serde_json::from_str::<Wrapper>(json);
 
             assert!(
-                matches!(result, Ok(actual) if actual.keys.clone().sort() == vec!["foo", "bar"].sort())
+                matches!(result, Ok(actual) if sorted_eq(&actual.keys, &["foo".to_string(), "bar".to_string()]))
             )
         }
     }

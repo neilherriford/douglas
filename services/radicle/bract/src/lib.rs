@@ -7,7 +7,7 @@ use std::path::PathBuf;
 
 pub use client::Client;
 use serde::{Deserialize, Serialize};
-pub use server::server::{Server, ServerError};
+pub use server::{Server, ServerError};
 pub use version::Version;
 
 #[derive(Debug, Serialize, Deserialize, PartialEq)]

@@ -55,7 +55,7 @@ impl From<Modes> for u32 {
 
 impl std::fmt::Display for Modes {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let mode: u32 = self.clone().into();
+        let mode: u32 = self.to_owned().into();
         write!(f, "0o{:o}", mode)
     }
 }
@@ -158,6 +158,7 @@ pub trait FileRenamer {
     fn rename(&self, from: &Path, to: &Path) -> Result<(), FileSystemError>;
 }
 
+#[derive(Default)]
 pub struct LocalFileWriter {}
 
 impl LocalFileWriter {
@@ -168,7 +169,7 @@ impl LocalFileWriter {
 
 impl FileWriter for LocalFileWriter {
     fn write_all(&self, path: &Path, contents: String) -> Result<(), FileSystemError> {
-        let mut file = File::create(&path)?;
+        let mut file = File::create(path)?;
         file.write_all(contents.as_bytes())?;
 
         Ok(())
@@ -185,6 +186,7 @@ pub trait FileAppender {
     fn exists(&self, path: &Path) -> bool;
 }
 
+#[derive(Default)]
 pub struct LocalFileAppender {}
 
 impl LocalFileAppender {
@@ -206,6 +208,7 @@ impl FileAppender for LocalFileAppender {
     }
 }
 
+#[derive(Default)]
 pub struct LocalFileReader {}
 
 impl LocalFileReader {
@@ -223,6 +226,7 @@ impl FileReader for LocalFileReader {
     }
 }
 
+#[derive(Default)]
 pub struct LocalFileDeleter {}
 
 impl LocalFileDeleter {
@@ -240,6 +244,7 @@ impl FileDeleter for LocalFileDeleter {
     }
 }
 
+#[derive(Default)]
 pub struct LocalFileRenamer {}
 
 impl LocalFileRenamer {
@@ -264,6 +269,7 @@ pub trait Permissions {
     fn change_mode(&self, path: &Path, mode: &Modes) -> Result<(), FileSystemError>;
 }
 
+#[derive(Default)]
 pub struct LocalPermissions {}
 
 impl LocalPermissions {
@@ -293,7 +299,7 @@ impl Permissions for LocalPermissions {
     fn change_mode(&self, path: &Path, mode: &Modes) -> Result<(), FileSystemError> {
         Ok(set_permissions(
             path,
-            Perms::from_mode(mode.clone().into()),
+            Perms::from_mode(mode.to_owned().into()),
         )?)
     }
 }
@@ -365,6 +371,7 @@ pub trait UnixDomainSocket {
     ) -> Result<Box<dyn Listener + Send + Sync + 'static>, FileSystemError>;
 }
 
+#[derive(Default)]
 pub struct LocalUnixDomainSocket {}
 
 impl LocalUnixDomainSocket {
@@ -405,6 +412,7 @@ pub trait Links {
     fn read(&self, path: &Path) -> Result<PathBuf, FileSystemError>;
 }
 
+#[derive(Default)]
 pub struct LocalLinks {}
 
 impl LocalLinks {
@@ -461,6 +469,7 @@ pub trait Inspect {
     fn exists(&self, path: &Path) -> bool;
 }
 
+#[derive(Default)]
 pub struct LocalInspect {}
 
 impl LocalInspect {
@@ -500,6 +509,7 @@ pub trait Folder {
     fn create_file(&self, path: &Path, name: &str) -> Result<(File, PathBuf), FileSystemError>;
 }
 
+#[derive(Default)]
 pub struct LocalFolder {}
 
 impl LocalFolder {
@@ -514,16 +524,17 @@ impl Folder for LocalFolder {
     }
 
     fn create_recursively(&self, path: &Path) -> Result<PathBuf, FileSystemError> {
-        create_dir_all(&path)?;
+        create_dir_all(path)?;
         self.canonicalize(path)
     }
 
     fn entries(&self, path: &Path) -> Result<Vec<Entry>, FileSystemError> {
         let mut result = Vec::<Entry>::new();
 
-        result.extend(read_dir(path)?.into_iter().filter_map(|entry| {
+        result.extend(read_dir(path)?.filter_map(|entry| {
             let entry = entry.ok()?;
-            Some(Entry::try_create_entry(entry.file_name(), entry.metadata()).ok()?)
+
+            Entry::try_create_entry(entry.file_name(), entry.metadata()).ok()
         }));
 
         Ok(result)
@@ -534,11 +545,8 @@ impl Folder for LocalFolder {
     }
 
     fn pop(&self, path: &Path) -> Option<String> {
-        if let Some(name) = path.file_name() {
-            Some(name.to_string_lossy().to_string())
-        } else {
-            None
-        }
+        path.file_name()
+            .map(|name| name.to_string_lossy().to_string())
     }
 
     fn executable_root(&self) -> Result<PathBuf, FileSystemError> {
@@ -552,7 +560,7 @@ impl Folder for LocalFolder {
     }
 
     fn create_file(&self, path: &Path, name: &str) -> Result<(File, PathBuf), FileSystemError> {
-        self.create_recursively(&path)?;
+        self.create_recursively(path)?;
         let mut path = path.to_path_buf();
         path.push(name);
 

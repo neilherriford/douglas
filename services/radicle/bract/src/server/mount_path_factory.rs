@@ -89,16 +89,16 @@ impl MountPathFactory {
         let active_version_path = self.active_version_path(service_name, mount_name);
 
         if self.folder.exists(&active_version_path) {
-            let version_path = self.links.read(&active_version_path.as_path())?;
-            self.derive_version_from_path(&version_path.as_path())
+            let version_path = self.links.read(active_version_path.as_path())?;
+            self.derive_version_from_path(version_path.as_path())
         } else {
             Err(MountPathVersionError::InvalidPath(active_version_path))
         }
     }
 
     fn derive_version_from_path(&self, path: &Path) -> Result<Version, MountPathVersionError> {
-        if self.folder.exists(&path) {
-            if let Some(version) = self.folder.pop(&path) {
+        if self.folder.exists(path) {
+            if let Some(version) = self.folder.pop(path) {
                 match version.parse::<Version>() {
                     Ok(version) => Ok(version),
                     Err(_) => Err(MountPathVersionError::CouldNotDetermineVersion(
@@ -138,7 +138,7 @@ mod tests {
             let links = MockLinks::new();
             let root = Path::new("/tmp/mount_root");
 
-            let actual = build(&root, Arc::new(folder), Arc::new(links)).version_path(
+            let actual = build(root, Arc::new(folder), Arc::new(links)).version_path(
                 "foo service",
                 "bar:mount",
                 Version(5),
@@ -160,7 +160,7 @@ mod tests {
             let links = MockLinks::new();
             let root = Path::new("/tmp/mount_root");
 
-            let actual = build(&root, Arc::new(folder), Arc::new(links))
+            let actual = build(root, Arc::new(folder), Arc::new(links))
                 .mount_path("foo service", "bar:mount");
             let expected = Path::new("/tmp/mount_root/foo%20service/bar%3Amount").to_path_buf();
 
@@ -179,8 +179,7 @@ mod tests {
             let links = MockLinks::new();
             let root = Path::new("/tmp/mount_root");
 
-            let actual =
-                build(&root, Arc::new(folder), Arc::new(links)).service_path("foo service");
+            let actual = build(root, Arc::new(folder), Arc::new(links)).service_path("foo service");
             let expected = Path::new("/tmp/mount_root/foo%20service").to_path_buf();
 
             assert_eq!(expected, actual)
@@ -198,7 +197,7 @@ mod tests {
             let links = MockLinks::new();
             let root = Path::new("/tmp/mount_root");
 
-            let actual = build(&root, Arc::new(folder), Arc::new(links))
+            let actual = build(root, Arc::new(folder), Arc::new(links))
                 .active_version_path("foo service", "bar:mount");
             let expected =
                 Path::new("/tmp/mount_root/foo%20service/bar%3Amount/current").to_path_buf();
@@ -221,7 +220,7 @@ mod tests {
             let root = Path::new("/tmp/mount_root");
 
             folder.given_does_not_exist("/tmp/mount_root/foo%20service/bar%3Amount/current");
-            let actual = build(&root, Arc::new(folder), Arc::new(links))
+            let actual = build(root, Arc::new(folder), Arc::new(links))
                 .active_version("foo service", "bar:mount");
 
             assert!(matches!(actual, Err(MountPathVersionError::InvalidPath(_))));
@@ -242,7 +241,7 @@ mod tests {
                 )))
                 .returning(|_| Err(FileSystemError::ExpectedFileError));
 
-            let actual = build(&root, Arc::new(folder), Arc::new(links))
+            let actual = build(root, Arc::new(folder), Arc::new(links))
                 .active_version("foo service", "bar:mount");
 
             assert!(matches!(
@@ -265,7 +264,7 @@ mod tests {
                 "/tmp/mount_root/foo%20service/bar%3Amount/oops",
             );
 
-            let actual = build(&root, Arc::new(folder), Arc::new(links))
+            let actual = build(root, Arc::new(folder), Arc::new(links))
                 .active_version("foo service", "bar:mount");
 
             assert!(matches!(actual, Err(MountPathVersionError::InvalidPath(_))));
@@ -293,7 +292,7 @@ mod tests {
                 "/tmp/mount_root/foo%20service/bar%3Amount/oops",
             );
 
-            let actual = build(&root, Arc::new(folder), Arc::new(links))
+            let actual = build(root, Arc::new(folder), Arc::new(links))
                 .active_version("foo service", "bar:mount");
 
             assert!(matches!(
@@ -324,7 +323,7 @@ mod tests {
                 "/tmp/mount_root/foo%20service/bar%3Amount/oops",
             );
 
-            let actual = build(&root, Arc::new(folder), Arc::new(links))
+            let actual = build(root, Arc::new(folder), Arc::new(links))
                 .active_version("foo service", "bar:mount");
 
             assert!(matches!(
@@ -355,7 +354,7 @@ mod tests {
                 "/tmp/mount_root/foo%20service/bar%3Amount/v5",
             );
 
-            let actual = build(&root, Arc::new(folder), Arc::new(links))
+            let actual = build(root, Arc::new(folder), Arc::new(links))
                 .active_version("foo service", "bar:mount");
 
             assert!(matches!(

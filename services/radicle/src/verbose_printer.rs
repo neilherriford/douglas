@@ -6,7 +6,7 @@ pub trait VerbosePrinter {
     fn print_indented(&self, indent: u8, text: &str);
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct PlainVerbosePrinter {}
 
 impl PlainVerbosePrinter {
@@ -29,6 +29,7 @@ impl VerbosePrinter for PlainVerbosePrinter {
     }
 }
 
+#[derive(Debug, Default)]
 pub struct SilentVerbosePrinter {}
 
 impl SilentVerbosePrinter {

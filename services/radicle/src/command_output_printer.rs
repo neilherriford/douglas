@@ -12,6 +12,7 @@ pub trait CommandOutputPrinter<TOutput: 'static, TError> {
         TError: std::fmt::Display + 'static;
 }
 
+#[derive(Default)]
 pub struct PlainCommandOutputPrinter {}
 
 impl PlainCommandOutputPrinter {
@@ -105,6 +106,7 @@ impl<T: std::fmt::Display> CommandOutputPrinter<(), T> for PlainCommandOutputPri
     }
 }
 
+#[derive(Default)]
 pub struct JsonCommandOutputPrinter {}
 
 impl JsonCommandOutputPrinter {

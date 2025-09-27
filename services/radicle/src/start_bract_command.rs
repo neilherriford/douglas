@@ -62,6 +62,7 @@ pub enum BractLogger {
 }
 
 impl StartBractCommand {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         credentials: Arc<dyn Credentials + Sync + Send + 'static>,
         folder: Arc<dyn Folder + Sync + Send + 'static>,
@@ -132,9 +133,9 @@ impl StartBractCommand {
 
     fn create_server(&self, config: &Config) -> Result<Server, StartBractCommandError> {
         let logger = match &self.logger {
-            BractLogger::Use(logger) => Arc::clone(&logger),
+            BractLogger::Use(logger) => Arc::clone(logger),
             BractLogger::WriteToFile => douglas_logger_factory::create(
-                &config,
+                config,
                 Arc::clone(&self.file_appender),
                 Arc::clone(&self.permissions),
             ),
@@ -153,7 +154,7 @@ impl StartBractCommand {
             Arc::clone(&self.credentials),
             self.bract_path_factory.token_path()?.as_path(),
             self.bract_path_factory.bract_socket_path()?.as_path(),
-            &config.mount_root_path.as_path(),
+            config.mount_root_path.as_path(),
             constants::RADICLE_USER,
             constants::RADICLE_GROUP,
             constants::DOUGLAS_GROUP,
@@ -163,10 +164,10 @@ impl StartBractCommand {
     fn run_detached(&self, server: Server, config: &Config) -> Result<(), StartBractCommandError> {
         let (stdout, stdout_path) = self
             .folder
-            .create_file(&config.log_path.as_path(), "douglas-bract.out")?;
+            .create_file(config.log_path.as_path(), "douglas-bract.out")?;
         let (stderr, stderr_path) = self
             .folder
-            .create_file(&config.log_path.as_path(), "douglas-bract.err")?;
+            .create_file(config.log_path.as_path(), "douglas-bract.err")?;
 
         self.set_permissions_to_service_readable(stdout_path.as_path())?;
         self.set_permissions_to_service_readable(stderr_path.as_path())?;
@@ -262,6 +263,7 @@ mod tests {
     use os::MockOs;
     use std::sync::Arc;
 
+    #[allow(clippy::too_many_arguments)]
     fn build(
         credentials: Arc<dyn Credentials + Sync + Send + 'static>,
         folder: Arc<MockFolder>,

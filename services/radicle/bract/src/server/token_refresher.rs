@@ -60,7 +60,7 @@ impl TokenRefresher {
         E: Debug,
     {
         match result {
-            Ok(_) => return,
+            Ok(_) => (),
             Err(err) => {
                 self.log
                     .error(&format!("Token refresh error: {:?}!  Exiting!", err));
@@ -100,7 +100,7 @@ mod tests {
 
             let refresher = TokenRefresher::new(
                 Arc::new(log),
-                &token_path,
+                token_path,
                 Arc::new(permissions),
                 Arc::new(file_writer),
                 Arc::new(os),
@@ -140,7 +140,7 @@ mod tests {
 
             let refresher = TokenRefresher::new(
                 Arc::new(log),
-                &token_path,
+                token_path,
                 Arc::new(permissions),
                 Arc::new(file_writer),
                 Arc::new(os),
@@ -180,7 +180,7 @@ mod tests {
 
             let refresher = TokenRefresher::new(
                 Arc::new(log),
-                &token_path,
+                token_path,
                 Arc::new(permissions),
                 Arc::new(file_writer),
                 Arc::new(os),
@@ -217,7 +217,7 @@ mod tests {
 
             TokenRefresher::new(
                 Arc::new(log),
-                &token_path,
+                token_path,
                 Arc::new(permissions),
                 Arc::new(file_writer),
                 Arc::new(os),

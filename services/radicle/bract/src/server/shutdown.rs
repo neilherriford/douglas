@@ -75,7 +75,7 @@ mod tests {
 
             let (sender, _) = broadcast::channel::<()>(1);
 
-            let actual = build(&token_path, Arc::new(log), Arc::new(file_reader))
+            let actual = build(token_path, Arc::new(log), Arc::new(file_reader))
                 .perform("foo".to_string(), sender);
 
             assert!(matches!(actual, Response::InvalidToken));

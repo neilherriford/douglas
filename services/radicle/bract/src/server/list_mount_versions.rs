@@ -56,6 +56,7 @@ mod tests {
         use mockall::predicate;
         use std::{path::Path, sync::Arc};
 
+        #[allow(clippy::too_many_arguments)]
         fn build(
             token_path: &Path,
             mount_root: &Path,
@@ -114,8 +115,8 @@ mod tests {
                 .return_const(());
 
             let actual = build(
-                &token_path,
-                &mount_root,
+                token_path,
+                mount_root,
                 Arc::new(log),
                 Arc::new(file_reader),
                 Arc::new(file_deleter),
@@ -151,8 +152,8 @@ mod tests {
                 );
 
             let actual = build(
-                &token_path,
-                &mount_root,
+                token_path,
+                mount_root,
                 Arc::new(log),
                 Arc::new(file_reader),
                 Arc::new(file_deleter),

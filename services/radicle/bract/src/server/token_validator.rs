@@ -71,7 +71,7 @@ mod tests {
                 .returning(|_| Err(FileSystemError::ExpectedFileError));
 
             let mut called = false;
-            let actual = TokenValidator::new(Arc::new(log), Arc::new(file_reader), &token_path)
+            let actual = TokenValidator::new(Arc::new(log), Arc::new(file_reader), token_path)
                 .perform_if_valid("foo".to_string(), || {
                     called = true;
                     Response::Error("foo".to_string())
@@ -91,7 +91,7 @@ mod tests {
             file_reader.given_can_read_all_with_contents("/tmp/token", "token");
 
             let mut called = false;
-            let actual = TokenValidator::new(Arc::new(log), Arc::new(file_reader), &token_path)
+            let actual = TokenValidator::new(Arc::new(log), Arc::new(file_reader), token_path)
                 .perform_if_valid("foo".to_string(), || {
                     called = true;
                     Response::Error("foo".to_string())
@@ -110,14 +110,14 @@ mod tests {
             file_reader.given_can_read_all_with_contents("/tmp/token", "token");
 
             let mut called = false;
-            let actual = TokenValidator::new(Arc::new(log), Arc::new(file_reader), &token_path)
+            let actual = TokenValidator::new(Arc::new(log), Arc::new(file_reader), token_path)
                 .perform_if_valid("token".to_string(), || {
                     called = true;
                     Response::Error("foo".to_string())
                 });
 
-            assert_eq!(true, called);
-            assert!(matches!(actual, Response::Error(msg) if msg == "foo".to_string()));
+            assert!(called);
+            assert!(matches!(actual, Response::Error(msg) if msg == "foo"));
         }
     }
 }

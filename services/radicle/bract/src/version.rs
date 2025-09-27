@@ -57,7 +57,7 @@ mod tests {
             let actual = "".parse::<Version>();
 
             assert!(
-                matches!(actual, Err(VersionParseError::InvalidFormat(given)) if given == "".to_string())
+                matches!(actual, Err(VersionParseError::InvalidFormat(given)) if given == String::new())
             );
         }
 
@@ -66,7 +66,7 @@ mod tests {
             let actual = "x123".parse::<Version>();
 
             assert!(
-                matches!(actual, Err(VersionParseError::InvalidFormat(given)) if given == "x123".to_string())
+                matches!(actual, Err(VersionParseError::InvalidFormat(given)) if given == "x123")
             );
         }
 

@@ -1,4 +1,4 @@
-use super::server::ServerError;
+use super::ServerError;
 use file_system::{FileDeleter, Listener, Modes, Permissions, UnixDomainSocket};
 use log::Logger;
 use std::path::{Path, PathBuf};
@@ -86,7 +86,7 @@ mod tests {
 
             let actual = CreateListener::new(
                 Arc::new(log),
-                &socket_path,
+                socket_path,
                 Arc::new(file_deleter),
                 Arc::new(permissions),
                 Arc::new(unix_domain_socket),
@@ -94,7 +94,7 @@ mod tests {
             )
             .create();
 
-            assert_eq!(true, actual.is_err());
+            assert!(actual.is_err());
         }
 
         #[test]
@@ -114,7 +114,7 @@ mod tests {
 
             let actual = CreateListener::new(
                 Arc::new(log),
-                &socket_path,
+                socket_path,
                 Arc::new(file_deleter),
                 Arc::new(permissions),
                 Arc::new(unix_domain_socket),
@@ -122,7 +122,7 @@ mod tests {
             )
             .create();
 
-            assert_eq!(true, actual.is_err());
+            assert!(actual.is_err());
         }
 
         #[test]
@@ -147,7 +147,7 @@ mod tests {
 
             let actual = CreateListener::new(
                 Arc::new(log),
-                &socket_path,
+                socket_path,
                 Arc::new(file_deleter),
                 Arc::new(permissions),
                 Arc::new(unix_domain_socket),
@@ -155,7 +155,7 @@ mod tests {
             )
             .create();
 
-            assert_eq!(true, actual.is_err());
+            assert!(actual.is_err());
         }
 
         #[test]
@@ -180,7 +180,7 @@ mod tests {
 
             let actual = CreateListener::new(
                 Arc::new(log),
-                &socket_path,
+                socket_path,
                 Arc::new(file_deleter),
                 Arc::new(permissions),
                 Arc::new(unix_domain_socket),
@@ -188,7 +188,7 @@ mod tests {
             )
             .create();
 
-            assert_eq!(true, actual.is_err());
+            assert!(actual.is_err());
         }
 
         #[test]
@@ -211,7 +211,7 @@ mod tests {
 
             let actual = CreateListener::new(
                 Arc::new(log),
-                &socket_path,
+                socket_path,
                 Arc::new(file_deleter),
                 Arc::new(permissions),
                 Arc::new(unix_domain_socket),
@@ -219,7 +219,7 @@ mod tests {
             )
             .create();
 
-            assert_eq!(true, actual.is_ok());
+            assert!(actual.is_ok());
         }
     }
 }

@@ -103,8 +103,8 @@ mod tests {
                 .return_const(());
 
             let actual = build(
-                &token_path,
-                &mount_root,
+                token_path,
+                mount_root,
                 Arc::new(log),
                 Arc::new(file_reader),
                 Arc::new(links),
@@ -140,8 +140,8 @@ mod tests {
                 .return_const("v5".to_string());
 
             let actual = build(
-                &token_path,
-                &mount_root,
+                token_path,
+                mount_root,
                 Arc::new(log),
                 Arc::new(file_reader),
                 Arc::new(links),
