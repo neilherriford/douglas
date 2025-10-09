@@ -1,10 +1,16 @@
-use crate::Response;
-use crate::container::{Container, Repository as ContainerRepository};
-use crate::{DockerError, Label, SimpleDockerClient, deserialize_labels, serialize_labels};
+use crate::Parser;
+use crate::{Container, DockerError, Label, deserialize_labels, serialize_labels};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer, Serialize};
+use serde_json::from_value;
 use serde_json::value::Value as Json;
-use simple_rest_client::{Header, Request};
+use simple_rest_client::{Header, Request, Response, RestClient};
+use std::sync::Arc;
+
+use super::json_parser::JsonParserError;
+use super::{
+    assert_created_with_body, assert_non_empty_string_argument, assert_okay, assert_okay_with_body,
+};
 
 #[derive(Debug, Deserialize, PartialEq)]
 pub struct Network {
@@ -62,59 +68,49 @@ where
     Ok(obj.keys().map(|key| key.as_str().to_string()).collect())
 }
 
-#[async_trait::async_trait]
-pub trait Repository {
-    async fn inspect_by_id(&mut self, id: String) -> Result<Network, DockerError>;
-    async fn inspect_by_name(&mut self, name: String) -> Result<Network, DockerError>;
-    async fn find_connected_containers_by_id(
-        &mut self,
-        network_id: String,
-    ) -> Result<Vec<Container>, DockerError>;
-    async fn find_connected_containers_by_name(
-        &mut self,
-        network_name: String,
-    ) -> Result<Vec<Container>, DockerError>;
-    async fn create(&mut self, name: &str, lables: Vec<Label>) -> Result<Network, DockerError>;
-    async fn connect(
-        &mut self,
-        network: &Network,
-        container: &Container,
-    ) -> Result<(), DockerError>;
-    async fn disconnect(
-        &mut self,
-        network: &Network,
-        container: &Container,
-    ) -> Result<(), DockerError>;
+pub struct NetworkCommand {
+    rest_client: Arc<tokio::sync::Mutex<dyn RestClient + Send + Sync + 'static>>,
+    parser: Arc<dyn Parser<Json, ParseError = JsonParserError>>,
 }
 
-#[async_trait::async_trait]
-impl Repository for SimpleDockerClient {
-    async fn inspect_by_id(&mut self, id: String) -> Result<Network, DockerError> {
-        self.expect_non_empty_string_argument("id", &id)?;
+impl NetworkCommand {
+    pub fn new(
+        rest_client: Arc<tokio::sync::Mutex<dyn RestClient + Send + Sync + 'static>>,
+        parser: Arc<dyn Parser<Json, ParseError = JsonParserError>>,
+    ) -> Self {
+        Self {
+            rest_client,
+            parser,
+        }
+    }
+
+    pub async fn inspect_by_id(&mut self, id: &str) -> Result<Network, DockerError> {
+        assert_non_empty_string_argument("id", id)?;
         self.inspect_network_by_hight::<Network>(id).await
     }
-    async fn inspect_by_name(&mut self, name: String) -> Result<Network, DockerError> {
-        self.expect_non_empty_string_argument("name", &name)?;
+
+    pub async fn inspect_by_name(&mut self, name: &str) -> Result<Network, DockerError> {
+        assert_non_empty_string_argument("name", name)?;
         self.inspect_network_by_hight::<Network>(name).await
     }
 
-    async fn find_connected_containers_by_id(
+    pub async fn find_connected_containers_by_id(
         &mut self,
-        network_id: String,
-    ) -> Result<Vec<Container>, DockerError> {
-        self.expect_non_empty_string_argument("network_id", &network_id)?;
+        network_id: &str,
+    ) -> Result<Vec<String>, DockerError> {
+        assert_non_empty_string_argument("network_id", network_id)?;
         self.find_connected_containers_by_hight(network_id).await
     }
 
-    async fn find_connected_containers_by_name(
+    pub async fn find_connected_containers_by_name(
         &mut self,
-        network_name: String,
-    ) -> Result<Vec<Container>, DockerError> {
-        self.expect_non_empty_string_argument("network_name", &network_name)?;
+        network_name: &str,
+    ) -> Result<Vec<String>, DockerError> {
+        assert_non_empty_string_argument("network_name", network_name)?;
         self.find_connected_containers_by_hight(network_name).await
     }
 
-    async fn create(&mut self, name: &str, labels: Vec<Label>) -> Result<Network, DockerError> {
+    pub async fn create(&mut self, name: &str, labels: Vec<Label>) -> Result<Network, DockerError> {
         let req = Request::Post {
             path: "/networks/create".to_string(),
             body: Some(serde_json::to_string(&CreationBody {
@@ -124,14 +120,19 @@ impl Repository for SimpleDockerClient {
             headers: vec![Header::content_type_json()],
         };
 
-        let response: Response<Vec<Json>> = self.rest_client.execute(&req).await?;
-        let body = self.expect_created(response)?;
-        let buffer = self.expect_single_chunk::<CreationResponse>(body)?;
+        let response = {
+            let mut rest_client = self.rest_client.lock().await;
+            rest_client.execute(&req).await?
+        };
 
-        self.inspect_network_by_hight(buffer.id).await
+        let body = assert_created_with_body(response)?;
+        let json = self.parser.parse(body)?;
+        let result: CreationResponse = from_value(json)?;
+
+        self.inspect_network_by_hight(&result.id).await
     }
 
-    async fn connect(
+    pub async fn connect(
         &mut self,
         network: &Network,
         container: &Container,
@@ -144,12 +145,13 @@ impl Repository for SimpleDockerClient {
             headers: vec![Header::content_type_json()],
         };
 
-        let response: Response<Vec<Json>> = self.rest_client.execute(&req).await?;
-        self.expect_okay(response)?;
+        let mut rest_client = self.rest_client.lock().await;
+        let response = rest_client.execute(&req).await?;
+        assert_okay(response)?;
         Ok(())
     }
 
-    async fn disconnect(
+    pub async fn disconnect(
         &mut self,
         network: &Network,
         container: &Container,
@@ -162,17 +164,18 @@ impl Repository for SimpleDockerClient {
             headers: vec![Header::content_type_json()],
         };
 
-        let response: Response<Vec<Json>> = self.rest_client.execute(&req).await?;
+        let response = {
+            let mut rest_client = self.rest_client.lock().await;
+            rest_client.execute(&req).await?
+        };
 
         if !self.is_already_disconnected(&response) {
-            self.expect_okay(response)?;
+            assert_okay(response)?;
         }
         Ok(())
     }
-}
 
-impl SimpleDockerClient {
-    async fn inspect_network_by_hight<T>(&mut self, hight: String) -> Result<T, DockerError>
+    async fn inspect_network_by_hight<T>(&mut self, hight: &str) -> Result<T, DockerError>
     where
         T: DeserializeOwned,
     {
@@ -181,39 +184,35 @@ impl SimpleDockerClient {
             headers: vec![],
         };
 
-        let response: Response<Vec<Json>> = self.rest_client.execute(&request).await?;
-        let body = self.expect_okay(response)?;
-        self.expect_single_chunk::<T>(body)
+        let mut rest_client = self.rest_client.lock().await;
+        let response = rest_client.execute(&request).await?;
+        let body = assert_okay_with_body(response)?;
+        let json = self.parser.parse(body)?;
+
+        Ok(from_value(json)?)
     }
 
     async fn find_connected_containers_by_hight(
         &mut self,
-        hight: String,
-    ) -> Result<Vec<Container>, DockerError> {
+        hight: &str,
+    ) -> Result<Vec<String>, DockerError> {
         let network = self
             .inspect_network_by_hight::<ConnectedContainers>(hight)
             .await?;
-        let mut result: Vec<Container> = Vec::with_capacity(network.container_ids.len());
 
-        for container_id in network.container_ids {
-            result.push(ContainerRepository::inspect_by_id(self, container_id).await?);
-        }
-
-        Ok(result)
+        Ok(network.container_ids)
     }
 
-    fn is_already_disconnected(&mut self, response: &Response<Vec<Json>>) -> bool {
+    fn is_already_disconnected(&mut self, response: &Response) -> bool {
         if let Response::Error {
             status: 500,
-            body: Some(chunks),
+            body: Some(body),
             ..
         } = response
         {
-            if let Ok(connection_error) =
-                self.expect_single_chunk::<ConnectionError>(chunks.to_vec())
-            {
-                if connection_error.message.contains("not connected") {
-                    return true;
+            if let Ok(json) = self.parser.parse(body.to_string()) {
+                if let Ok(connection_error) = from_value::<ConnectionError>(json) {
+                    return connection_error.message.contains("not connected");
                 }
             }
         }
@@ -236,9 +235,9 @@ mod tests {
     }
 
     mod key_deserializer {
-        use super::super::*;
         use crate::Deserialize;
-        use tests::sorted_eq;
+        use crate::commands::network::deserialize_keys;
+        use crate::commands::network::tests::sorted_eq;
 
         #[derive(Debug, Deserialize)]
         struct Wrapper {
@@ -281,17 +280,21 @@ mod tests {
     }
 
     mod inspect_by_id {
-        use super::super::*;
+        use crate::{
+            DockerError,
+            commands::{json_parser::JsonParser, network::NetworkCommand},
+        };
         use simple_rest_client::MockRestClient;
+        use std::sync::Arc;
 
         #[tokio::test]
         async fn should_err_if_id_is_empty() {
             let mock_rest_client = MockRestClient::new();
-            let mut client = SimpleDockerClient {
-                rest_client: Box::new(mock_rest_client),
-            };
-
-            let result = Repository::inspect_by_id(&mut client, String::new()).await;
+            let mut network_command = NetworkCommand::new(
+                Arc::new(tokio::sync::Mutex::new(mock_rest_client)),
+                Arc::new(JsonParser::new()),
+            );
+            let result = network_command.inspect_by_id("").await;
 
             assert!(matches!(
                 result,
@@ -305,18 +308,21 @@ mod tests {
     }
 
     mod find_connected_containers_by_id {
-        use super::super::*;
+        use crate::{
+            DockerError,
+            commands::{json_parser::JsonParser, network::NetworkCommand},
+        };
         use simple_rest_client::MockRestClient;
+        use std::sync::Arc;
 
         #[tokio::test]
         async fn should_err_if_id_is_empty() {
             let mock_rest_client = MockRestClient::new();
-            let mut client = SimpleDockerClient {
-                rest_client: Box::new(mock_rest_client),
-            };
-
-            let result =
-                Repository::find_connected_containers_by_id(&mut client, String::new()).await;
+            let mut network_command = NetworkCommand::new(
+                Arc::new(tokio::sync::Mutex::new(mock_rest_client)),
+                Arc::new(JsonParser::new()),
+            );
+            let result = network_command.find_connected_containers_by_id("").await;
 
             assert!(matches!(
                 result,
@@ -330,18 +336,21 @@ mod tests {
     }
 
     mod find_connected_containers_by_name {
-        use super::super::*;
+        use crate::{
+            DockerError,
+            commands::{json_parser::JsonParser, network::NetworkCommand},
+        };
         use simple_rest_client::MockRestClient;
+        use std::sync::Arc;
 
         #[tokio::test]
         async fn should_err_if_id_is_empty() {
             let mock_rest_client = MockRestClient::new();
-            let mut client = SimpleDockerClient {
-                rest_client: Box::new(mock_rest_client),
-            };
-
-            let result =
-                Repository::find_connected_containers_by_name(&mut client, String::new()).await;
+            let mut network_command = NetworkCommand::new(
+                Arc::new(tokio::sync::Mutex::new(mock_rest_client)),
+                Arc::new(JsonParser::new()),
+            );
+            let result = network_command.find_connected_containers_by_name("").await;
 
             assert!(matches!(
                 result,
@@ -355,17 +364,21 @@ mod tests {
     }
 
     mod inspect_by_name {
-        use super::super::*;
+        use crate::{
+            DockerError,
+            commands::{json_parser::JsonParser, network::NetworkCommand},
+        };
         use simple_rest_client::MockRestClient;
+        use std::sync::Arc;
 
         #[tokio::test]
         async fn should_err_if_id_is_empty() {
             let mock_rest_client = MockRestClient::new();
-            let mut client = SimpleDockerClient {
-                rest_client: Box::new(mock_rest_client),
-            };
-
-            let result = Repository::inspect_by_name(&mut client, String::new()).await;
+            let mut network_command = NetworkCommand::new(
+                Arc::new(tokio::sync::Mutex::new(mock_rest_client)),
+                Arc::new(JsonParser::new()),
+            );
+            let result = network_command.inspect_by_name("").await;
 
             assert!(matches!(
                 result,
@@ -379,58 +392,44 @@ mod tests {
     }
 
     mod inspect_network_by_hight {
-        use super::super::*;
-        use serde_json::json;
+        use crate::{
+            DockerError, Label,
+            commands::{
+                json_parser::JsonParser,
+                network::{Network, NetworkCommand},
+            },
+        };
         use simple_rest_client::MockRestClient;
+        use std::sync::Arc;
 
         #[tokio::test]
         async fn should_err_if_empty_body() {
             let mut mock_rest_client = MockRestClient::new();
-            mock_rest_client.expect_get_and_return_okay("/networks/10111213", Some(vec![]));
+            mock_rest_client.expect_get_and_return_okay("/networks/10111213", Some(String::new()));
 
-            let mut client = SimpleDockerClient {
-                rest_client: Box::new(mock_rest_client),
-            };
-
-            let result = client
-                .inspect_network_by_hight::<Network>("10111213".to_string())
-                .await;
-
-            assert!(matches!(result, Err(DockerError::InsufficientChunksError)));
-        }
-
-        #[tokio::test]
-        async fn should_err_if_too_many_chunks() {
-            let mut mock_rest_client = MockRestClient::new();
-
-            mock_rest_client.expect_get_and_return_okay(
-                "/networks/10111213",
-                Some(vec![json!("too"), json!("many")]),
+            let mut network_command = NetworkCommand::new(
+                Arc::new(tokio::sync::Mutex::new(mock_rest_client)),
+                Arc::new(JsonParser::new()),
             );
-
-            let mut client = SimpleDockerClient {
-                rest_client: Box::new(mock_rest_client),
-            };
-
-            let result = client
-                .inspect_network_by_hight::<Network>("10111213".to_string())
+            let result = network_command
+                .inspect_network_by_hight::<Network>("10111213")
                 .await;
 
-            assert!(matches!(result, Err(DockerError::ExcessiveChunksError)));
+            assert!(matches!(result, Err(DockerError::ParseError { .. })));
         }
 
         #[tokio::test]
         async fn should_err_if_bad_json() {
             let mut mock_rest_client = MockRestClient::new();
             mock_rest_client
-                .expect_get_and_return_okay("/networks/10111213", Some(vec![json!("oops")]));
+                .expect_get_and_return_okay("/networks/10111213", Some("oops".to_string()));
 
-            let mut client = SimpleDockerClient {
-                rest_client: Box::new(mock_rest_client),
-            };
-
-            let result = client
-                .inspect_network_by_hight::<Network>("10111213".to_string())
+            let mut network_command = NetworkCommand::new(
+                Arc::new(tokio::sync::Mutex::new(mock_rest_client)),
+                Arc::new(JsonParser::new()),
+            );
+            let result = network_command
+                .inspect_network_by_hight::<Network>("10111213")
                 .await;
 
             assert!(matches!(result, Err(DockerError::ParseError { .. })));
@@ -441,12 +440,12 @@ mod tests {
             let mut mock_rest_client = MockRestClient::new();
             mock_rest_client.expect_get_and_return_created_with_none("/networks/10111213");
 
-            let mut client = SimpleDockerClient {
-                rest_client: Box::new(mock_rest_client),
-            };
-
-            let result = client
-                .inspect_network_by_hight::<Network>("10111213".to_string())
+            let mut network_command = NetworkCommand::new(
+                Arc::new(tokio::sync::Mutex::new(mock_rest_client)),
+                Arc::new(JsonParser::new()),
+            );
+            let result = network_command
+                .inspect_network_by_hight::<Network>("10111213")
                 .await;
 
             assert!(matches!(
@@ -460,12 +459,12 @@ mod tests {
             let mut mock_rest_client = MockRestClient::new();
             mock_rest_client.expect_get_and_return_no_content("/networks/10111213");
 
-            let mut client = SimpleDockerClient {
-                rest_client: Box::new(mock_rest_client),
-            };
-
-            let result = client
-                .inspect_network_by_hight::<Network>("10111213".to_string())
+            let mut network_command = NetworkCommand::new(
+                Arc::new(tokio::sync::Mutex::new(mock_rest_client)),
+                Arc::new(JsonParser::new()),
+            );
+            let result = network_command
+                .inspect_network_by_hight::<Network>("10111213")
                 .await;
 
             assert!(matches!(
@@ -479,12 +478,12 @@ mod tests {
             let mut mock_rest_client = MockRestClient::new();
             mock_rest_client.expect_get_and_return_internal_server_error("/networks/10111213");
 
-            let mut client = SimpleDockerClient {
-                rest_client: Box::new(mock_rest_client),
-            };
-
-            let result = client
-                .inspect_network_by_hight::<Network>("10111213".to_string())
+            let mut network_command = NetworkCommand::new(
+                Arc::new(tokio::sync::Mutex::new(mock_rest_client)),
+                Arc::new(JsonParser::new()),
+            );
+            let result = network_command
+                .inspect_network_by_hight::<Network>("10111213")
                 .await;
 
             assert!(matches!(
@@ -498,12 +497,12 @@ mod tests {
             let mut mock_rest_client = MockRestClient::new();
             mock_rest_client.expect_get_and_return_not_found("/networks/10111213");
 
-            let mut client = SimpleDockerClient {
-                rest_client: Box::new(mock_rest_client),
-            };
-
-            let result = client
-                .inspect_network_by_hight::<Network>("10111213".to_string())
+            let mut network_command = NetworkCommand::new(
+                Arc::new(tokio::sync::Mutex::new(mock_rest_client)),
+                Arc::new(JsonParser::new()),
+            );
+            let result = network_command
+                .inspect_network_by_hight::<Network>("10111213")
                 .await;
 
             assert!(matches!(result, Err(DockerError::NotFoundError)));
@@ -514,22 +513,23 @@ mod tests {
             let mut mock_rest_client = MockRestClient::new();
             mock_rest_client.expect_get_and_return_okay(
                 "/networks/10111213",
-                Some(vec![json!({
+                Some(
+                    r#"{
                     "Id": "10111213",
                     "Name": "qux",
                     "Labels": {
                       "quux": "corge"
                     }
-                })]),
+                }"#
+                    .to_string(),
+                ),
             );
 
-            let mut client = SimpleDockerClient {
-                rest_client: Box::new(mock_rest_client),
-            };
-
-            let result = client
-                .inspect_network_by_hight("10111213".to_string())
-                .await;
+            let mut network_command = NetworkCommand::new(
+                Arc::new(tokio::sync::Mutex::new(mock_rest_client)),
+                Arc::new(JsonParser::new()),
+            );
+            let result = network_command.inspect_network_by_hight("10111213").await;
 
             assert!(matches!(
                 result,
@@ -546,46 +546,27 @@ mod tests {
     }
 
     mod find_connected_containers_by_hight {
-        use super::super::*;
-        use crate::Id;
-        use crate::container::{EnvironmentVariable, Mount, MountType, Status};
-        use crate::image::{Image, Tag};
-        use serde_json::json;
+        use crate::{
+            DockerError,
+            commands::{json_parser::JsonParser, network::NetworkCommand},
+        };
         use simple_rest_client::MockRestClient;
+        use std::sync::Arc;
 
         #[tokio::test]
         async fn should_err_if_empty_body() {
             let mut mock_rest_client = MockRestClient::new();
-            mock_rest_client.expect_get_and_return_okay("/networks/10111213", Some(vec![]));
+            mock_rest_client.expect_get_and_return_okay("/networks/10111213", Some(String::new()));
 
-            let mut client = SimpleDockerClient {
-                rest_client: Box::new(mock_rest_client),
-            };
-
-            let result = client
-                .find_connected_containers_by_hight("10111213".to_string())
-                .await;
-
-            assert!(matches!(result, Err(DockerError::InsufficientChunksError)));
-        }
-
-        #[tokio::test]
-        async fn should_err_if_too_many_chunks() {
-            let mut mock_rest_client = MockRestClient::new();
-            mock_rest_client.expect_get_and_return_okay(
-                "/networks/10111213",
-                Some(vec![json!("too"), json!("many")]),
+            let mut network_command = NetworkCommand::new(
+                Arc::new(tokio::sync::Mutex::new(mock_rest_client)),
+                Arc::new(JsonParser::new()),
             );
-
-            let mut client = SimpleDockerClient {
-                rest_client: Box::new(mock_rest_client),
-            };
-
-            let result = client
-                .find_connected_containers_by_hight("10111213".to_string())
+            let result = network_command
+                .find_connected_containers_by_hight("10111213")
                 .await;
 
-            assert!(matches!(result, Err(DockerError::ExcessiveChunksError)));
+            assert!(matches!(result, Err(DockerError::ParseError { .. })));
         }
 
         #[tokio::test]
@@ -593,12 +574,12 @@ mod tests {
             let mut mock_rest_client = MockRestClient::new();
             mock_rest_client.expect_get_and_return_created_with_none("/networks/10111213");
 
-            let mut client = SimpleDockerClient {
-                rest_client: Box::new(mock_rest_client),
-            };
-
-            let result = client
-                .find_connected_containers_by_hight("10111213".to_string())
+            let mut network_command = NetworkCommand::new(
+                Arc::new(tokio::sync::Mutex::new(mock_rest_client)),
+                Arc::new(JsonParser::new()),
+            );
+            let result = network_command
+                .find_connected_containers_by_hight("10111213")
                 .await;
 
             assert!(matches!(
@@ -612,12 +593,12 @@ mod tests {
             let mut mock_rest_client = MockRestClient::new();
             mock_rest_client.expect_get_and_return_no_content("/networks/10111213");
 
-            let mut client = SimpleDockerClient {
-                rest_client: Box::new(mock_rest_client),
-            };
-
-            let result = client
-                .find_connected_containers_by_hight("10111213".to_string())
+            let mut network_command = NetworkCommand::new(
+                Arc::new(tokio::sync::Mutex::new(mock_rest_client)),
+                Arc::new(JsonParser::new()),
+            );
+            let result = network_command
+                .find_connected_containers_by_hight("10111213")
                 .await;
 
             assert!(matches!(
@@ -631,12 +612,12 @@ mod tests {
             let mut mock_rest_client = MockRestClient::new();
             mock_rest_client.expect_get_and_return_internal_server_error("/networks/10111213");
 
-            let mut client = SimpleDockerClient {
-                rest_client: Box::new(mock_rest_client),
-            };
-
-            let result = client
-                .find_connected_containers_by_hight("10111213".to_string())
+            let mut network_command = NetworkCommand::new(
+                Arc::new(tokio::sync::Mutex::new(mock_rest_client)),
+                Arc::new(JsonParser::new()),
+            );
+            let result = network_command
+                .find_connected_containers_by_hight("10111213")
                 .await;
 
             assert!(matches!(
@@ -650,12 +631,12 @@ mod tests {
             let mut mock_rest_client = MockRestClient::new();
             mock_rest_client.expect_get_and_return_not_found("/networks/10111213");
 
-            let mut client = SimpleDockerClient {
-                rest_client: Box::new(mock_rest_client),
-            };
-
-            let result = client
-                .find_connected_containers_by_hight("10111213".to_string())
+            let mut network_command = NetworkCommand::new(
+                Arc::new(tokio::sync::Mutex::new(mock_rest_client)),
+                Arc::new(JsonParser::new()),
+            );
+            let result = network_command
+                .find_connected_containers_by_hight("10111213")
                 .await;
 
             assert!(matches!(result, Err(DockerError::NotFoundError)));
@@ -666,94 +647,40 @@ mod tests {
             let mut mock_rest_client = MockRestClient::new();
             mock_rest_client.expect_get_and_return_okay(
                 "/networks/10111213",
-                Some(vec![json!({
+                Some(
+                    r#"{
                     "Containers": {
                         "123456": {}
                     }
-                })]),
-            );
-            mock_rest_client.expect_get_and_return_okay(
-                "/containers/123456/json",
-                Some(vec![json!(
-                    {
-                      "Id": "123456",
-                      "Name": "foo",
-                      "Image": "alg:654321",
-                      "State": {"Status": "exited"},
-                      "Mounts":
-                      [
-                        {
-                          "Type": "bind",
-                          "Source": "/bar/",
-                          "Destination": "/baz/",
-                          "RW": true
-                        }
-                      ],
-                      "Config":
-                      {
-                        "Env": ["quux=corge"],
-                        "Labels": {"grault": "garply"}
-                      }
-                    }
-                )]),
+                }"#
+                    .to_string(),
+                ),
             );
 
-            mock_rest_client.expect_get_and_return_okay(
-                "/images/alg:654321/json",
-                Some(vec![json!({
-                "Id": "alg:654321",
-                "RepoTags":["waldo:1.2.3"],
-                })]),
+            let mut network_command = NetworkCommand::new(
+                Arc::new(tokio::sync::Mutex::new(mock_rest_client)),
+                Arc::new(JsonParser::new()),
             );
-
-            let mut client = SimpleDockerClient {
-                rest_client: Box::new(mock_rest_client),
-            };
-
-            let result = client
-                .find_connected_containers_by_hight("10111213".to_string())
+            let result = network_command
+                .find_connected_containers_by_hight("10111213")
                 .await;
 
-            let expected = vec![Container {
-                id: "123456".to_string(),
-                name: "foo".to_string(),
-                image: Image {
-                    id: Id {
-                        algorithm: "alg".to_string(),
-                        hex: "654321".to_string(),
-                    },
-                    tags: vec![Tag {
-                        name: "waldo".to_string(),
-                        version: "1.2.3".to_string(),
-                    }]
-                    .into_iter()
-                    .collect(),
-                },
-                status: Status::Exited,
-                mounts: vec![Mount {
-                    mount_type: MountType::Bind,
-                    source: "/bar/".to_string(),
-                    destination: "/baz/".to_string(),
-                    writable: true,
-                }],
-                environment_variables: vec![EnvironmentVariable {
-                    name: "quux".to_string(),
-                    value: "corge".to_string(),
-                }],
-                labels: vec![Label {
-                    name: "grault".to_string(),
-                    value: "garply".to_string(),
-                }],
-            }];
+            let expected = vec!["123456".to_string()];
 
             assert!(matches!(result, Ok(actual) if actual == expected));
         }
     }
 
     mod create {
-        use super::super::*;
-        use serde_json::json;
-        use simple_rest_client::MockRestClient;
+        use crate::{
+            DockerError, Label,
+            commands::{
+                json_parser::JsonParser,
+                network::{CreationBody, Network, NetworkCommand},
+            },
+        };
+        use simple_rest_client::{Header, MockRestClient};
+        use std::sync::Arc;
 
         #[tokio::test]
         async fn should_err_if_okay() {
@@ -771,11 +698,13 @@ mod tests {
                 None,
             );
 
-            let mut client = SimpleDockerClient {
-                rest_client: Box::new(mock_rest_client),
-            };
-
-            let result = client.create("foo", vec![Label::new("bar", "baz")]).await;
+            let mut network_command = NetworkCommand::new(
+                Arc::new(tokio::sync::Mutex::new(mock_rest_client)),
+                Arc::new(JsonParser::new()),
+            );
+            let result = network_command
+                .create("foo", vec![Label::new("bar", "baz")])
+                .await;
 
             assert!(matches!(
                 result,
@@ -796,16 +725,18 @@ mod tests {
                     })
                     .unwrap(),
                 ),
-                Some(vec![]),
+                Some(String::new()),
             );
 
-            let mut client = SimpleDockerClient {
-                rest_client: Box::new(mock_rest_client),
-            };
+            let mut network_command = NetworkCommand::new(
+                Arc::new(tokio::sync::Mutex::new(mock_rest_client)),
+                Arc::new(JsonParser::new()),
+            );
+            let result = network_command
+                .create("foo", vec![Label::new("bar", "baz")])
+                .await;
 
-            let result = client.create("foo", vec![Label::new("bar", "baz")]).await;
-
-            assert!(matches!(result, Err(DockerError::InsufficientChunksError)));
+            assert!(matches!(result, Err(DockerError::ParseError { .. })));
         }
 
         #[tokio::test]
@@ -821,25 +752,30 @@ mod tests {
                     })
                     .unwrap(),
                 ),
-                Some(vec![json!({"Id":"123456","Warning":""})]),
+                Some(r#"{"Id":"123456","Warning":""}"#.to_string()),
             );
 
             mock_rest_client.expect_get_and_return_okay(
                 "/networks/123456",
-                Some(vec![json!({
+                Some(
+                    r#"{
                     "Id": "123456",
                     "Name": "qux",
                     "Labels": {
                       "quux": "corge"
-                    }
-                })]),
+                      }
+                }"#
+                    .to_string(),
+                ),
             );
 
-            let mut client = SimpleDockerClient {
-                rest_client: Box::new(mock_rest_client),
-            };
-
-            let result = client.create("foo", vec![Label::new("bar", "baz")]).await;
+            let mut network_command = NetworkCommand::new(
+                Arc::new(tokio::sync::Mutex::new(mock_rest_client)),
+                Arc::new(JsonParser::new()),
+            );
+            let result = network_command
+                .create("foo", vec![Label::new("bar", "baz")])
+                .await;
             let expected = Network {
                 id: "123456".to_string(),
                 name: "qux".to_string(),
@@ -867,10 +803,13 @@ mod tests {
                 ),
             );
 
-            let mut client = SimpleDockerClient {
-                rest_client: Box::new(mock_rest_client),
-            };
-            let result = client.create("foo", vec![Label::new("bar", "baz")]).await;
+            let mut network_command = NetworkCommand::new(
+                Arc::new(tokio::sync::Mutex::new(mock_rest_client)),
+                Arc::new(JsonParser::new()),
+            );
+            let result = network_command
+                .create("foo", vec![Label::new("bar", "baz")])
+                .await;
 
             assert!(matches!(
                 result,
@@ -893,10 +832,13 @@ mod tests {
                 ),
             );
 
-            let mut client = SimpleDockerClient {
-                rest_client: Box::new(mock_rest_client),
-            };
-            let result = client.create("foo", vec![Label::new("bar", "baz")]).await;
+            let mut network_command = NetworkCommand::new(
+                Arc::new(tokio::sync::Mutex::new(mock_rest_client)),
+                Arc::new(JsonParser::new()),
+            );
+            let result = network_command
+                .create("foo", vec![Label::new("bar", "baz")])
+                .await;
 
             assert!(matches!(
                 result,
@@ -906,10 +848,15 @@ mod tests {
     }
 
     mod connect {
-        use super::super::*;
-        use crate::{Id, container::Status, image::Image};
-        use simple_rest_client::MockRestClient;
-        use std::collections::HashSet;
+        use crate::{
+            Container, DockerError, Id, Image, Status,
+            commands::{
+                json_parser::JsonParser,
+                network::{ConnectionBody, Network, NetworkCommand},
+            },
+        };
+        use simple_rest_client::{Header, MockRestClient};
+        use std::{collections::HashSet, sync::Arc};
 
         #[tokio::test]
         async fn should_err_if_created() {
@@ -923,13 +870,13 @@ mod tests {
                     })
                     .unwrap(),
                 ),
-                Some(vec![]),
+                Some(String::new()),
             );
 
-            let mut client = SimpleDockerClient {
-                rest_client: Box::new(mock_rest_client),
-            };
-
+            let mut network_command = NetworkCommand::new(
+                Arc::new(tokio::sync::Mutex::new(mock_rest_client)),
+                Arc::new(JsonParser::new()),
+            );
             let network = Network {
                 id: "123456".to_string(),
                 name: "foo".to_string(),
@@ -952,7 +899,7 @@ mod tests {
                 labels: vec![],
             };
 
-            let result = client.connect(&network, &container).await;
+            let result = network_command.connect(&network, &container).await;
 
             assert!(matches!(
                 result,
@@ -974,10 +921,10 @@ mod tests {
                 ),
             );
 
-            let mut client = SimpleDockerClient {
-                rest_client: Box::new(mock_rest_client),
-            };
-
+            let mut network_command = NetworkCommand::new(
+                Arc::new(tokio::sync::Mutex::new(mock_rest_client)),
+                Arc::new(JsonParser::new()),
+            );
             let network = Network {
                 id: "123456".to_string(),
                 name: "foo".to_string(),
@@ -1000,7 +947,7 @@ mod tests {
                 labels: vec![],
             };
 
-            let result = client.connect(&network, &container).await;
+            let result = network_command.connect(&network, &container).await;
 
             assert!(matches!(
                 result,
@@ -1022,10 +969,10 @@ mod tests {
                 ),
             );
 
-            let mut client = SimpleDockerClient {
-                rest_client: Box::new(mock_rest_client),
-            };
-
+            let mut network_command = NetworkCommand::new(
+                Arc::new(tokio::sync::Mutex::new(mock_rest_client)),
+                Arc::new(JsonParser::new()),
+            );
             let network = Network {
                 id: "123456".to_string(),
                 name: "foo".to_string(),
@@ -1048,7 +995,7 @@ mod tests {
                 labels: vec![],
             };
 
-            let result = client.connect(&network, &container).await;
+            let result = network_command.connect(&network, &container).await;
 
             assert!(matches!(
                 result,
@@ -1070,10 +1017,10 @@ mod tests {
                 ),
             );
 
-            let mut client = SimpleDockerClient {
-                rest_client: Box::new(mock_rest_client),
-            };
-
+            let mut network_command = NetworkCommand::new(
+                Arc::new(tokio::sync::Mutex::new(mock_rest_client)),
+                Arc::new(JsonParser::new()),
+            );
             let network = Network {
                 id: "123456".to_string(),
                 name: "foo".to_string(),
@@ -1096,7 +1043,7 @@ mod tests {
                 labels: vec![],
             };
 
-            let result = client.connect(&network, &container).await;
+            let result = network_command.connect(&network, &container).await;
 
             assert!(matches!(result, Err(DockerError::NotFoundError)));
         }
@@ -1113,13 +1060,13 @@ mod tests {
                     })
                     .unwrap(),
                 ),
-                Some(vec![]),
+                Some(String::new()),
             );
 
-            let mut client = SimpleDockerClient {
-                rest_client: Box::new(mock_rest_client),
-            };
-
+            let mut network_command = NetworkCommand::new(
+                Arc::new(tokio::sync::Mutex::new(mock_rest_client)),
+                Arc::new(JsonParser::new()),
+            );
             let network = Network {
                 id: "123456".to_string(),
                 name: "foo".to_string(),
@@ -1142,17 +1089,21 @@ mod tests {
                 labels: vec![],
             };
 
-            let result = client.connect(&network, &container).await;
+            let result = network_command.connect(&network, &container).await;
             assert!(matches!(result, Ok(())));
         }
     }
 
     mod disconnect {
-        use super::super::*;
-        use crate::{Id, container::Status, image::Image};
-        use serde_json::json;
-        use simple_rest_client::MockRestClient;
-        use std::collections::HashSet;
+        use crate::{
+            Container, DockerError, Id, Image, Status,
+            commands::{
+                json_parser::JsonParser,
+                network::{ConnectionBody, Network, NetworkCommand},
+            },
+        };
+        use simple_rest_client::{Header, MockRestClient};
+        use std::{collections::HashSet, sync::Arc};
 
         #[tokio::test]
         async fn should_return_err_if_no_content() {
@@ -1168,10 +1119,10 @@ mod tests {
                 ),
             );
 
-            let mut client = SimpleDockerClient {
-                rest_client: Box::new(mock_rest_client),
-            };
-
+            let mut network_command = NetworkCommand::new(
+                Arc::new(tokio::sync::Mutex::new(mock_rest_client)),
+                Arc::new(JsonParser::new()),
+            );
             let network = Network {
                 id: "123456".to_string(),
                 name: "foo".to_string(),
@@ -1194,7 +1145,7 @@ mod tests {
                 labels: vec![],
             };
 
-            let result = client.disconnect(&network, &container).await;
+            let result = network_command.disconnect(&network, &container).await;
 
             assert!(matches!(
                 result,
@@ -1217,10 +1168,10 @@ mod tests {
                 None,
             );
 
-            let mut client = SimpleDockerClient {
-                rest_client: Box::new(mock_rest_client),
-            };
-
+            let mut network_command = NetworkCommand::new(
+                Arc::new(tokio::sync::Mutex::new(mock_rest_client)),
+                Arc::new(JsonParser::new()),
+            );
             let network = Network {
                 id: "123456".to_string(),
                 name: "foo".to_string(),
@@ -1243,7 +1194,7 @@ mod tests {
                 labels: vec![],
             };
 
-            let result = client.disconnect(&network, &container).await;
+            let result = network_command.disconnect(&network, &container).await;
 
             assert!(matches!(
                 result,
@@ -1265,10 +1216,10 @@ mod tests {
                 ),
             );
 
-            let mut client = SimpleDockerClient {
-                rest_client: Box::new(mock_rest_client),
-            };
-
+            let mut network_command = NetworkCommand::new(
+                Arc::new(tokio::sync::Mutex::new(mock_rest_client)),
+                Arc::new(JsonParser::new()),
+            );
             let network = Network {
                 id: "123456".to_string(),
                 name: "foo".to_string(),
@@ -1291,7 +1242,7 @@ mod tests {
                 labels: vec![],
             };
 
-            let result = client.disconnect(&network, &container).await;
+            let result = network_command.disconnect(&network, &container).await;
 
             assert!(matches!(
                 result,
@@ -1313,10 +1264,10 @@ mod tests {
                 ),
             );
 
-            let mut client = SimpleDockerClient {
-                rest_client: Box::new(mock_rest_client),
-            };
-
+            let mut network_command = NetworkCommand::new(
+                Arc::new(tokio::sync::Mutex::new(mock_rest_client)),
+                Arc::new(JsonParser::new()),
+            );
             let network = Network {
                 id: "123456".to_string(),
                 name: "foo".to_string(),
@@ -1339,7 +1290,7 @@ mod tests {
                 labels: vec![],
             };
 
-            let result = client.disconnect(&network, &container).await;
+            let result = network_command.disconnect(&network, &container).await;
             assert!(matches!(result, Err(DockerError::NotFoundError)));
         }
 
@@ -1355,13 +1306,13 @@ mod tests {
                     })
                     .unwrap(),
                 ),
-                Some(vec![]),
+                Some(String::new()),
             );
 
-            let mut client = SimpleDockerClient {
-                rest_client: Box::new(mock_rest_client),
-            };
-
+            let mut network_command = NetworkCommand::new(
+                Arc::new(tokio::sync::Mutex::new(mock_rest_client)),
+                Arc::new(JsonParser::new()),
+            );
             let network = Network {
                 id: "123456".to_string(),
                 name: "foo".to_string(),
@@ -1384,7 +1335,7 @@ mod tests {
                 labels: vec![],
             };
 
-            let result = client.disconnect(&network, &container).await;
+            let result = network_command.disconnect(&network, &container).await;
             assert!(matches!(result, Ok(())));
         }
 
@@ -1401,15 +1352,16 @@ mod tests {
                     .unwrap(),
                 ),
                 500,
-                Some(vec![
-                    json!({"message":"container 654321 is not connected to the network foo"}),
-                ]),
+                Some(
+                    r#"{"message":"container 654321 is not connected to the network foo"}"#
+                        .to_string(),
+                ),
             );
 
-            let mut client = SimpleDockerClient {
-                rest_client: Box::new(mock_rest_client),
-            };
-
+            let mut network_command = NetworkCommand::new(
+                Arc::new(tokio::sync::Mutex::new(mock_rest_client)),
+                Arc::new(JsonParser::new()),
+            );
             let network = Network {
                 id: "123456".to_string(),
                 name: "foo".to_string(),
@@ -1432,7 +1384,7 @@ mod tests {
                 labels: vec![],
             };
 
-            let result = client.disconnect(&network, &container).await;
+            let result = network_command.disconnect(&network, &container).await;
             assert!(matches!(result, Ok(())));
         }
     }

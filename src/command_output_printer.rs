@@ -1,9 +1,10 @@
-use crate::status_command::DouglasStatus;
 use file_system::FileSystemError;
 use mockall::automock;
 use serde::Serialize;
 use serde_json::{Value, json};
 use std::path::Path;
+
+use crate::status_command::{BractStatus, DouglasStatus};
 
 #[automock]
 pub trait CommandOutputPrinter<TOutput: 'static, TError> {
@@ -56,42 +57,58 @@ impl CommandOutputPrinter<DouglasStatus, FileSystemError> for PlainCommandOutput
     fn print(&self, command: &str, result: &Result<DouglasStatus, FileSystemError>) {
         self.print_command(command);
         match result {
-            Ok(status) => match &status.bract_status {
-                crate::status_command::BractStatus::CannotDetermineStatus => {
-                    self.print_indented(1, "Cannot determine status.")
-                }
-                crate::status_command::BractStatus::NotIntialized => {
-                    self.print_indented(1, "Not intialized.")
-                }
-                crate::status_command::BractStatus::NotRunning => {
-                    self.print_indented(1, "Not running")
-                }
-                crate::status_command::BractStatus::Status(bract_status) => {
-                    self.print_indented(
-                        2,
-                        &format!(
-                            "Mount path: {}",
-                            self.path_to_string(bract_status.mount_root.as_path())
-                        ),
-                    );
-                    self.print_indented(
-                        2,
-                        &format!(
-                            "Token path: {}",
-                            self.path_to_string(bract_status.token_path.as_path())
-                        ),
-                    );
-                    self.print_indented(2, "Services:");
-                    for service in &bract_status.services {
-                        self.print_indented(3, &service.name);
-                        self.print_indented(4, "Mounts:");
+            Ok(status) => {
+                self.print_indented(1, "Bract:");
+                match &status.bract_status {
+                    BractStatus::CannotDetermineStatus(message) => {
+                        self.print_indented(2, &format!("Cannot determine status: {message}"));
+                    }
+                    BractStatus::NotIntialized => self.print_indented(2, "Not intialized."),
+                    BractStatus::NotRunning => self.print_indented(2, "Not running"),
+                    BractStatus::Status(bract_status) => {
+                        self.print_indented(
+                            2,
+                            &format!(
+                                "Mount path: {}",
+                                self.path_to_string(bract_status.mount_root.as_path())
+                            ),
+                        );
+                        self.print_indented(
+                            2,
+                            &format!(
+                                "Token path: {}",
+                                self.path_to_string(bract_status.token_path.as_path())
+                            ),
+                        );
+                        self.print_indented(2, "Services:");
+                        for service in &bract_status.services {
+                            self.print_indented(3, &service.name);
+                            self.print_indented(4, "Mounts:");
 
-                        for mount in &service.mounts {
-                            self.print_indented(5, &format!("{}: {}", mount.name, mount.version));
+                            for mount in &service.mounts {
+                                self.print_indented(
+                                    5,
+                                    &format!("{}: {}", mount.name, mount.version),
+                                );
+                            }
                         }
                     }
                 }
-            },
+                self.print_indented(1, "Docker:");
+                match &status.docker_status {
+                    crate::status_command::DockerStatus::Active => self.print_indented(2, "Active"),
+                    crate::status_command::DockerStatus::ConfigFileNotFound => self.print_indented(
+                        2,
+                        "Could not find config file, has the system been initialized yet?",
+                    ),
+                    crate::status_command::DockerStatus::DockerClientError(message) => {
+                        self.print_indented(2, &format!("Docker error: {message}"))
+                    }
+                    crate::status_command::DockerStatus::CouldNotLoadConfiguration(message) => {
+                        self.print_indented(2, &format!("Docker error: {message}"))
+                    }
+                }
+            }
             Err(err) => self.print_error(command, err),
         }
     }
@@ -174,21 +191,33 @@ impl CommandOutputPrinter<DouglasStatus, FileSystemError> for JsonCommandOutputP
         match result {
             Ok(status) => {
                 let bract_status = match &status.bract_status {
-                    crate::status_command::BractStatus::NotIntialized => {
+                    BractStatus::NotIntialized => {
                         json!({"status": "not_initialized"})
                     }
-                    crate::status_command::BractStatus::NotRunning => {
+                    BractStatus::NotRunning => {
                         json!({"status": "not_running"})
                     }
-                    crate::status_command::BractStatus::Status(status) => {
-                        self.serialize(&status, "bract status")
-                    }
-                    crate::status_command::BractStatus::CannotDetermineStatus => {
-                        json!({"status": "unknown"})
+                    BractStatus::Status(status) => self.serialize(&status, "bract status"),
+                    BractStatus::CannotDetermineStatus(message) => {
+                        json!({"status": "unknown", "details": message})
                     }
                 };
+                let docker_status = match &status.docker_status {
+                    crate::status_command::DockerStatus::Active => json!({"status": "active"}),
+                    crate::status_command::DockerStatus::ConfigFileNotFound => {
+                        json!({"status": "config_file_not_found"})
+                    }
+                    crate::status_command::DockerStatus::DockerClientError(message) => {
+                        json!({"status": "docker_client_error", "details": message})
+                    }
+                    crate::status_command::DockerStatus::CouldNotLoadConfiguration(message) => {
+                        json!({"status": "could_not_load_configuration", "details": message})
+                    }
+                };
+
                 let data = json!({
-                    "bract": bract_status
+                    "bract": bract_status,
+                    "docker": docker_status,
                 });
                 self.print_success(command, data);
             }

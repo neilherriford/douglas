@@ -1,5 +1,9 @@
-use crate::bract_path_factory::BractPathFactory;
+use crate::{
+    bract_path_factory::BractPathFactory,
+    config::{ConfigReader, ConfigRepositoryError},
+};
 use bract::{Client, client::ClientError};
+use docker::{SimpleSystemClient, SystemClient};
 use file_system::{FileReader, FileSystemError};
 use log::Logger;
 use std::sync::Arc;
@@ -9,17 +13,28 @@ pub struct StatusCommand {
     file_reader: Arc<dyn FileReader + Send + Sync>,
     log: Arc<dyn Logger + Sync + Send>,
     bract_path_factory: Arc<BractPathFactory>,
+    config_reader: Arc<dyn ConfigReader>,
 }
 
+#[derive(Debug)]
 pub enum BractStatus {
-    NotIntialized,
     NotRunning,
+    NotIntialized,
     Status(bract::client::Status),
-    CannotDetermineStatus,
+    CannotDetermineStatus(String),
+}
+
+#[derive(Debug)]
+pub enum DockerStatus {
+    Active,
+    ConfigFileNotFound,
+    DockerClientError(String),
+    CouldNotLoadConfiguration(String),
 }
 
 pub struct DouglasStatus {
     pub bract_status: BractStatus,
+    pub docker_status: DockerStatus,
 }
 
 impl StatusCommand {
@@ -27,11 +42,14 @@ impl StatusCommand {
         file_reader: Arc<dyn FileReader + Send + Sync>,
         log: Arc<dyn Logger + Sync + Send>,
         bract_path_factory: Arc<BractPathFactory>,
+        config_reader: Arc<dyn ConfigReader>,
     ) -> Self {
+        let _ = config_reader;
         Self {
             file_reader,
             log,
             bract_path_factory,
+            config_reader,
         }
     }
 
@@ -48,7 +66,7 @@ impl StatusCommand {
             token_path,
         );
 
-        let mut bract_status: BractStatus = BractStatus::CannotDetermineStatus;
+        let mut bract_status: BractStatus = BractStatus::NotRunning;
 
         let rt = Runtime::new().unwrap();
         rt.block_on(async {
@@ -59,13 +77,45 @@ impl StatusCommand {
                 Err(ClientError::MissingToken) => BractStatus::NotIntialized,
                 Err(ClientError::NoResponse) => BractStatus::NotRunning,
                 Err(ClientError::ConnectionRefused) => BractStatus::NotRunning,
-                Err(err) => {
-                    eprintln!("{:?}", err);
-                    BractStatus::CannotDetermineStatus
-                }
+                Err(err) => BractStatus::CannotDetermineStatus(format!("{err:?}")),
             };
         });
 
-        Ok(DouglasStatus { bract_status })
+        let docker_socket_path = match self.config_reader.read() {
+            Ok(config) => config.docker_socket_path,
+            Err(ConfigRepositoryError::NotFound) => {
+                return Ok(DouglasStatus {
+                    bract_status,
+                    docker_status: DockerStatus::ConfigFileNotFound,
+                });
+            }
+            Err(err) => {
+                return Ok(DouglasStatus {
+                    bract_status,
+                    docker_status: DockerStatus::CouldNotLoadConfiguration(format!("{err:?}")),
+                });
+            }
+        };
+
+        let rt = Runtime::new().unwrap();
+        let docker_status = rt.block_on(async move {
+            match SimpleSystemClient::build(
+                docker_socket_path,
+                Arc::clone(&self.log) as Arc<dyn Logger>,
+            )
+            .await
+            {
+                Ok(mut client) => match client.ping().await {
+                    Ok(_) => DockerStatus::Active,
+                    Err(err) => DockerStatus::DockerClientError(format!("{err:?}")),
+                },
+                Err(err) => DockerStatus::DockerClientError(format!("{err:?}")),
+            }
+        });
+
+        Ok(DouglasStatus {
+            bract_status,
+            docker_status,
+        })
     }
 }

@@ -3,7 +3,7 @@ use mockall::automock;
 #[cfg(test)]
 use mockall::predicate;
 use serde::{Deserialize, Serialize};
-use std::{path::PathBuf, sync::Arc};
+use std::{io::ErrorKind, path::PathBuf, sync::Arc};
 use thiserror::Error;
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Clone)]
@@ -21,6 +21,8 @@ pub enum ConfigRepositoryError {
     SerializationError(#[from] serde_json::Error),
     #[error("File system error '{0}'")]
     FileSystemError(#[from] FileSystemError),
+    #[error("Config file not found.  Has the system initialized?")]
+    NotFound,
 }
 
 #[automock]
@@ -65,9 +67,15 @@ impl LocalConfigRepository {
 impl ConfigReader for LocalConfigRepository {
     fn read(&self) -> Result<Config, ConfigRepositoryError> {
         let path = self.config_path()?;
-        let data = self.file_reader.read_all(path.as_path())?;
-        let config: Config = serde_json::from_str(&data)?;
+        let data = match self.file_reader.read_all(path.as_path()) {
+            Ok(data) => data,
+            Err(FileSystemError::IoError(err)) if err.kind() == ErrorKind::NotFound => {
+                return Err(ConfigRepositoryError::NotFound);
+            }
+            Err(err) => return Err(ConfigRepositoryError::FileSystemError(err)),
+        };
 
+        let config: Config = serde_json::from_str(&data)?;
         Ok(config)
     }
 }

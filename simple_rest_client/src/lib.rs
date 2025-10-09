@@ -1,10 +1,8 @@
 pub mod unix_domain_socket;
-
 use http_body_util::BodyExt;
 use hyper::client::conn::http1::SendRequest;
 use log::Logger;
 use std::collections::HashMap;
-use std::marker::PhantomData;
 use std::sync::Arc;
 use thiserror::Error;
 
@@ -12,16 +10,10 @@ use thiserror::Error;
 pub enum RestClientError {
     #[error("Stream error: {0}")]
     Stream(#[from] hyper::http::Error),
-
     #[error("Client error: {0}")]
     Client(#[from] hyper::Error),
-
-    #[error("Parser error: {0}")]
-    Parser(String),
-
     #[error("IO stream already taken")]
     IoStreamAlreadyTaken,
-
     #[error("General error: {0}")]
     General(String),
 }
@@ -49,14 +41,14 @@ pub enum Request {
 }
 
 #[derive(Debug, PartialEq)]
-pub enum Response<T> {
+pub enum Response {
     Okay {
         headers: Vec<Header>,
-        body: Option<T>,
+        body: Option<String>,
     },
     Created {
         headers: Vec<Header>,
-        body: Option<T>,
+        body: Option<String>,
     },
     NoContent {
         headers: Vec<Header>,
@@ -64,7 +56,7 @@ pub enum Response<T> {
     Error {
         headers: Vec<Header>,
         status: u16,
-        body: Option<T>,
+        body: Option<String>,
     },
 }
 
@@ -110,17 +102,14 @@ pub trait IoStream: hyper::rt::Read + hyper::rt::Write + Unpin + Send + Sync {}
 
 #[cfg_attr(feature = "mock", mockall::automock)]
 #[async_trait::async_trait]
-pub trait RestClient<T: Send> {
-    async fn execute(&mut self, request: &Request) -> Result<Response<T>, RestClientError>;
+pub trait RestClient: Send + Sync {
+    async fn execute(&mut self, request: &Request) -> Result<Response, RestClientError>;
 }
 
 #[cfg(feature = "mock")]
-impl<T: Send + 'static> MockRestClient<T> {
-    pub fn expect_rest_call<TPredicate>(
-        &mut self,
-        request_predicate: TPredicate,
-        output: Response<T>,
-    ) where
+impl MockRestClient {
+    pub fn expect_rest_call<TPredicate>(&mut self, request_predicate: TPredicate, output: Response)
+    where
         TPredicate: Fn(&Request) -> bool + Send + 'static,
     {
         self.expect_execute()
@@ -156,8 +145,8 @@ impl<T: Send + 'static> MockRestClient<T> {
     }
 
     fn paths_equal(expected_path: String, actual_path: String) -> bool {
-        let expected = MockRestClient::<T>::parse_path_and_query(expected_path);
-        let actual = MockRestClient::<T>::parse_path_and_query(actual_path);
+        let expected = MockRestClient::parse_path_and_query(expected_path);
+        let actual = MockRestClient::parse_path_and_query(actual_path);
 
         match (expected, actual) {
             (Some((expected_path, expected_params)), Some((actual_path, actual_params))) => {
@@ -175,17 +164,17 @@ impl<T: Send + 'static> MockRestClient<T> {
                 ..
             } = req
             {
-                MockRestClient::<T>::paths_equal(path.clone(), requested_path.to_string())
+                MockRestClient::paths_equal(path.clone(), requested_path.to_string())
             } else {
                 false
             }
         })
     }
 
-    pub fn expect_get_and_return_okay(&mut self, path: &str, body: Option<T>) {
+    pub fn expect_get_and_return_okay(&mut self, path: &str, body: Option<String>) {
         self.expect_rest_call(
             self.create_get_expectation(path),
-            Response::<T>::Okay {
+            Response::Okay {
                 headers: vec![],
                 body,
             },
@@ -195,7 +184,7 @@ impl<T: Send + 'static> MockRestClient<T> {
     pub fn expect_get_and_return_created_with_none(&mut self, path: &str) {
         self.expect_rest_call(
             self.create_get_expectation(path),
-            Response::<T>::Created {
+            Response::Created {
                 headers: vec![],
                 body: None,
             },
@@ -205,14 +194,14 @@ impl<T: Send + 'static> MockRestClient<T> {
     pub fn expect_get_and_return_no_content(&mut self, path: &str) {
         self.expect_rest_call(
             self.create_get_expectation(path),
-            Response::<T>::NoContent { headers: vec![] },
+            Response::NoContent { headers: vec![] },
         )
     }
 
     pub fn expect_get_and_return_not_found(&mut self, path: &str) {
         self.expect_rest_call(
             self.create_get_expectation(path),
-            Response::<T>::Error {
+            Response::Error {
                 headers: vec![],
                 status: 404,
                 body: None,
@@ -223,7 +212,7 @@ impl<T: Send + 'static> MockRestClient<T> {
     pub fn expect_get_and_return_internal_server_error(&mut self, path: &str) {
         self.expect_rest_call(
             self.create_get_expectation(path),
-            Response::<T>::Error {
+            Response::Error {
                 headers: vec![],
                 status: 500,
                 body: None,
@@ -246,7 +235,7 @@ impl<T: Send + 'static> MockRestClient<T> {
             } = req
             {
                 body == *actual_body
-                    && MockRestClient::<T>::paths_equal(
+                    && MockRestClient::paths_equal(
                         expected_path.clone(),
                         requested_path.to_string(),
                     )
@@ -262,11 +251,11 @@ impl<T: Send + 'static> MockRestClient<T> {
         path: &str,
         headers: Vec<Header>,
         body: Option<String>,
-        response_body: Option<T>,
+        response_body: Option<String>,
     ) {
         self.expect_rest_call(
             self.create_post_expectation(path, headers, body),
-            Response::<T>::Okay {
+            Response::Okay {
                 headers: vec![],
                 body: response_body,
             },
@@ -278,11 +267,11 @@ impl<T: Send + 'static> MockRestClient<T> {
         path: &str,
         headers: Vec<Header>,
         body: Option<String>,
-        response_body: Option<T>,
+        response_body: Option<String>,
     ) {
         self.expect_rest_call(
             self.create_post_expectation(path, headers, body),
-            Response::<T>::Created {
+            Response::Created {
                 headers: vec![],
                 body: response_body,
             },
@@ -297,7 +286,7 @@ impl<T: Send + 'static> MockRestClient<T> {
     ) {
         self.expect_rest_call(
             self.create_post_expectation(path, headers, body),
-            Response::<T>::NoContent { headers: vec![] },
+            Response::NoContent { headers: vec![] },
         )
     }
 
@@ -309,7 +298,7 @@ impl<T: Send + 'static> MockRestClient<T> {
     ) {
         self.expect_rest_call(
             self.create_post_expectation(path, headers, body),
-            Response::<T>::Error {
+            Response::Error {
                 headers: vec![],
                 status: 404,
                 body: None,
@@ -325,7 +314,7 @@ impl<T: Send + 'static> MockRestClient<T> {
     ) {
         self.expect_rest_call(
             self.create_post_expectation(path, headers, body),
-            Response::<T>::Error {
+            Response::Error {
                 headers: vec![],
                 status: 500,
                 body: None,
@@ -339,11 +328,11 @@ impl<T: Send + 'static> MockRestClient<T> {
         headers: Vec<Header>,
         body: Option<String>,
         status: u16,
-        response_body: Option<T>,
+        response_body: Option<String>,
     ) {
         self.expect_rest_call(
             self.create_post_expectation(path, headers, body),
-            Response::<T>::Error {
+            Response::Error {
                 headers: vec![],
                 status,
                 body: response_body,
@@ -352,37 +341,23 @@ impl<T: Send + 'static> MockRestClient<T> {
     }
 }
 
-pub trait Parser<TIn, TOut>: Send + Sync + std::fmt::Debug {
-    type ParseError: std::error::Error + Send + Sync + 'static;
-    fn parse(&self, input: TIn) -> Result<TOut, Self::ParseError>;
-}
-
 #[derive(Debug)]
-pub struct SimpleRestClient<
-    TIo: IoStream,
-    TResponseBody: Send + Sync,
-    TParser: Parser<String, TResponseBody>,
-> {
-    parser: TParser,
+pub struct SimpleRestClient<TIo: IoStream> {
     scheme: String,
     authority: String,
     io_stream: Option<TIo>,
     sender: Option<SendRequest<String>>,
     default_headers: Vec<Header>,
     logger: Arc<dyn Logger>,
-    _marker: PhantomData<TResponseBody>,
 }
 
-impl<TIo: IoStream + 'static, TResponseBody: Send + Sync, TParser: Parser<String, TResponseBody>>
-    SimpleRestClient<TIo, TResponseBody, TParser>
-{
+impl<TIo: IoStream + 'static> SimpleRestClient<TIo> {
     pub fn new(
         scheme: &str,
         authority: &str,
         io_stream: TIo,
         default_headers: Vec<Header>,
         logger: Arc<dyn Logger>,
-        parser: TParser,
     ) -> Self {
         Self {
             scheme: scheme.into(),
@@ -391,8 +366,6 @@ impl<TIo: IoStream + 'static, TResponseBody: Send + Sync, TParser: Parser<String
             sender: None,
             default_headers,
             logger,
-            parser,
-            _marker: PhantomData,
         }
     }
 
@@ -451,10 +424,18 @@ impl<TIo: IoStream + 'static, TResponseBody: Send + Sync, TParser: Parser<String
         Ok(request_builder.body(request_body.clone().unwrap_or_default())?)
     }
 
-    async fn send_request(
+    async fn send_hyper_request(
         &mut self,
-        request: hyper::Request<String>,
-    ) -> Result<Response<TResponseBody>, RestClientError> {
+        hyper_request: hyper::Request<String>,
+    ) -> Result<hyper::Response<hyper::body::Incoming>, hyper::Error> {
+        self.sender
+            .as_mut()
+            .unwrap()
+            .send_request(hyper_request)
+            .await
+    }
+
+    async fn initialize_sender(&mut self) -> Result<(), RestClientError> {
         if self.sender.is_none() {
             let io = self
                 .io_stream
@@ -472,14 +453,31 @@ impl<TIo: IoStream + 'static, TResponseBody: Send + Sync, TParser: Parser<String
             self.sender = Some(sender);
         }
 
-        let response = self.sender.as_mut().unwrap().send_request(request).await?;
-        self.build_response_from_hyper_response(response).await
+        Ok(())
     }
 
-    async fn build_response_from_hyper_response(
+    fn create_response(
+        &self,
+        status: hyper::StatusCode,
+        headers: Vec<Header>,
+        body: Option<String>,
+    ) -> Result<Response, RestClientError> {
+        match status {
+            hyper::StatusCode::OK => Ok(Response::Okay { headers, body }),
+            hyper::StatusCode::CREATED => Ok(Response::Created { headers, body }),
+            hyper::StatusCode::NO_CONTENT => Ok(Response::NoContent { headers }),
+            _ => Ok(Response::Error {
+                headers,
+                status: status.as_u16(),
+                body,
+            }),
+        }
+    }
+
+    async fn parse_hyper_response(
         &self,
         hyper_response: hyper::Response<hyper::body::Incoming>,
-    ) -> Result<Response<TResponseBody>, RestClientError> {
+    ) -> Result<(hyper::StatusCode, Vec<Header>, Option<String>), RestClientError> {
         let status = hyper_response.status();
         let headers: Vec<Header> = hyper_response
             .headers()
@@ -489,28 +487,9 @@ impl<TIo: IoStream + 'static, TResponseBody: Send + Sync, TParser: Parser<String
                 value: header_value.to_str().unwrap().to_string(),
             })
             .collect();
-
         let raw_body = self.read_raw_body(hyper_response).await?;
         self.log_response(status.as_u16(), &headers, &raw_body);
-
-        let body = match raw_body {
-            None => None,
-            Some(text) => match self.parser.parse(text) {
-                Ok(parsed) => Some(parsed),
-                Err(err) => return Err(RestClientError::Parser(err.to_string())),
-            },
-        };
-
-        match status {
-            hyper::StatusCode::OK => Ok(Response::<TResponseBody>::Okay { headers, body }),
-            hyper::StatusCode::CREATED => Ok(Response::<TResponseBody>::Created { headers, body }),
-            hyper::StatusCode::NO_CONTENT => Ok(Response::<TResponseBody>::NoContent { headers }),
-            _ => Ok(Response::<TResponseBody>::Error {
-                headers,
-                status: status.as_u16(),
-                body,
-            }),
-        }
+        Ok((status, headers, raw_body))
     }
 
     async fn read_raw_body(
@@ -618,21 +597,19 @@ impl<TIo: IoStream + 'static, TResponseBody: Send + Sync, TParser: Parser<String
 }
 
 #[async_trait::async_trait]
-impl<TResponseBody, TIo, TParser> RestClient<TResponseBody>
-    for SimpleRestClient<TIo, TResponseBody, TParser>
+impl<TIo> RestClient for SimpleRestClient<TIo>
 where
-    TResponseBody: Send + Sync,
-    TParser: Parser<String, TResponseBody>,
     TIo: IoStream + 'static,
 {
-    async fn execute(
-        &mut self,
-        request: &Request,
-    ) -> Result<Response<TResponseBody>, RestClientError> {
+    async fn execute(&mut self, request: &Request) -> Result<Response, RestClientError> {
         self.log_request(request);
         let hyper_request = self.build_hyper_request(request)?;
-        let response: Response<TResponseBody> = self.send_request(hyper_request).await?;
-        Ok(response)
+
+        self.initialize_sender().await?;
+        let hyper_response = self.send_hyper_request(hyper_request).await?;
+
+        let (status, headers, raw_body) = self.parse_hyper_response(hyper_response).await?;
+        self.create_response(status, headers, raw_body)
     }
 }
 
@@ -642,31 +619,9 @@ mod tests {
     use hyper_util::rt::TokioIo;
     use log::MockLogger;
     use mockall::predicate::str::contains;
-
-    use thiserror::Error;
     use tokio_test::io::Mock;
 
     impl IoStream for TokioIo<Mock> {}
-
-    #[derive(Debug)]
-    struct PassthroughParser {}
-
-    #[derive(Error, Debug)]
-    enum PassthroughParserError {}
-
-    impl<T> Parser<T, T> for PassthroughParser {
-        type ParseError = PassthroughParserError;
-
-        fn parse(&self, input: T) -> Result<T, Self::ParseError> {
-            Ok(input)
-        }
-    }
-
-    impl PassthroughParser {
-        pub fn new() -> Self {
-            Self {}
-        }
-    }
 
     #[tokio::test]
     async fn logs_successful_request() {
@@ -695,16 +650,9 @@ mod tests {
             .times(1)
             .return_const(());
 
-        let mut client = SimpleRestClient::new(
-            "HTTP",
-            "localhost",
-            io,
-            vec![],
-            Arc::new(logger),
-            PassthroughParser::new(),
-        );
+        let mut client = SimpleRestClient::new("HTTP", "localhost", io, vec![], Arc::new(logger));
 
-        let result: Result<Response<String>, _> = client
+        let result: Result<Response, _> = client
             .execute(&Request::Get {
                 path: "/".to_string(),
                 headers: vec![],
@@ -762,16 +710,9 @@ mod tests {
             .times(1)
             .return_const(());
 
-        let mut client = SimpleRestClient::new(
-            "HTTP",
-            "localhost",
-            io,
-            vec![],
-            Arc::new(logger),
-            PassthroughParser::new(),
-        );
+        let mut client = SimpleRestClient::new("HTTP", "localhost", io, vec![], Arc::new(logger));
 
-        let _: Result<Response<String>, _> = client
+        let _: Result<Response, _> = client
             .execute(&Request::Get {
                 path: "/".to_string(),
                 headers: vec![],
@@ -805,16 +746,9 @@ mod tests {
             .times(1)
             .return_const(());
 
-        let mut client = SimpleRestClient::new(
-            "HTTP",
-            "localhost",
-            io,
-            vec![],
-            Arc::new(logger),
-            PassthroughParser::new(),
-        );
+        let mut client = SimpleRestClient::new("HTTP", "localhost", io, vec![], Arc::new(logger));
 
-        let result: Result<Response<String>, _> = client
+        let result: Result<Response, _> = client
             .execute(&Request::Get {
                 path: "/".to_string(),
                 headers: vec![],
@@ -847,20 +781,11 @@ mod tests {
             .read(b"HTTP/1.1 204 OK\r\nContent-Length: 0\r\n\r\n")
             .build();
         let io = TokioIo::new(io);
-
         let mut logger = MockLogger::new();
-        logger.expect_info().times(2).return_const(());
+        logger.expect_info().return_const(());
+        let mut client = SimpleRestClient::new("HTTP", "localhost", io, vec![], Arc::new(logger));
 
-        let mut client = SimpleRestClient::new(
-            "HTTP",
-            "localhost",
-            io,
-            vec![],
-            Arc::new(logger),
-            PassthroughParser::new(),
-        );
-
-        let result: Result<Response<String>, _> = client
+        let result: Result<Response, _> = client
             .execute(&Request::Get {
                 path: "/".to_string(),
                 headers: vec![],
@@ -893,16 +818,9 @@ mod tests {
         let mut logger = MockLogger::new();
         logger.expect_info().times(2).return_const(());
 
-        let mut client = SimpleRestClient::new(
-            "HTTP",
-            "localhost",
-            io,
-            vec![],
-            Arc::new(logger),
-            PassthroughParser::new(),
-        );
+        let mut client = SimpleRestClient::new("HTTP", "localhost", io, vec![], Arc::new(logger));
 
-        let result: Result<Response<String>, _> = client
+        let result: Result<Response, _> = client
             .execute(&Request::Get {
                 path: "/".to_string(),
                 headers: vec![],
@@ -941,16 +859,9 @@ mod tests {
         let mut logger = MockLogger::new();
         logger.expect_info().times(2).return_const(());
 
-        let mut client = SimpleRestClient::new(
-            "HTTP",
-            "localhost",
-            io,
-            vec![],
-            Arc::new(logger),
-            PassthroughParser::new(),
-        );
+        let mut client = SimpleRestClient::new("HTTP", "localhost", io, vec![], Arc::new(logger));
 
-        let result: Result<Response<String>, _> = client
+        let result: Result<Response, _> = client
             .execute(&Request::Delete {
                 path: "/".to_string(),
                 headers: vec![],
@@ -987,16 +898,9 @@ mod tests {
         let mut logger = MockLogger::new();
         logger.expect_info().times(2).return_const(());
 
-        let mut client = SimpleRestClient::new(
-            "HTTP",
-            "localhost",
-            io,
-            vec![],
-            Arc::new(logger),
-            PassthroughParser::new(),
-        );
+        let mut client = SimpleRestClient::new("HTTP", "localhost", io, vec![], Arc::new(logger));
 
-        let result: Result<Response<String>, _> = client
+        let result: Result<Response, _> = client
             .execute(&Request::Put {
                 path: "/".to_string(),
                 headers: vec![],
@@ -1040,10 +944,9 @@ mod tests {
             io,
             vec![Header::new("foo", "bar")],
             Arc::new(logger),
-            PassthroughParser::new(),
         );
 
-        let result: Result<Response<String>, _> = client
+        let result: Result<Response, _> = client
             .execute(&Request::Post {
                 path: "/".to_string(),
                 headers: vec![Header::new("baz", "qux")],

@@ -1,7 +1,7 @@
-use crate::{Header, Logger, Parser, RestClient, SimpleRestClient};
+use crate::{Header, Logger, RestClient, SimpleRestClient};
 use hyper_util::rt::TokioIo;
 use std::fmt::Formatter;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use thiserror::Error;
 
@@ -64,22 +64,37 @@ impl crate::IoStream for IoStream {}
 
 #[derive(Error, Debug)]
 pub enum BuilderError {
-    #[error("IO Error: {0}")]
-    IoError(#[from] std::io::Error),
+    #[error("IO Error")]
+    SocketFileNotFound,
+    #[error("Permission denied trying to open socket")]
+    PermissionDenied,
+    #[error("Connection refused")]
+    ConnectionRefused,
+    #[error("General Error: {0}")]
+    General(std::io::Error),
 }
 
-pub async fn build_client<T>(
-    socket_file_path: &Path,
+impl From<std::io::Error> for BuilderError {
+    fn from(value: std::io::Error) -> Self {
+        match value.kind() {
+            std::io::ErrorKind::NotFound => BuilderError::SocketFileNotFound,
+            std::io::ErrorKind::PermissionDenied => BuilderError::PermissionDenied,
+            std::io::ErrorKind::ConnectionRefused => BuilderError::ConnectionRefused,
+            _ => BuilderError::General(value),
+        }
+    }
+}
+
+pub async fn build_client(
+    socket_file_path: PathBuf,
     logger: Arc<dyn Logger>,
-    parser: impl Parser<String, T> + 'static,
-) -> Result<impl RestClient<T>, BuilderError>
+) -> Result<impl RestClient, BuilderError>
 where
-    T: Send + Sync,
 {
-    let unix_stream = UnixStream::connect(socket_file_path).await?;
+    let unix_stream = UnixStream::connect(socket_file_path.as_path()).await?;
     let io_stream = IoStream {
         stream: TokioIo::new(unix_stream),
-        socket_file_path: socket_file_path.to_path_buf(),
+        socket_file_path,
     };
 
     let result = SimpleRestClient::new(
@@ -88,7 +103,6 @@ where
         io_stream,
         vec![Header::new("host", "localhost")],
         Arc::clone(&logger),
-        parser,
     );
 
     Ok(result)

@@ -1,0 +1,72 @@
+use crate::{DockerError, Parser, PingResult};
+
+use super::assert_okay_with_body;
+use simple_rest_client::{Request, RestClient};
+use std::sync::Arc;
+use thiserror::Error;
+
+#[derive(Error, Debug)]
+pub enum PingParserError {}
+
+#[derive(Debug, Default)]
+pub struct PingParser {}
+
+impl PingParser {
+    pub fn new() -> Self {
+        Self {}
+    }
+}
+
+impl Parser<PingResult> for PingParser {
+    type ParseError = PingParserError;
+
+    fn parse(&self, input: String) -> Result<PingResult, Self::ParseError> {
+        if input == "ok" {
+            Ok(PingResult::Ok)
+        } else {
+            Ok(PingResult::Error(format!(
+                "Unexpected ping value: '{input}'"
+            )))
+        }
+    }
+}
+
+pub struct PingCommand {
+    rest_client: Arc<tokio::sync::Mutex<dyn RestClient + Send + 'static>>,
+    parser: Box<dyn Parser<PingResult, ParseError = PingParserError> + Send>,
+}
+
+impl PingCommand {
+    pub fn new(
+        rest_client: Arc<tokio::sync::Mutex<dyn RestClient + Send + Sync + 'static>>,
+        parser: Box<dyn Parser<PingResult, ParseError = PingParserError> + Send>,
+    ) -> Self {
+        Self {
+            rest_client,
+            parser,
+        }
+    }
+}
+
+impl PingCommand {
+    pub async fn ping(&mut self) -> Result<PingResult, DockerError> {
+        let req = Request::Get {
+            path: "/_ping".to_string(),
+            headers: vec![],
+        };
+
+        let mut rest_client = self.rest_client.lock().await;
+        let response = rest_client.execute(&req).await?;
+
+        let body = assert_okay_with_body(response)?;
+
+        match self.parser.parse(body) {
+            Ok(result) => Ok(result),
+            Err(err) => Err(DockerError::ParseError {
+                line: 0,
+                column: 0,
+                message: format!("{err}"),
+            }),
+        }
+    }
+}

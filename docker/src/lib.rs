@@ -1,19 +1,27 @@
-pub mod container;
-pub mod image;
-pub mod network;
-pub mod status;
+mod commands;
 
+use async_trait::async_trait;
+use commands::ImageCommand;
+use commands::container::{ContainerCommand, InspectedContainer};
+use commands::json_parser::{ChunkedJsonParser, JsonParser, JsonParserError};
+use commands::network::{Network, NetworkCommand};
+use commands::ping::{PingCommand, PingParser};
 use file_system::FileSystemError;
 use log::Logger;
 use serde::ser::SerializeMap;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use serde_json::from_value;
 use serde_json::value::Value as Json;
 use simple_rest_client::unix_domain_socket::{BuilderError, build_client};
-use simple_rest_client::{Parser, Request, Response, RestClient, RestClientError};
-use std::path::{Path, PathBuf};
+use simple_rest_client::{Request, RestClient, RestClientError};
+use std::collections::HashSet;
+use std::path::PathBuf;
 use std::sync::Arc;
 use thiserror::Error;
+
+pub trait Parser<T>: Send + Sync + std::fmt::Debug {
+    type ParseError: std::error::Error + Send + Sync + 'static;
+    fn parse(&self, input: String) -> Result<T, Self::ParseError>;
+}
 
 #[derive(Debug, Deserialize, Clone, PartialEq)]
 pub struct Id {
@@ -94,44 +102,11 @@ where
 }
 
 #[derive(Error, Debug)]
-pub enum ChunkedJsonParserError {
-    #[error("HTTP client error: {0}")]
-    Json(#[from] serde_json::Error),
-}
-
-#[derive(Debug, Default)]
-pub struct ChunkedJsonParser {}
-
-impl ChunkedJsonParser {
-    pub fn new() -> Self {
-        Self {}
-    }
-}
-
-impl Parser<String, Vec<Json>> for ChunkedJsonParser {
-    type ParseError = ChunkedJsonParserError;
-
-    fn parse(&self, input: String) -> Result<Vec<Json>, Self::ParseError> {
-        input
-            .split("\r\n")
-            .filter(|chunk| !chunk.is_empty())
-            .map(|chunk| serde_json::from_str(chunk).map_err(|e| e.into()))
-            .collect()
-    }
-}
-
-#[derive(Error, Debug)]
 pub enum DockerError {
-    #[error("Insufficnet number of chunks in response")]
-    InsufficientChunksError,
-
-    #[error("Excessive number of chunks in response")]
-    ExcessiveChunksError,
-
     #[error("Received unexpected response with status: {status}, {message}")]
     UnexpectedResponseError {
         status: u16,
-        body: Option<Vec<Json>>,
+        body: Option<String>,
         message: String,
     },
 
@@ -184,117 +159,471 @@ impl From<serde_json::Error> for DockerError {
     }
 }
 
-pub struct SimpleDockerClient {
-    rest_client: Box<dyn RestClient<Vec<Json>> + Send>,
+#[derive(Debug)]
+pub enum Version {
+    Latest,
+    Specific(String),
 }
 
-impl SimpleDockerClient {
+impl std::fmt::Display for Version {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let formatted = match self {
+            Version::Latest => "latest".to_string(),
+            Version::Specific(version) => version.to_string(),
+        };
+
+        write!(f, "{formatted}")
+    }
+}
+
+#[derive(Debug, Deserialize, Clone, PartialEq, Eq, Hash)]
+pub struct Tag {
+    pub name: String,
+    pub version: String,
+}
+
+#[derive(Debug, PartialEq)]
+pub struct Container {
+    pub id: String,
+    pub name: String,
+    pub image: Image,
+    pub status: Status,
+    pub mounts: Vec<Mount>,
+    pub environment_variables: Vec<EnvironmentVariable>,
+    pub labels: Vec<Label>,
+}
+
+#[derive(Debug, Deserialize, PartialEq)]
+struct State {
+    #[serde(rename = "Status")]
+    pub status: Status,
+}
+
+#[derive(Debug, Deserialize, PartialEq)]
+struct Config {
+    #[serde(rename = "Env")]
+    #[serde(deserialize_with = "deserialize_environment_variables")]
+    pub env: Vec<EnvironmentVariable>,
+
+    #[serde(rename = "Labels")]
+    #[serde(deserialize_with = "deserialize_labels")]
+    pub labels: Vec<Label>,
+}
+
+#[derive(Debug, Deserialize, PartialEq)]
+pub struct Mount {
+    #[serde(rename = "Type")]
+    pub mount_type: MountType,
+    #[serde(rename = "Source")]
+    pub source: String,
+    #[serde(rename = "Destination")]
+    pub destination: String,
+    #[serde(rename = "RW")]
+    pub writable: bool,
+}
+
+#[derive(Debug, Deserialize, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum Status {
+    Created,
+    Running,
+    Paused,
+    Restarting,
+    Removing,
+    Exited,
+    Dead,
+}
+
+impl std::fmt::Display for Status {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        let text = match self {
+            Status::Created => "created",
+            Status::Running => "running",
+            Status::Paused => "paused",
+            Status::Restarting => "restarting",
+            Status::Removing => "removing",
+            Status::Exited => "exited",
+            Status::Dead => "dead",
+        };
+        write!(f, "{text}")
+    }
+}
+
+#[derive(Debug, Deserialize, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum MountType {
+    Bind,
+    Volume,
+    Image,
+    Tmpfs,
+    Npipe,
+    Cluster,
+}
+
+impl std::fmt::Display for MountType {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        let text = match self {
+            MountType::Bind => "bind",
+            MountType::Volume => "volume",
+            MountType::Image => "image",
+            MountType::Tmpfs => "tmpfs",
+            MountType::Npipe => "npipe",
+            MountType::Cluster => "cluster",
+        };
+        write!(f, "{text}")
+    }
+}
+
+#[derive(Debug, PartialEq, Ord, PartialOrd, Eq)]
+pub struct EnvironmentVariable {
+    pub name: String,
+    pub value: String,
+}
+
+fn deserialize_environment_variables<'de, D>(
+    deserializer: D,
+) -> Result<Vec<EnvironmentVariable>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let json: Json = Json::deserialize(deserializer)?;
+    let obj = json
+        .as_array()
+        .ok_or_else(|| serde::de::Error::custom("Expected Env to be an array"))?;
+
+    let result: Vec<EnvironmentVariable> = obj
+        .iter()
+        .map(|item| {
+            if let Some(assignment) = item.as_str() {
+                let parts: Vec<&str> = assignment.split('=').collect();
+                let (name, value) = match parts.as_slice() {
+                    [first, second] => (first.to_string(), second.to_string()),
+                    _ => (assignment.to_string(), String::new()),
+                };
+                Ok(EnvironmentVariable { name, value })
+            } else {
+                Err(serde::de::Error::custom(
+                    "Expected assignments to be strings",
+                ))
+            }
+        })
+        .collect::<Result<_, D::Error>>()?;
+    Ok(result)
+}
+
+#[derive(Debug, Deserialize, Clone, PartialEq)]
+pub struct Image {
+    #[serde(rename = "Id")]
+    #[serde(deserialize_with = "deserialize_id")]
+    pub id: Id,
+
+    #[serde(rename = "RepoTags")]
+    #[serde(deserialize_with = "deserialize_tags")]
+    pub tags: HashSet<Tag>,
+}
+
+fn deserialize_tags<'de, D>(deserializer: D) -> Result<HashSet<Tag>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let raw_strings: Vec<String> = Deserialize::deserialize(deserializer)?;
+
+    let tags = raw_strings
+        .into_iter()
+        .map(|raw_tag| {
+            let parts: Vec<&str> = raw_tag.split(':').collect();
+            let (name, version) = match parts.as_slice() {
+                [first, second] => (first.to_string(), second.to_string()),
+                _ => (raw_tag, String::from("")),
+            };
+            Tag { name, version }
+        })
+        .collect();
+
+    Ok(tags)
+}
+
+pub enum PingResult {
+    Ok,
+    Error(String),
+}
+
+#[async_trait]
+pub trait SystemClient {
+    async fn ping(&mut self) -> Result<PingResult, DockerError>;
+}
+
+pub struct SimpleSystemClient {
+    command: PingCommand,
+}
+
+impl SimpleSystemClient {
     pub async fn build(
-        socket_file: &'static Path,
-        mount_root: &Path,
+        socket_file_path: PathBuf,
         logger: Arc<dyn Logger>,
     ) -> Result<Self, DockerError> {
-        let client = build_client(socket_file, logger, ChunkedJsonParser::new()).await?;
-
-        if mount_root.is_file() {
-            return Err(DockerError::PathError {
-                path: mount_root.to_path_buf(),
-                message: "Expected directory".to_string(),
-            });
-        }
+        let rest_client = build_client(socket_file_path, logger).await?;
 
         Ok(Self {
-            rest_client: Box::new(client),
+            command: PingCommand::new(
+                Arc::new(tokio::sync::Mutex::new(rest_client)),
+                Box::new(PingParser::new()),
+            ),
+        })
+    }
+}
+
+#[async_trait]
+impl SystemClient for SimpleSystemClient {
+    async fn ping(&mut self) -> Result<PingResult, DockerError> {
+        Ok(self.command.ping().await?)
+    }
+}
+
+#[async_trait]
+pub trait ImageClient {
+    async fn find_by_id(&mut self, id: &Id) -> Result<Image, DockerError>;
+    async fn find_by_name(&mut self, name: &str, version: Version) -> Result<Image, DockerError>;
+    async fn list(&mut self) -> Result<Vec<Image>, DockerError>;
+    async fn pull(&mut self, name: &str, version: Version) -> Result<Image, DockerError>;
+}
+
+pub struct SimpleImageClient {
+    command: ImageCommand,
+}
+
+impl SimpleImageClient {
+    pub async fn build(
+        socket_file_path: PathBuf,
+        logger: Arc<dyn Logger>,
+    ) -> Result<Self, DockerError> {
+        let rest_client = build_client(socket_file_path, logger).await?;
+
+        Ok(Self {
+            command: ImageCommand::new(
+                Arc::new(tokio::sync::Mutex::new(rest_client)),
+                Arc::new(JsonParser::new()),
+                Arc::new(ChunkedJsonParser::new()),
+            ),
+        })
+    }
+}
+
+#[async_trait]
+impl ImageClient for SimpleImageClient {
+    async fn find_by_id(&mut self, id: &Id) -> Result<Image, DockerError> {
+        self.command.find_by_id(id).await
+    }
+
+    async fn find_by_name(&mut self, name: &str, version: Version) -> Result<Image, DockerError> {
+        self.command.find_by_name(name, version).await
+    }
+
+    async fn list(&mut self) -> Result<Vec<Image>, DockerError> {
+        self.command.list().await
+    }
+
+    async fn pull(&mut self, name: &str, version: Version) -> Result<Image, DockerError> {
+        self.command.pull(name, version).await
+    }
+}
+
+#[async_trait]
+pub trait ContainerClient {
+    async fn find_by_id(&mut self, id: &str) -> Result<Container, DockerError>;
+    async fn find_by_name(&mut self, name: &str) -> Result<Container, DockerError>;
+}
+
+pub struct SimpleContainerClient {
+    container_command: ContainerCommand,
+    image_command: ImageCommand,
+}
+
+impl SimpleContainerClient {
+    pub async fn build(
+        socket_file_path: PathBuf,
+        logger: Arc<dyn Logger>,
+    ) -> Result<Self, DockerError> {
+        let rest_client = build_client(socket_file_path, logger).await?;
+        let rest_client: Arc<tokio::sync::Mutex<dyn RestClient + Send + Sync>> =
+            Arc::new(tokio::sync::Mutex::new(rest_client));
+
+        let json_parser: Arc<dyn Parser<Json, ParseError = JsonParserError>> =
+            Arc::new(JsonParser::new());
+        let chunked_json_parser: Arc<dyn Parser<Vec<Json>, ParseError = JsonParserError>> =
+            Arc::new(ChunkedJsonParser::new());
+
+        Ok(Self {
+            image_command: ImageCommand::new(
+                Arc::clone(&rest_client),
+                Arc::clone(&json_parser),
+                Arc::clone(&chunked_json_parser),
+            ),
+            container_command: ContainerCommand::new(rest_client, json_parser),
         })
     }
 
-    fn expect_non_empty_string_argument(
-        &self,
-        argument_name: &str,
-        argument: &String,
-    ) -> Result<(), DockerError> {
-        if argument.is_empty() {
-            Err(DockerError::InvalidArgumentError {
-                name: argument_name.to_string(),
-                given: argument.to_string(),
-                message: "Cannot be blank".to_string(),
-            })
-        } else {
-            Ok(())
-        }
+    async fn create_container(
+        &mut self,
+        inspected_container: InspectedContainer,
+    ) -> Result<Container, DockerError> {
+        let image = self
+            .image_command
+            .find_by_id(&inspected_container.image_id)
+            .await?;
+
+        let result = Container {
+            id: inspected_container.id,
+            name: inspected_container.name,
+            image,
+            status: inspected_container.state.status,
+            mounts: inspected_container.mounts,
+            environment_variables: inspected_container.config.env,
+            labels: inspected_container.config.labels,
+        };
+
+        Ok(result)
+    }
+}
+
+#[async_trait]
+impl ContainerClient for SimpleContainerClient {
+    async fn find_by_id(&mut self, id: &str) -> Result<Container, DockerError> {
+        let inspected_container = self.container_command.find_by_id(id).await?;
+        let result = self.create_container(inspected_container).await?;
+        Ok(result)
     }
 
-    fn expect_no_docker_errors(&self, responses: Vec<Json>) -> Result<(), DockerError> {
-        for response in responses {
-            if let Some(message) = response.get("error") {
-                let msg = match message.as_str() {
-                    Some(text) => text.to_string(),
-                    None => message.to_string(),
-                };
+    async fn find_by_name(&mut self, name: &str) -> Result<Container, DockerError> {
+        let inspected_container = self.container_command.find_by_name(name).await?;
+        let result = self.create_container(inspected_container).await?;
+        Ok(result)
+    }
+}
 
-                return Err(DockerError::ApiError(msg));
+#[async_trait]
+pub trait NetworkClient {
+    async fn inspect_by_id(&mut self, id: &str) -> Result<Network, DockerError>;
+    async fn inspect_by_name(&mut self, name: &str) -> Result<Network, DockerError>;
+    async fn find_connected_containers_by_id(
+        &mut self,
+        network_id: &str,
+    ) -> Result<Vec<Container>, DockerError>;
+    async fn find_connected_containers_by_name(
+        &mut self,
+        network_name: &str,
+    ) -> Result<Vec<Container>, DockerError>;
+    async fn create(&mut self, name: &str, labels: Vec<Label>) -> Result<Network, DockerError>;
+    async fn connect(
+        &mut self,
+        network: &Network,
+        container: &Container,
+    ) -> Result<(), DockerError>;
+    async fn disconnect(
+        &mut self,
+        network: &Network,
+        container: &Container,
+    ) -> Result<(), DockerError>;
+}
+
+pub struct SimplekNetworkClient {
+    network_command: NetworkCommand,
+    container_client: SimpleContainerClient,
+}
+
+impl SimplekNetworkClient {
+    pub async fn build(
+        socket_file_path: PathBuf,
+        logger: Arc<dyn Logger>,
+    ) -> Result<Self, DockerError> {
+        let rest_client = build_client(socket_file_path, logger).await?;
+        let rest_client: Arc<tokio::sync::Mutex<dyn RestClient + Send + Sync>> =
+            Arc::new(tokio::sync::Mutex::new(rest_client));
+
+        let json_parser: Arc<dyn Parser<Json, ParseError = JsonParserError>> =
+            Arc::new(JsonParser::new());
+        let chunked_json_parser: Arc<dyn Parser<Vec<Json>, ParseError = JsonParserError>> =
+            Arc::new(ChunkedJsonParser::new());
+
+        Ok(Self {
+            container_client: SimpleContainerClient {
+                container_command: ContainerCommand::new(
+                    Arc::clone(&rest_client),
+                    Arc::clone(&json_parser),
+                ),
+                image_command: ImageCommand::new(
+                    Arc::clone(&rest_client),
+                    Arc::clone(&json_parser),
+                    Arc::clone(&chunked_json_parser),
+                ),
+            },
+            network_command: NetworkCommand::new(rest_client, json_parser),
+        })
+    }
+
+    async fn load_containers(&mut self, container_ids: Vec<String>) -> Vec<Container> {
+        let mut result = Vec::with_capacity(container_ids.len());
+
+        for id in container_ids {
+            if let Ok(container) = self.container_client.find_by_id(&id).await {
+                result.push(container);
             }
         }
 
-        Ok(())
+        result
+    }
+}
+
+#[async_trait]
+impl NetworkClient for SimplekNetworkClient {
+    async fn inspect_by_id(&mut self, id: &str) -> Result<Network, DockerError> {
+        self.network_command.inspect_by_id(id).await
     }
 
-    fn expect_okay(&self, response: Response<Vec<Json>>) -> Result<Vec<Json>, DockerError> {
-        match response {
-            Response::Okay { body, .. } => Ok(body.unwrap_or_default()),
-            Response::Created { body, .. } => Err(DockerError::UnexpectedResponseError {
-                status: 201,
-                body,
-                message: "expected OK, but recieved CREATED".to_string(),
-            }),
-            Response::NoContent { .. } => Err(DockerError::UnexpectedResponseError {
-                status: 204,
-                body: None,
-                message: "expected OK, but recieved NO CONTENT".to_string(),
-            }),
-            Response::Error { status: 404, .. } => Err(DockerError::NotFoundError),
-            Response::Error { status, body, .. } => Err(DockerError::UnexpectedResponseError {
-                status,
-                body,
-                message: "non successful response".to_string(),
-            }),
-        }
+    async fn inspect_by_name(&mut self, name: &str) -> Result<Network, DockerError> {
+        self.network_command.inspect_by_name(name).await
     }
 
-    fn expect_created(&self, response: Response<Vec<Json>>) -> Result<Vec<Json>, DockerError> {
-        match response {
-            Response::Okay { headers: _, body } => Err(DockerError::UnexpectedResponseError {
-                status: 200,
-                body,
-                message: "expected CREATED, but recieved OK".to_string(),
-            }),
-            Response::Created { body, .. } => Ok(body.unwrap_or_default()),
+    async fn find_connected_containers_by_id(
+        &mut self,
+        network_id: &str,
+    ) -> Result<Vec<Container>, DockerError> {
+        let container_ids = self
+            .network_command
+            .find_connected_containers_by_id(network_id)
+            .await?;
 
-            Response::NoContent { .. } => Err(DockerError::UnexpectedResponseError {
-                status: 204,
-                body: None,
-                message: "expected CREATED, but recieved NO CONTENT".to_string(),
-            }),
-            Response::Error { status: 404, .. } => Err(DockerError::NotFoundError),
-            Response::Error { status, body, .. } => Err(DockerError::UnexpectedResponseError {
-                status,
-                body,
-                message: "non successful response".to_string(),
-            }),
-        }
+        Ok(self.load_containers(container_ids).await)
+    }
+    async fn find_connected_containers_by_name(
+        &mut self,
+        network_name: &str,
+    ) -> Result<Vec<Container>, DockerError> {
+        let container_ids = self
+            .network_command
+            .find_connected_containers_by_name(network_name)
+            .await?;
+
+        Ok(self.load_containers(container_ids).await)
+    }
+    async fn create(&mut self, name: &str, labels: Vec<Label>) -> Result<Network, DockerError> {
+        self.network_command.create(name, labels).await
     }
 
-    fn expect_single_chunk<T>(&mut self, body: Vec<Json>) -> Result<T, DockerError>
-    where
-        T: serde::de::DeserializeOwned,
-    {
-        let mut chunks = body.into_iter();
+    async fn connect(
+        &mut self,
+        network: &Network,
+        container: &Container,
+    ) -> Result<(), DockerError> {
+        self.network_command.connect(network, container).await
+    }
 
-        match (chunks.next(), chunks.next()) {
-            (None, _) => Err(DockerError::InsufficientChunksError),
-            (Some(json), None) => Ok(from_value::<T>(json)?),
-            (Some(_), Some(_)) => Err(DockerError::ExcessiveChunksError),
-        }
+    async fn disconnect(
+        &mut self,
+        network: &Network,
+        container: &Container,
+    ) -> Result<(), DockerError> {
+        self.network_command.disconnect(network, container).await
     }
 }
 

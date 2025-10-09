@@ -229,6 +229,7 @@ fn main() {
                 Arc::clone(&file_reader),
                 Arc::clone(&stdout_log),
                 Arc::clone(&bract_path_factory),
+                Arc::clone(&config_repository) as Arc<dyn ConfigReader>,
             )
             .perform();
 
