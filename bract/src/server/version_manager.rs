@@ -48,21 +48,21 @@ impl ClientErrorDisplay for VersionManagerError {
 
 pub(super) struct VersionManager {
     mount_paths: Arc<MountPathFactory>,
-    folder: Arc<dyn Folder + Sync + Send + 'static>,
-    links: Arc<dyn Links + Sync + Send + 'static>,
-    file_deleter: Arc<dyn FileDeleter + Sync + Send + 'static>,
-    permissions: Arc<dyn Permissions + Sync + Send + 'static>,
-    credentials: Arc<dyn Credentials + Sync + Send + 'static>,
+    folder: Arc<dyn Folder + Sync + Send>,
+    links: Arc<dyn Links + Sync + Send>,
+    file_deleter: Arc<dyn FileDeleter + Sync + Send>,
+    permissions: Arc<dyn Permissions + Sync + Send>,
+    credentials: Arc<dyn Credentials + Sync + Send>,
 }
 
 impl VersionManager {
     pub fn new(
         mount_path_factory: Arc<MountPathFactory>,
-        folder: Arc<dyn Folder + Sync + Send + 'static>,
-        links: Arc<dyn Links + Sync + Send + 'static>,
-        file_deleter: Arc<dyn FileDeleter + Sync + Send + 'static>,
-        permissions: Arc<dyn Permissions + Sync + Send + 'static>,
-        credentials: Arc<dyn Credentials + Sync + Send + 'static>,
+        folder: Arc<dyn Folder + Sync + Send>,
+        links: Arc<dyn Links + Sync + Send>,
+        file_deleter: Arc<dyn FileDeleter + Sync + Send>,
+        permissions: Arc<dyn Permissions + Sync + Send>,
+        credentials: Arc<dyn Credentials + Sync + Send>,
     ) -> Self {
         Self {
             mount_paths: mount_path_factory,

@@ -36,18 +36,18 @@ pub trait ConfigWriter {
 }
 
 pub struct LocalConfigRepository {
-    folder: Arc<dyn Folder + Send + Sync + 'static>,
-    permissions: Arc<dyn Permissions + Send + Sync + 'static>,
-    file_writer: Arc<dyn FileWriter + Send + Sync + 'static>,
-    file_reader: Arc<dyn FileReader + Send + Sync + 'static>,
+    folder: Arc<dyn Folder + Send + Sync>,
+    permissions: Arc<dyn Permissions + Send + Sync>,
+    file_writer: Arc<dyn FileWriter + Send + Sync>,
+    file_reader: Arc<dyn FileReader + Send + Sync>,
 }
 
 impl LocalConfigRepository {
     pub fn new(
-        folder: Arc<dyn Folder + Send + Sync + 'static>,
-        permissions: Arc<dyn Permissions + Send + Sync + 'static>,
-        file_reader: Arc<dyn FileReader + Send + Sync + 'static>,
-        file_writer: Arc<dyn FileWriter + Send + Sync + 'static>,
+        folder: Arc<dyn Folder + Send + Sync>,
+        permissions: Arc<dyn Permissions + Send + Sync>,
+        file_reader: Arc<dyn FileReader + Send + Sync>,
+        file_writer: Arc<dyn FileWriter + Send + Sync>,
     ) -> Self {
         Self {
             folder,
@@ -112,14 +112,15 @@ impl MockConfigWriter {
 #[cfg(test)]
 mod tests {
     use super::LocalConfigRepository;
+    #[cfg(test)]
     use file_system::{MockFileReader, MockFileWriter, MockFolder, MockPermissions};
     use std::sync::Arc;
 
     fn build(
-        folder: Arc<MockFolder>,
-        permissions: Arc<MockPermissions>,
-        file_reader: Arc<MockFileReader>,
-        file_writer: Arc<MockFileWriter>,
+        folder: &Arc<MockFolder>,
+        permissions: &Arc<MockPermissions>,
+        file_reader: &Arc<MockFileReader>,
+        file_writer: &Arc<MockFileWriter>,
     ) -> LocalConfigRepository {
         LocalConfigRepository::new(
             folder.clone(),
@@ -153,10 +154,10 @@ mod tests {
                 .returning(|| Err(FileSystemError::ExpectedFileError));
 
             let actual = build(
-                Arc::new(folder),
-                Arc::new(permissions),
-                Arc::new(file_reader),
-                Arc::new(file_writer),
+                &Arc::new(folder),
+                &Arc::new(permissions),
+                &Arc::new(file_reader),
+                &Arc::new(file_writer),
             )
             .save(&crate::config::Config {
                 operator_user: "foo-operator".to_string(),
@@ -189,10 +190,10 @@ mod tests {
                 .returning(|_, _| Err(FileSystemError::ExpectedFileError));
 
             let actual = build(
-                Arc::new(folder),
-                Arc::new(permissions),
-                Arc::new(file_reader),
-                Arc::new(file_writer),
+                &Arc::new(folder),
+                &Arc::new(permissions),
+                &Arc::new(file_reader),
+                &Arc::new(file_writer),
             )
             .save(&crate::config::Config {
                 operator_user: "foo-operator".to_string(),
@@ -234,10 +235,10 @@ mod tests {
                 .returning(|_, _, _| Err(FileSystemError::ExpectedFileError));
 
             let actual = build(
-                Arc::new(folder),
-                Arc::new(permissions),
-                Arc::new(file_reader),
-                Arc::new(file_writer),
+                &Arc::new(folder),
+                &Arc::new(permissions),
+                &Arc::new(file_reader),
+                &Arc::new(file_writer),
             )
             .save(&crate::config::Config {
                 operator_user: "foo-operator".to_string(),
@@ -283,10 +284,10 @@ mod tests {
                 .returning(|_, _| Err(FileSystemError::ExpectedFileError));
 
             let actual = build(
-                Arc::new(folder),
-                Arc::new(permissions),
-                Arc::new(file_reader),
-                Arc::new(file_writer),
+                &Arc::new(folder),
+                &Arc::new(permissions),
+                &Arc::new(file_reader),
+                &Arc::new(file_writer),
             )
             .save(&crate::config::Config {
                 operator_user: "foo-operator".to_string(),
@@ -326,10 +327,10 @@ mod tests {
             );
 
             let actual = build(
-                Arc::new(folder),
-                Arc::new(permissions),
-                Arc::new(file_reader),
-                Arc::new(file_writer),
+                &Arc::new(folder),
+                &Arc::new(permissions),
+                &Arc::new(file_reader),
+                &Arc::new(file_writer),
             )
             .save(&crate::config::Config {
                 operator_user: "foo-operator".to_string(),
@@ -367,10 +368,10 @@ mod tests {
                 .returning(|| Err(FileSystemError::ExpectedFileError));
 
             let actual = build(
-                Arc::new(folder),
-                Arc::new(permissions),
-                Arc::new(file_reader),
-                Arc::new(file_writer),
+                &Arc::new(folder),
+                &Arc::new(permissions),
+                &Arc::new(file_reader),
+                &Arc::new(file_writer),
             )
             .read();
 
@@ -394,10 +395,10 @@ mod tests {
                 .returning(|_| Err(FileSystemError::ExpectedFileError));
 
             let actual = build(
-                Arc::new(folder),
-                Arc::new(permissions),
-                Arc::new(file_reader),
-                Arc::new(file_writer),
+                &Arc::new(folder),
+                &Arc::new(permissions),
+                &Arc::new(file_reader),
+                &Arc::new(file_writer),
             )
             .read();
 
@@ -418,10 +419,10 @@ mod tests {
             file_reader.given_can_read_all_with_contents("/tmp/douglas-config.json", "oops");
 
             let actual = build(
-                Arc::new(folder),
-                Arc::new(permissions),
-                Arc::new(file_reader),
-                Arc::new(file_writer),
+                &Arc::new(folder),
+                &Arc::new(permissions),
+                &Arc::new(file_reader),
+                &Arc::new(file_writer),
             )
             .read();
 
@@ -451,10 +452,10 @@ mod tests {
             file_reader.given_can_read_all_with_contents("/tmp/douglas-config.json", config);
 
             let actual = build(
-                Arc::new(folder),
-                Arc::new(permissions),
-                Arc::new(file_reader),
-                Arc::new(file_writer),
+                &Arc::new(folder),
+                &Arc::new(permissions),
+                &Arc::new(file_reader),
+                &Arc::new(file_writer),
             )
             .read();
 

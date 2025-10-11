@@ -12,16 +12,16 @@ use crate::constants;
 
 pub struct FileLogger {
     path: PathBuf,
-    file_appender: Arc<dyn FileAppender + Send + Sync + 'static>,
-    permissions: Arc<dyn Permissions + Send + Sync + 'static>,
+    file_appender: Arc<dyn FileAppender + Sync + Send>,
+    permissions: Arc<dyn Permissions + Sync + Send>,
     set_permissions: Once,
 }
 
 impl FileLogger {
     pub fn new(
         path: &Path,
-        file_appender: Arc<dyn FileAppender + Send + Sync + 'static>,
-        permissions: Arc<dyn Permissions + Send + Sync + 'static>,
+        file_appender: Arc<dyn FileAppender + Sync + Send>,
+        permissions: Arc<dyn Permissions + Sync + Send>,
     ) -> Self {
         Self {
             path: path.to_path_buf(),
@@ -36,12 +36,9 @@ impl FileLogger {
 
         if let Err(err) = self
             .file_appender
-            .append(&self.path, format!("{},{},{}\n", now, flag, message))
+            .append(&self.path, format!("{now},{flag},{message}\n"))
         {
-            eprintln!(
-                "Error writing log: '{}' Original log entry: '{},{},{}'",
-                err, now, flag, message
-            );
+            eprintln!("Error writing log: '{err}' Original log entry: '{now},{flag},{message}'");
         } else {
             self.set_permissions.call_once(|| {
                 if let Err(err) = self.permissions.change_user_and_group_ownership(
@@ -49,12 +46,12 @@ impl FileLogger {
                     credentials::ROOT_GROUP_NAME,
                     constants::RADICLE_GROUP,
                 ) {
-                    eprintln!("Failed to set permissions on log file! {}", err);
+                    eprintln!("Failed to set permissions on log file! {err}");
                 } else if let Err(err) = self
                     .permissions
                     .change_mode(&self.path, &Modes::OwnerReadWriteGroupRead)
                 {
-                    eprintln!("Failed to set mode on log file! {}", err);
+                    eprintln!("Failed to set mode on log file! {err}");
                 };
             });
         }
@@ -93,8 +90,8 @@ mod tests {
 
     fn build(
         path: &str,
-        file_appender: Arc<MockFileAppender>,
-        permissions: Arc<MockPermissions>,
+        file_appender: &Arc<MockFileAppender>,
+        permissions: &Arc<MockPermissions>,
     ) -> FileLogger {
         FileLogger::new(Path::new(path), file_appender.clone(), permissions.clone())
     }
@@ -130,7 +127,11 @@ mod tests {
                 .times(1)
                 .returning(|_, _| Ok(()));
 
-            let logger = build("/tmp/log", Arc::new(file_appender), Arc::new(permismisions));
+            let logger = build(
+                "/tmp/log",
+                &Arc::new(file_appender),
+                &Arc::new(permismisions),
+            );
             logger.log("foo", "bar");
             logger.log("baz", "qux");
         }

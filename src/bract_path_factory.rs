@@ -3,11 +3,11 @@ use std::{path::PathBuf, sync::Arc};
 use file_system::{FileSystemError, Folder};
 
 pub struct BractPathFactory {
-    folder: Arc<dyn Folder + Send + Sync + 'static>,
+    folder: Arc<dyn Folder + Send + Sync>,
 }
 
 impl BractPathFactory {
-    pub fn new(folder: Arc<dyn Folder + Send + Sync + 'static>) -> Self {
+    pub fn new(folder: Arc<dyn Folder + Send + Sync>) -> Self {
         Self { folder }
     }
 

@@ -7,13 +7,13 @@ use std::sync::Arc;
 
 pub(super) struct CreateMount {
     token: Arc<TokenValidator>,
-    log: Arc<dyn Logger + Sync + Send + 'static>,
+    log: Arc<dyn Logger + Sync + Send>,
     version_manager: Arc<VersionManager>,
 }
 
 impl CreateMount {
     pub fn new(
-        log: Arc<dyn Logger + Sync + Send + 'static>,
+        log: Arc<dyn Logger + Sync + Send>,
         token_validator: Arc<TokenValidator>,
         version_manager: Arc<VersionManager>,
     ) -> Self {

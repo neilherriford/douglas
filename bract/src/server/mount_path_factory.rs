@@ -29,15 +29,15 @@ impl ClientErrorDisplay for MountPathVersionError {
 
 pub(super) struct MountPathFactory {
     root: PathBuf,
-    links: Arc<dyn Links + Sync + Send + 'static>,
-    folder: Arc<dyn Folder + Sync + Send + 'static>,
+    links: Arc<dyn Links + Sync + Send>,
+    folder: Arc<dyn Folder + Sync + Send>,
 }
 
 impl MountPathFactory {
     pub fn new(
         root: &Path,
-        folder: Arc<dyn Folder + Sync + Send + 'static>,
-        links: Arc<dyn Links + Sync + Send + 'static>,
+        folder: Arc<dyn Folder + Sync + Send>,
+        links: Arc<dyn Links + Sync + Send>,
     ) -> Self {
         Self {
             root: root.to_path_buf(),

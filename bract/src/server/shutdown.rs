@@ -5,15 +5,12 @@ use std::sync::Arc;
 use tokio::sync::broadcast::Sender;
 
 pub(super) struct Shutdown {
-    log: Arc<dyn Logger + Sync + Send + 'static>,
+    log: Arc<dyn Logger + Sync + Send>,
     token: Arc<TokenValidator>,
 }
 
 impl Shutdown {
-    pub fn new(
-        log: Arc<dyn Logger + Sync + Send + 'static>,
-        token_validator: Arc<TokenValidator>,
-    ) -> Self {
+    pub fn new(log: Arc<dyn Logger + Sync + Send>, token_validator: Arc<TokenValidator>) -> Self {
         Self {
             log,
             token: token_validator,

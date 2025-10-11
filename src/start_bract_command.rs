@@ -41,15 +41,15 @@ pub enum StartBractCommandError {
 
 pub struct StartBractCommand {
     config_reader: Arc<dyn ConfigReader>,
-    credentials: Arc<dyn Credentials + Sync + Send + 'static>,
-    folder: Arc<dyn Folder + Sync + Send + 'static>,
-    file_reader: Arc<dyn FileReader + Sync + Send + 'static>,
-    file_writer: Arc<dyn FileWriter + Sync + Send + 'static>,
-    file_deleter: Arc<dyn FileDeleter + Sync + Send + 'static>,
-    file_appender: Arc<dyn FileAppender + Sync + Send + 'static>,
-    links: Arc<dyn Links + Sync + Send + 'static>,
-    os: Arc<dyn Os + Sync + Send + 'static>,
-    permissions: Arc<dyn Permissions + Sync + Send + 'static>,
+    credentials: Arc<dyn Credentials + Send + Sync>,
+    folder: Arc<dyn Folder + Send + Sync>,
+    file_reader: Arc<dyn FileReader + Send + Sync>,
+    file_writer: Arc<dyn FileWriter + Send + Sync>,
+    file_deleter: Arc<dyn FileDeleter + Send + Sync>,
+    file_appender: Arc<dyn FileAppender + Send + Sync>,
+    links: Arc<dyn Links + Send + Sync>,
+    os: Arc<dyn Os>,
+    permissions: Arc<dyn Permissions + Send + Sync>,
     unix_domain_socket: Arc<dyn UnixDomainSocket + 'static>,
     bract_path_factory: Arc<BractPathFactory>,
     logger: BractLogger,
@@ -57,31 +57,31 @@ pub struct StartBractCommand {
 }
 
 pub enum BractLogger {
-    Use(Arc<dyn Logger + Send + Sync>),
+    Use(Arc<dyn Logger>),
     WriteToFile,
 }
 
 impl StartBractCommand {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        credentials: Arc<dyn Credentials + Sync + Send + 'static>,
-        folder: Arc<dyn Folder + Sync + Send + 'static>,
+        credentials: Arc<dyn Credentials + Send + Sync>,
+        folder: Arc<dyn Folder + Send + Sync>,
         config_reader: Arc<dyn ConfigReader>,
-        file_reader: Arc<dyn FileReader + Sync + Send + 'static>,
-        file_writer: Arc<dyn FileWriter + Sync + Send + 'static>,
-        file_deleter: Arc<dyn FileDeleter + Sync + Send + 'static>,
-        file_appender: Arc<dyn FileAppender + Sync + Send + 'static>,
-        links: Arc<dyn Links + Sync + Send + 'static>,
-        os: Arc<dyn Os + Sync + Send + 'static>,
-        permissions: Arc<dyn Permissions + Sync + Send + 'static>,
+        file_reader: Arc<dyn FileReader + Send + Sync>,
+        file_writer: Arc<dyn FileWriter + Send + Sync>,
+        file_deleter: Arc<dyn FileDeleter + Send + Sync>,
+        file_appender: Arc<dyn FileAppender + Send + Sync>,
+        links: Arc<dyn Links + Send + Sync>,
+        os: Arc<dyn Os>,
+        permissions: Arc<dyn Permissions + Send + Sync>,
         unix_domain_socket: Arc<dyn UnixDomainSocket + 'static>,
         bract_path_factory: Arc<BractPathFactory>,
         logger: BractLogger,
         verbose_printer: Arc<dyn VerbosePrinter>,
     ) -> Self {
         Self {
-            credentials,
             config_reader,
+            credentials,
             folder,
             file_reader,
             file_writer,
@@ -115,9 +115,9 @@ impl StartBractCommand {
         if daemonize {
             self.verbose_printer
                 .print_indented(1, "Starting daemonizeds…");
-            self.run_detached(server, &config)?;
+            self.run_detached(&server, &config)?;
         } else {
-            server.start()?
+            server.start()?;
         }
 
         Ok(())
@@ -161,7 +161,7 @@ impl StartBractCommand {
         ))
     }
 
-    fn run_detached(&self, server: Server, config: &Config) -> Result<(), StartBractCommandError> {
+    fn run_detached(&self, server: &Server, config: &Config) -> Result<(), StartBractCommandError> {
         let (stdout, stdout_path) = self
             .folder
             .create_file(config.log_path.as_path(), "douglas-bract.out")?;
@@ -181,7 +181,7 @@ impl StartBractCommand {
 
         self.verbose_printer.print("🆗 Douglas bract started!");
         match daemonize.start() {
-            Ok(_) => {
+            Ok(()) => {
                 self.set_permissions_to_service_readable(&pid_file_path)?;
                 match server.start() {
                     Ok(()) => Ok(()),
@@ -196,7 +196,7 @@ impl StartBractCommand {
         &self,
     ) -> Result<(PathBuf, PathBuf), StartBractCommandError> {
         let executable_root = self.folder.executable_root()?;
-        let mut pid_path = executable_root.to_path_buf();
+        let mut pid_path = executable_root.clone();
         pid_path.push("bract.pid");
         Ok((executable_root, pid_path))
     }
@@ -228,8 +228,7 @@ impl StartBractCommand {
                 Ok(pid) => pid,
                 Err(_) => {
                     return Err(StartBractCommandError::GeneralError(format!(
-                        "Unexpected PID format: {}",
-                        pid
+                        "Unexpected PID format: {pid}"
                     )));
                 }
             };
@@ -241,8 +240,7 @@ impl StartBractCommand {
             }
         } else {
             Err(StartBractCommandError::GeneralError(format!(
-                "Could not determine bract pid from pid file: {:?}",
-                pid_file_path
+                "Could not determine bract pid from pid file: {pid_file_path:?}"
             )))
         }
     }
@@ -255,7 +253,7 @@ mod tests {
         bract_path_factory::BractPathFactory, config::MockConfigReader,
         verbose_printer::MockVerbosePrinter,
     };
-    use credentials::Credentials;
+    use credentials::{Credentials, MockCredentials};
     use file_system::{
         MockFileAppender, MockFileDeleter, MockFileReader, MockFileWriter, MockFolder, MockLinks,
         MockPermissions, MockUnixDomainSocket,
@@ -265,22 +263,25 @@ mod tests {
 
     #[allow(clippy::too_many_arguments)]
     fn build(
-        credentials: Arc<dyn Credentials + Sync + Send + 'static>,
-        folder: Arc<MockFolder>,
-        config_reader: Arc<MockConfigReader>,
-        file_reader: Arc<MockFileReader>,
-        file_writer: Arc<MockFileWriter>,
-        file_deleter: Arc<MockFileDeleter>,
-        file_appender: Arc<MockFileAppender>,
-        links: Arc<MockLinks>,
-        os: Arc<MockOs>,
-        permissions: Arc<MockPermissions>,
-        unix_domain_socket: Arc<MockUnixDomainSocket>,
-        verbose_printer: Arc<MockVerbosePrinter>,
+        credentials: &Arc<MockCredentials>,
+        folder: &Arc<MockFolder>,
+        config_reader: &Arc<MockConfigReader>,
+        file_reader: &Arc<MockFileReader>,
+        file_writer: &Arc<MockFileWriter>,
+        file_deleter: &Arc<MockFileDeleter>,
+        file_appender: &Arc<MockFileAppender>,
+        links: &Arc<MockLinks>,
+        os: &Arc<MockOs>,
+        permissions: &Arc<MockPermissions>,
+        unix_domain_socket: &Arc<MockUnixDomainSocket>,
+        verbose_printer: &Arc<MockVerbosePrinter>,
         logger: BractLogger,
     ) -> StartBractCommand {
+        let credentials: Arc<dyn Credentials + Sync + Send + 'static> =
+            Arc::clone(credentials) as Arc<dyn Credentials + Sync + Send + 'static>;
+
         StartBractCommand::new(
-            Arc::clone(&credentials),
+            credentials,
             folder.clone(),
             config_reader.clone(),
             file_reader.clone(),
@@ -334,18 +335,18 @@ mod tests {
             credentials.given_is_not_root();
 
             let actual = build(
-                Arc::new(credentials),
-                Arc::new(folder),
-                Arc::new(config_reader),
-                Arc::new(file_reader),
-                Arc::new(file_writer),
-                Arc::new(file_deleter),
-                Arc::new(file_appender),
-                Arc::new(links),
-                Arc::new(os),
-                Arc::new(permissions),
-                Arc::new(unix_domain_socket),
-                Arc::new(verbose_printer),
+                &Arc::new(credentials),
+                &Arc::new(folder),
+                &Arc::new(config_reader),
+                &Arc::new(file_reader),
+                &Arc::new(file_writer),
+                &Arc::new(file_deleter),
+                &Arc::new(file_appender),
+                &Arc::new(links),
+                &Arc::new(os),
+                &Arc::new(permissions),
+                &Arc::new(unix_domain_socket),
+                &Arc::new(verbose_printer),
                 BractLogger::Use(Arc::new(logger) as Arc<dyn Logger + Send + Sync>),
             )
             .perform(false);
@@ -378,18 +379,18 @@ mod tests {
             file_reader.given_can_read_all_with_contents("/tmp/bract.pid", "oops");
 
             let actual = build(
-                Arc::new(credentials),
-                Arc::new(folder),
-                Arc::new(config_reader),
-                Arc::new(file_reader),
-                Arc::new(file_writer),
-                Arc::new(file_deleter),
-                Arc::new(file_appender),
-                Arc::new(links),
-                Arc::new(os),
-                Arc::new(permissions),
-                Arc::new(unix_domain_socket),
-                Arc::new(verbose_printer),
+                &Arc::new(credentials),
+                &Arc::new(folder),
+                &Arc::new(config_reader),
+                &Arc::new(file_reader),
+                &Arc::new(file_writer),
+                &Arc::new(file_deleter),
+                &Arc::new(file_appender),
+                &Arc::new(links),
+                &Arc::new(os),
+                &Arc::new(permissions),
+                &Arc::new(unix_domain_socket),
+                &Arc::new(verbose_printer),
                 BractLogger::Use(Arc::new(logger) as Arc<dyn Logger + Send + Sync>),
             )
             .perform(true);
@@ -427,18 +428,18 @@ mod tests {
             os.given_pid_is_active(12345);
 
             let actual = build(
-                Arc::new(credentials),
-                Arc::new(folder),
-                Arc::new(config_reader),
-                Arc::new(file_reader),
-                Arc::new(file_writer),
-                Arc::new(file_deleter),
-                Arc::new(file_appender),
-                Arc::new(links),
-                Arc::new(os),
-                Arc::new(permissions),
-                Arc::new(unix_domain_socket),
-                Arc::new(verbose_printer),
+                &Arc::new(credentials),
+                &Arc::new(folder),
+                &Arc::new(config_reader),
+                &Arc::new(file_reader),
+                &Arc::new(file_writer),
+                &Arc::new(file_deleter),
+                &Arc::new(file_appender),
+                &Arc::new(links),
+                &Arc::new(os),
+                &Arc::new(permissions),
+                &Arc::new(unix_domain_socket),
+                &Arc::new(verbose_printer),
                 BractLogger::Use(Arc::new(logger) as Arc<dyn Logger + Send + Sync>),
             )
             .perform(true);
@@ -475,18 +476,18 @@ mod tests {
             });
 
             let actual = build(
-                Arc::new(credentials),
-                Arc::new(folder),
-                Arc::new(config_reader),
-                Arc::new(file_reader),
-                Arc::new(file_writer),
-                Arc::new(file_deleter),
-                Arc::new(file_appender),
-                Arc::new(links),
-                Arc::new(os),
-                Arc::new(permissions),
-                Arc::new(unix_domain_socket),
-                Arc::new(verbose_printer),
+                &Arc::new(credentials),
+                &Arc::new(folder),
+                &Arc::new(config_reader),
+                &Arc::new(file_reader),
+                &Arc::new(file_writer),
+                &Arc::new(file_deleter),
+                &Arc::new(file_appender),
+                &Arc::new(links),
+                &Arc::new(os),
+                &Arc::new(permissions),
+                &Arc::new(unix_domain_socket),
+                &Arc::new(verbose_printer),
                 BractLogger::Use(Arc::new(logger) as Arc<dyn Logger + Send + Sync>),
             )
             .perform(false);

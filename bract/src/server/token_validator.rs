@@ -7,14 +7,14 @@ use subtle::ConstantTimeEq;
 
 pub(super) struct TokenValidator {
     path: PathBuf,
-    log: Arc<dyn Logger + Sync + Send + 'static>,
-    file_reader: Arc<dyn FileReader + Sync + Send + 'static>,
+    log: Arc<dyn Logger + Sync + Send>,
+    file_reader: Arc<dyn FileReader + Sync + Send>,
 }
 
 impl TokenValidator {
     pub fn new(
-        log: Arc<dyn Logger + Sync + Send + 'static>,
-        file_reader: Arc<dyn FileReader + Sync + Send + 'static>,
+        log: Arc<dyn Logger + Sync + Send>,
+        file_reader: Arc<dyn FileReader + Sync + Send>,
         path: &Path,
     ) -> Self {
         Self {

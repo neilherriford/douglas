@@ -7,11 +7,11 @@ use std::sync::Arc;
 pub(super) struct ActiveMountVersion {
     token: Arc<TokenValidator>,
     mount_paths: Arc<MountPathFactory>,
-    log: Arc<dyn Logger + Sync + Send + 'static>,
+    log: Arc<dyn Logger>,
 }
 impl ActiveMountVersion {
     pub fn new(
-        log: Arc<dyn Logger + Sync + Send + 'static>,
+        log: Arc<dyn Logger + Sync + Send>,
         token_validator: Arc<TokenValidator>,
         mount_path_factory: Arc<MountPathFactory>,
     ) -> Self {

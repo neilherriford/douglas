@@ -10,8 +10,8 @@ use std::sync::Arc;
 use tokio::runtime::Runtime;
 
 pub struct StatusCommand {
-    file_reader: Arc<dyn FileReader + Send + Sync>,
-    log: Arc<dyn Logger + Sync + Send>,
+    file_reader: Arc<dyn FileReader>,
+    log: Arc<dyn Logger>,
     bract_path_factory: Arc<BractPathFactory>,
     config_reader: Arc<dyn ConfigReader>,
 }
@@ -39,8 +39,8 @@ pub struct DouglasStatus {
 
 impl StatusCommand {
     pub fn new(
-        file_reader: Arc<dyn FileReader + Send + Sync>,
-        log: Arc<dyn Logger + Sync + Send>,
+        file_reader: Arc<dyn FileReader>,
+        log: Arc<dyn Logger>,
         bract_path_factory: Arc<BractPathFactory>,
         config_reader: Arc<dyn ConfigReader>,
     ) -> Self {
@@ -68,15 +68,16 @@ impl StatusCommand {
 
         let mut bract_status: BractStatus = BractStatus::NotRunning;
 
-        let rt = Runtime::new().unwrap();
+        let rt = Runtime::new()?;
         rt.block_on(async {
             let response = bract_client.status().await;
 
             bract_status = match response {
                 Ok(status) => BractStatus::Status(status),
                 Err(ClientError::MissingToken) => BractStatus::NotIntialized,
-                Err(ClientError::NoResponse) => BractStatus::NotRunning,
-                Err(ClientError::ConnectionRefused) => BractStatus::NotRunning,
+                Err(ClientError::NoResponse | ClientError::ConnectionRefused) => {
+                    BractStatus::NotRunning
+                }
                 Err(err) => BractStatus::CannotDetermineStatus(format!("{err:?}")),
             };
         });
@@ -97,7 +98,7 @@ impl StatusCommand {
             }
         };
 
-        let rt = Runtime::new().unwrap();
+        let rt = Runtime::new()?;
         let docker_status = rt.block_on(async move {
             match SimpleSystemClient::build(
                 docker_socket_path,

@@ -21,7 +21,7 @@ impl PlainCommandOutputPrinter {
         Self {}
     }
 
-    fn path_to_string(&self, path: &Path) -> String {
+    fn path_to_string(path: &Path) -> String {
         if let Some(result) = path.to_str() {
             result.to_string()
         } else {
@@ -29,64 +29,64 @@ impl PlainCommandOutputPrinter {
         }
     }
 
-    fn print_indented(&self, indent: u8, text: &str) {
+    fn print_indented(indent: u8, text: &str) {
         let mut indentation = String::new();
         for _ in 0..indent {
             indentation += "  ";
         }
-        println!("{}{}", indentation, text);
+        println!("{indentation}{text}");
     }
 
-    fn print_ok(&self, command: &str) {
+    fn print_ok(command: &str) {
         println!("{command}: OK!");
     }
 
-    fn print_error<T>(&self, command: &str, error: &T)
+    fn print_error<T>(command: &str, error: &T)
     where
         T: std::fmt::Display,
     {
         eprintln!("❌ {command}: error: {error}");
     }
 
-    fn print_command(&self, command: &str) {
+    fn print_command(command: &str) {
         println!("{command}:");
     }
 }
 
 impl CommandOutputPrinter<DouglasStatus, FileSystemError> for PlainCommandOutputPrinter {
     fn print(&self, command: &str, result: &Result<DouglasStatus, FileSystemError>) {
-        self.print_command(command);
+        Self::print_command(command);
         match result {
             Ok(status) => {
-                self.print_indented(1, "Bract:");
+                Self::print_indented(1, "Bract:");
                 match &status.bract_status {
                     BractStatus::CannotDetermineStatus(message) => {
-                        self.print_indented(2, &format!("Cannot determine status: {message}"));
+                        Self::print_indented(2, &format!("Cannot determine status: {message}"));
                     }
-                    BractStatus::NotIntialized => self.print_indented(2, "Not intialized."),
-                    BractStatus::NotRunning => self.print_indented(2, "Not running"),
+                    BractStatus::NotIntialized => Self::print_indented(2, "Not intialized."),
+                    BractStatus::NotRunning => Self::print_indented(2, "Not running"),
                     BractStatus::Status(bract_status) => {
-                        self.print_indented(
+                        Self::print_indented(
                             2,
                             &format!(
                                 "Mount path: {}",
-                                self.path_to_string(bract_status.mount_root.as_path())
+                                Self::path_to_string(bract_status.mount_root.as_path())
                             ),
                         );
-                        self.print_indented(
+                        Self::print_indented(
                             2,
                             &format!(
                                 "Token path: {}",
-                                self.path_to_string(bract_status.token_path.as_path())
+                                Self::path_to_string(bract_status.token_path.as_path())
                             ),
                         );
-                        self.print_indented(2, "Services:");
+                        Self::print_indented(2, "Services:");
                         for service in &bract_status.services {
-                            self.print_indented(3, &service.name);
-                            self.print_indented(4, "Mounts:");
+                            Self::print_indented(3, &service.name);
+                            Self::print_indented(4, "Mounts:");
 
                             for mount in &service.mounts {
-                                self.print_indented(
+                                Self::print_indented(
                                     5,
                                     &format!("{}: {}", mount.name, mount.version),
                                 );
@@ -94,22 +94,24 @@ impl CommandOutputPrinter<DouglasStatus, FileSystemError> for PlainCommandOutput
                         }
                     }
                 }
-                self.print_indented(1, "Docker:");
+                Self::print_indented(1, "Docker:");
                 match &status.docker_status {
-                    crate::status_command::DockerStatus::Active => self.print_indented(2, "Active"),
-                    crate::status_command::DockerStatus::ConfigFileNotFound => self.print_indented(
-                        2,
-                        "Could not find config file, has the system been initialized yet?",
-                    ),
-                    crate::status_command::DockerStatus::DockerClientError(message) => {
-                        self.print_indented(2, &format!("Docker error: {message}"))
+                    crate::status_command::DockerStatus::Active => {
+                        Self::print_indented(2, "Active");
                     }
-                    crate::status_command::DockerStatus::CouldNotLoadConfiguration(message) => {
-                        self.print_indented(2, &format!("Docker error: {message}"))
+                    crate::status_command::DockerStatus::ConfigFileNotFound => {
+                        Self::print_indented(
+                            2,
+                            "Could not find config file, has the system been initialized yet?",
+                        );
+                    }
+                    crate::status_command::DockerStatus::DockerClientError(message)
+                    | crate::status_command::DockerStatus::CouldNotLoadConfiguration(message) => {
+                        Self::print_indented(2, &format!("Docker error: {message}"));
                     }
                 }
             }
-            Err(err) => self.print_error(command, err),
+            Err(err) => Self::print_error(command, err),
         }
     }
 }
@@ -117,8 +119,8 @@ impl CommandOutputPrinter<DouglasStatus, FileSystemError> for PlainCommandOutput
 impl<T: std::fmt::Display> CommandOutputPrinter<(), T> for PlainCommandOutputPrinter {
     fn print(&self, command: &str, result: &Result<(), T>) {
         match result {
-            Ok(_) => self.print_ok(command),
-            Err(err) => self.print_error(command, err),
+            Ok(()) => Self::print_ok(command),
+            Err(err) => Self::print_error(command, err),
         }
     }
 }
@@ -131,26 +133,26 @@ impl JsonCommandOutputPrinter {
         Self {}
     }
 
-    fn print_success(&self, command: &str, data: Value) {
-        self.print_json(command, data, Value::Null);
+    fn print_success(command: &str, data: &Value) {
+        Self::print_json(command, data, &Value::Null);
     }
 
-    fn print_failure(&self, command: &str, error: Value) {
-        self.print_json(command, Value::Null, error);
+    fn print_failure(command: &str, error: &Value) {
+        Self::print_json(command, &Value::Null, error);
     }
 
-    fn print_error<T>(&self, command: &str, error: &T)
+    fn print_error<T>(command: &str, error: &T)
     where
         T: std::fmt::Display,
     {
-        self.print_failure(command, Value::String(format!("{error}")));
+        Self::print_failure(command, &Value::String(format!("{error}")));
     }
 
-    fn print_ok(&self, command: &str) {
-        self.print_success(command, Value::String("OK".to_string()));
+    fn print_ok(command: &str) {
+        Self::print_success(command, &Value::String("OK".to_string()));
     }
 
-    fn print_json(&self, command: &str, data: Value, error: Value) {
+    fn print_json(command: &str, data: &Value, error: &Value) {
         let json = json!({
             "command": command,
             "data": data,
@@ -159,20 +161,19 @@ impl JsonCommandOutputPrinter {
 
         match serde_json::to_string_pretty(&json) {
             Ok(text) => {
-                if error == Value::Null {
-                    eprintln!("{}", text)
+                if error == &Value::Null {
+                    eprintln!("{text}");
                 } else {
-                    println!("{}", text)
+                    println!("{text}");
                 }
             }
             Err(err) => eprintln!(
-                "{{\n  \"command\": \"{}\",\n  \"data\": null,\n  \"error\": \"{:?}\"\n}}",
-                command, err
+                "{{\n  \"command\": \"{command}\",\n  \"data\": null,\n  \"error\": \"{err:?}\"\n}}",
             ),
         }
     }
 
-    fn serialize<T>(&self, value: &T, name: &str) -> Value
+    fn serialize<T>(value: &T, name: &str) -> Value
     where
         T: Serialize,
     {
@@ -197,7 +198,7 @@ impl CommandOutputPrinter<DouglasStatus, FileSystemError> for JsonCommandOutputP
                     BractStatus::NotRunning => {
                         json!({"status": "not_running"})
                     }
-                    BractStatus::Status(status) => self.serialize(&status, "bract status"),
+                    BractStatus::Status(status) => Self::serialize(&status, "bract status"),
                     BractStatus::CannotDetermineStatus(message) => {
                         json!({"status": "unknown", "details": message})
                     }
@@ -219,9 +220,9 @@ impl CommandOutputPrinter<DouglasStatus, FileSystemError> for JsonCommandOutputP
                     "bract": bract_status,
                     "docker": docker_status,
                 });
-                self.print_success(command, data);
+                Self::print_success(command, &data);
             }
-            Err(err) => self.print_error(command, err),
+            Err(err) => Self::print_error(command, err),
         }
     }
 }
@@ -229,8 +230,8 @@ impl CommandOutputPrinter<DouglasStatus, FileSystemError> for JsonCommandOutputP
 impl<T: std::fmt::Display> CommandOutputPrinter<(), T> for JsonCommandOutputPrinter {
     fn print(&self, command: &str, result: &Result<(), T>) {
         match result {
-            Ok(_) => self.print_ok(command),
-            Err(err) => self.print_error(command, err),
+            Ok(()) => Self::print_ok(command),
+            Err(err) => Self::print_error(command, err),
         }
     }
 }

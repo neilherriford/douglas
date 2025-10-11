@@ -8,21 +8,21 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 pub(super) struct TokenRefresher {
-    log: Arc<dyn Logger + Sync + Send + 'static>,
+    log: Arc<dyn Logger + Sync + Send>,
     token_path: PathBuf,
-    permissions: Arc<dyn Permissions + Sync + Send + 'static>,
-    file_writer: Arc<dyn FileWriter + Sync + Send + 'static>,
+    permissions: Arc<dyn Permissions + Sync + Send>,
+    file_writer: Arc<dyn FileWriter + Sync + Send>,
     os: Arc<dyn Os>,
     service_group_name: String,
 }
 
 impl TokenRefresher {
     pub fn new(
-        log: Arc<dyn Logger + Sync + Send + 'static>,
+        log: Arc<dyn Logger + Sync + Send>,
         token_path: &Path,
-        permissions: Arc<dyn Permissions + Sync + Send + 'static>,
-        file_writer: Arc<dyn FileWriter + Sync + Send + 'static>,
-        os: Arc<dyn Os + Sync + Send + 'static>,
+        permissions: Arc<dyn Permissions + Sync + Send>,
+        file_writer: Arc<dyn FileWriter + Sync + Send>,
+        os: Arc<dyn Os>,
         service_group_name: &str,
     ) -> Self {
         Self {

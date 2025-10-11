@@ -5,20 +5,20 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 pub(super) struct CreateListener {
-    log: Arc<dyn Logger + Sync + Send + 'static>,
+    log: Arc<dyn Logger + Sync + Send>,
     socket_path: PathBuf,
-    file_deleter: Arc<dyn FileDeleter + Sync + Send + 'static>,
-    permissions: Arc<dyn Permissions + Sync + Send + 'static>,
+    file_deleter: Arc<dyn FileDeleter + Sync + Send>,
+    permissions: Arc<dyn Permissions + Sync + Send>,
     unix_domain_socket: Arc<dyn UnixDomainSocket + 'static>,
     owning_group_name: String,
 }
 
 impl CreateListener {
     pub fn new(
-        log: Arc<dyn Logger + Sync + Send + 'static>,
+        log: Arc<dyn Logger + Sync + Send>,
         socket_path: &Path,
-        file_deleter: Arc<dyn FileDeleter + Sync + Send + 'static>,
-        permissions: Arc<dyn Permissions + Sync + Send + 'static>,
+        file_deleter: Arc<dyn FileDeleter + Sync + Send>,
+        permissions: Arc<dyn Permissions + Sync + Send>,
         unix_domain_socket: Arc<dyn UnixDomainSocket + 'static>,
         owning_group_name: &str,
     ) -> Self {

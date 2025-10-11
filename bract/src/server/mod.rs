@@ -197,13 +197,13 @@ struct RequestHandler {
 impl RequestHandler {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        log: Arc<dyn Logger + Sync + Send + 'static>,
-        folder: Arc<dyn Folder + Sync + Send + 'static>,
-        file_reader: Arc<dyn FileReader + Sync + Send + 'static>,
-        file_deleter: Arc<dyn FileDeleter + Sync + Send + 'static>,
-        links: Arc<dyn Links + Sync + Send + 'static>,
-        credentials: Arc<dyn Credentials + Sync + Send + 'static>,
-        permissions: Arc<dyn Permissions + Sync + Send + 'static>,
+        log: Arc<dyn Logger + Send + Sync>,
+        folder: Arc<dyn Folder + Send + Sync>,
+        file_reader: Arc<dyn FileReader + Send + Sync>,
+        file_deleter: Arc<dyn FileDeleter + Send + Sync>,
+        links: Arc<dyn Links + Send + Sync>,
+        credentials: Arc<dyn Credentials + Send + Sync>,
+        permissions: Arc<dyn Permissions + Send + Sync>,
         token_path: &Path,
         mount_root: &Path,
         marker_group_name: &str,
@@ -343,11 +343,11 @@ pub enum ServerError {
 pub(crate) static FIVE_MINUTES: u64 = 5 * 60;
 
 pub struct Server {
-    log: Arc<dyn Logger + Sync + Send + 'static>,
+    log: Arc<dyn Logger + Sync + Send>,
     request_handler: Arc<RequestHandler>,
     token_refresher: Arc<TokenRefresher>,
     listener_factory: CreateListener,
-    credentials: Arc<dyn Credentials + Send + Sync + 'static>,
+    credentials: Arc<dyn Credentials + Sync + Send>,
     service_user_name: String,
     service_group_name: String,
     marker_group_name: String,
@@ -357,16 +357,16 @@ pub struct Server {
 impl Server {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        log: Arc<dyn Logger + Sync + Send + 'static>,
-        file_reader: Arc<dyn FileReader + Sync + Send + 'static>,
-        file_writer: Arc<dyn FileWriter + Sync + Send + 'static>,
-        file_deleter: Arc<dyn FileDeleter + Sync + Send + 'static>,
-        folder: Arc<dyn Folder + Sync + Send + 'static>,
-        links: Arc<dyn Links + Sync + Send + 'static>,
-        os: Arc<dyn Os + Sync + Send + 'static>,
-        permissions: Arc<dyn Permissions + Sync + Send + 'static>,
+        log: Arc<dyn Logger + Sync + Send>,
+        file_reader: Arc<dyn FileReader + Sync + Send>,
+        file_writer: Arc<dyn FileWriter + Sync + Send>,
+        file_deleter: Arc<dyn FileDeleter + Sync + Send>,
+        folder: Arc<dyn Folder + Sync + Send>,
+        links: Arc<dyn Links + Sync + Send>,
+        os: Arc<dyn Os>,
+        permissions: Arc<dyn Permissions + Sync + Send>,
         unix_domain_socket: Arc<dyn UnixDomainSocket + 'static>,
-        credentials: Arc<dyn Credentials + Send + Sync + 'static>,
+        credentials: Arc<dyn Credentials + Sync + Send>,
         token_path: &Path,
         socket_path: &Path,
         mount_root: &Path,
@@ -459,8 +459,8 @@ impl Server {
     }
 
     async fn request_handler_task(
-        listener: Box<dyn Listener + Send + Sync + 'static>,
-        log: Arc<dyn Logger + Send + Sync + 'static>,
+        listener: Box<dyn Listener>,
+        log: Arc<dyn Logger + Sync + Send>,
         handler: Arc<RequestHandler>,
     ) -> Result<(), ServerError> {
         log.info("Listening…");

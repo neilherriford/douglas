@@ -6,15 +6,15 @@ use std::sync::Arc;
 
 pub(super) struct CreateCredentials {
     token: Arc<TokenValidator>,
-    log: Arc<dyn Logger + Sync + Send + 'static>,
+    log: Arc<dyn Logger + Sync + Send>,
     marker_group_name: String,
-    credentials: Arc<dyn Credentials + Sync + Send + 'static>,
+    credentials: Arc<dyn Credentials + Sync + Send>,
 }
 impl CreateCredentials {
     pub fn new(
-        log: Arc<dyn Logger + Sync + Send + 'static>,
+        log: Arc<dyn Logger + Sync + Send>,
         token_validator: Arc<TokenValidator>,
-        credentials: Arc<dyn Credentials + Sync + Send + 'static>,
+        credentials: Arc<dyn Credentials + Sync + Send>,
         marker_group_name: &str,
     ) -> Self {
         Self {

@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 pub(super) struct Status {
-    log: Arc<dyn Logger + Sync + Send + 'static>,
+    log: Arc<dyn Logger + Sync + Send>,
     token: Arc<TokenValidator>,
     version_manager: Arc<VersionManager>,
     token_path: PathBuf,
@@ -15,7 +15,7 @@ pub(super) struct Status {
 
 impl Status {
     pub fn new(
-        log: Arc<dyn Logger + Sync + Send + 'static>,
+        log: Arc<dyn Logger + Sync + Send>,
         token_validator: Arc<TokenValidator>,
         version_manager: Arc<VersionManager>,
         token_path: &Path,

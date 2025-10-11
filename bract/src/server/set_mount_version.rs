@@ -6,14 +6,14 @@ use log::Logger;
 use std::sync::Arc;
 
 pub(super) struct SetMountVersion {
-    log: Arc<dyn Logger + Sync + Send + 'static>,
+    log: Arc<dyn Logger + Sync + Send>,
     token: Arc<TokenValidator>,
     version_manager: Arc<VersionManager>,
 }
 
 impl SetMountVersion {
     pub fn new(
-        log: Arc<dyn Logger + Sync + Send + 'static>,
+        log: Arc<dyn Logger + Sync + Send>,
         token_validator: Arc<TokenValidator>,
         version_manager: Arc<VersionManager>,
     ) -> Self {

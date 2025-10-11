@@ -188,7 +188,7 @@ impl InitCommand {
 
     fn create_group(&self, name: &str) -> Result<(), CredentialsError> {
         self.verbose_printer
-            .print_indented(2, &format!("Creating '{}' group…", name));
+            .print_indented(2, &format!("Creating '{name}' group…"));
         self.credentials.create_group(name)
     }
 }
@@ -196,7 +196,10 @@ impl InitCommand {
 #[cfg(test)]
 mod tests {
     use super::InitCommand;
-    use crate::{config::MockConfigWriter, verbose_printer::VerbosePrinter};
+    use crate::{
+        config::MockConfigWriter,
+        verbose_printer::{MockVerbosePrinter, VerbosePrinter},
+    };
     use credentials::MockCredentials;
     use file_system::{MockFolder, MockPermissions};
     use std::{path::Path, sync::Arc};
@@ -207,12 +210,16 @@ mod tests {
         mount_root_path: &str,
         log_path: &str,
         docker_socket_path: &str,
-        credentials: Arc<MockCredentials>,
-        folder: Arc<MockFolder>,
-        permissions: Arc<MockPermissions>,
-        config_writer: Arc<MockConfigWriter>,
-        verbose_printer: Arc<dyn VerbosePrinter>,
+        credentials: &Arc<MockCredentials>,
+        folder: &Arc<MockFolder>,
+        permissions: &Arc<MockPermissions>,
+        config_writer: &Arc<MockConfigWriter>,
+        verbose_printer: &Arc<MockVerbosePrinter>,
+        // verbose_printer: &Arc<dyn VerbosePrinter>,
     ) -> InitCommand {
+        let verbose_printer: Arc<dyn VerbosePrinter> =
+            Arc::clone(verbose_printer) as Arc<dyn VerbosePrinter>;
+
         InitCommand::new(
             service_user,
             service_group,
@@ -223,7 +230,7 @@ mod tests {
             folder.clone(),
             permissions.clone(),
             config_writer.clone(),
-            Arc::clone(&verbose_printer),
+            verbose_printer,
         )
     }
     mod run {
@@ -257,11 +264,11 @@ mod tests {
                 "/tmp/mounts",
                 "/tmp/logs",
                 "/tmp/docker.socket",
-                Arc::new(credentials),
-                Arc::new(folder),
-                Arc::new(permissions),
-                Arc::new(config_writer),
-                Arc::new(verbose_printer),
+                &Arc::new(credentials),
+                &Arc::new(folder),
+                &Arc::new(permissions),
+                &Arc::new(config_writer),
+                &Arc::new(verbose_printer),
             )
             .perform();
 
@@ -291,11 +298,11 @@ mod tests {
                 "/tmp/mounts",
                 "/tmp/logs",
                 "/tmp/docker.socket",
-                Arc::new(credentials),
-                Arc::new(folder),
-                Arc::new(permissions),
-                Arc::new(config_writer),
-                Arc::new(verbose_printer),
+                &Arc::new(credentials),
+                &Arc::new(folder),
+                &Arc::new(permissions),
+                &Arc::new(config_writer),
+                &Arc::new(verbose_printer),
             )
             .perform();
 
@@ -327,11 +334,11 @@ mod tests {
                 "/tmp/mounts",
                 "/tmp/logs",
                 "/tmp/docker.socket",
-                Arc::new(credentials),
-                Arc::new(folder),
-                Arc::new(permissions),
-                Arc::new(config_writer),
-                Arc::new(verbose_printer),
+                &Arc::new(credentials),
+                &Arc::new(folder),
+                &Arc::new(permissions),
+                &Arc::new(config_writer),
+                &Arc::new(verbose_printer),
             )
             .perform();
 
@@ -369,11 +376,11 @@ mod tests {
                 "/tmp/mounts",
                 "/tmp/logs",
                 "/tmp/docker.socket",
-                Arc::new(credentials),
-                Arc::new(folder),
-                Arc::new(permissions),
-                Arc::new(config_writer),
-                Arc::new(verbose_printer),
+                &Arc::new(credentials),
+                &Arc::new(folder),
+                &Arc::new(permissions),
+                &Arc::new(config_writer),
+                &Arc::new(verbose_printer),
             )
             .perform();
 
@@ -404,11 +411,11 @@ mod tests {
                 "/tmp/mounts",
                 "/tmp/logs",
                 "/tmp/docker.socket",
-                Arc::new(credentials),
-                Arc::new(folder),
-                Arc::new(permissions),
-                Arc::new(config_writer),
-                Arc::new(verbose_printer),
+                &Arc::new(credentials),
+                &Arc::new(folder),
+                &Arc::new(permissions),
+                &Arc::new(config_writer),
+                &Arc::new(verbose_printer),
             )
             .perform();
 
@@ -447,11 +454,11 @@ mod tests {
                 "/tmp/mounts",
                 "/tmp/logs",
                 "/tmp/docker.socket",
-                Arc::new(credentials),
-                Arc::new(folder),
-                Arc::new(permissions),
-                Arc::new(config_writer),
-                Arc::new(verbose_printer),
+                &Arc::new(credentials),
+                &Arc::new(folder),
+                &Arc::new(permissions),
+                &Arc::new(config_writer),
+                &Arc::new(verbose_printer),
             )
             .perform();
 
@@ -488,11 +495,11 @@ mod tests {
                 "/tmp/mounts",
                 "/tmp/logs",
                 "/tmp/docker.socket",
-                Arc::new(credentials),
-                Arc::new(folder),
-                Arc::new(permissions),
-                Arc::new(config_writer),
-                Arc::new(verbose_printer),
+                &Arc::new(credentials),
+                &Arc::new(folder),
+                &Arc::new(permissions),
+                &Arc::new(config_writer),
+                &Arc::new(verbose_printer),
             )
             .perform();
 
@@ -534,11 +541,11 @@ mod tests {
                 "/tmp/mounts",
                 "/tmp/logs",
                 "/tmp/docker.socket",
-                Arc::new(credentials),
-                Arc::new(folder),
-                Arc::new(permissions),
-                Arc::new(config_writer),
-                Arc::new(verbose_printer),
+                &Arc::new(credentials),
+                &Arc::new(folder),
+                &Arc::new(permissions),
+                &Arc::new(config_writer),
+                &Arc::new(verbose_printer),
             )
             .perform();
 
@@ -581,11 +588,11 @@ mod tests {
                 "/tmp/mounts",
                 "/tmp/logs",
                 "/tmp/docker.socket",
-                Arc::new(credentials),
-                Arc::new(folder),
-                Arc::new(permissions),
-                Arc::new(config_writer),
-                Arc::new(verbose_printer),
+                &Arc::new(credentials),
+                &Arc::new(folder),
+                &Arc::new(permissions),
+                &Arc::new(config_writer),
+                &Arc::new(verbose_printer),
             )
             .perform();
 
@@ -629,11 +636,11 @@ mod tests {
                 "/tmp/mounts",
                 "/tmp/logs",
                 "/tmp/docker.socket",
-                Arc::new(credentials),
-                Arc::new(folder),
-                Arc::new(permissions),
-                Arc::new(config_writer),
-                Arc::new(verbose_printer),
+                &Arc::new(credentials),
+                &Arc::new(folder),
+                &Arc::new(permissions),
+                &Arc::new(config_writer),
+                &Arc::new(verbose_printer),
             )
             .perform();
 
@@ -691,11 +698,11 @@ mod tests {
                 "/tmp/mounts",
                 "/tmp/logs",
                 "/tmp/docker.socket",
-                Arc::new(credentials),
-                Arc::new(folder),
-                Arc::new(permissions),
-                Arc::new(config_writer),
-                Arc::new(verbose_printer),
+                &Arc::new(credentials),
+                &Arc::new(folder),
+                &Arc::new(permissions),
+                &Arc::new(config_writer),
+                &Arc::new(verbose_printer),
             )
             .perform();
 
@@ -745,11 +752,11 @@ mod tests {
                 "/tmp/mounts",
                 "/tmp/logs",
                 "/tmp/docker.socket",
-                Arc::new(credentials),
-                Arc::new(folder),
-                Arc::new(permissions),
-                Arc::new(config_writer),
-                Arc::new(verbose_printer),
+                &Arc::new(credentials),
+                &Arc::new(folder),
+                &Arc::new(permissions),
+                &Arc::new(config_writer),
+                &Arc::new(verbose_printer),
             )
             .perform();
 

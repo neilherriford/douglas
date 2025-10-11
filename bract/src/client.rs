@@ -52,16 +52,16 @@ type Transport = SerdeFramed<
 >;
 
 pub struct Client {
-    log: Arc<dyn Logger + Sync + Send + 'static>,
-    file_reader: Arc<dyn FileReader + Sync + Send + 'static>,
+    log: Arc<dyn Logger>,
+    file_reader: Arc<dyn FileReader>,
     socket_path: PathBuf,
     token_path: PathBuf,
 }
 
 impl Client {
     pub fn new(
-        log: Arc<dyn Logger + Sync + Send + 'static>,
-        file_reader: Arc<dyn FileReader + Sync + Send + 'static>,
+        log: Arc<dyn Logger>,
+        file_reader: Arc<dyn FileReader>,
         socket_path: &Path,
         token_path: &Path,
     ) -> Self {

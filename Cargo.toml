@@ -35,3 +35,9 @@ members = [
 
 [patch.crates-io]
 users = { git = "https://github.com/neilherriford/rust-users", branch = "fix/macos_misaligned-pointer-dereference" }
+
+[lints.clippy]
+all = { level = "warn", priority = -2 }
+pedantic = { level = "warn", priority = -1 }
+unwrap_used = "deny"
+expect_used = "deny"

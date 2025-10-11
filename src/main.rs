@@ -12,27 +12,31 @@ mod verbose_printer;
 
 use bract_path_factory::BractPathFactory;
 use clap::{Parser, Subcommand, ValueEnum};
-use config::{ConfigReader, LocalConfigRepository};
-use credentials::create_for_target;
+use config::{Config, ConfigReader, ConfigWriter, LocalConfigRepository};
+use credentials::{Credentials, create_for_target};
 use file_system::{
     FileAppender, FileDeleter, FileReader, FileSystemError, FileWriter, Folder, Links,
     LocalFileAppender, LocalFileDeleter, LocalFileReader, LocalFileWriter, LocalFolder, LocalLinks,
     LocalPermissions, LocalUnixDomainSocket, Permissions, UnixDomainSocket,
 };
-use init_command::InitCommand;
+use init_command::{InitCommand, InitCommandError};
 
 use command_output_printer::{
     CommandOutputPrinter, JsonCommandOutputPrinter, PlainCommandOutputPrinter,
 };
 use log::{Logger, StdOutLogger};
 use os::{Os, Unix};
-use shutdown_command::ShutdownCommand;
-use start_bract_command::{BractLogger, StartBractCommand};
+use shutdown_command::{ShutdownCommand, ShutdownCommandError};
+use start_bract_command::{BractLogger, StartBractCommand, StartBractCommandError};
 use status_command::{DouglasStatus, StatusCommand};
-use std::{fmt::Debug, path::Path, sync::Arc};
+use std::{
+    fmt::Debug,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 use verbose_printer::{PlainVerbosePrinter, SilentVerbosePrinter, VerbosePrinter};
 
-#[derive(ValueEnum, Clone, Debug)]
+#[derive(ValueEnum, Clone, Debug, Copy)]
 enum OutputStyle {
     Plain,
     Json,
@@ -116,26 +120,6 @@ enum Commands {
 }
 
 fn main() {
-    let stdout_log: Arc<dyn Logger + Send + Sync> = Arc::new(StdOutLogger::new());
-    let os: Arc<dyn Os + Sync + Send> = Arc::new(Unix::new());
-    let credentials = create_for_target(os.clone());
-    let folder: Arc<dyn Folder + Send + Sync> = Arc::new(LocalFolder::new());
-    let permissions: Arc<dyn Permissions + Send + Sync> = Arc::new(LocalPermissions::new());
-    let file_reader: Arc<dyn FileReader + Send + Sync> = Arc::new(LocalFileReader::new());
-    let file_writer: Arc<dyn FileWriter + Send + Sync> = Arc::new(LocalFileWriter::new());
-    let file_deleter: Arc<dyn FileDeleter + Send + Sync> = Arc::new(LocalFileDeleter::new());
-    let file_appender: Arc<dyn FileAppender + Send + Sync> = Arc::new(LocalFileAppender::new());
-    let links: Arc<dyn Links + Sync + Send> = Arc::new(LocalLinks::new());
-    let config_repository = Arc::new(LocalConfigRepository::new(
-        folder.clone(),
-        permissions.clone(),
-        file_reader.clone(),
-        file_writer.clone(),
-    ));
-    let bract_path_factory = Arc::new(BractPathFactory::new(folder.clone()));
-    let unix_domain_socket: Arc<dyn UnixDomainSocket + 'static> =
-        Arc::new(LocalUnixDomainSocket::new());
-
     let cli = Cli::parse();
 
     let verbose_printer: Arc<dyn VerbosePrinter> = match cli.verbose {
@@ -152,129 +136,217 @@ fn main() {
             docker_socket_path,
             daemonize,
         } => {
-            let init_result = InitCommand::new(
-                &service_user,
-                &service_group,
-                Path::new(&mount_root_path),
-                Path::new(&log_path),
-                Path::new(&docker_socket_path),
-                credentials.clone(),
-                folder.clone(),
-                permissions.clone(),
-                config_repository.clone(),
-                Arc::clone(&verbose_printer),
-            )
-            .perform();
-
-            if init_result.is_err() {
-                create_simple_printer(cli.output_style).print("init", &init_result);
-                return;
-            }
-
-            let log = if daemonize {
-                BractLogger::WriteToFile
-            } else {
-                BractLogger::Use(Arc::clone(&stdout_log))
+            let config = Config {
+                docker_socket_path: PathBuf::from(docker_socket_path),
+                log_path: PathBuf::from(log_path),
+                mount_root_path: PathBuf::from(mount_root_path),
+                operator_group: service_group,
+                operator_user: service_user,
             };
-
-            let start_bract_result = StartBractCommand::new(
-                Arc::clone(&credentials),
-                Arc::clone(&folder),
-                config_repository.clone(),
-                Arc::clone(&file_reader),
-                Arc::clone(&file_writer),
-                Arc::clone(&file_deleter),
-                Arc::clone(&file_appender),
-                Arc::clone(&links),
-                Arc::clone(&os),
-                Arc::clone(&permissions),
-                Arc::clone(&unix_domain_socket),
-                Arc::clone(&bract_path_factory),
-                log,
-                Arc::clone(&verbose_printer),
-            )
-            .perform(daemonize);
-
-            create_simple_printer(cli.output_style).print("init", &start_bract_result);
+            run_init(
+                &*create_empty_command_output_printer(cli.output_style),
+                &*create_empty_command_output_printer(cli.output_style),
+                &verbose_printer,
+                &config,
+                daemonize,
+            );
         }
         Commands::Start { daemonize } => {
-            let log = if daemonize {
-                BractLogger::WriteToFile
-            } else {
-                BractLogger::Use(Arc::clone(&stdout_log))
-            };
-
-            let start_bract_result = StartBractCommand::new(
-                Arc::clone(&credentials),
-                Arc::clone(&folder),
-                config_repository.clone(),
-                Arc::clone(&file_reader),
-                Arc::clone(&file_writer),
-                Arc::clone(&file_deleter),
-                Arc::clone(&file_appender),
-                Arc::clone(&links),
-                Arc::clone(&os),
-                Arc::clone(&permissions),
-                Arc::clone(&unix_domain_socket),
-                Arc::clone(&bract_path_factory),
-                log,
-                Arc::clone(&verbose_printer),
-            )
-            .perform(daemonize);
-
-            create_simple_printer(cli.output_style).print("start", &start_bract_result);
+            run_start(
+                &*create_empty_command_output_printer(cli.output_style),
+                &verbose_printer,
+                daemonize,
+            );
         }
         Commands::Status => {
-            let result = StatusCommand::new(
-                Arc::clone(&file_reader),
-                Arc::clone(&stdout_log),
-                Arc::clone(&bract_path_factory),
-                Arc::clone(&config_repository) as Arc<dyn ConfigReader>,
-            )
-            .perform();
-
-            make_status_printer(cli.output_style).print("status", &result);
+            let printer: Box<dyn CommandOutputPrinter<DouglasStatus, FileSystemError>> =
+                match cli.output_style {
+                    OutputStyle::Plain => Box::new(PlainCommandOutputPrinter::new()),
+                    OutputStyle::Json => Box::new(JsonCommandOutputPrinter::new()),
+                };
+            run_status(&*printer);
         }
         Commands::Shutdown => {
-            let result = ShutdownCommand::new(
-                Arc::clone(&bract_path_factory),
-                Arc::clone(&config_repository) as Arc<dyn ConfigReader + Send + Sync>,
-                Arc::clone(&file_appender),
-                Arc::clone(&file_reader),
-                Arc::clone(&permissions),
-            )
-            .perform();
-            create_simple_printer(cli.output_style).print("shutdown", &result);
+            run_shutdown(&*create_empty_command_output_printer(cli.output_style));
         }
     }
 }
 
-fn make_status_printer(
-    style: OutputStyle,
-) -> Box<dyn CommandOutputPrinter<DouglasStatus, FileSystemError>> {
-    match style {
-        OutputStyle::Plain => Box::new(PlainCommandOutputPrinter::new()),
-        OutputStyle::Json => Box::new(JsonCommandOutputPrinter::new()),
-    }
+fn run_shutdown(command_output_printer: &dyn CommandOutputPrinter<(), ShutdownCommandError>) {
+    let folder: Arc<dyn Folder + Send + Sync> = Arc::new(LocalFolder::new());
+    let permissions: Arc<dyn Permissions + Send + Sync> = Arc::new(LocalPermissions::new());
+    let file_reader: Arc<dyn FileReader + Send + Sync> = Arc::new(LocalFileReader::new());
+    let file_writer: Arc<dyn FileWriter + Send + Sync> = Arc::new(LocalFileWriter::new());
+    let bract_path_factory = Arc::new(BractPathFactory::new(Arc::clone(&folder)));
+    let config_repository: Arc<dyn ConfigReader> = Arc::new(LocalConfigRepository::new(
+        Arc::clone(&folder),
+        Arc::clone(&permissions),
+        Arc::clone(&file_reader),
+        Arc::clone(&file_writer),
+    ));
+    let file_appender: Arc<dyn FileAppender + Send + Sync> = Arc::new(LocalFileAppender::new());
+
+    let result = ShutdownCommand::new(
+        bract_path_factory,
+        config_repository,
+        file_appender,
+        file_reader,
+        permissions,
+    )
+    .perform();
+    command_output_printer.print("shutdown", &result);
 }
 
-// fn make_init_printer(style: OutputStyle) -> Box<dyn CommandOutputPrinter<(), InitCommandError>> {
-//     match style {
-//         OutputStyle::Plain => Box::new(PlainCommandOutputPrinter::new()),
-//         OutputStyle::Json => Box::new(JsonCommandOutputPrinter::new()),
-//     }
-// }
+fn run_status(command_output_printer: &dyn CommandOutputPrinter<DouglasStatus, FileSystemError>) {
+    let stdout_log: Arc<dyn Logger> = Arc::new(StdOutLogger::new());
+    let folder: Arc<dyn Folder + Send + Sync> = Arc::new(LocalFolder::new());
+    let permissions: Arc<dyn Permissions + Send + Sync> = Arc::new(LocalPermissions::new());
+    let file_reader: Arc<dyn FileReader + Send + Sync> = Arc::new(LocalFileReader::new());
+    let file_writer: Arc<dyn FileWriter + Send + Sync> = Arc::new(LocalFileWriter::new());
+    let config_repository: Arc<dyn ConfigReader> = Arc::new(LocalConfigRepository::new(
+        Arc::clone(&folder),
+        Arc::clone(&permissions),
+        Arc::clone(&file_reader),
+        Arc::clone(&file_writer),
+    ));
+    let bract_path_factory = Arc::new(BractPathFactory::new(folder.clone()));
 
-// fn make_start_bract_printer(
-//     style: OutputStyle,
-// ) -> Box<dyn CommandOutputPrinter<(), StartBractCommandError>> {
-//     match style {
-//         OutputStyle::Plain => Box::new(PlainCommandOutputPrinter::new()),
-//         OutputStyle::Json => Box::new(JsonCommandOutputPrinter::new()),
-//     }
-// }
+    let result = StatusCommand::new(
+        file_reader,
+        stdout_log,
+        bract_path_factory,
+        config_repository,
+    )
+    .perform();
 
-fn create_simple_printer<T>(style: OutputStyle) -> Box<dyn CommandOutputPrinter<(), T>>
+    command_output_printer.print("status", &result);
+}
+
+fn run_start(
+    command_output_printer: &dyn CommandOutputPrinter<(), StartBractCommandError>,
+    verbose_printer: &Arc<dyn VerbosePrinter>,
+    daemonize: bool,
+) {
+    let stdout_log: Arc<dyn Logger> = Arc::new(StdOutLogger::new());
+    let os: Arc<dyn Os> = Arc::new(Unix::new());
+    let credentials: Arc<dyn Credentials + Send + Sync> = create_for_target(os.clone());
+    let folder: Arc<dyn Folder + Send + Sync> = Arc::new(LocalFolder::new());
+    let permissions: Arc<dyn Permissions + Send + Sync> = Arc::new(LocalPermissions::new());
+    let file_reader: Arc<dyn FileReader + Send + Sync> = Arc::new(LocalFileReader::new());
+    let file_writer: Arc<dyn FileWriter + Send + Sync> = Arc::new(LocalFileWriter::new());
+    let file_deleter: Arc<dyn FileDeleter + Send + Sync> = Arc::new(LocalFileDeleter::new());
+    let file_appender: Arc<dyn FileAppender + Send + Sync> = Arc::new(LocalFileAppender::new());
+    let links: Arc<dyn Links + Send + Sync> = Arc::new(LocalLinks::new());
+    let config_repository: Arc<dyn ConfigReader> = Arc::new(LocalConfigRepository::new(
+        Arc::clone(&folder),
+        Arc::clone(&permissions),
+        Arc::clone(&file_reader),
+        Arc::clone(&file_writer),
+    ));
+
+    let bract_path_factory = Arc::new(BractPathFactory::new(Arc::clone(&folder)));
+    let unix_domain_socket: Arc<dyn UnixDomainSocket> = Arc::new(LocalUnixDomainSocket::new());
+
+    let log = if daemonize {
+        BractLogger::WriteToFile
+    } else {
+        BractLogger::Use(Arc::clone(&stdout_log))
+    };
+
+    let start_bract_result = StartBractCommand::new(
+        credentials,
+        folder,
+        config_repository,
+        file_reader,
+        file_writer,
+        file_deleter,
+        file_appender,
+        links,
+        os,
+        permissions,
+        unix_domain_socket,
+        bract_path_factory,
+        log,
+        Arc::clone(verbose_printer),
+    )
+    .perform(daemonize);
+
+    command_output_printer.print("start", &start_bract_result);
+}
+
+fn run_init(
+    init_command_output_printer: &dyn CommandOutputPrinter<(), InitCommandError>,
+    start_command_output_printer: &dyn CommandOutputPrinter<(), StartBractCommandError>,
+    verbose_printer: &Arc<dyn VerbosePrinter>,
+    config: &Config,
+    daemonize: bool,
+) {
+    let stdout_log: Arc<dyn Logger> = Arc::new(StdOutLogger::new());
+    let os: Arc<dyn Os> = Arc::new(Unix::new());
+    let credentials: Arc<dyn Credentials + Send + Sync> = create_for_target(os.clone());
+    let folder: Arc<dyn Folder + Send + Sync> = Arc::new(LocalFolder::new());
+    let permissions: Arc<dyn Permissions + Send + Sync> = Arc::new(LocalPermissions::new());
+    let file_reader: Arc<dyn FileReader + Send + Sync> = Arc::new(LocalFileReader::new());
+    let file_writer: Arc<dyn FileWriter + Send + Sync> = Arc::new(LocalFileWriter::new());
+    let file_deleter: Arc<dyn FileDeleter + Send + Sync> = Arc::new(LocalFileDeleter::new());
+    let file_appender: Arc<dyn FileAppender + Send + Sync> = Arc::new(LocalFileAppender::new());
+    let links: Arc<dyn Links + Send + Sync> = Arc::new(LocalLinks::new());
+    let config_repository = Arc::new(LocalConfigRepository::new(
+        Arc::clone(&folder),
+        Arc::clone(&permissions),
+        Arc::clone(&file_reader),
+        Arc::clone(&file_writer),
+    ));
+
+    let bract_path_factory = Arc::new(BractPathFactory::new(folder.clone()));
+    let unix_domain_socket: Arc<dyn UnixDomainSocket> = Arc::new(LocalUnixDomainSocket::new());
+
+    let init_result = InitCommand::new(
+        &config.operator_user,
+        &config.operator_group,
+        Path::new(&config.mount_root_path),
+        Path::new(&config.log_path),
+        Path::new(&config.docker_socket_path),
+        Arc::clone(&credentials) as Arc<dyn Credentials>,
+        Arc::clone(&folder) as Arc<dyn Folder>,
+        Arc::clone(&permissions) as Arc<dyn Permissions>,
+        Arc::clone(&config_repository) as Arc<dyn ConfigWriter>,
+        Arc::clone(verbose_printer),
+    )
+    .perform();
+    if init_result.is_err() {
+        init_command_output_printer.print("init", &init_result);
+        return;
+    }
+
+    let log = if daemonize {
+        BractLogger::WriteToFile
+    } else {
+        BractLogger::Use(Arc::clone(&stdout_log))
+    };
+    let start_bract_result = StartBractCommand::new(
+        credentials,
+        folder,
+        config_repository as Arc<dyn ConfigReader>,
+        file_reader,
+        file_writer,
+        file_deleter,
+        file_appender,
+        links,
+        os,
+        permissions,
+        unix_domain_socket,
+        bract_path_factory,
+        log,
+        Arc::clone(verbose_printer),
+    )
+    .perform(daemonize);
+    start_command_output_printer.print("init", &start_bract_result);
+}
+
+fn create_empty_command_output_printer<T>(
+    style: OutputStyle,
+) -> Box<dyn CommandOutputPrinter<(), T>>
 where
     T: std::fmt::Display,
 {
