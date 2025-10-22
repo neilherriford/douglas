@@ -13,8 +13,8 @@ let
       (builtins.attrNames (builtins.readDir userKeysDir));
 
   # Version information for your dev image
-  devImageVersion = "0.0.2c";
-  devImageDate = "2025-09-11";
+  devImageVersion = "0.0.2f";
+  devImageDate = "2025-10-20";
   devImageName = "Douglas Development Environment";
 
   # Define our development packages explicitly - CHOOSE ONE RUST APPROACH
@@ -96,11 +96,11 @@ in
 
        w  e  l  c  o  m  e    t  o
    ⋀                     _
-  ╱│╲      /            //
-  ╱│╲   __/ __ . . _,  // __.  _
-  ╱│╲  (_/_(_)(_/_(_)_</_(_/|_/_)_
-   │   ⎼⎼⎼⎼⎼⎼⎼⎼⎼⎼⎼⎼/|⎼⎼⎼⎼⎼⎼⎼⎼⎼⎼⎼⎼⎼
-       d e v      |/        v${devImageVersion}
+  ╱│╲      ╱            ╱╱
+  ╱│╲   __╱ __ . . _,  ╱╱ __.  _
+  ╱│╲  (_╱_(_)(_╱_(_)_<╱_(_╱│_╱_)_
+   │   ⎼⎼⎼⎼⎼⎼⎼⎼⎼⎼⎼⎼╱│⎼⎼⎼⎼⎼⎼⎼⎼⎼⎼⎼⎼⎼
+       d e v      │╱       v${devImageVersion}
 
     '';
   };
@@ -178,10 +178,10 @@ in
           mkdir -p "$HOME/.rustup" "$HOME/.cargo"
 
           # Install stable toolchain quietly
-          rustup default stable >/dev/null 2>&1
+          rustup default stable 2>&1 | grep -v "info: " || true
 
           # Add essential components
-          rustup component add clippy rustfmt rust-src >/dev/null 2>&1
+          rustup component add clippy rustfmt rust-src 2>&1 | grep -v "info: " || true
 
           echo "✅ Rust toolchain ready! Version: $(rustc --version 2>/dev/null || echo 'setup in progress')"
         fi
@@ -327,6 +327,12 @@ in
   };
 
   security.sudo.wheelNeedsPassword = false;
+  # Allow trusted users to override Nix settings
+  nix.settings = {
+    trusted-users = [ "root" "dev" "@wheel" ];
+    # Also enable flakes and nix-command for convenience
+    experimental-features = [ "nix-command" "flakes" ];
+  };
 
   # Enable networking for package downloads and development
   networking = {
