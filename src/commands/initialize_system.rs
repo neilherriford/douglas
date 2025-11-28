@@ -62,22 +62,22 @@ impl<'a> InitializeSystem<'a> {
                 "log root",
                 &self.system_paths.log_root(),
                 credentials::ROOT_USER_NAME,
-                Modes::OwnerReadWriteGroupReadWrite,
+                Modes::OwnerReadWriteExecuteGroupReadWriteExecute,
             ) && create_system_folder.perform(
                 "runtime root",
                 &self.system_paths.runtime_root(),
                 credentials::ROOT_USER_NAME,
-                Modes::OwnerReadWriteGroupRead,
+                Modes::OwnerReadWriteExecuteGroupReadWriteExecute,
             ) && create_system_folder.perform(
                 "service root",
                 &self.system_paths.service_root(),
                 RADICLE_USER,
-                Modes::OwnerReadWriteGroupRead,
+                Modes::OwnerReadWriteExecuteGroupReadWriteExecute,
             ) && create_system_folder.perform(
                 "mount root",
                 &self.system_paths.mount_root(),
                 RADICLE_USER,
-                Modes::OwnerReadWriteGroupRead,
+                Modes::OwnerReadWriteExecuteGroupReadWriteExecute,
             )
         );
 
