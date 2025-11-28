@@ -6,9 +6,9 @@ use commands::container::{ContainerCommand, InspectedContainer};
 use commands::json_parser::{ChunkedJsonParser, JsonParser, JsonParserError};
 use commands::network::{Network, NetworkCommand};
 use commands::ping::{PingCommand, PingParser};
-use file_system::FileSystemError;
+use file_system::{FileSystemError, path_to_string};
 use log::Logger;
-use serde::ser::SerializeMap;
+use serde::ser::{SerializeMap, SerializeSeq, SerializeStruct};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::value::Value as Json;
 use simple_rest_client::unix_domain_socket::{BuilderError, build_client};
@@ -17,6 +17,29 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 use thiserror::Error;
+
+#[derive(Debug, PartialEq, Eq, Clone)]
+pub enum Capability {
+    IpcLock,
+}
+
+pub(crate) fn serialize_capabilities<S>(
+    capabilities: &Vec<Capability>,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    let mut seq = serializer.serialize_seq(Some(capabilities.len()))?;
+    for capability in capabilities {
+        let text = match capability {
+            Capability::IpcLock => "IPC_LOCK",
+        };
+
+        seq.serialize_element(&text)?;
+    }
+    seq.end()
+}
 
 pub trait Parser<T>: Send + Sync + std::fmt::Debug {
     type ParseError: std::error::Error + Send + Sync + 'static;
@@ -29,7 +52,7 @@ pub struct Id {
     pub hex: String,
 }
 
-#[derive(Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, PartialEq, Clone)]
 pub struct Label {
     pub name: String,
     pub value: String,
@@ -149,6 +172,21 @@ pub enum DockerError {
     PathError { path: PathBuf, message: String },
 }
 
+impl PartialEq for DockerError {
+    fn eq(&self, other: &Self) -> bool {
+        match self {
+            DockerError::IoError(left) => {
+                if let DockerError::IoError(right) = other {
+                    left.to_string() == right.to_string()
+                } else {
+                    false
+                }
+            }
+            _ => self == other,
+        }
+    }
+}
+
 impl From<serde_json::Error> for DockerError {
     fn from(err: serde_json::Error) -> DockerError {
         DockerError::ParseError {
@@ -159,7 +197,7 @@ impl From<serde_json::Error> for DockerError {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq, Clone)]
 pub enum Version {
     Latest,
     Specific(String),
@@ -174,6 +212,53 @@ impl std::fmt::Display for Version {
 
         write!(f, "{formatted}")
     }
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub struct ImageName {
+    pub namespace: String,
+    pub name: String,
+    pub version: Version,
+}
+
+impl ImageName {
+    pub fn latest(namespace: &str, name: &str) -> Self {
+        Self {
+            namespace: namespace.to_string(),
+            name: name.to_string(),
+            version: Version::Latest,
+        }
+    }
+    pub fn specific(namespace: &str, name: &str, version: &str) -> Self {
+        Self {
+            namespace: namespace.to_string(),
+            name: name.to_string(),
+            version: Version::Specific(version.to_string()),
+        }
+    }
+}
+
+impl std::fmt::Display for ImageName {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&format!(
+            "{}/{}:{}",
+            self.namespace, self.name, self.version
+        ))
+    }
+}
+
+pub fn serialize_image_identifier<S>(
+    image_identifier: &ImageIdentifier,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    let id = match image_identifier {
+        ImageIdentifier::Id(id) => id.to_string(),
+        ImageIdentifier::ImageName(image_name) => image_name.to_string(),
+    };
+    serializer.collect_str(&id)
 }
 
 #[derive(Debug, Deserialize, Clone, PartialEq, Eq, Hash)]
@@ -274,7 +359,7 @@ impl std::fmt::Display for MountType {
     }
 }
 
-#[derive(Debug, PartialEq, Ord, PartialOrd, Eq)]
+#[derive(Debug, PartialEq, Ord, PartialOrd, Eq, Clone)]
 pub struct EnvironmentVariable {
     pub name: String,
     pub value: String,
@@ -309,6 +394,33 @@ where
         })
         .collect::<Result<_, D::Error>>()?;
     Ok(result)
+}
+
+pub(crate) fn serialize_environment_variables<S>(
+    environment_variables: &Vec<EnvironmentVariable>,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    let mut seq = serializer.serialize_seq(Some(environment_variables.len()))?;
+    for environment_variable in environment_variables {
+        let s = format!(
+            "{}={}",
+            environment_variable.name, environment_variable.value
+        );
+        seq.serialize_element(&s)?;
+    }
+    seq.end()
+}
+
+impl EnvironmentVariable {
+    pub fn new(name: &str, value: &str) -> Self {
+        Self {
+            name: name.into(),
+            value: value.into(),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize, Clone, PartialEq)]
@@ -383,9 +495,9 @@ impl SystemClient for SimpleSystemClient {
 #[async_trait]
 pub trait ImageClient {
     async fn find_by_id(&mut self, id: &Id) -> Result<Image, DockerError>;
-    async fn find_by_name(&mut self, name: &str, version: Version) -> Result<Image, DockerError>;
+    async fn find_by_name(&mut self, image_name: &ImageName) -> Result<Image, DockerError>;
     async fn list(&mut self) -> Result<Vec<Image>, DockerError>;
-    async fn pull(&mut self, name: &str, version: Version) -> Result<Image, DockerError>;
+    async fn pull(&mut self, image_name: &ImageName) -> Result<Image, DockerError>;
 }
 
 pub struct SimpleImageClient {
@@ -415,16 +527,16 @@ impl ImageClient for SimpleImageClient {
         self.command.find_by_id(id).await
     }
 
-    async fn find_by_name(&mut self, name: &str, version: Version) -> Result<Image, DockerError> {
-        self.command.find_by_name(name, version).await
+    async fn find_by_name(&mut self, image_name: &ImageName) -> Result<Image, DockerError> {
+        self.command.find_by_name(image_name).await
     }
 
     async fn list(&mut self) -> Result<Vec<Image>, DockerError> {
         self.command.list().await
     }
 
-    async fn pull(&mut self, name: &str, version: Version) -> Result<Image, DockerError> {
-        self.command.pull(name, version).await
+    async fn pull(&mut self, image_name: &ImageName) -> Result<Image, DockerError> {
+        self.command.pull(image_name).await
     }
 }
 
@@ -432,6 +544,69 @@ impl ImageClient for SimpleImageClient {
 pub trait ContainerClient {
     async fn find_by_id(&mut self, id: &str) -> Result<Container, DockerError>;
     async fn find_by_name(&mut self, name: &str) -> Result<Container, DockerError>;
+    async fn create(
+        &mut self,
+        container_definition: ContainerDefinition,
+    ) -> Result<Container, DockerError>;
+    async fn start(&mut self, id: &str) -> Result<(), DockerError>;
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub struct MountDefinition {
+    pub name: String,
+    pub host_path: PathBuf,
+    pub container_path: PathBuf,
+    pub writable: bool,
+}
+
+impl Serialize for MountDefinition {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut state = serializer.serialize_struct("VolumeMount", 8)?;
+
+        state.serialize_field("Type", "bind")?;
+        state.serialize_field("Name", &self.name)?;
+        state.serialize_field("Source", &path_to_string(&self.host_path))?;
+        state.serialize_field("Target", &path_to_string(&self.container_path))?;
+        state.serialize_field("RW", &self.writable)?;
+
+        state.end()
+    }
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub enum ImageIdentifier {
+    Id(Id),
+    ImageName(ImageName),
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub struct ContainerUser {
+    pub user_id: u32,
+    pub group_id: u32,
+}
+
+impl Serialize for ContainerUser {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.collect_str(&format!("{}:{}", self.user_id, self.group_id))
+    }
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub struct ContainerDefinition {
+    pub name: String,
+    pub run_as: Option<ContainerUser>,
+    pub command: Option<String>,
+    pub environment_variables: Vec<EnvironmentVariable>,
+    pub image_name: ImageIdentifier,
+    pub mounts: Vec<MountDefinition>,
+    pub added_capabilities: Vec<Capability>,
+    pub labels: Vec<Label>,
 }
 
 pub struct SimpleContainerClient {
@@ -499,6 +674,19 @@ impl ContainerClient for SimpleContainerClient {
         let result = self.create_container(inspected_container).await?;
         Ok(result)
     }
+
+    async fn create(
+        &mut self,
+        container_definition: ContainerDefinition,
+    ) -> Result<Container, DockerError> {
+        let inspected_container = self.container_command.create(container_definition).await?;
+        let result = self.create_container(inspected_container).await?;
+        Ok(result)
+    }
+
+    async fn start(&mut self, id: &str) -> Result<(), DockerError> {
+        self.container_command.start(id).await
+    }
 }
 
 #[async_trait]
@@ -526,12 +714,12 @@ pub trait NetworkClient {
     ) -> Result<(), DockerError>;
 }
 
-pub struct SimplekNetworkClient {
+pub struct SimpleNetworkClient {
     network_command: NetworkCommand,
     container_client: SimpleContainerClient,
 }
 
-impl SimplekNetworkClient {
+impl SimpleNetworkClient {
     pub async fn build(
         socket_file_path: PathBuf,
         logger: Arc<dyn Logger>,
@@ -575,7 +763,7 @@ impl SimplekNetworkClient {
 }
 
 #[async_trait]
-impl NetworkClient for SimplekNetworkClient {
+impl NetworkClient for SimpleNetworkClient {
     async fn inspect_by_id(&mut self, id: &str) -> Result<Network, DockerError> {
         self.network_command.inspect_by_id(id).await
     }

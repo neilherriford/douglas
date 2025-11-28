@@ -1,19 +1,21 @@
 use crate::{
-    bract_path_factory::BractPathFactory,
-    config::{ConfigReader, ConfigRepositoryError},
+    deferred_file_logger::DeferredFileLogger, file_logger::FileLogger, tee_logger::TeeLogger,
 };
 use bract::{Client, client::ClientError};
+use config::{SystemPaths, create_system_paths};
 use docker::{SimpleSystemClient, SystemClient};
-use file_system::{FileReader, FileSystemError};
+use file_system::{
+    FileAppender, LocalFileAppender, LocalFileReader, LocalPermissions, Permissions,
+};
 use log::Logger;
 use std::sync::Arc;
 use tokio::runtime::Runtime;
 
 pub struct StatusCommand {
-    file_reader: Arc<dyn FileReader>,
-    log: Arc<dyn Logger>,
-    bract_path_factory: Arc<BractPathFactory>,
-    config_reader: Arc<dyn ConfigReader>,
+    log: Box<dyn Logger>,
+    system_paths: Box<dyn SystemPaths>,
+    permissions: Arc<dyn Permissions>,
+    file_appender: Arc<dyn FileAppender>,
 }
 
 #[derive(Debug)]
@@ -27,48 +29,55 @@ pub enum BractStatus {
 #[derive(Debug)]
 pub enum DockerStatus {
     Active,
-    ConfigFileNotFound,
     DockerClientError(String),
-    CouldNotLoadConfiguration(String),
 }
 
+#[derive(Debug)]
 pub struct DouglasStatus {
     pub bract_status: BractStatus,
     pub docker_status: DockerStatus,
 }
 
 impl StatusCommand {
-    pub fn new(
-        file_reader: Arc<dyn FileReader>,
-        log: Arc<dyn Logger>,
-        bract_path_factory: Arc<BractPathFactory>,
-        config_reader: Arc<dyn ConfigReader>,
-    ) -> Self {
-        let _ = config_reader;
+    pub fn new() -> Self {
+        let system_paths = create_system_paths();
+        let log_path = system_paths.log_path("douglas");
+
+        let file_appender: Arc<dyn FileAppender> = Arc::new(LocalFileAppender::new());
+        let permissions: Arc<dyn Permissions> = Arc::new(LocalPermissions::new());
         Self {
-            file_reader,
-            log,
-            bract_path_factory,
-            config_reader,
+            system_paths,
+            file_appender: Arc::clone(&file_appender),
+            permissions: Arc::clone(&permissions),
+            log: Box::new(TeeLogger::new(Box::new(DeferredFileLogger::new(
+                &log_path,
+                file_appender,
+                permissions,
+            )))),
         }
     }
 
-    pub fn perform(&self) -> Result<DouglasStatus, FileSystemError> {
-        let bract_socket_path = self.bract_path_factory.bract_socket_path()?;
-        let bract_socket_path = bract_socket_path.as_path();
-        let token_path = self.bract_path_factory.token_path()?;
-        let token_path = token_path.as_path();
+    pub fn perform(&self) -> bool {
+        let bract_socket_path = self.system_paths.douglas_socket_path("bract");
+        let token_path = self.system_paths.token_path();
+        let file_reader = Box::new(LocalFileReader::new());
 
-        let bract_client = Client::new(
-            Arc::clone(&self.log),
-            Arc::clone(&self.file_reader),
-            bract_socket_path,
-            token_path,
-        );
+        let bract_logger = Box::new(FileLogger::new(
+            self.system_paths.log_path("bract").as_path(),
+            Arc::clone(&self.file_appender),
+            Arc::clone(&self.permissions),
+        ));
 
+        let bract_client = Client::new(bract_logger, file_reader, bract_socket_path, token_path);
         let mut bract_status: BractStatus = BractStatus::NotRunning;
 
-        let rt = Runtime::new()?;
+        let rt = match Runtime::new() {
+            Ok(rt) => rt,
+            Err(err) => {
+                self.log.error(&format!("Runtime error: {err}"));
+                return false;
+            }
+        };
         rt.block_on(async {
             let response = bract_client.status().await;
 
@@ -82,30 +91,23 @@ impl StatusCommand {
             };
         });
 
-        let docker_socket_path = match self.config_reader.read() {
-            Ok(config) => config.docker_socket_path,
-            Err(ConfigRepositoryError::NotFound) => {
-                return Ok(DouglasStatus {
-                    bract_status,
-                    docker_status: DockerStatus::ConfigFileNotFound,
-                });
-            }
+        let docker_socket_path = self.system_paths.docker_socket_path();
+        let docker_logger = Arc::new(FileLogger::new(
+            self.system_paths.log_path("docker").as_path(),
+            Arc::clone(&self.file_appender),
+            Arc::clone(&self.permissions),
+        ));
+
+        let rt = match Runtime::new() {
+            Ok(rt) => rt,
             Err(err) => {
-                return Ok(DouglasStatus {
-                    bract_status,
-                    docker_status: DockerStatus::CouldNotLoadConfiguration(format!("{err:?}")),
-                });
+                self.log.error(&format!("Runtime error: {err}"));
+                return false;
             }
         };
 
-        let rt = Runtime::new()?;
         let docker_status = rt.block_on(async move {
-            match SimpleSystemClient::build(
-                docker_socket_path,
-                Arc::clone(&self.log) as Arc<dyn Logger>,
-            )
-            .await
-            {
+            match SimpleSystemClient::build(docker_socket_path, docker_logger).await {
                 Ok(mut client) => match client.ping().await {
                     Ok(_) => DockerStatus::Active,
                     Err(err) => DockerStatus::DockerClientError(format!("{err:?}")),
@@ -114,9 +116,12 @@ impl StatusCommand {
             }
         });
 
-        Ok(DouglasStatus {
+        let status = DouglasStatus {
             bract_status,
             docker_status,
-        })
+        };
+        self.log.info(&format!("{status:?}"));
+
+        true
     }
 }

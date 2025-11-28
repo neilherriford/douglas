@@ -74,6 +74,21 @@ pub enum BuilderError {
     General(std::io::Error),
 }
 
+impl PartialEq for BuilderError {
+    fn eq(&self, other: &Self) -> bool {
+        match self {
+            BuilderError::General(left) => {
+                if let BuilderError::General(right) = other {
+                    left.to_string() == right.to_string()
+                } else {
+                    false
+                }
+            }
+            _ => self == other,
+        }
+    }
+}
+
 impl From<std::io::Error> for BuilderError {
     fn from(value: std::io::Error) -> Self {
         match value.kind() {

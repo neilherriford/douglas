@@ -6,13 +6,12 @@ mod queries;
 use crate::linux_credentials::LinuxCredentials;
 #[cfg(target_os = "macos")]
 use crate::macos_credentials::MacOSCredentials;
-
 #[cfg(feature = "mock")]
 use mockall::{automock, predicate};
-
 use os::{Os, OsError};
 use std::sync::Arc;
 use thiserror::Error;
+use utils::ClientErrorDisplay;
 
 #[derive(Error, Debug)]
 pub enum CredentialsError {
@@ -28,24 +27,31 @@ pub enum CredentialsError {
     GeneralError(String),
 }
 
+impl ClientErrorDisplay for CredentialsError {
+    fn to_client_string(&self) -> String {
+        "Could not create credentials".to_string()
+    }
+}
+
 pub static ROOT_USER_NAME: &str = "root";
 pub static ROOT_GROUP_NAME: &str = "root";
 
 #[cfg_attr(feature = "mock", automock)]
-pub trait Credentials {
+pub trait Credentials: Send + Sync {
     fn is_root(&self) -> bool;
     fn create_user(
         &self,
         name: &str,
         primary_group_name: &str,
         group_names: Vec<String>,
-    ) -> Result<(), CredentialsError>;
+    ) -> Result<u32, CredentialsError>;
     fn user_exists(&self, name: &str) -> bool;
     fn delete_user(&self, name: &str) -> Result<(), CredentialsError>;
-    fn create_group(&self, name: &str) -> Result<(), CredentialsError>;
+    fn create_group(&self, name: &str) -> Result<u32, CredentialsError>;
     fn group_exists(&self, name: &str) -> bool;
     fn group_memberships(&self, name: &str) -> Vec<String>;
     fn get_group_id(&self, name: &str) -> Option<u32>;
+    fn get_user_id(&self, name: &str) -> Option<u32>;
     fn delete_group(&self, name: &str) -> Result<(), CredentialsError>;
     fn list_users(&self) -> Result<Vec<String>, CredentialsError>;
     fn join_group(&self, user_name: &str, group_name: &str) -> Result<(), CredentialsError>;
@@ -111,11 +117,11 @@ impl MockCredentials {
         self
     }
 
-    pub fn expect_group_created_named(&mut self, name: &str) -> &mut Self {
+    pub fn expect_group_created_named(&mut self, name: &str, gid: u32) -> &mut Self {
         let name = name.to_string();
         self.expect_create_group()
             .with(predicate::eq(name))
-            .returning(|_| Ok(()));
+            .returning(move |_| Ok(gid));
         self
     }
 
@@ -124,6 +130,7 @@ impl MockCredentials {
         name: &str,
         primary_group_name: &str,
         group_names: Vec<&str>,
+        uid: u32,
     ) -> &mut Self {
         let name = name.to_string();
         let primary_group = primary_group_name.to_string();
@@ -135,7 +142,7 @@ impl MockCredentials {
                 predicate::eq(primary_group),
                 predicate::eq(group_names),
             )
-            .returning(|_, _, _| Ok(()));
+            .returning(move |_, _, _| Ok(uid));
 
         self
     }
@@ -152,15 +159,11 @@ impl MockCredentials {
 }
 
 #[cfg(target_os = "macos")]
-pub fn create_for_target(
-    os: Arc<dyn Os + Sync + Send + 'static>,
-) -> Arc<dyn Credentials + Sync + Send> {
-    Arc::new(MacOSCredentials::new(Arc::clone(&os)))
+pub fn create_credentials(os: Arc<dyn Os>) -> Box<dyn Credentials> {
+    Box::new(MacOSCredentials::new(os))
 }
 
 #[cfg(target_os = "linux")]
-pub fn create_for_target(
-    os: Arc<dyn Os + Sync + Send + 'static>,
-) -> Arc<dyn Credentials + Sync + Send> {
-    Arc::new(LinuxCredentials::new(Arc::clone(&os)))
+pub fn create_credentials(os: Arc<dyn Os>) -> Box<dyn Credentials> {
+    Box::new(LinuxCredentials::new(Arc::clone(&os)))
 }

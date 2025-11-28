@@ -1,20 +1,21 @@
-use super::{ClientErrorDisplay, Response};
+use super::Response;
 use file_system::FileReader;
 use log::Logger;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use subtle::ConstantTimeEq;
+use utils::ClientErrorDisplay;
 
 pub(super) struct TokenValidator {
     path: PathBuf,
     log: Arc<dyn Logger + Sync + Send>,
-    file_reader: Arc<dyn FileReader + Sync + Send>,
+    file_reader: Arc<dyn FileReader>,
 }
 
 impl TokenValidator {
     pub fn new(
         log: Arc<dyn Logger + Sync + Send>,
-        file_reader: Arc<dyn FileReader + Sync + Send>,
+        file_reader: Arc<dyn FileReader>,
         path: &Path,
     ) -> Self {
         Self {
@@ -30,7 +31,7 @@ impl TokenValidator {
     {
         self.log.info("Verifying token…");
 
-        let expected = or_log_and_return_error!(
+        let expected = or_log_and_return_response_error!(
             self.log => warn,
             self.file_reader.read_all(self.path.as_path())
         );

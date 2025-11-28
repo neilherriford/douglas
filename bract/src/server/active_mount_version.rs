@@ -1,8 +1,9 @@
+use super::Response;
 use super::mount_path_factory::MountPathFactory;
 use super::token_validator::TokenValidator;
-use super::{ClientErrorDisplay, Response};
 use log::Logger;
 use std::sync::Arc;
+use utils::ClientErrorDisplay;
 
 pub(super) struct ActiveMountVersion {
     token: Arc<TokenValidator>,
@@ -28,17 +29,16 @@ impl ActiveMountVersion {
             service_name, mount_name
         ));
         self.token.perform_if_valid(token, move || {
-            let version = or_log_and_return_error!(
+            if let Some(version) = or_log_and_return_response_error!(
                 self.log => warn,
                 self.mount_paths.active_version(&service_name, &mount_name)
-            );
-            Response::MountSet {
-                name: mount_name.to_string(),
-                version,
-                path: self
+            ) {
+                let path = self
                     .mount_paths
-                    .active_version_path(&service_name, &mount_name)
-                    .to_path_buf(),
+                    .active_version_path(&service_name, &mount_name);
+                Response::MountVersionListed { version, path }
+            } else {
+                Response::NoActiveMountVersion
             }
         })
     }
@@ -54,8 +54,8 @@ mod tests {
                 Response, mount_path_factory::MountPathFactory, token_validator::TokenValidator,
             },
         };
-        use file_system::{MockFileReader, MockFolder, MockLinks};
-        use log::MockLogger;
+        use file_system::{FileReader, MockFileReader, MockFolder, MockLinks};
+        use log::{Logger, MockLogger};
         use mockall::predicate;
         use std::{path::Path, sync::Arc};
 
@@ -74,8 +74,8 @@ mod tests {
             ));
 
             let token_validator = Arc::new(TokenValidator::new(
-                logger.clone(),
-                file_reader.clone(),
+                Arc::clone(&logger) as Arc<dyn Logger>,
+                Arc::clone(&file_reader) as Arc<dyn FileReader>,
                 token_path,
             ));
 
@@ -151,11 +151,10 @@ mod tests {
 
             assert!(matches!(
                     actual,
-                    Response::MountSet {
-                        name,
+                    Response::MountVersionListed {
                         version,
                         path
-                    } if name == "baz" && version == Version(5) && path == Path::new("/tmp/mount_root/bar/baz/current")));
+                    } if  version == Version(5) && path == Path::new("/tmp/mount_root/bar/baz/current")));
         }
     }
 }

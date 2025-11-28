@@ -1,4 +1,3 @@
-use super::ClientErrorDisplay;
 use super::mount_path_factory::{MountPathFactory, MountPathVersionError};
 use crate::Mount;
 use crate::Service;
@@ -10,6 +9,7 @@ use std::fmt::Debug;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use thiserror::Error;
+use utils::ClientErrorDisplay;
 
 #[derive(Error, Debug)]
 pub(super) enum VersionManagerError {
@@ -48,21 +48,26 @@ impl ClientErrorDisplay for VersionManagerError {
 
 pub(super) struct VersionManager {
     mount_paths: Arc<MountPathFactory>,
-    folder: Arc<dyn Folder + Sync + Send>,
-    links: Arc<dyn Links + Sync + Send>,
-    file_deleter: Arc<dyn FileDeleter + Sync + Send>,
-    permissions: Arc<dyn Permissions + Sync + Send>,
-    credentials: Arc<dyn Credentials + Sync + Send>,
+    folder: Arc<dyn Folder>,
+    links: Arc<dyn Links>,
+    file_deleter: Arc<dyn FileDeleter>,
+    permissions: Arc<dyn Permissions>,
+    credentials: Arc<dyn Credentials>,
+}
+
+enum ServicePathType {
+    Support,
+    Version,
 }
 
 impl VersionManager {
     pub fn new(
         mount_path_factory: Arc<MountPathFactory>,
-        folder: Arc<dyn Folder + Sync + Send>,
-        links: Arc<dyn Links + Sync + Send>,
-        file_deleter: Arc<dyn FileDeleter + Sync + Send>,
-        permissions: Arc<dyn Permissions + Sync + Send>,
-        credentials: Arc<dyn Credentials + Sync + Send>,
+        folder: Arc<dyn Folder>,
+        links: Arc<dyn Links>,
+        file_deleter: Arc<dyn FileDeleter>,
+        permissions: Arc<dyn Permissions>,
+        credentials: Arc<dyn Credentials>,
     ) -> Self {
         Self {
             mount_paths: mount_path_factory,
@@ -96,17 +101,25 @@ impl VersionManager {
             &self.mount_paths.service_path(service_name),
             &user_name,
             &group_name,
+            ServicePathType::Support,
         )?;
         self.create_service_path(
             &self.mount_paths.mount_path(service_name, mount_name),
             &user_name,
             &group_name,
+            ServicePathType::Support,
         )?;
 
         let version_path = self
             .mount_paths
             .version_path(service_name, mount_name, version);
-        let created = self.create_service_path(&version_path, &user_name, &group_name)?;
+
+        let created = self.create_service_path(
+            &version_path,
+            &user_name,
+            &group_name,
+            ServicePathType::Version,
+        )?;
         if !created {
             return Err(VersionManagerError::VersionAlreadyExists(version));
         }
@@ -115,7 +128,7 @@ impl VersionManager {
             .mount_paths
             .active_version_path(service_name, mount_name);
 
-        self.set_active_version(service_name, &active_path, &version_path)
+        self.set_active_version(&active_path, &version_path)
     }
 
     fn assert_credentials(
@@ -149,7 +162,7 @@ impl VersionManager {
             .mount_paths
             .active_version_path(service_name, mount_name);
 
-        self.set_active_version(service_name, active_path.as_path(), version_path.as_path())
+        self.set_active_version(active_path.as_path(), version_path.as_path())
     }
 
     pub fn versions(
@@ -199,24 +212,14 @@ impl VersionManager {
 
     fn set_active_version(
         &self,
-        service_name: &str,
         active_path: &Path,
         version_path: &Path,
     ) -> Result<PathBuf, VersionManagerError> {
-        let (user_name, group_name) = safe_prefixed_credential_name(service_name);
-
         if self.folder.exists(active_path) {
             self.file_deleter.delete(active_path)?;
         }
 
         self.links.create(version_path, active_path)?;
-        self.set_ownership(
-            active_path,
-            &user_name,
-            &group_name,
-            Modes::OwnerReadWriteGroupReadWrite,
-        )?;
-
         Ok(active_path.to_path_buf())
     }
 
@@ -237,6 +240,7 @@ impl VersionManager {
         path: &Path,
         user_name: &str,
         group_name: &str,
+        service_path_type: ServicePathType,
     ) -> Result<bool, FileSystemError> {
         if self.folder.exists(path) {
             return Ok(false);
@@ -247,7 +251,10 @@ impl VersionManager {
             path,
             user_name,
             group_name,
-            Modes::OwnerReadWriteGroupReadWrite,
+            match service_path_type {
+                ServicePathType::Support => Modes::OwnerReadWriteGroupReadWrite,
+                ServicePathType::Version => Modes::OwnerReadWriteExecuteGroupReadWriteExecute,
+            },
         )?;
         Ok(true)
     }
@@ -272,6 +279,18 @@ impl VersionManager {
                 let version = self
                     .mount_paths
                     .active_version(&service.name, &mount.name)?;
+
+                let version = match version {
+                    Some(version) => version,
+                    None => {
+                        let mut path = self.mount_paths.service_path(&service.name);
+                        path.push(mount.name.clone());
+                        return Err(VersionManagerError::MountPathVersionError(
+                            MountPathVersionError::CouldNotDetermineVersion(path),
+                        ));
+                    }
+                };
+
                 let path = self
                     .mount_paths
                     .active_version_path(&service.name, &mount.name);
@@ -370,7 +389,7 @@ mod tests {
                 "/tmp/mount_root/foo/bar/v0",
                 "doug-foo",
                 "doug-foo",
-                Modes::OwnerReadWriteGroupReadWrite,
+                Modes::OwnerReadWriteExecuteGroupReadWriteExecute,
             );
         }
 
@@ -823,7 +842,7 @@ mod tests {
                 .expect_change_mode()
                 .with(
                     predicate::eq(Path::new("/tmp/mount_root/foo/bar/v0")),
-                    predicate::eq(Modes::OwnerReadWriteGroupReadWrite),
+                    predicate::eq(Modes::OwnerReadWriteExecuteGroupReadWriteExecute),
                 )
                 .returning(|_, _| Err(file_system::FileSystemError::ExpectedFileError));
 
@@ -907,98 +926,6 @@ mod tests {
                 .with(
                     predicate::eq(Path::new("/tmp/mount_root/foo/bar/v0")),
                     predicate::eq(Path::new("/tmp/mount_root/foo/bar/current")),
-                )
-                .returning(|_, _| Err(FileSystemError::ExpectedFileError));
-
-            let actual = create_version_manager(
-                folder,
-                links,
-                file_deleter,
-                permissions,
-                credentials,
-                mount_root,
-            )
-            .create("foo", "bar", Version(0));
-
-            assert!(matches!(
-                actual,
-                Err(VersionManagerError::FileSystemError(_))
-            ));
-        }
-
-        #[test]
-        fn should_error_if_current_permissions_failed() {
-            let mut folder = MockFolder::new();
-            let mut links = MockLinks::new();
-            let mut file_deleter = MockFileDeleter::new();
-            let mut permissions = MockPermissions::new();
-            let mut credentials = MockCredentials::new();
-            let mount_root = Path::new("/tmp/mount_root");
-
-            credentials.given_user_and_group_exist("doug-foo", "doug-foo");
-            folder
-                .given_exists("/tmp/mount_root")
-                .given_exists("/tmp/mount_root/foo")
-                .given_exists("/tmp/mount_root/foo/bar")
-                .given_exists("/tmp/mount_root/foo/bar/current")
-                .given_does_not_exist("/tmp/mount_root/foo/bar/v0");
-            expect_version_folder_created(&mut folder, &mut permissions);
-            expect_current_version_recreated(&mut file_deleter, &mut links);
-
-            permissions
-                .expect_change_user_and_group_ownership()
-                .with(
-                    predicate::eq(Path::new("/tmp/mount_root/foo/bar/current")),
-                    predicate::eq("doug-foo"),
-                    predicate::eq("doug-foo"),
-                )
-                .returning(|_, _, _| Err(FileSystemError::ExpectedFileError));
-
-            let actual = create_version_manager(
-                folder,
-                links,
-                file_deleter,
-                permissions,
-                credentials,
-                mount_root,
-            )
-            .create("foo", "bar", Version(0));
-
-            assert!(matches!(
-                actual,
-                Err(VersionManagerError::FileSystemError(_))
-            ));
-        }
-
-        #[test]
-        fn should_error_if_current_mode_failed() {
-            let mut folder = MockFolder::new();
-            let mut links = MockLinks::new();
-            let mut file_deleter = MockFileDeleter::new();
-            let mut permissions = MockPermissions::new();
-            let mut credentials = MockCredentials::new();
-            let mount_root = Path::new("/tmp/mount_root");
-
-            credentials.given_user_and_group_exist("doug-foo", "doug-foo");
-            folder
-                .given_exists("/tmp/mount_root")
-                .given_exists("/tmp/mount_root/foo")
-                .given_exists("/tmp/mount_root/foo/bar")
-                .given_exists("/tmp/mount_root/foo/bar/current")
-                .given_does_not_exist("/tmp/mount_root/foo/bar/v0");
-            expect_version_folder_created(&mut folder, &mut permissions);
-            expect_current_version_recreated(&mut file_deleter, &mut links);
-
-            permissions.expect_ownership_to_be_set(
-                "/tmp/mount_root/foo/bar/current",
-                "doug-foo",
-                "doug-foo",
-            );
-            permissions
-                .expect_change_mode()
-                .with(
-                    predicate::eq(Path::new("/tmp/mount_root/foo/bar/current")),
-                    predicate::eq(Modes::OwnerReadWriteGroupReadWrite),
                 )
                 .returning(|_, _| Err(FileSystemError::ExpectedFileError));
 
@@ -1173,98 +1100,6 @@ mod tests {
                     .with(
                         predicate::eq(Path::new("/tmp/mount_root/foo/bar/v0")),
                         predicate::eq(Path::new("/tmp/mount_root/foo/bar/current")),
-                    )
-                    .returning(|_, _| Err(FileSystemError::ExpectedFileError));
-
-                let actual = create_version_manager(
-                    folder,
-                    links,
-                    file_deleter,
-                    permissions,
-                    credentials,
-                    mount_root,
-                )
-                .activate("foo", "bar", Version(0));
-
-                assert!(matches!(
-                    actual,
-                    Err(VersionManagerError::FileSystemError(_))
-                ));
-            }
-
-            #[test]
-            fn should_error_if_permissions_could_not_be_set() {
-                let mut folder = MockFolder::new();
-                let mut links = MockLinks::new();
-                let mut file_deleter = MockFileDeleter::new();
-                let mut permissions = MockPermissions::new();
-                let mut credentials = MockCredentials::new();
-                let mount_root = Path::new("/tmp/mount_root");
-
-                credentials.given_user_and_group_exist("doug-foo", "doug-foo");
-                folder.given_exists("/tmp/mount_root/foo/bar/current");
-                file_deleter.expect_file_to_be_deleted("/tmp/mount_root/foo/bar/current");
-                links.expect_create_with(
-                    "/tmp/mount_root/foo/bar/v0",
-                    "/tmp/mount_root/foo/bar/current",
-                );
-
-                permissions
-                    .expect_change_user_and_group_ownership()
-                    .with(
-                        predicate::eq(Path::new("/tmp/mount_root/foo/bar/current")),
-                        predicate::eq("doug-foo"),
-                        predicate::eq("doug-foo"),
-                    )
-                    .returning(|_, _, _| Err(FileSystemError::ExpectedFileError));
-
-                let actual = create_version_manager(
-                    folder,
-                    links,
-                    file_deleter,
-                    permissions,
-                    credentials,
-                    mount_root,
-                )
-                .activate("foo", "bar", Version(0));
-
-                assert!(matches!(
-                    actual,
-                    Err(VersionManagerError::FileSystemError(_))
-                ));
-            }
-
-            #[test]
-            fn should_error_if_mode_could_not_be_set() {
-                let mut folder = MockFolder::new();
-                let mut links = MockLinks::new();
-                let mut file_deleter = MockFileDeleter::new();
-                let mut permissions = MockPermissions::new();
-                let mut credentials = MockCredentials::new();
-                let mount_root = Path::new("/tmp/mount_root");
-
-                credentials.given_user_and_group_exist("doug-foo", "doug-foo");
-                folder
-                    .given_exists("/tmp/mount_root")
-                    .given_exists("/tmp/mount_root/foo")
-                    .given_exists("/tmp/mount_root/foo/bar")
-                    .given_exists("/tmp/mount_root/foo/bar/current");
-                file_deleter.expect_file_to_be_deleted("/tmp/mount_root/foo/bar/current");
-                links.expect_create_with(
-                    "/tmp/mount_root/foo/bar/v0",
-                    "/tmp/mount_root/foo/bar/current",
-                );
-
-                permissions.expect_ownership_to_be_set(
-                    "/tmp/mount_root/foo/bar/current",
-                    "doug-foo",
-                    "doug-foo",
-                );
-                permissions
-                    .expect_change_mode()
-                    .with(
-                        predicate::eq(Path::new("/tmp/mount_root/foo/bar/current")),
-                        predicate::eq(Modes::OwnerReadWriteGroupReadWrite),
                     )
                     .returning(|_, _| Err(FileSystemError::ExpectedFileError));
 

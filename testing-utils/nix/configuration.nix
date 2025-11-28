@@ -13,7 +13,7 @@ let
       (builtins.attrNames (builtins.readDir userKeysDir));
 
   # Version information for your dev image
-  devImageVersion = "0.0.2f";
+  devImageVersion = "0.0.2g";
   devImageDate = "2025-10-20";
   devImageName = "Douglas Development Environment";
 
@@ -41,6 +41,7 @@ let
     jq
     docker
     socat
+    lsof
 
     # Additional useful development tools
     tree
@@ -237,6 +238,28 @@ in
         rustup component add clippy rustfmt rust-src
       fi
       exec cargo "$@"
+    '')
+    # Add a quick setup command for manual fixes
+    (pkgs.writeShellScriptBin "setup-rust" ''
+      echo "🦀 Setting up Rust toolchain for $USER..."
+      mkdir -p "$HOME/.rustup" "$HOME/.cargo"
+
+      if rustup show >/dev/null 2>&1; then
+        echo "✅ Rust is already configured!"
+        rustup show
+      else
+        echo "Installing stable Rust toolchain..."
+        rustup default stable
+        rustup component add clippy rustfmt rust-src
+        echo ""
+        echo "✅ Rust setup complete!"
+        rustc --version
+        cargo --version
+      fi
+
+      echo ""
+      echo "💡 Tip: Add ~/.cargo/bin to your PATH if needed:"
+      echo "   export PATH=\"\$HOME/.cargo/bin:\$PATH\""
     '')
   ];
 

@@ -1,9 +1,10 @@
+use super::Response;
 use super::token_validator::TokenValidator;
 use super::version_manager::VersionManager;
-use super::{ClientErrorDisplay, Response};
 use log::Logger;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use utils::ClientErrorDisplay;
 
 pub(super) struct Status {
     log: Arc<dyn Logger + Sync + Send>,
@@ -33,7 +34,7 @@ impl Status {
     pub fn perform(&self, token: String) -> Response {
         self.log.info("Reporting status");
         self.token.perform_if_valid(token, move || {
-            let services = or_log_and_return_error!(
+            let services = or_log_and_return_response_error!(
                 self.log => warn,
                 self.version_manager.list()
             );

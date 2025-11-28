@@ -4,11 +4,19 @@ use nix::sys::signal::kill;
 use nix::unistd::Pid;
 #[cfg(feature = "mock")]
 use std::os::unix::process::ExitStatusExt;
-use std::process::{Command, Output};
+
+use std::{
+    env::VarError,
+    path::PathBuf,
+    process::{Command, Output},
+    time::Duration,
+};
 use thiserror::Error;
 
 #[derive(Error, Debug)]
 pub enum OsError {
+    #[error("Invalid PID")]
+    PidTooLarge,
     #[error("IO error: {0}")]
     IoError(#[from] std::io::Error),
     #[error("Proccess '{name}' returned a non success status")]
@@ -23,10 +31,28 @@ pub enum OsError {
 
 #[cfg_attr(feature = "mock", mockall::automock)]
 pub trait Os: Send + Sync {
-    fn execute(&self, command: &str, args: Vec<String>) -> Result<(), OsError>;
-    fn execute_with_output(&self, command: &str, args: Vec<String>) -> Result<Output, OsError>;
-    fn is_active_pid(&self, pid: i32) -> Result<bool, OsError>;
+    fn current_executable(&self) -> Result<PathBuf, OsError>;
+    fn execute(
+        &self,
+        command: &str,
+        args: Vec<String>,
+        env: Vec<(String, String)>,
+    ) -> Result<(), OsError>;
+    fn execute_with_output(
+        &self,
+        command: &str,
+        args: Vec<String>,
+        env: Vec<(String, String)>,
+    ) -> Result<Output, OsError>;
+    fn spawn(
+        &self,
+        command: &str,
+        args: Vec<String>,
+        env: Vec<(String, String)>,
+    ) -> Result<u32, OsError>;
+    fn is_active_pid(&self, pid: u32) -> Result<bool, OsError>;
     fn exit(&self, code: i32);
+    fn sleep(&self, duration: Duration);
 }
 
 #[cfg(feature = "mock")]
@@ -42,8 +68,9 @@ impl MockOs {
         &mut self,
         command: &str,
         args: Vec<&str>,
+        env: Vec<(&str, &str)>,
     ) -> &mut Self {
-        self.expect_execute_with_output_for(command, args, "", "", 0);
+        self.expect_execute_with_output_for(command, args, env, "", "", 0);
         self
     }
 
@@ -51,20 +78,27 @@ impl MockOs {
         &mut self,
         command: &str,
         args: Vec<&str>,
+        env: Vec<(&str, &str)>,
         stdout: &str,
         stderr: &str,
         status_code: i32,
     ) -> &mut Self {
         let expected_command = command.to_string();
         let expected_args: Vec<String> = args.iter().map(|arg| arg.to_string()).collect();
+        let expected_env: Vec<(String, String)> = env
+            .iter()
+            .map(|pair| (pair.0.to_string(), pair.0.to_string()))
+            .collect();
         let given_output = self.make_fake_output(stdout, stderr, status_code);
 
         self.expect_execute_with_output()
-            .withf(move |given_command, given_args| {
-                given_command == expected_command && *given_args == expected_args
+            .withf(move |given_command, given_args, given_env| {
+                given_command == expected_command
+                    && *given_args == expected_args
+                    && *given_env == expected_env
             })
             .times(1)
-            .return_once(move |_, _| Ok(given_output));
+            .return_once(move |_, _, _| Ok(given_output));
         self
     }
 
@@ -77,7 +111,7 @@ impl MockOs {
         self
     }
 
-    pub fn given_pid_is_active(&mut self, pid: i32) -> &mut Self {
+    pub fn given_pid_is_active(&mut self, pid: u32) -> &mut Self {
         self.expect_is_active_pid()
             .with(predicate::eq(pid))
             .once()
@@ -86,7 +120,7 @@ impl MockOs {
         self
     }
 
-    pub fn given_pid_is_not_active(&mut self, pid: i32) -> &mut Self {
+    pub fn given_pid_is_not_active(&mut self, pid: u32) -> &mut Self {
         self.expect_is_active_pid()
             .with(predicate::eq(pid))
             .once()
@@ -106,13 +140,23 @@ impl Unix {
 }
 
 impl Os for Unix {
-    fn execute(&self, command: &str, args: Vec<String>) -> Result<(), OsError> {
-        self.execute_with_output(command, args)?;
+    fn execute(
+        &self,
+        command: &str,
+        args: Vec<String>,
+        env: Vec<(String, String)>,
+    ) -> Result<(), OsError> {
+        self.execute_with_output(command, args, env)?;
         Ok(())
     }
 
-    fn execute_with_output(&self, command: &str, args: Vec<String>) -> Result<Output, OsError> {
-        let output = Command::new(command).args(&args).output()?;
+    fn execute_with_output(
+        &self,
+        command: &str,
+        args: Vec<String>,
+        env: Vec<(String, String)>,
+    ) -> Result<Output, OsError> {
+        let output = Command::new(command).args(&args).envs(env).output()?;
 
         if output.status.success() {
             Ok(output)
@@ -129,12 +173,56 @@ impl Os for Unix {
         std::process::exit(code);
     }
 
-    fn is_active_pid(&self, pid: i32) -> Result<bool, OsError> {
-        match kill(Pid::from_raw(pid), None) {
+    fn is_active_pid(&self, pid: u32) -> Result<bool, OsError> {
+        let pid_i32 = i32::try_from(pid).map_err(|_| OsError::PidTooLarge)?;
+
+        match kill(Pid::from_raw(pid_i32), None) {
             Ok(_) => Ok(true),
             Err(nix::errno::Errno::ESRCH) => Ok(false), // No such process
             Err(nix::errno::Errno::EPERM) => Ok(true),  // Process exists, but we lack permission
             Err(errno) => Err(OsError::ErrorNumber(errno as i32)),
         }
+    }
+
+    fn current_executable(&self) -> Result<PathBuf, OsError> {
+        Ok(std::env::current_exe()?)
+    }
+
+    fn spawn(
+        &self,
+        command: &str,
+        args: Vec<String>,
+        env: Vec<(String, String)>,
+    ) -> Result<u32, OsError> {
+        Ok(Command::new(command).args(&args).envs(env).spawn()?.id())
+    }
+
+    fn sleep(&self, duration: Duration) {
+        std::thread::sleep(duration);
+    }
+}
+
+#[cfg_attr(feature = "mock", mockall::automock)]
+pub trait EnvironmentVariableReader {
+    fn read(&self, name: &str) -> Result<String, VarError>;
+}
+
+pub struct UnixEnvironmentVariableReader {}
+
+impl UnixEnvironmentVariableReader {
+    pub fn new() -> Self {
+        Self {}
+    }
+}
+
+impl Default for UnixEnvironmentVariableReader {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl EnvironmentVariableReader for UnixEnvironmentVariableReader {
+    fn read(&self, name: &str) -> Result<String, VarError> {
+        std::env::var(name)
     }
 }

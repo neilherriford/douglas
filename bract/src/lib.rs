@@ -5,7 +5,7 @@ mod version;
 
 use std::path::PathBuf;
 
-pub use client::Client;
+pub use client::{Client, ClientError, IoOperation};
 use serde::{Deserialize, Serialize};
 pub use server::{Server, ServerError};
 pub use version::Version;

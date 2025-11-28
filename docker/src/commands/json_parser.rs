@@ -1,13 +1,6 @@
+use crate::{DockerError, Parser};
 use serde_json::value::Value as Json;
 use thiserror::Error;
-
-use crate::{DockerError, Parser};
-
-#[derive(Error, Debug)]
-pub(crate) enum ChunkedJsonParserError {
-    #[error("HTTP client error: {0}")]
-    Json(#[from] serde_json::Error),
-}
 
 #[derive(Debug, Default)]
 pub struct ChunkedJsonParser {}

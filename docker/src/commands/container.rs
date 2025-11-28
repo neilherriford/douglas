@@ -1,15 +1,47 @@
 use super::json_parser::JsonParserError;
-use super::{assert_non_empty_string_argument, assert_okay_with_body};
-use crate::{Config, DockerError, Id, Mount, Parser, Request, State, deserialize_id};
-use serde::{Deserialize, Serialize};
+use super::{assert_created_with_body, assert_non_empty_string_argument, assert_okay_with_body};
+use crate::{
+    Capability, Config, ContainerDefinition, ContainerUser, DockerError, EnvironmentVariable, Id,
+    ImageIdentifier, Label, Mount, MountDefinition, Parser, Request, State, deserialize_id,
+    serialize_capabilities, serialize_environment_variables, serialize_image_identifier,
+    serialize_labels,
+};
+use serde::ser::SerializeSeq;
+use serde::{Deserialize, Serialize, Serializer};
 use serde_json::from_value;
 use serde_json::value::Value as Json;
-use simple_rest_client::{RestClient, create_path_and_query_string};
+use simple_rest_client::{Header, Response, RestClient, create_path_and_query_string};
 use std::{collections::HashMap, sync::Arc};
 
 #[derive(Debug, Serialize, PartialEq)]
 struct Filter {
     pub name: Vec<String>,
+}
+
+#[derive(Debug, Deserialize, PartialEq)]
+struct CreationResponse {
+    #[serde(rename = "Id")]
+    id: String,
+}
+
+pub(crate) fn serialize_container_command<S>(
+    command: &Option<String>,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    match command {
+        Some(command) => {
+            let tokens = shlex::split(command).unwrap();
+            let mut seq = serializer.serialize_seq(Some(tokens.len()))?;
+            for token in tokens {
+                seq.serialize_element(&token)?;
+            }
+            seq.end()
+        }
+        None => unreachable!("skip_serializing_if should prevent None from reaching here"),
+    }
 }
 
 #[derive(Debug, Deserialize, PartialEq)]
@@ -38,6 +70,40 @@ pub(crate) struct InspectedContainer {
 struct IdentifiedContainer {
     #[serde(rename = "Id")]
     pub id: String,
+}
+
+#[derive(Debug, Serialize, PartialEq)]
+struct HostConfig {
+    #[serde(rename = "Mounts")]
+    pub mounts: Vec<MountDefinition>,
+
+    #[serde(rename = "CapAdd", serialize_with = "serialize_capabilities")]
+    added_capabilities: Vec<Capability>,
+}
+
+#[derive(Debug, Serialize, PartialEq)]
+struct CreateContainerBody {
+    #[serde(rename = "User", skip_serializing_if = "Option::is_none")]
+    pub run_as: Option<ContainerUser>,
+
+    #[serde(rename = "Env", serialize_with = "serialize_environment_variables")]
+    pub environment_variables: Vec<EnvironmentVariable>,
+
+    #[serde(
+        rename = "Cmd",
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "serialize_container_command"
+    )]
+    pub command: Option<String>,
+
+    #[serde(rename = "Image", serialize_with = "serialize_image_identifier")]
+    pub image_identifier: ImageIdentifier,
+
+    #[serde(rename = "HostConfig")]
+    host_config: HostConfig,
+
+    #[serde(rename = "Labels", serialize_with = "serialize_labels")]
+    labels: Vec<Label>,
 }
 
 pub struct ContainerCommand {
@@ -95,6 +161,77 @@ impl ContainerCommand {
             0 => Err(DockerError::NotFoundError),
             1 => self.find_by_id(&identified_containers[0].id).await,
             _ => Err(DockerError::AmbiguousMatchError),
+        }
+    }
+
+    pub async fn create(
+        &self,
+        definition: ContainerDefinition,
+    ) -> Result<InspectedContainer, DockerError> {
+        let request_body = CreateContainerBody {
+            run_as: definition.run_as,
+            environment_variables: definition.environment_variables,
+            command: definition.command,
+            image_identifier: definition.image_name,
+            host_config: HostConfig {
+                mounts: definition.mounts,
+                added_capabilities: definition.added_capabilities,
+            },
+            labels: definition.labels,
+        };
+
+        let request = Request::Post {
+            path: create_path_and_query_string(
+                "/containers/create",
+                HashMap::from([("name", definition.name.as_str())]),
+            ),
+            headers: vec![Header::content_type_json()],
+            body: Some(serde_json::to_string(&request_body)?),
+        };
+
+        let response = {
+            let mut rest_client = self.rest_client.lock().await;
+            rest_client.execute(&request).await?
+        };
+
+        let body = assert_created_with_body(response)?;
+        let json = self.parser.parse(body)?;
+        let result: CreationResponse = from_value(json)?;
+
+        self.find_by_id(&result.id).await
+    }
+
+    pub async fn start(&self, id: &str) -> Result<(), DockerError> {
+        let request = Request::Post {
+            path: format!("/containers/{id}/start"),
+            headers: vec![],
+            body: None,
+        };
+
+        let response = {
+            let mut rest_client = self.rest_client.lock().await;
+            rest_client.execute(&request).await?
+        };
+
+        match response {
+            Response::Okay { headers: _, body } => Err(DockerError::UnexpectedResponseError {
+                status: 200,
+                body,
+                message: "expected NO CONTENT, but recieved OK".to_string(),
+            }),
+            Response::Created { headers: _, body } => Err(DockerError::UnexpectedResponseError {
+                status: 200,
+                body,
+                message: "expected NO CONTENT, but recieved CREATED".to_string(),
+            }),
+            Response::NoContent { .. } => Ok(()),
+            Response::Error { status: 304, .. } => Ok(()),
+            Response::Error { status: 404, .. } => Err(DockerError::NotFoundError),
+            Response::Error { status, body, .. } => Err(DockerError::UnexpectedResponseError {
+                status,
+                body,
+                message: "non successful response".to_string(),
+            }),
         }
     }
 }

@@ -1,4 +1,4 @@
-macro_rules! or_log_and_return_error {
+macro_rules! or_log_and_return_response_error {
     ($logger:expr => $method:ident, $result:expr) => {{
         match $result {
             Ok(val) => val,
@@ -50,7 +50,7 @@ mod tests {
                 .return_const("server-facing message".to_string());
 
             fn test(logger: impl Logger, result: Result<String, MockError>) -> Response {
-                let _ = or_log_and_return_error!(logger => warn, result);
+                let _ = or_log_and_return_response_error!(logger => warn, result);
                 Response::InvalidToken
             }
 
@@ -64,10 +64,12 @@ mod tests {
             let logger = MockLogger::new();
 
             fn test(logger: impl Logger, result: Result<String, MockError>) -> Response {
-                let success = or_log_and_return_error!(logger => warn, result);
+                let success = or_log_and_return_response_error!(logger => warn, result);
                 Response::CredentialsCreated {
                     user: success,
-                    group: "fake".to_string(),
+                    user_id: 123,
+                    group: "bar".into(),
+                    group_id: 321,
                 }
             }
 

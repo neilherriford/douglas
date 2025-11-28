@@ -209,12 +209,10 @@ impl NetworkCommand {
             body: Some(body),
             ..
         } = response
+            && let Ok(json) = self.parser.parse(body.to_string())
+            && let Ok(connection_error) = from_value::<ConnectionError>(json)
         {
-            if let Ok(json) = self.parser.parse(body.to_string()) {
-                if let Ok(connection_error) = from_value::<ConnectionError>(json) {
-                    return connection_error.message.contains("not connected");
-                }
-            }
+            return connection_error.message.contains("not connected");
         }
 
         false

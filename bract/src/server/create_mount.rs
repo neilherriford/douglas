@@ -1,9 +1,10 @@
+use super::Response;
 use super::token_validator::TokenValidator;
 use super::version_manager::VersionManager;
-use super::{ClientErrorDisplay, Response};
 use crate::version::Version;
 use log::Logger;
 use std::sync::Arc;
+use utils::ClientErrorDisplay;
 
 pub(super) struct CreateMount {
     token: Arc<TokenValidator>,
@@ -31,7 +32,7 @@ impl CreateMount {
         ));
         self.token.perform_if_valid(token, move || {
             let version = Version(0);
-            let active_path = or_log_and_return_error!(
+            let active_path = or_log_and_return_response_error!(
                 self.log => warn,
                 self.version_manager.create(
                     &service_name,
@@ -180,7 +181,7 @@ mod tests {
                     "/tmp/mount_root/bar/baz/v0",
                     "doug-bar",
                     "doug-bar",
-                    Modes::OwnerReadWriteGroupReadWrite,
+                    Modes::OwnerReadWriteExecuteGroupReadWriteExecute,
                 )
                 .expect_ownership_and_mode_to_be_set(
                     "/tmp/mount_root/bar/baz/current",

@@ -1,5 +1,6 @@
 use crate::{Service, Version};
 use active_mount_version::ActiveMountVersion;
+use config::{SystemPaths, constants};
 use create_credentials::CreateCredentials;
 use create_listener::CreateListener;
 use create_mount::CreateMount;
@@ -12,8 +13,9 @@ use file_system::{
 use futures::{SinkExt, StreamExt};
 use list_mount_versions::ListMountVersions;
 use log::Logger;
-use mockall::automock;
+use mount_io::MountIo;
 use mount_path_factory::MountPathFactory;
+use mount_writer::MountWriter;
 use os::{Os, OsError};
 use serde::{Deserialize, Serialize};
 use set_mount_version::SetMountVersion;
@@ -42,7 +44,9 @@ mod create_listener;
 mod create_mount;
 mod create_new_mount_version;
 mod list_mount_versions;
+mod mount_io;
 mod mount_path_factory;
+mod mount_writer;
 mod set_mount_version;
 mod shutdown;
 mod status;
@@ -50,26 +54,22 @@ mod token_refresher;
 mod token_validator;
 mod version_manager;
 
-#[automock]
-pub(super) trait ClientErrorDisplay {
-    fn to_client_string(&self) -> String;
-}
-
-impl ClientErrorDisplay for FileSystemError {
-    fn to_client_string(&self) -> String {
-        "Could not create mount".to_string()
-    }
-}
-
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "status", content = "data")]
 pub(crate) enum Response {
     CredentialsCreated {
         user: String,
+        user_id: u32,
         group: String,
+        group_id: u32,
     },
     MountSet {
         name: String,
+        version: Version,
+        path: PathBuf,
+    },
+    NoActiveMountVersion,
+    MountVersionListed {
         version: Version,
         path: PathBuf,
     },
@@ -83,6 +83,7 @@ pub(crate) enum Response {
     Error(String),
     ShuttingDown,
     Stopped,
+    WroteToMount,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -112,6 +113,13 @@ pub(crate) enum Request {
         service_name: String,
         mount_name: String,
     },
+    WriteToMount {
+        token: String,
+        service_name: String,
+        mount_name: String,
+        relative_path: PathBuf,
+        contents: String,
+    },
     SetMountVersion {
         token: String,
         service_name: String,
@@ -134,36 +142,30 @@ impl std::fmt::Display for Request {
                 service_name,
                 mount_name,
             } => format!(
-                "ActiveMountVersion service_name: '{}', mount_name: '{}'",
-                service_name, mount_name
+                "ActiveMountVersion service_name: '{service_name}', mount_name: '{mount_name}'"
             ),
             Request::CreateCredentials {
                 token: _,
                 service_name,
-            } => format!("CreateCredentials service_name: '{}'", service_name),
+            } => format!("CreateCredentials service_name: '{service_name}'"),
             Request::CreateMount {
                 token: _,
                 service_name,
                 mount_name,
-            } => format!(
-                "CreateMount service_name: '{}', mount_name: '{}'",
-                service_name, mount_name
-            ),
+            } => format!("CreateMount service_name: '{service_name}', mount_name: '{mount_name}'",),
             Request::CreateNewMountVersion {
                 token: _,
                 service_name,
                 mount_name,
             } => format!(
-                "CreateNewMountVersion service_name: '{}', mount_name: '{}'",
-                service_name, mount_name
+                "CreateNewMountVersion service_name: '{service_name}', mount_name: '{mount_name}'",
             ),
             Request::ListMountVersions {
                 token: _,
                 service_name,
                 mount_name,
             } => format!(
-                "ListMountVersions service_name: '{}', mount_name: '{}'",
-                service_name, mount_name
+                "ListMountVersions service_name: '{service_name}', mount_name: '{mount_name}'",
             ),
             Request::SetMountVersion {
                 token: _,
@@ -171,11 +173,21 @@ impl std::fmt::Display for Request {
                 mount_name,
                 version,
             } => format!(
-                "SetMountVersion service_name: '{}', mount_name: '{}', version: '{}'",
-                service_name, mount_name, version
+                "SetMountVersion service_name: '{service_name}', mount_name: '{mount_name}', version: '{version}'",
             ),
             Request::Status { token: _ } => "Status".to_string(),
             Request::Shutdown { token: _ } => "Shutdown".to_string(),
+            Request::WriteToMount {
+                token: _,
+                service_name,
+                mount_name,
+                relative_path,
+                contents,
+            } => format!(
+                "WriteToMount service_name: '{service_name}', mount_name: '{mount_name}', relative_path: '{}', size: '{}' ",
+                relative_path.to_str().unwrap_or("unknown"),
+                contents.len()
+            ),
         };
 
         write!(f, "{}", value)
@@ -188,6 +200,7 @@ struct RequestHandler {
     create_mount: CreateMount,
     create_new_mount_version: CreateNewMountVersion,
     list_mount_versions: ListMountVersions,
+    mount_writer: MountWriter,
     set_mount_version: SetMountVersion,
     status: Status,
     shutdown: Shutdown,
@@ -198,20 +211,20 @@ impl RequestHandler {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         log: Arc<dyn Logger + Send + Sync>,
-        folder: Arc<dyn Folder + Send + Sync>,
-        file_reader: Arc<dyn FileReader + Send + Sync>,
-        file_deleter: Arc<dyn FileDeleter + Send + Sync>,
-        links: Arc<dyn Links + Send + Sync>,
-        credentials: Arc<dyn Credentials + Send + Sync>,
-        permissions: Arc<dyn Permissions + Send + Sync>,
+        folder: Arc<dyn Folder>,
+        file_reader: Arc<dyn FileReader>,
+        file_writer: Arc<dyn FileWriter>,
+        file_deleter: Arc<dyn FileDeleter>,
+        links: Arc<dyn Links>,
+        credentials: Arc<dyn Credentials>,
+        permissions: Arc<dyn Permissions>,
         token_path: &Path,
         mount_root: &Path,
-        marker_group_name: &str,
         shutdown_sender: Sender<()>,
     ) -> Self {
         let token_validator = Arc::new(TokenValidator::new(
             Arc::clone(&log),
-            Arc::clone(&file_reader),
+            file_reader,
             token_path,
         ));
 
@@ -225,9 +238,16 @@ impl RequestHandler {
             Arc::clone(&mount_path_factory),
             Arc::clone(&folder),
             Arc::clone(&links),
-            Arc::clone(&file_deleter),
+            file_deleter,
             Arc::clone(&permissions),
             Arc::clone(&credentials),
+        ));
+
+        let mount_io = Arc::new(MountIo::new(
+            Arc::clone(&mount_path_factory),
+            Arc::clone(&folder),
+            file_writer,
+            Arc::clone(&permissions),
         ));
 
         Self {
@@ -240,7 +260,6 @@ impl RequestHandler {
                 Arc::clone(&log),
                 Arc::clone(&token_validator),
                 Arc::clone(&credentials),
-                marker_group_name,
             ),
             create_mount: CreateMount::new(
                 Arc::clone(&log),
@@ -256,6 +275,11 @@ impl RequestHandler {
                 Arc::clone(&log),
                 Arc::clone(&token_validator),
                 Arc::clone(&version_manager),
+            ),
+            mount_writer: MountWriter::new(
+                Arc::clone(&log),
+                Arc::clone(&token_validator),
+                Arc::clone(&mount_io),
             ),
             set_mount_version: SetMountVersion::new(
                 Arc::clone(&log),
@@ -318,6 +342,19 @@ impl RequestHandler {
             Request::Shutdown { token } => {
                 self.shutdown.perform(token, self.shutdown_sender.clone())
             }
+            Request::WriteToMount {
+                token,
+                service_name,
+                mount_name,
+                relative_path,
+                contents,
+            } => self.mount_writer.perform(
+                token,
+                &service_name,
+                &mount_name,
+                relative_path,
+                &contents,
+            ),
         }
     }
 }
@@ -347,32 +384,23 @@ pub struct Server {
     request_handler: Arc<RequestHandler>,
     token_refresher: Arc<TokenRefresher>,
     listener_factory: CreateListener,
-    credentials: Arc<dyn Credentials + Sync + Send>,
-    service_user_name: String,
-    service_group_name: String,
-    marker_group_name: String,
+    credentials: Arc<dyn Credentials>,
     shutdown_sender: Sender<()>,
 }
 
 impl Server {
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
         log: Arc<dyn Logger + Sync + Send>,
-        file_reader: Arc<dyn FileReader + Sync + Send>,
-        file_writer: Arc<dyn FileWriter + Sync + Send>,
-        file_deleter: Arc<dyn FileDeleter + Sync + Send>,
-        folder: Arc<dyn Folder + Sync + Send>,
-        links: Arc<dyn Links + Sync + Send>,
+        file_reader: Arc<dyn FileReader>,
+        file_writer: Arc<dyn FileWriter>,
+        file_deleter: Arc<dyn FileDeleter>,
+        folder: Arc<dyn Folder>,
+        links: Arc<dyn Links>,
         os: Arc<dyn Os>,
-        permissions: Arc<dyn Permissions + Sync + Send>,
-        unix_domain_socket: Arc<dyn UnixDomainSocket + 'static>,
-        credentials: Arc<dyn Credentials + Sync + Send>,
-        token_path: &Path,
-        socket_path: &Path,
-        mount_root: &Path,
-        service_user_name: &str,
-        service_group_name: &str,
-        marker_group_name: &str,
+        permissions: Arc<dyn Permissions>,
+        unix_domain_socket: Arc<dyn UnixDomainSocket>,
+        credentials: Arc<dyn Credentials>,
+        system_paths: Arc<dyn SystemPaths>,
     ) -> Self {
         let (shutdown_sender, _) = broadcast::channel::<()>(1);
 
@@ -381,36 +409,32 @@ impl Server {
             request_handler: Arc::new(RequestHandler::new(
                 Arc::clone(&log),
                 Arc::clone(&folder),
-                Arc::clone(&file_reader),
+                file_reader,
+                Arc::clone(&file_writer),
                 Arc::clone(&file_deleter),
                 Arc::clone(&links),
                 Arc::clone(&credentials),
                 Arc::clone(&permissions),
-                token_path,
-                mount_root,
-                marker_group_name,
+                &system_paths.token_path(),
+                &system_paths.mount_root(),
                 shutdown_sender.clone(),
             )),
+
             token_refresher: Arc::new(TokenRefresher::new(
                 Arc::clone(&log),
-                token_path,
+                &system_paths.token_path(),
                 Arc::clone(&permissions),
                 file_writer,
-                Arc::clone(&os),
-                service_group_name,
+                os,
             )),
             listener_factory: CreateListener::new(
                 Arc::clone(&log),
-                socket_path,
+                &system_paths.douglas_socket_path("bract"),
                 Arc::clone(&file_deleter),
                 Arc::clone(&permissions),
-                unix_domain_socket,
-                service_group_name,
+                Arc::clone(&unix_domain_socket),
             ),
             credentials: Arc::clone(&credentials),
-            service_user_name: service_user_name.to_string(),
-            service_group_name: service_group_name.to_string(),
-            marker_group_name: marker_group_name.to_string(),
             shutdown_sender,
         }
     }
@@ -418,8 +442,6 @@ impl Server {
     pub fn start(&self) -> Result<(), ServerError> {
         self.log.info("Starting server…");
         self.log.info("Verifying permissions");
-        self.assert_root()?;
-
         self.log.info("Verifying initialization complete");
         self.assert_initalized()?;
         self.log.info("Refreshing token");
@@ -438,6 +460,7 @@ impl Server {
 
             let token_refresh = Self::token_refresh_task(
                 Arc::clone(&self.token_refresher),
+                Arc::clone(&self.log),
                 self.shutdown_sender.subscribe(),
             );
             let request_handler = Self::request_handler_task(
@@ -459,7 +482,7 @@ impl Server {
     }
 
     async fn request_handler_task(
-        listener: Box<dyn Listener>,
+        listener: Box<dyn Listener + Sync + Send>,
         log: Arc<dyn Logger + Sync + Send>,
         handler: Arc<RequestHandler>,
     ) -> Result<(), ServerError> {
@@ -500,8 +523,10 @@ impl Server {
 
     async fn token_refresh_task(
         token_refresher: Arc<TokenRefresher>,
+        log: Arc<dyn Logger + Sync + Send>,
         mut shutdown_rceiver: broadcast::Receiver<()>,
     ) -> Result<(), ServerError> {
+        log.info("Starting refresh task…");
         loop {
             tokio::select! {
                 _ = time::sleep(Duration::from_secs(FIVE_MINUTES)) => {
@@ -515,19 +540,11 @@ impl Server {
         Ok(())
     }
 
-    fn assert_root(&self) -> Result<(), ServerError> {
-        if self.credentials.is_root() {
-            Ok(())
-        } else {
-            self.log.error("Not root!");
-            Err(ServerError::NotRootError)
-        }
-    }
-
+    // TODO: tone it down
     fn assert_initalized(&self) -> Result<(), ServerError> {
-        if self.credentials.user_exists(&self.service_user_name)
-            && self.credentials.group_exists(&self.service_group_name)
-            && self.credentials.group_exists(&self.marker_group_name)
+        if self.credentials.user_exists(constants::RADICLE_USER)
+            && self.credentials.group_exists(constants::RADICLE_GROUP)
+            && self.credentials.group_exists(constants::DOUGLAS_GROUP)
         {
             Ok(())
         } else {

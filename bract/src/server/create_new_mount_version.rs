@@ -1,9 +1,10 @@
+use super::Response;
 use super::token_validator::TokenValidator;
 use super::version_manager::VersionManager;
-use super::{ClientErrorDisplay, Response};
 use crate::version::Version;
 use log::Logger;
 use std::sync::Arc;
+use utils::ClientErrorDisplay;
 
 pub(super) struct CreateNewMountVersion {
     log: Arc<dyn Logger + Sync + Send>,
@@ -34,7 +35,7 @@ impl CreateNewMountVersion {
                 .version_manager
                 .is_initialized(&service_name, &mount_name)
             {
-                match or_log_and_return_error!(
+                match or_log_and_return_response_error!(
                     self.log => warn,
                     self.version_manager.versions(&service_name, &mount_name)
                 )
@@ -47,7 +48,7 @@ impl CreateNewMountVersion {
                 Version(0)
             };
 
-            let path = or_log_and_return_error!(self.log => warn,
+            let path = or_log_and_return_response_error!(self.log => warn,
                 self.version_manager.create(
                     &service_name,
                     &mount_name,
@@ -208,13 +209,7 @@ mod tests {
                     "/tmp/mount_root/bar/baz/v0",
                     "doug-bar",
                     "doug-bar",
-                    Modes::OwnerReadWriteGroupReadWrite,
-                )
-                .expect_ownership_and_mode_to_be_set(
-                    "/tmp/mount_root/bar/baz/current",
-                    "doug-bar",
-                    "doug-bar",
-                    Modes::OwnerReadWriteGroupReadWrite,
+                    Modes::OwnerReadWriteExecuteGroupReadWriteExecute,
                 );
 
             links.expect_create_with(
@@ -284,13 +279,7 @@ mod tests {
                     "/tmp/mount_root/bar/baz/v0",
                     "doug-bar",
                     "doug-bar",
-                    Modes::OwnerReadWriteGroupReadWrite,
-                )
-                .expect_ownership_and_mode_to_be_set(
-                    "/tmp/mount_root/bar/baz/current",
-                    "doug-bar",
-                    "doug-bar",
-                    Modes::OwnerReadWriteGroupReadWrite,
+                    Modes::OwnerReadWriteExecuteGroupReadWriteExecute,
                 );
 
             links.expect_create_with(
@@ -342,19 +331,12 @@ mod tests {
                 .given_does_not_exist("/tmp/mount_root/bar/baz/v1")
                 .expect_create_folder_recursively_with("/tmp/mount_root/bar/baz/v1");
 
-            permissions
-                .expect_ownership_and_mode_to_be_set(
-                    "/tmp/mount_root/bar/baz/v1",
-                    "doug-bar",
-                    "doug-bar",
-                    Modes::OwnerReadWriteGroupReadWrite,
-                )
-                .expect_ownership_and_mode_to_be_set(
-                    "/tmp/mount_root/bar/baz/current",
-                    "doug-bar",
-                    "doug-bar",
-                    Modes::OwnerReadWriteGroupReadWrite,
-                );
+            permissions.expect_ownership_and_mode_to_be_set(
+                "/tmp/mount_root/bar/baz/v1",
+                "doug-bar",
+                "doug-bar",
+                Modes::OwnerReadWriteExecuteGroupReadWriteExecute,
+            );
 
             folder.given_folder_entries(
                 "/tmp/mount_root/bar/baz",

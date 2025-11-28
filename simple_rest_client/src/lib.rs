@@ -18,6 +18,28 @@ pub enum RestClientError {
     General(String),
 }
 
+impl PartialEq for RestClientError {
+    fn eq(&self, other: &Self) -> bool {
+        match self {
+            RestClientError::Stream(left) => {
+                if let RestClientError::Stream(right) = other {
+                    left.to_string() == right.to_string()
+                } else {
+                    false
+                }
+            }
+            RestClientError::Client(left) => {
+                if let RestClientError::Client(right) = other {
+                    left.to_string() == right.to_string()
+                } else {
+                    false
+                }
+            }
+            _ => other == self,
+        }
+    }
+}
+
 #[derive(Debug, PartialEq)]
 pub enum Request {
     Delete {
@@ -684,7 +706,7 @@ mod tests {
             .write(b"GET HTTP://localhost")
             .write(b"/ HTTP/1.1\r\n\r\n")
             .read(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
-            .read_error(std::io::Error::new(std::io::ErrorKind::Other, "oops"))
+            .read_error(std::io::Error::other("oops"))
             .build();
         let io = TokioIo::new(io);
 

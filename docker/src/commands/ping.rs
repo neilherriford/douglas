@@ -21,7 +21,7 @@ impl Parser<PingResult> for PingParser {
     type ParseError = PingParserError;
 
     fn parse(&self, input: String) -> Result<PingResult, Self::ParseError> {
-        if input == "ok" {
+        if input == "OK" {
             Ok(PingResult::Ok)
         } else {
             Ok(PingResult::Error(format!(

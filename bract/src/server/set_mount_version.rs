@@ -1,9 +1,10 @@
+use super::Response;
 use super::token_validator::TokenValidator;
 use super::version_manager::VersionManager;
-use super::{ClientErrorDisplay, Response};
 use crate::version::Version;
 use log::Logger;
 use std::sync::Arc;
+use utils::ClientErrorDisplay;
 
 pub(super) struct SetMountVersion {
     log: Arc<dyn Logger + Sync + Send>,
@@ -37,7 +38,7 @@ impl SetMountVersion {
         ));
 
         self.token.perform_if_valid(token, move || {
-            let path = or_log_and_return_error!(
+            let path = or_log_and_return_response_error!(
                 self.log => warn,
                 self.version_manager.activate(
                     &service_name,

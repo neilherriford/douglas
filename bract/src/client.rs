@@ -5,18 +5,24 @@ use futures::{SinkExt, StreamExt};
 use log::Logger;
 use serde::Serialize;
 use std::io::ErrorKind;
-use std::{
-    path::{Path, PathBuf},
-    sync::Arc,
-};
+use std::path::{Path, PathBuf};
 use thiserror::Error;
 use tokio::net::UnixStream;
 use tokio_serde::Framed as SerdeFramed;
 use tokio_serde::formats::Json;
 use tokio_util::codec::{Framed, LengthDelimitedCodec};
 
+pub enum IoOperation<'a> {
+    WriteFile {
+        relative_path: &'a Path,
+        contents: &'a str,
+    },
+}
+
 #[derive(Error, Debug)]
 pub enum ClientError {
+    #[error("Missing socket. Has the system been initialized?")]
+    MissingSocket,
     #[error("Missing token. Has the system been initialized?")]
     MissingToken,
     #[error("Invalid token")]
@@ -25,8 +31,12 @@ pub enum ClientError {
     ConnectionRefused,
     #[error("Server closed connection without responding")]
     NoResponse,
-    #[error("Server returned an unexpected response")]
-    UnexpectedResponse,
+    #[error("Server returned an unexpected response, expected {expected} but received {received}")]
+    UnexpectedResponse {
+        expected: String,
+        received: String,
+        details: String,
+    },
     #[error("Error: {0}")]
     Error(String),
 }
@@ -34,7 +44,9 @@ pub enum ClientError {
 #[derive(Debug)]
 pub struct Credential {
     pub user: String,
+    pub user_id: u32,
     pub group: String,
+    pub group_id: u32,
 }
 
 #[derive(Debug, Serialize)]
@@ -52,29 +64,30 @@ type Transport = SerdeFramed<
 >;
 
 pub struct Client {
-    log: Arc<dyn Logger>,
-    file_reader: Arc<dyn FileReader>,
+    log: Box<dyn Logger>,
+    file_reader: Box<dyn FileReader>,
     socket_path: PathBuf,
     token_path: PathBuf,
 }
 
 impl Client {
     pub fn new(
-        log: Arc<dyn Logger>,
-        file_reader: Arc<dyn FileReader>,
-        socket_path: &Path,
-        token_path: &Path,
+        log: Box<dyn Logger>,
+        file_reader: Box<dyn FileReader>,
+        socket_path: PathBuf,
+        token_path: PathBuf,
     ) -> Self {
         Self {
-            log: Arc::clone(&log),
+            log,
             file_reader,
-            token_path: token_path.to_path_buf(),
-            socket_path: socket_path.to_path_buf(),
+            token_path,
+            socket_path,
         }
     }
 
     fn get_token(&self) -> Result<String, ClientError> {
         let token_path = self.token_path.as_path();
+
         if !self.file_reader.exists(token_path) {
             return Err(ClientError::MissingToken);
         }
@@ -85,19 +98,11 @@ impl Client {
         }
     }
 
-    fn create_client_error_from_response(&self, response: ServerResponse) -> ClientError {
-        match response {
-            ServerResponse::Error(err) => ClientError::Error(err),
-            ServerResponse::InvalidToken => ClientError::InvalidToken,
-            _ => ClientError::UnexpectedResponse,
-        }
-    }
-
     pub async fn active_mount_version(
         &self,
         service_name: &str,
         mount_name: &str,
-    ) -> Result<Mount, ClientError> {
+    ) -> Result<Option<Mount>, ClientError> {
         let response = self
             .request(ServerRequest::ActiveMountVersion {
                 token: self.get_token()?,
@@ -106,19 +111,14 @@ impl Client {
             })
             .await?;
 
-        if let ServerResponse::MountSet {
-            name,
-            version,
-            path,
-        } = response
-        {
-            Ok(Mount {
-                name,
+        match response {
+            ServerResponse::MountVersionListed { version, path } => Ok(Some(Mount {
+                name: mount_name.into(),
                 version,
                 path,
-            })
-        } else {
-            Err(self.create_client_error_from_response(response))
+            })),
+            ServerResponse::NoActiveMountVersion => Ok(None),
+            _ => Err(self.create_unexpected_response("MountVersionListed", response)),
         }
     }
 
@@ -130,10 +130,21 @@ impl Client {
             })
             .await?;
 
-        if let ServerResponse::CredentialsCreated { user, group } = response {
-            Ok(Credential { user, group })
+        if let ServerResponse::CredentialsCreated {
+            user,
+            user_id,
+            group,
+            group_id,
+        } = response
+        {
+            Ok(Credential {
+                user,
+                user_id,
+                group,
+                group_id,
+            })
         } else {
-            Err(self.create_client_error_from_response(response))
+            Err(self.create_unexpected_response("CredentialsCreated", response))
         }
     }
 
@@ -162,7 +173,7 @@ impl Client {
                 path,
             })
         } else {
-            Err(self.create_client_error_from_response(response))
+            Err(self.create_unexpected_response("MountSet", response))
         }
     }
 
@@ -191,7 +202,7 @@ impl Client {
                 path,
             })
         } else {
-            Err(self.create_client_error_from_response(response))
+            Err(self.create_unexpected_response("MountSet", response))
         }
     }
 
@@ -211,7 +222,7 @@ impl Client {
         if let ServerResponse::MountVersionsListed(versions) = response {
             Ok(versions)
         } else {
-            Err(self.create_client_error_from_response(response))
+            Err(self.create_unexpected_response("MountVersionsListed", response))
         }
     }
 
@@ -242,7 +253,7 @@ impl Client {
                 path,
             })
         } else {
-            Err(self.create_client_error_from_response(response))
+            Err(self.create_unexpected_response("MountSet", response))
         }
     }
 
@@ -265,7 +276,37 @@ impl Client {
                 services,
             })
         } else {
-            Err(self.create_client_error_from_response(response))
+            Err(self.create_unexpected_response("Status", response))
+        }
+    }
+
+    pub async fn mount_io(
+        &self,
+        service_name: &str,
+        mount_name: &str,
+        operation: IoOperation<'_>,
+    ) -> Result<(), ClientError> {
+        match operation {
+            IoOperation::WriteFile {
+                relative_path,
+                contents,
+            } => {
+                let response = self
+                    .request(ServerRequest::WriteToMount {
+                        token: self.get_token()?,
+                        service_name: service_name.to_string(),
+                        mount_name: mount_name.to_string(),
+                        relative_path: relative_path.to_owned(),
+                        contents: contents.to_string(),
+                    })
+                    .await?;
+
+                if let ServerResponse::WroteToMount = response {
+                    Ok(())
+                } else {
+                    Err(self.create_unexpected_response("WroteToMount", response))
+                }
+            }
         }
     }
 
@@ -279,7 +320,7 @@ impl Client {
         if let ServerResponse::ShuttingDown = response {
             Ok(())
         } else {
-            Err(self.create_client_error_from_response(response))
+            Err(self.create_unexpected_response("ShuttingDown", response))
         }
     }
 
@@ -305,10 +346,32 @@ impl Client {
                 }
             }
             Err(err) => match err.kind() {
-                ErrorKind::NotFound => Err(ClientError::MissingToken),
+                ErrorKind::NotFound => Err(ClientError::MissingSocket),
                 ErrorKind::ConnectionRefused => Err(ClientError::ConnectionRefused),
                 _ => Err(ClientError::Error(format!("{:?}", err))),
             },
+        }
+    }
+
+    fn create_unexpected_response(&self, expected: &str, response: ServerResponse) -> ClientError {
+        let received = match response {
+            ServerResponse::CredentialsCreated { .. } => "CredentialsCreated",
+            ServerResponse::MountSet { .. } => "MountSet",
+            ServerResponse::MountVersionListed { .. } => "MountVersionListed",
+            ServerResponse::NoActiveMountVersion => "NoActiveMountVersion",
+            ServerResponse::MountVersionsListed(_) => "MountVersionsListed",
+            ServerResponse::InvalidToken => "InvalidToken",
+            ServerResponse::Status { .. } => "Status",
+            ServerResponse::Error(_) => "Error",
+            ServerResponse::ShuttingDown => "ShuttingDown",
+            ServerResponse::Stopped => "Stopped",
+            ServerResponse::WroteToMount => "WroteToMount",
+        };
+
+        ClientError::UnexpectedResponse {
+            expected: expected.to_string(),
+            received: received.to_string(),
+            details: format!("{response:?}"),
         }
     }
 }

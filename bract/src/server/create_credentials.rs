@@ -1,32 +1,31 @@
-use super::{ClientErrorDisplay, Response, token_validator::TokenValidator};
+use super::{Response, token_validator::TokenValidator};
 use crate::encoding::safe_prefixed_credential_name;
+use config::constants;
 use credentials::{Credentials, CredentialsError};
 use log::Logger;
 use std::sync::Arc;
+use utils::ClientErrorDisplay;
 
 pub(super) struct CreateCredentials {
     token: Arc<TokenValidator>,
     log: Arc<dyn Logger + Sync + Send>,
-    marker_group_name: String,
-    credentials: Arc<dyn Credentials + Sync + Send>,
+    credentials: Arc<dyn Credentials>,
 }
 impl CreateCredentials {
     pub fn new(
         log: Arc<dyn Logger + Sync + Send>,
         token_validator: Arc<TokenValidator>,
-        credentials: Arc<dyn Credentials + Sync + Send>,
-        marker_group_name: &str,
+        credentials: Arc<dyn Credentials>,
     ) -> Self {
         Self {
             token: token_validator,
             log,
             credentials,
-            marker_group_name: marker_group_name.to_string(),
         }
     }
 
     pub fn create(&self, token: String, service_name: String) -> Response {
-        or_log_and_return_error!(
+        or_log_and_return_response_error!(
             self.log => error,
             self.assert_marker_group_exists());
 
@@ -35,39 +34,35 @@ impl CreateCredentials {
         self.log
             .info(&format!("Creating credentials for {}", service_name));
         self.token.perform_if_valid(token, move || {
-            or_log_and_return_error!(
+            let group_id = or_log_and_return_response_error!(
                 self.log => warn,
                 self.credentials.create_group(&group_name));
-            or_log_and_return_error!(
+            let user_id = or_log_and_return_response_error!(
                 self.log => warn,
                 self.credentials.create_user(
                     &user_name,
                     &group_name,
-                    vec![self.marker_group_name.to_string()],
+                    vec![constants::DOUGLAS_GROUP.to_string()],
                 )
             );
 
             Response::CredentialsCreated {
                 user: user_name.clone(),
+                user_id,
                 group: group_name.clone(),
+                group_id,
             }
         })
     }
 
     fn assert_marker_group_exists(&self) -> Result<(), CredentialsError> {
-        if self.credentials.group_exists(&self.marker_group_name) {
+        if self.credentials.group_exists(constants::DOUGLAS_GROUP) {
             Ok(())
         } else {
             Err(CredentialsError::GroupNotFoundError {
-                name: self.marker_group_name.to_string(),
+                name: constants::DOUGLAS_GROUP.to_string(),
             })
         }
-    }
-}
-
-impl ClientErrorDisplay for CredentialsError {
-    fn to_client_string(&self) -> String {
-        "Could not create credentials".to_string()
     }
 }
 
@@ -93,20 +88,19 @@ mod tests {
                 token_path,
             ));
 
-            CreateCredentials::new(
-                logger.clone(),
-                token_validator.clone(),
-                credentials.clone(),
-                "foo-group",
-            )
+            CreateCredentials::new(logger.clone(), token_validator.clone(), credentials.clone())
         }
 
-        fn given_group_created(credentials: &mut MockCredentials, expected_group_name: &str) {
+        fn given_group_created(
+            credentials: &mut MockCredentials,
+            expected_group_name: &str,
+            expeced_gid: u32,
+        ) {
             let expected_group_name = expected_group_name.to_string();
             credentials
                 .expect_create_group()
                 .with(predicate::eq(expected_group_name.clone()))
-                .returning(|_| Ok(()));
+                .returning(move |_| Ok(expeced_gid));
         }
 
         #[test]
@@ -117,7 +111,7 @@ mod tests {
             let token_path = Path::new("/tmp/token");
 
             logger.expect_error().return_const(());
-            credentials.given_group_does_not_exist("foo-group");
+            credentials.given_group_does_not_exist("douglas");
 
             let actual = build(
                 Arc::new(logger),
@@ -143,7 +137,7 @@ mod tests {
                 .with(predicate::eq("Invalid token"))
                 .return_const(());
 
-            credentials.given_group_exists("foo-group");
+            credentials.given_group_exists("douglas");
             file_reader.given_can_read_all_with_contents("/tmp/token", "token");
 
             let actual = build(
@@ -168,7 +162,7 @@ mod tests {
             logger.expect_error().return_const(());
 
             file_reader.given_can_read_all_with_contents("/tmp/token", "token");
-            credentials.given_group_does_not_exist("foo-group");
+            credentials.given_group_does_not_exist("douglas");
 
             let actual = build(
                 Arc::new(logger),
@@ -193,7 +187,7 @@ mod tests {
 
             file_reader.given_can_read_all_with_contents("/tmp/token", "token");
             credentials
-                .given_group_exists("foo-group")
+                .given_group_exists("douglas")
                 .expect_create_group()
                 .with(predicate::eq("doug-foo"))
                 .returning(|_| Err(CredentialsError::InvalidName));
@@ -220,14 +214,14 @@ mod tests {
             logger.expect_warn().return_const(());
 
             file_reader.given_can_read_all_with_contents("/tmp/token", "token");
-            given_group_created(&mut credentials, "doug-foo");
+            given_group_created(&mut credentials, "doug-foo", 1337);
             credentials
-                .given_group_exists("foo-group")
+                .given_group_exists("douglas")
                 .expect_create_user()
                 .with(
                     predicate::eq("doug-foo"),
                     predicate::eq("doug-foo"),
-                    predicate::eq(vec!["foo-group".to_string()]),
+                    predicate::eq(vec!["douglas".to_string()]),
                 )
                 .returning(|_, _, _| Err(CredentialsError::InvalidName));
 
@@ -253,16 +247,16 @@ mod tests {
             logger.expect_warn().return_const(());
 
             file_reader.given_can_read_all_with_contents("/tmp/token", "token");
-            given_group_created(&mut credentials, "doug-foo");
+            given_group_created(&mut credentials, "doug-foo", 1337);
             credentials
-                .given_group_exists("foo-group")
+                .given_group_exists("douglas")
                 .expect_create_user()
                 .with(
                     predicate::eq("doug-foo"),
                     predicate::eq("doug-foo"),
-                    predicate::eq(vec!["foo-group".to_string()]),
+                    predicate::eq(vec!["douglas".to_string()]),
                 )
-                .returning(|_, _, _| Ok(()));
+                .returning(|_, _, _| Ok(42));
 
             let actual = build(
                 Arc::new(logger),
@@ -274,10 +268,10 @@ mod tests {
 
             assert!(matches!(
                     actual,
-                    Response::CredentialsCreated {
-                        user,
-                        group
-                    } if user =="doug-foo" && group == "doug-foo"));
+                    Response::CredentialsCreated {user,
+                        user_id,
+                        group,
+                        group_id } if user =="doug-foo" && user_id == 42 && group == "doug-foo" && group_id == 1337));
         }
     }
 }

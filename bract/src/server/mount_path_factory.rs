@@ -1,4 +1,3 @@
-use super::ClientErrorDisplay;
 use crate::encoding::safe_file_system_name;
 use crate::version::{Version, VersionParseError};
 use file_system::{FileSystemError, Folder, Links};
@@ -6,6 +5,7 @@ use std::fmt::Debug;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use thiserror::Error;
+use utils::ClientErrorDisplay;
 
 #[derive(Error, Debug)]
 pub(super) enum MountPathVersionError {
@@ -29,16 +29,12 @@ impl ClientErrorDisplay for MountPathVersionError {
 
 pub(super) struct MountPathFactory {
     root: PathBuf,
-    links: Arc<dyn Links + Sync + Send>,
-    folder: Arc<dyn Folder + Sync + Send>,
+    links: Arc<dyn Links>,
+    folder: Arc<dyn Folder>,
 }
 
 impl MountPathFactory {
-    pub fn new(
-        root: &Path,
-        folder: Arc<dyn Folder + Sync + Send>,
-        links: Arc<dyn Links + Sync + Send>,
-    ) -> Self {
+    pub fn new(root: &Path, folder: Arc<dyn Folder>, links: Arc<dyn Links>) -> Self {
         Self {
             root: root.to_path_buf(),
             folder,
@@ -85,14 +81,15 @@ impl MountPathFactory {
         &self,
         service_name: &str,
         mount_name: &str,
-    ) -> Result<Version, MountPathVersionError> {
+    ) -> Result<Option<Version>, MountPathVersionError> {
         let active_version_path = self.active_version_path(service_name, mount_name);
 
         if self.folder.exists(&active_version_path) {
             let version_path = self.links.read(active_version_path.as_path())?;
-            self.derive_version_from_path(version_path.as_path())
+            let version = self.derive_version_from_path(version_path.as_path())?;
+            Ok(Some(version))
         } else {
-            Err(MountPathVersionError::InvalidPath(active_version_path))
+            Ok(None)
         }
     }
 
@@ -219,11 +216,14 @@ mod tests {
             let links = MockLinks::new();
             let root = Path::new("/tmp/mount_root");
 
-            folder.given_does_not_exist("/tmp/mount_root/foo%20service/bar%3Amount/current");
+            folder
+                .given_does_not_exist("/tmp/mount_root/foo%20service/bar%3Amount/current")
+                .given_does_not_exist("/tmp/mount_root/foo%20service/bar%3Amount");
+
             let actual = build(root, Arc::new(folder), Arc::new(links))
                 .active_version("foo service", "bar:mount");
 
-            assert!(matches!(actual, Err(MountPathVersionError::InvalidPath(_))));
+            assert!(matches!(actual, Ok(None)));
         }
 
         #[test]
@@ -333,6 +333,22 @@ mod tests {
         }
 
         #[test]
+        fn should_return_none_if_no_active_version() {
+            let mut folder = MockFolder::new();
+            let links = MockLinks::new();
+            let root = Path::new("/tmp/mount_root");
+
+            folder
+                .given_does_not_exist("/tmp/mount_root/foo%20service/bar%3Amount/current")
+                .given_exists("/tmp/mount_root/foo%20service/bar%3Amount");
+
+            let actual = build(root, Arc::new(folder), Arc::new(links))
+                .active_version("foo service", "bar:mount");
+
+            assert!(matches!(actual, Ok(None)));
+        }
+
+        #[test]
         fn should_deterime_active_version() {
             let mut folder = MockFolder::new();
             let mut links = MockLinks::new();
@@ -359,7 +375,7 @@ mod tests {
 
             assert!(matches!(
                 actual,
-                Ok(version) if version == Version(5)
+                Ok(version) if version == Some(Version(5))
             ));
         }
     }

@@ -7,20 +7,18 @@ use std::sync::Arc;
 pub(super) struct CreateListener {
     log: Arc<dyn Logger + Sync + Send>,
     socket_path: PathBuf,
-    file_deleter: Arc<dyn FileDeleter + Sync + Send>,
-    permissions: Arc<dyn Permissions + Sync + Send>,
-    unix_domain_socket: Arc<dyn UnixDomainSocket + 'static>,
-    owning_group_name: String,
+    file_deleter: Arc<dyn FileDeleter>,
+    permissions: Arc<dyn Permissions>,
+    unix_domain_socket: Arc<dyn UnixDomainSocket>,
 }
 
 impl CreateListener {
     pub fn new(
         log: Arc<dyn Logger + Sync + Send>,
         socket_path: &Path,
-        file_deleter: Arc<dyn FileDeleter + Sync + Send>,
-        permissions: Arc<dyn Permissions + Sync + Send>,
-        unix_domain_socket: Arc<dyn UnixDomainSocket + 'static>,
-        owning_group_name: &str,
+        file_deleter: Arc<dyn FileDeleter>,
+        permissions: Arc<dyn Permissions>,
+        unix_domain_socket: Arc<dyn UnixDomainSocket>,
     ) -> Self {
         Self {
             log,
@@ -28,7 +26,6 @@ impl CreateListener {
             file_deleter,
             permissions,
             unix_domain_socket,
-            owning_group_name: owning_group_name.to_string(),
         }
     }
 
@@ -44,7 +41,7 @@ impl CreateListener {
         self.permissions.change_user_and_group_ownership(
             &self.socket_path,
             credentials::ROOT_USER_NAME,
-            &self.owning_group_name,
+            config::constants::RADICLE_GROUP,
         )?;
         self.permissions
             .change_mode(&self.socket_path, &Modes::OwnerReadWriteGroupReadWrite)?;
@@ -90,7 +87,6 @@ mod tests {
                 Arc::new(file_deleter),
                 Arc::new(permissions),
                 Arc::new(unix_domain_socket),
-                "foo-owning-group",
             )
             .create();
 
@@ -118,7 +114,6 @@ mod tests {
                 Arc::new(file_deleter),
                 Arc::new(permissions),
                 Arc::new(unix_domain_socket),
-                "foo-owning-group",
             )
             .create();
 
@@ -141,7 +136,7 @@ mod tests {
                 .with(
                     predicate::eq(Path::new("/tmp/socket")),
                     predicate::eq("root"),
-                    predicate::eq("foo-owning-group"),
+                    predicate::eq("doug-radicle"),
                 )
                 .returning(|_, _, _| Err(FileSystemError::ExpectedFileError));
 
@@ -151,7 +146,6 @@ mod tests {
                 Arc::new(file_deleter),
                 Arc::new(permissions),
                 Arc::new(unix_domain_socket),
-                "foo-owning-group",
             )
             .create();
 
@@ -169,7 +163,7 @@ mod tests {
             log.expect_info().return_const(());
             file_deleter.expect_file_to_be_deleted("/tmp/socket");
             unix_domain_socket.expect_bind_with("/tmp/socket", || Box::new(MockListener::new()));
-            permissions.expect_ownership_to_be_set("/tmp/socket", "root", "foo-owning-group");
+            permissions.expect_ownership_to_be_set("/tmp/socket", "root", "doug-radicle");
             permissions
                 .expect_change_mode()
                 .with(
@@ -184,7 +178,6 @@ mod tests {
                 Arc::new(file_deleter),
                 Arc::new(permissions),
                 Arc::new(unix_domain_socket),
-                "foo-owning-group",
             )
             .create();
 
@@ -205,7 +198,7 @@ mod tests {
             permissions.expect_ownership_and_mode_to_be_set(
                 "/tmp/socket",
                 "root",
-                "foo-owning-group",
+                "doug-radicle",
                 Modes::OwnerReadWriteGroupReadWrite,
             );
 
@@ -215,7 +208,6 @@ mod tests {
                 Arc::new(file_deleter),
                 Arc::new(permissions),
                 Arc::new(unix_domain_socket),
-                "foo-owning-group",
             )
             .create();
 

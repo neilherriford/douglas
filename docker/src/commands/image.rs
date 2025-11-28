@@ -1,6 +1,6 @@
 use super::json_parser::JsonParserError;
 use super::{assert_no_docker_errors, assert_non_empty_string_argument, assert_okay_with_body};
-use crate::{DockerError, Id, Version};
+use crate::{DockerError, Id, ImageName};
 use crate::{Image, Parser};
 use serde_json::from_value;
 use serde_json::value::Value as Json;
@@ -44,15 +44,14 @@ impl ImageCommand {
         Ok(from_value(json)?)
     }
 
-    pub async fn find_by_name(
-        &mut self,
-        name: &str,
-        version: Version,
-    ) -> Result<Image, DockerError> {
-        assert_non_empty_string_argument("name", name)?;
+    pub async fn find_by_name(&mut self, image_name: &ImageName) -> Result<Image, DockerError> {
+        assert_non_empty_string_argument("name", &image_name.name)?;
 
         let request = Request::Get {
-            path: format!("/images/{name}:{version}/json"),
+            path: format!(
+                "/images/{}/{}:{}/json",
+                image_name.namespace, image_name.name, image_name.version
+            ),
             headers: vec![],
         };
 
@@ -83,11 +82,17 @@ impl ImageCommand {
             .map_err(Into::into)
     }
 
-    pub async fn pull(&mut self, name: &str, version: Version) -> Result<Image, DockerError> {
+    pub async fn pull(&mut self, image_name: &ImageName) -> Result<Image, DockerError> {
         let request = Request::Post {
             path: simple_rest_client::create_path_and_query_string(
                 "/images/create",
-                HashMap::from([("fromImage", name), ("tag", &version.to_string())]),
+                HashMap::from([
+                    (
+                        "fromImage",
+                        format!("{}/{}", image_name.namespace, image_name.name).as_str(),
+                    ),
+                    ("tag", &image_name.version.to_string()),
+                ]),
             ),
             body: None,
             headers: vec![],
@@ -102,7 +107,7 @@ impl ImageCommand {
         let chunks = self.chunked_parser.parse(body)?;
         assert_no_docker_errors(chunks)?;
 
-        self.find_by_name(name, version).await
+        self.find_by_name(image_name).await
     }
 }
 
@@ -307,7 +312,7 @@ mod tests {
 
     mod pull {
         use crate::{
-            DockerError, Id, Image, Tag, Version,
+            DockerError, Id, Image, ImageName, Tag,
             commands::{
                 ImageCommand,
                 json_parser::{ChunkedJsonParser, JsonParser},
@@ -320,7 +325,7 @@ mod tests {
         async fn shoud_error_if_received_got_created() {
             let mut mock_rest_client = MockRestClient::new();
             mock_rest_client.expect_post_and_return_created(
-                "/images/create?tag=latest&fromImage=foo",
+                "/images/create?tag=latest&fromImage=namespace%2Ffoo",
                 vec![],
                 None,
                 None,
@@ -332,7 +337,7 @@ mod tests {
                 Arc::new(ChunkedJsonParser::new()),
             );
 
-            let result = command.pull("foo", Version::Latest).await;
+            let result = command.pull(&ImageName::latest("namespace", "foo")).await;
 
             assert!(matches!(
                 result,
@@ -344,7 +349,7 @@ mod tests {
         async fn shoud_error_if_received_got_no_content() {
             let mut mock_rest_client = MockRestClient::new();
             mock_rest_client.expect_post_and_return_no_content(
-                "/images/create?tag=latest&fromImage=foo",
+                "/images/create?tag=latest&fromImage=namespace%2Ffoo",
                 vec![],
                 None,
             );
@@ -355,7 +360,7 @@ mod tests {
                 Arc::new(ChunkedJsonParser::new()),
             );
 
-            let result = command.pull("foo", Version::Latest).await;
+            let result = command.pull(&ImageName::latest("namespace", "foo")).await;
 
             assert!(matches!(
                 result,
@@ -367,7 +372,7 @@ mod tests {
         async fn shoud_error_if_received_error() {
             let mut mock_rest_client = MockRestClient::new();
             mock_rest_client.expect_post_and_return_internal_server_error(
-                "/images/create?tag=latest&fromImage=foo",
+                "/images/create?tag=latest&fromImage=namespace%2Ffoo",
                 vec![],
                 None,
             );
@@ -378,7 +383,7 @@ mod tests {
                 Arc::new(ChunkedJsonParser::new()),
             );
 
-            let result = command.pull("foo", Version::Latest).await;
+            let result = command.pull(&ImageName::latest("namespace", "foo")).await;
 
             assert!(matches!(
                 result,
@@ -390,7 +395,7 @@ mod tests {
         async fn shoud_error_if_received_missing() {
             let mut mock_rest_client = MockRestClient::new();
             mock_rest_client.expect_post_and_return_not_found(
-                "/images/create?tag=latest&fromImage=foo",
+                "/images/create?tag=latest&fromImage=namespace%2Ffoo",
                 vec![],
                 None,
             );
@@ -401,7 +406,7 @@ mod tests {
                 Arc::new(ChunkedJsonParser::new()),
             );
 
-            let result = command.pull("foo", Version::Latest).await;
+            let result = command.pull(&ImageName::latest("namespace", "foo")).await;
 
             assert!(matches!(result, Err(DockerError::NotFoundError)));
         }
@@ -410,7 +415,7 @@ mod tests {
         async fn should_error_if_docker_error() {
             let mut mock_rest_client = MockRestClient::new();
             mock_rest_client.expect_post_and_return_okay(
-                "/images/create?tag=latest&fromImage=foo",
+                "/images/create?tag=latest&fromImage=namespace%2Ffoo",
                 vec![],
                 None,
                 Some(r#"{"error":"Oops all errors"}"#.to_string()),
@@ -422,7 +427,7 @@ mod tests {
                 Arc::new(ChunkedJsonParser::new()),
             );
 
-            let result = command.pull("foo", Version::Latest).await;
+            let result = command.pull(&ImageName::latest("namespace", "foo")).await;
 
             assert!(matches!(result, Err(DockerError::ApiError(msg)) if msg == "Oops all errors"));
         }
@@ -431,13 +436,13 @@ mod tests {
         async fn should_pull_latest() {
             let mut mock_rest_client = MockRestClient::new();
             mock_rest_client.expect_post_and_return_okay(
-                "/images/create?tag=latest&fromImage=foo",
+                "/images/create?tag=latest&fromImage=namespace%2Ffoo",
                 vec![],
                 None,
                 Some(r#"{"status":"Pulling from library/foo","id":"latest"}"#.to_string()),
             );
             mock_rest_client.expect_get_and_return_okay(
-                "/images/foo:latest/json",
+                "/images/namespace/foo:latest/json",
                 Some(
                     r#"{
                         "Id": "alg:123456",
@@ -454,7 +459,7 @@ mod tests {
                 Arc::new(ChunkedJsonParser::new()),
             );
 
-            let result = command.pull("foo", Version::Latest).await;
+            let result = command.pull(&ImageName::latest("namespace", "foo")).await;
             let expected = Image {
                 id: Id {
                     algorithm: "alg".to_string(),
@@ -475,13 +480,13 @@ mod tests {
         async fn should_pull_specific_version() {
             let mut mock_rest_client = MockRestClient::new();
             mock_rest_client.expect_post_and_return_okay(
-                "/images/create?tag=1.2.3&fromImage=foo",
+                "/images/create?tag=1.2.3&fromImage=namespace%2Ffoo",
                 vec![],
                 None,
                 Some(r#"{"status":"Pulling from library/foo","id":"latest"}"#.to_string()),
             );
             mock_rest_client.expect_get_and_return_okay(
-                "/images/foo:1.2.3/json",
+                "/images/namespace/foo:1.2.3/json",
                 Some(
                     r#"{
                         "Id": "alg:123456",
@@ -499,7 +504,7 @@ mod tests {
             );
 
             let result = command
-                .pull("foo", Version::Specific("1.2.3".to_string()))
+                .pull(&ImageName::specific("namespace", "foo", "1.2.3"))
                 .await;
 
             let expected = Image {
@@ -535,7 +540,9 @@ mod tests {
                 Arc::new(ChunkedJsonParser::new()),
             );
 
-            let result = command.find_by_name("", Version::Latest).await;
+            let result = command
+                .find_by_name(&ImageName::latest("namespace", ""))
+                .await;
 
             assert!(matches!(
                 result,
@@ -550,14 +557,17 @@ mod tests {
         #[tokio::test]
         async fn should_error_if_created() {
             let mut mock_rest_client = MockRestClient::new();
-            mock_rest_client.expect_get_and_return_created_with_none("/images/foo:latest/json");
+            mock_rest_client
+                .expect_get_and_return_created_with_none("/images/namespace/foo:latest/json");
             let mut command = ImageCommand::new(
                 Arc::new(tokio::sync::Mutex::new(mock_rest_client)),
                 Arc::new(JsonParser::new()),
                 Arc::new(ChunkedJsonParser::new()),
             );
 
-            let result = command.find_by_name("foo", Version::Latest).await;
+            let result = command
+                .find_by_name(&ImageName::latest("namespace", "foo"))
+                .await;
             assert!(matches!(
                 result,
                 Err(DockerError::UnexpectedResponseError { status: 201, .. })
@@ -567,7 +577,7 @@ mod tests {
         #[tokio::test]
         async fn should_error_if_no_content() {
             let mut mock_rest_client = MockRestClient::new();
-            mock_rest_client.expect_get_and_return_no_content("/images/foo:latest/json");
+            mock_rest_client.expect_get_and_return_no_content("/images/namespace/foo:latest/json");
 
             let mut command = ImageCommand::new(
                 Arc::new(tokio::sync::Mutex::new(mock_rest_client)),
@@ -575,7 +585,9 @@ mod tests {
                 Arc::new(ChunkedJsonParser::new()),
             );
 
-            let result = command.find_by_name("foo", Version::Latest).await;
+            let result = command
+                .find_by_name(&ImageName::latest("namespace", "foo"))
+                .await;
             assert!(matches!(
                 result,
                 Err(DockerError::UnexpectedResponseError { status: 204, .. })
@@ -585,7 +597,8 @@ mod tests {
         #[tokio::test]
         async fn should_error_if_error() {
             let mut mock_rest_client = MockRestClient::new();
-            mock_rest_client.expect_get_and_return_internal_server_error("/images/foo:latest/json");
+            mock_rest_client
+                .expect_get_and_return_internal_server_error("/images/namespace/foo:latest/json");
 
             let mut command = ImageCommand::new(
                 Arc::new(tokio::sync::Mutex::new(mock_rest_client)),
@@ -593,7 +606,9 @@ mod tests {
                 Arc::new(ChunkedJsonParser::new()),
             );
 
-            let result = command.find_by_name("foo", Version::Latest).await;
+            let result = command
+                .find_by_name(&ImageName::latest("namespace", "foo"))
+                .await;
             assert!(matches!(
                 result,
                 Err(DockerError::UnexpectedResponseError { status: 500, .. })
@@ -603,7 +618,7 @@ mod tests {
         #[tokio::test]
         async fn should_error_if_not_found() {
             let mut mock_rest_client = MockRestClient::new();
-            mock_rest_client.expect_get_and_return_not_found("/images/foo:latest/json");
+            mock_rest_client.expect_get_and_return_not_found("/images/namespace/foo:latest/json");
 
             let mut command = ImageCommand::new(
                 Arc::new(tokio::sync::Mutex::new(mock_rest_client)),
@@ -611,7 +626,9 @@ mod tests {
                 Arc::new(ChunkedJsonParser::new()),
             );
 
-            let result = command.find_by_name("foo", Version::Latest).await;
+            let result = command
+                .find_by_name(&ImageName::latest("namespace", "foo"))
+                .await;
             assert!(matches!(result, Err(DockerError::NotFoundError)));
         }
 
@@ -619,7 +636,7 @@ mod tests {
         async fn should_inspect_latest() {
             let mut mock_rest_client = MockRestClient::new();
             mock_rest_client.expect_get_and_return_okay(
-                "/images/foo:latest/json",
+                "/images/namespace/foo:latest/json",
                 Some(r#"{"Id": "alg:123456", "RepoTags":["foo:latest"]}"#.to_string()),
             );
 
@@ -629,7 +646,9 @@ mod tests {
                 Arc::new(ChunkedJsonParser::new()),
             );
 
-            let result = command.find_by_name("foo", Version::Latest).await;
+            let result = command
+                .find_by_name(&ImageName::latest("namespace", "foo"))
+                .await;
             let expected = Image {
                 id: Id {
                     algorithm: "alg".to_string(),
@@ -650,7 +669,7 @@ mod tests {
         async fn should_inspect_specific() {
             let mut mock_rest_client = MockRestClient::new();
             mock_rest_client.expect_get_and_return_okay(
-                "/images/foo:1.2.3/json",
+                "/images/namespace/foo:1.2.3/json",
                 Some(r#"{"Id": "alg:123456", "RepoTags":["foo:1.2.3"]}"#.to_string()),
             );
 
@@ -661,7 +680,7 @@ mod tests {
             );
 
             let result = command
-                .find_by_name("foo", Version::Specific("1.2.3".to_string()))
+                .find_by_name(&ImageName::specific("namespace", "foo", "1.2.3"))
                 .await;
 
             let expected = Image {

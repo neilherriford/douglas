@@ -12,6 +12,7 @@ use std::os::unix::fs::{PermissionsExt, chown, symlink};
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 use users::{get_group_by_name, get_user_by_name};
+use utils::ClientErrorDisplay;
 
 #[derive(Error, Debug)]
 pub enum FileSystemError {
@@ -31,6 +32,27 @@ pub enum FileSystemError {
     ExpectedFileError,
 }
 
+impl ClientErrorDisplay for FileSystemError {
+    fn to_client_string(&self) -> String {
+        "Could not create mount".to_string()
+    }
+}
+
+impl PartialEq for FileSystemError {
+    fn eq(&self, other: &Self) -> bool {
+        match self {
+            FileSystemError::IoError(left) => {
+                if let FileSystemError::IoError(right) = other {
+                    left.to_string() == right.to_string()
+                } else {
+                    false
+                }
+            }
+            _ => self == other,
+        }
+    }
+}
+
 #[repr(u32)]
 #[derive(PartialEq, Eq, Debug, Copy, Clone)]
 pub enum Modes {
@@ -38,7 +60,15 @@ pub enum Modes {
     OwnerReadWrite,
     OwnerReadWriteGroupRead,
     OwnerReadWriteGroupReadWrite,
+    OwnerReadWriteExecuteGroupReadWriteExecute,
     Other(u32),
+}
+
+pub fn path_to_string<T: AsRef<Path>>(path: T) -> String {
+    path.as_ref()
+        .to_str()
+        .unwrap_or("<Invalid path>")
+        .to_string()
 }
 
 impl From<Modes> for u32 {
@@ -48,6 +78,7 @@ impl From<Modes> for u32 {
             Modes::OwnerReadWrite => 0o600,
             Modes::OwnerReadWriteGroupRead => 0o640,
             Modes::OwnerReadWriteGroupReadWrite => 0o660,
+            Modes::OwnerReadWriteExecuteGroupReadWriteExecute => 0o770,
             Modes::Other(v) => v,
         }
     }
@@ -109,13 +140,13 @@ impl Entry {
 }
 
 #[cfg_attr(feature = "mock", mockall::automock)]
-pub trait FileWriter {
-    fn write_all(&self, path: &Path, contents: String) -> Result<(), FileSystemError>;
+pub trait FileWriter: Send + Sync {
+    fn write_all(&self, path: &Path, contents: &str) -> Result<(), FileSystemError>;
     fn exists(&self, path: &Path) -> bool;
 }
 
 #[cfg_attr(feature = "mock", mockall::automock)]
-pub trait FileReader {
+pub trait FileReader: Send + Sync {
     fn read_all(&self, path: &Path) -> Result<String, FileSystemError>;
     fn exists(&self, path: &Path) -> bool;
 }
@@ -136,7 +167,7 @@ impl MockFileReader {
 }
 
 #[cfg_attr(feature = "mock", mockall::automock)]
-pub trait FileDeleter {
+pub trait FileDeleter: Send + Sync {
     fn delete(&self, path: &Path) -> Result<(), FileSystemError>;
 }
 
@@ -168,7 +199,7 @@ impl LocalFileWriter {
 }
 
 impl FileWriter for LocalFileWriter {
-    fn write_all(&self, path: &Path, contents: String) -> Result<(), FileSystemError> {
+    fn write_all(&self, path: &Path, contents: &str) -> Result<(), FileSystemError> {
         let mut file = File::create(path)?;
         file.write_all(contents.as_bytes())?;
 
@@ -181,7 +212,7 @@ impl FileWriter for LocalFileWriter {
 }
 
 #[cfg_attr(feature = "mock", mockall::automock)]
-pub trait FileAppender {
+pub trait FileAppender: Send + Sync {
     fn append(&self, path: &Path, contents: String) -> Result<(), FileSystemError>;
     fn exists(&self, path: &Path) -> bool;
 }
@@ -197,6 +228,12 @@ impl LocalFileAppender {
 
 impl FileAppender for LocalFileAppender {
     fn append(&self, path: &Path, contents: String) -> Result<(), FileSystemError> {
+        if let Some(parent) = path.parent()
+            && !self.exists(parent)
+        {
+            return Err(FileSystemError::ParentNotFoundError(parent.to_path_buf()));
+        }
+
         let mut file = OpenOptions::new().create(true).append(true).open(path)?;
         file.write_all(contents.as_bytes())?;
 
@@ -259,7 +296,7 @@ impl FileRenamer for LocalFileRenamer {
 }
 
 #[cfg_attr(feature = "mock", mockall::automock)]
-pub trait Permissions {
+pub trait Permissions: Send + Sync {
     fn change_user_and_group_ownership(
         &self,
         path: &Path,
@@ -297,10 +334,8 @@ impl Permissions for LocalPermissions {
     }
 
     fn change_mode(&self, path: &Path, mode: &Modes) -> Result<(), FileSystemError> {
-        Ok(set_permissions(
-            path,
-            Perms::from_mode(mode.to_owned().into()),
-        )?)
+        let result = set_permissions(path, Perms::from_mode(mode.to_owned().into()));
+        Ok(result?)
     }
 }
 
@@ -407,7 +442,7 @@ impl MockUnixDomainSocket {
 }
 
 #[cfg_attr(feature = "mock", mockall::automock)]
-pub trait Links {
+pub trait Links: Send + Sync {
     fn create(&self, from: &Path, to: &Path) -> Result<(), FileSystemError>;
     fn read(&self, path: &Path) -> Result<PathBuf, FileSystemError>;
 }
@@ -499,14 +534,18 @@ impl Inspect for LocalInspect {
 }
 
 #[cfg_attr(feature = "mock", mockall::automock)]
-pub trait Folder {
+pub trait Folder: Send + Sync {
     fn canonicalize(&self, path: &Path) -> Result<PathBuf, FileSystemError>;
     fn create_recursively(&self, path: &Path) -> Result<PathBuf, FileSystemError>;
     fn entries(&self, path: &Path) -> Result<Vec<Entry>, FileSystemError>;
     fn exists(&self, path: &Path) -> bool;
     fn pop(&self, path: &Path) -> Option<String>;
     fn executable_root(&self) -> Result<PathBuf, FileSystemError>;
-    fn create_file(&self, path: &Path, name: &str) -> Result<(File, PathBuf), FileSystemError>;
+    fn create_file(&self, path: &Path) -> Result<File, FileSystemError>;
+    fn open_file_for_writing(&self, path: &Path) -> Result<File, FileSystemError>;
+    fn parent(&self, path: &Path) -> Option<PathBuf>;
+    fn combine(&self, left: &Path, right: &Path) -> PathBuf;
+    fn split(&self, path: &Path) -> Vec<PathBuf>;
 }
 
 #[derive(Default)]
@@ -525,6 +564,7 @@ impl Folder for LocalFolder {
 
     fn create_recursively(&self, path: &Path) -> Result<PathBuf, FileSystemError> {
         create_dir_all(path)?;
+
         self.canonicalize(path)
     }
 
@@ -549,6 +589,10 @@ impl Folder for LocalFolder {
             .map(|name| name.to_string_lossy().to_string())
     }
 
+    fn parent(&self, path: &Path) -> Option<PathBuf> {
+        path.parent().map(|parent| parent.to_path_buf())
+    }
+
     fn executable_root(&self) -> Result<PathBuf, FileSystemError> {
         let exe_path = std::env::current_exe()?;
         let path = exe_path.as_path();
@@ -559,13 +603,36 @@ impl Folder for LocalFolder {
         }
     }
 
-    fn create_file(&self, path: &Path, name: &str) -> Result<(File, PathBuf), FileSystemError> {
-        self.create_recursively(path)?;
-        let mut path = path.to_path_buf();
-        path.push(name);
+    fn create_file(&self, path: &Path) -> Result<File, FileSystemError> {
+        let parent = match self.parent(path) {
+            Some(parent) => parent,
+            None => return Err(FileSystemError::ParentNotFoundError(path.to_path_buf())),
+        };
+        self.create_recursively(&parent)?;
 
-        let file = File::create(path.clone())?;
-        Ok((file, path))
+        let file = File::create(path)?;
+        Ok(file)
+    }
+
+    fn combine(&self, left: &Path, right: &Path) -> PathBuf {
+        left.join(right).to_path_buf()
+    }
+
+    fn split(&self, path: &Path) -> Vec<PathBuf> {
+        path.components()
+            .filter_map(|component| {
+                if let std::path::Component::Normal(os_str) = component {
+                    Some(PathBuf::from(os_str))
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    fn open_file_for_writing(&self, path: &Path) -> Result<File, FileSystemError> {
+        let result = OpenOptions::new().create(false).append(true).open(path)?;
+        Ok(result)
     }
 }
 

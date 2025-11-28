@@ -1,31 +1,30 @@
 use chrono::Utc;
+use config::constants;
 use file_system::{FileAppender, Modes, Permissions};
 use log::Logger;
 use std::sync::Once;
 use std::{
-    fmt::Debug,
+    fmt::{Debug, Display},
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, Mutex},
 };
-
-use crate::constants;
 
 pub struct FileLogger {
     path: PathBuf,
-    file_appender: Arc<dyn FileAppender + Sync + Send>,
-    permissions: Arc<dyn Permissions + Sync + Send>,
+    file_appender: Mutex<Arc<dyn FileAppender>>,
+    permissions: Arc<dyn Permissions>,
     set_permissions: Once,
 }
 
 impl FileLogger {
     pub fn new(
         path: &Path,
-        file_appender: Arc<dyn FileAppender + Sync + Send>,
-        permissions: Arc<dyn Permissions + Sync + Send>,
+        file_appender: Arc<dyn FileAppender>,
+        permissions: Arc<dyn Permissions>,
     ) -> Self {
         Self {
             path: path.to_path_buf(),
-            file_appender,
+            file_appender: Mutex::new(file_appender),
             permissions,
             set_permissions: Once::new(),
         }
@@ -34,27 +33,41 @@ impl FileLogger {
     fn log(&self, flag: &str, message: &str) {
         let now = Utc::now().to_rfc3339();
 
-        if let Err(err) = self
-            .file_appender
-            .append(&self.path, format!("{now},{flag},{message}\n"))
-        {
-            eprintln!("Error writing log: '{err}' Original log entry: '{now},{flag},{message}'");
-        } else {
-            self.set_permissions.call_once(|| {
-                if let Err(err) = self.permissions.change_user_and_group_ownership(
-                    &self.path,
-                    credentials::ROOT_GROUP_NAME,
-                    constants::RADICLE_GROUP,
-                ) {
-                    eprintln!("Failed to set permissions on log file! {err}");
-                } else if let Err(err) = self
-                    .permissions
-                    .change_mode(&self.path, &Modes::OwnerReadWriteGroupRead)
+        match self.file_appender.lock() {
+            Ok(file_appender) => {
+                if let Err(err) =
+                    file_appender.append(&self.path, format!("{now},{flag},{message}\n"))
                 {
-                    eprintln!("Failed to set mode on log file! {err}");
-                };
-            });
+                    Self::print_log_to_std_error(err, &now, flag, message);
+                } else {
+                    self.set_log_file_permissions();
+                }
+            }
+            Err(err) => {
+                Self::print_log_to_std_error(err, &now, flag, message);
+            }
         }
+    }
+
+    fn set_log_file_permissions(&self) {
+        self.set_permissions.call_once(|| {
+            if let Err(err) = self.permissions.change_user_and_group_ownership(
+                &self.path,
+                credentials::ROOT_GROUP_NAME,
+                constants::RADICLE_GROUP,
+            ) {
+                eprintln!("Failed to set permissions on log file! {err}");
+            } else if let Err(err) = self
+                .permissions
+                .change_mode(&self.path, &Modes::OwnerReadWriteGroupRead)
+            {
+                eprintln!("Failed to set mode on log file! {err}");
+            }
+        });
+    }
+
+    fn print_log_to_std_error(err: impl Display, now: &str, flag: &str, message: &str) {
+        eprintln!("Error writing log: '{err}' Original log entry: '{now},{flag},{message}'");
     }
 }
 

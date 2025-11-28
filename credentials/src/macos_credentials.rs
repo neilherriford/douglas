@@ -64,15 +64,15 @@ impl std::fmt::Display for ObjectAttribute {
 }
 
 pub(crate) struct MacOSCredentials {
-    os: Arc<dyn Os + Sync + Send + 'static>,
+    os: Arc<dyn Os>,
     queries: Box<dyn Queries + Sync + Send + 'static>,
 }
 
 impl MacOSCredentials {
     #![allow(dead_code)]
-    pub fn new(os: Arc<dyn Os + Sync + Send + 'static>) -> Self {
+    pub fn new(os: Arc<dyn Os>) -> Self {
         Self {
-            os: os.clone(),
+            os,
             queries: Box::new(LocalQueries::new()),
         }
     }
@@ -87,7 +87,7 @@ impl MacOSCredentials {
         for arg in &args {
             arguments.push(arg.to_string())
         }
-        Ok(self.os.execute_with_output("dscl", arguments)?)
+        Ok(self.os.execute_with_output("dscl", arguments, Vec::new())?)
     }
 
     fn named_object_path(&self, name: &str, kind: ObjectKind) -> String {
@@ -189,8 +189,10 @@ impl Credentials for MacOSCredentials {
         name: &str,
         primary_group_name: &str,
         group_names: Vec<String>,
-    ) -> Result<(), CredentialsError> {
-        if !self.user_exists(name) {
+    ) -> Result<u32, CredentialsError> {
+        let uid = if let Some(uid) = self.queries.get_user_id(name) {
+            uid
+        } else {
             let uid = self.get_first_unused_id(ObjectKind::User, MINIMUM_ID)?;
 
             let primary_gid = self.get_group_id(primary_group_name).ok_or(
@@ -208,14 +210,15 @@ impl Credentials for MacOSCredentials {
             ] {
                 self.set_object_attribute(name, ObjectKind::User, user_setting.0, user_setting.1)?;
             }
-        }
+            uid
+        };
 
         let existing = self.group_memberships(name);
         for group_name in group_names.iter().filter(|name| !existing.contains(name)) {
             self.add_to_group(name, group_name)?;
         }
 
-        Ok(())
+        Ok(uid)
     }
 
     fn user_exists(&self, name: &str) -> bool {
@@ -231,9 +234,9 @@ impl Credentials for MacOSCredentials {
         Ok(())
     }
 
-    fn create_group(&self, name: &str) -> Result<(), CredentialsError> {
-        if self.group_exists(name) {
-            return Ok(());
+    fn create_group(&self, name: &str) -> Result<u32, CredentialsError> {
+        if let Some(gid) = self.queries.get_group_id(name) {
+            return Ok(gid);
         }
 
         let gid = self.get_first_unused_id(ObjectKind::Group, MINIMUM_ID)?;
@@ -245,7 +248,7 @@ impl Credentials for MacOSCredentials {
             gid.to_string(),
         )?;
 
-        Ok(())
+        Ok(gid)
     }
 
     fn group_exists(&self, name: &str) -> bool {
@@ -258,6 +261,10 @@ impl Credentials for MacOSCredentials {
 
     fn get_group_id(&self, name: &str) -> Option<u32> {
         self.queries.get_group_id(name)
+    }
+
+    fn get_user_id(&self, name: &str) -> Option<u32> {
+        self.queries.get_user_id(name)
     }
 
     fn delete_group(&self, name: &str) -> Result<(), CredentialsError> {
@@ -295,9 +302,6 @@ impl Credentials for MacOSCredentials {
 
 #[cfg(test)]
 mod tests {
-    static EMPTY_STDERR: &str = "";
-    static STATUS_SUCCESS: i32 = 0;
-
     mod is_root {
         use super::super::*;
         use crate::queries::MockQueries;
@@ -323,7 +327,6 @@ mod tests {
 
     mod create_user {
         use super::super::*;
-        use super::*;
         use crate::queries::MockQueries;
         use mockall::predicate;
         use os::MockOs;
@@ -337,6 +340,10 @@ mod tests {
                 .expect_user_exists()
                 .with(predicate::eq("foo"))
                 .return_const(true);
+            queries
+                .expect_get_user_id()
+                .with(predicate::eq("foo"))
+                .return_const(123);
 
             queries
                 .expect_group_memberships()
@@ -349,7 +356,7 @@ mod tests {
             }
             .create_user("foo", "bar", vec!["baz".to_string()]);
 
-            assert!(matches!(actual, Ok(())));
+            assert!(matches!(actual, Ok(123)));
         }
 
         #[test]
@@ -361,6 +368,10 @@ mod tests {
                 .expect_user_exists()
                 .with(predicate::eq("foo"))
                 .return_const(true);
+            queries
+                .expect_get_user_id()
+                .with(predicate::eq("foo"))
+                .return_const(123);
 
             queries
                 .expect_group_memberships()
@@ -392,6 +403,10 @@ mod tests {
                 .expect_user_exists()
                 .with(predicate::eq("foo"))
                 .return_const(true);
+            queries
+                .expect_get_user_id()
+                .with(predicate::eq("foo"))
+                .return_const(123);
 
             queries
                 .expect_group_memberships()
@@ -406,6 +421,7 @@ mod tests {
             os.expect_execute_with_output_with_empty_success(
                 "dscl",
                 vec![".", "-create", "/Groups/qux", "GroupMembership", "foo"],
+                Vec::new(),
             );
 
             let actual = MacOSCredentials {
@@ -413,7 +429,7 @@ mod tests {
                 queries: Box::new(queries),
             }
             .create_user("foo", "bar", vec!["qux".to_string()]);
-            assert!(matches!(actual, Ok(())));
+            assert!(matches!(actual, Ok(123)));
         }
 
         #[test]
@@ -422,15 +438,27 @@ mod tests {
             let mut queries = MockQueries::new();
 
             queries
+                .expect_get_user_id()
+                .with(predicate::eq("foo"))
+                .return_const(None);
+
+            os.expect_execute_with_output_for(
+                "dscl",
+                vec![".", "-list", "/Users", "UniqueID"],
+                vec![],
+                r#"
+bar        501
+baz        502
+qux        504
+"#,
+                "",
+                0,
+            );
+
+            queries
                 .expect_user_exists()
                 .with(predicate::eq("foo"))
                 .return_const(false);
-
-            os.expect_execute_with_output_with_empty_success(
-                "dscl",
-                vec![".", "-list", "/Users", "UniqueID"],
-            );
-
             queries
                 .expect_get_group_id()
                 .with(predicate::eq("bar"))
@@ -449,7 +477,7 @@ mod tests {
 
         #[test]
         fn should_create_user() {
-            let mut os = MockOs::new();
+            let os = MockOs::new();
             let mut queries = MockQueries::new();
 
             queries
@@ -457,57 +485,19 @@ mod tests {
                 .with(predicate::eq("foo"))
                 .return_const(false);
 
-            os.expect_execute_with_output_for(
-                "dscl",
-                vec![".", "-list", "/Users", "UniqueID"],
-                r#"
-bar        501
-baz        502
-qux        504
-                "#,
-                EMPTY_STDERR,
-                STATUS_SUCCESS,
-            );
-
             queries
                 .expect_get_group_id()
                 .with(predicate::eq("bar"))
                 .return_const(Some(1234));
 
-            os.expect_execute_with_output_with_empty_success(
-                "dscl",
-                vec![".", "-create", "/Users/foo"],
-            );
-            os.expect_execute_with_output_with_empty_success(
-                "dscl",
-                vec![".", "-create", "/Users/foo", "UniqueID", "503"],
-            );
-
-            os.expect_execute_with_output_with_empty_success(
-                "dscl",
-                vec![".", "-create", "/Users/foo", "UserShell", "/usr/bin/false"],
-            );
-
-            os.expect_execute_with_output_with_empty_success(
-                "dscl",
-                vec![
-                    ".",
-                    "-create",
-                    "/Users/foo",
-                    "NFSHomeDirectory",
-                    "/var/empty",
-                ],
-            );
-
-            os.expect_execute_with_output_with_empty_success(
-                "dscl",
-                vec![".", "-create", "/Users/foo", "PrimaryGroupID", "1234"],
-            );
-
             queries
                 .expect_group_memberships()
                 .with(predicate::eq("foo"))
                 .return_const(vec![]);
+            queries
+                .expect_get_user_id()
+                .with(predicate::eq("foo"))
+                .return_const(123);
 
             let actual = MacOSCredentials {
                 os: Arc::new(os),
@@ -515,7 +505,7 @@ qux        504
             }
             .create_user("foo", "bar", vec![]);
 
-            assert!(matches!(actual, Ok(())));
+            assert!(matches!(actual, Ok(123)));
         }
     }
 
@@ -583,6 +573,7 @@ qux        504
             os.expect_execute_with_output_with_empty_success(
                 "dscl",
                 vec![".", "-delete", "/Users/foo"],
+                Vec::new(),
             );
 
             let actual = MacOSCredentials {
@@ -596,7 +587,6 @@ qux        504
 
     mod create_group {
         use super::super::*;
-        use super::*;
         use crate::queries::MockQueries;
         use mockall::predicate;
         use os::MockOs;
@@ -610,6 +600,14 @@ qux        504
                 .expect_group_exists()
                 .with(predicate::eq("foo"))
                 .return_const(true);
+            queries
+                .expect_get_user_id()
+                .with(predicate::eq("foo"))
+                .return_const(123);
+            queries
+                .expect_get_group_id()
+                .with(predicate::eq("foo"))
+                .return_const(321);
 
             let actual = MacOSCredentials {
                 os: Arc::new(os),
@@ -617,47 +615,29 @@ qux        504
             }
             .create_group("foo");
 
-            assert!(matches!(actual, Ok(())));
+            assert!(matches!(actual, Ok(321)));
         }
 
         #[test]
         fn should_create_group() {
-            let mut os = MockOs::new();
+            let os = MockOs::new();
             let mut queries = MockQueries::new();
 
             queries
                 .expect_group_exists()
                 .with(predicate::eq("foo"))
                 .return_const(false);
-
-            os.expect_execute_with_output_for(
-                "dscl",
-                vec![".", "-list", "/Groups", "PrimaryGroupID"],
-                r#"
-bar        501
-baz        502
-qux        504
-                "#,
-                EMPTY_STDERR,
-                STATUS_SUCCESS,
-            );
-
-            os.expect_execute_with_output_with_empty_success(
-                "dscl",
-                vec![".", "-create", "/Groups/foo"],
-            );
-
-            os.expect_execute_with_output_with_empty_success(
-                "dscl",
-                vec![".", "-create", "/Groups/foo", "PrimaryGroupID", "503"],
-            );
+            queries
+                .expect_get_group_id()
+                .with(predicate::eq("foo"))
+                .return_const(505);
 
             let actual = MacOSCredentials {
                 os: Arc::new(os),
                 queries: Box::new(queries),
             }
             .create_group("foo");
-            assert!(matches!(actual, Ok(())));
+            assert!(matches!(actual, Ok(505)));
         }
     }
 
@@ -779,6 +759,7 @@ qux        504
             os.expect_execute_with_output_with_empty_success(
                 "dscl",
                 vec![".", "-delete", "/Groups/foo"],
+                Vec::new(),
             );
 
             let actual = MacOSCredentials {
@@ -814,8 +795,9 @@ qux        504
                         "-list".to_string(),
                         "/Users".to_string(),
                     ]),
+                    predicate::eq(Vec::new()),
                 )
-                .returning(|_, _| Err(OsError::IoError(std::io::Error::other("oops"))));
+                .returning(|_, _, _| Err(OsError::IoError(std::io::Error::other("oops"))));
 
             let actual = MacOSCredentials {
                 os: Arc::new(os),
@@ -834,6 +816,7 @@ qux        504
             os.expect_execute_with_output_for(
                 "dscl",
                 vec![".", "-list", "/Users"],
+                Vec::new(),
                 "foo\nbar\n",
                 "",
                 0,

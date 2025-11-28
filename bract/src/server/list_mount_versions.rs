@@ -1,8 +1,9 @@
+use super::Response;
 use super::token_validator::TokenValidator;
 use super::version_manager::VersionManager;
-use super::{ClientErrorDisplay, Response};
 use log::Logger;
 use std::sync::Arc;
+use utils::ClientErrorDisplay;
 
 pub(super) struct ListMountVersions {
     log: Arc<dyn Logger + Sync + Send>,
@@ -28,7 +29,7 @@ impl ListMountVersions {
             service_name, mount_name
         ));
         self.token.perform_if_valid(token, move || {
-            let versions = or_log_and_return_error!(
+            let versions = or_log_and_return_response_error!(
                 self.log => warn,
                 self.version_manager.versions(&service_name, &mount_name)
             );
