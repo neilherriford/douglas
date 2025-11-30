@@ -31,11 +31,7 @@ impl StartCommand {
         Self {
             system_paths,
             file_appender: Arc::clone(&file_appender),
-            log: TeeLogger::new(Box::new(DeferredFileLogger::new(
-                &log_path,
-                file_appender,
-                Arc::clone(&permissions),
-            ))),
+            log: TeeLogger::new(Box::new(DeferredFileLogger::new(&log_path, file_appender))),
             permissions,
         }
     }
@@ -69,7 +65,6 @@ impl StartCommand {
         let docker_logger: Arc<dyn Logger> = Arc::new(FileLogger::new(
             &self.system_paths.log_path("docker"),
             Arc::clone(&self.file_appender),
-            Arc::clone(&self.permissions),
         ));
 
         let mut docker_image_client = unwrap_or_bail!(
@@ -93,7 +88,6 @@ impl StartCommand {
         let docker_logger: Arc<dyn Logger> = Arc::new(FileLogger::new(
             &self.system_paths.log_path("docker"),
             Arc::clone(&self.file_appender),
-            Arc::clone(&self.permissions),
         ));
 
         let mut docker_system_client = unwrap_or_bail!(
@@ -196,7 +190,6 @@ impl StartCommand {
         let bract_logger: Box<dyn Logger> = Box::new(FileLogger::new(
             &self.system_paths.log_path("bract"),
             Arc::clone(&self.file_appender),
-            Arc::clone(&self.permissions),
         ));
 
         bract::Client::new(

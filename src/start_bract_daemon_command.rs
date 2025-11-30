@@ -35,7 +35,6 @@ impl StartBractDaemonCommand {
         let log = Arc::new(TeeLogger::new(Box::new(FileLogger::new(
             &system_paths.log_path("douglas"),
             Arc::clone(&file_appender),
-            Arc::clone(&permissions),
         ))));
 
         let file_deleter = Arc::new(LocalFileDeleter::new());
@@ -154,7 +153,6 @@ impl StartBractDaemonCommand {
         let logger: Arc<dyn Logger + Sync + Send> = Arc::new(FileLogger::new(
             &self.system_paths.log_path("bract"),
             Arc::clone(&self.file_appender),
-            Arc::clone(&self.permissions),
         ));
 
         bract::Server::new(

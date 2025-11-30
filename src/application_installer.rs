@@ -78,7 +78,8 @@ impl<'a> ApplicationInstaller<'a> {
         &mut self,
         definition: &ApplicationDefinition,
     ) -> Result<docker::Image, ApplicationInstallerError> {
-        self.log.info("Installing Docker image…");
+        self.log
+            .info(&format!("Installing Docker image for {}…", definition.name,));
 
         match self
             .docker_image_client

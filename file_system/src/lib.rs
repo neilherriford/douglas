@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 #[cfg(feature = "mock")]
 use mockall::predicate;
+use nix::sys::stat::{Mode, umask};
 use std::ffi::OsString;
 use std::fs::OpenOptions;
 use std::fs::{
@@ -8,7 +9,7 @@ use std::fs::{
     read_to_string, remove_file, rename, set_permissions,
 };
 use std::io::Write;
-use std::os::unix::fs::{PermissionsExt, chown, symlink};
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt, chown, symlink};
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 use users::{get_group_by_name, get_user_by_name};
@@ -53,6 +54,42 @@ impl PartialEq for FileSystemError {
     }
 }
 
+pub fn path_to_string<T: AsRef<Path>>(path: T) -> String {
+    path.as_ref()
+        .to_str()
+        .unwrap_or("<Invalid path>")
+        .to_string()
+}
+
+#[repr(u16)]
+#[derive(PartialEq, Eq, Debug, Copy, Clone)]
+pub enum Masks {
+    ExcludeUser,
+    Other(u16),
+}
+
+impl From<Masks> for nix::libc::mode_t {
+    fn from(value: Masks) -> Self {
+        match value {
+            Masks::ExcludeUser => 0o007 as nix::libc::mode_t,
+            Masks::Other(v) => v as nix::libc::mode_t,
+        }
+    }
+}
+
+impl From<Masks> for Mode {
+    fn from(value: Masks) -> Self {
+        Mode::from_bits_truncate(value.into())
+    }
+}
+
+impl std::fmt::Display for Masks {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mask: nix::libc::mode_t = self.to_owned().into();
+        write!(f, "Mask 0o{mask:o}")
+    }
+}
+
 #[repr(u32)]
 #[derive(PartialEq, Eq, Debug, Copy, Clone)]
 pub enum Modes {
@@ -61,14 +98,8 @@ pub enum Modes {
     OwnerReadWriteGroupRead,
     OwnerReadWriteGroupReadWrite,
     OwnerReadWriteExecuteGroupReadWriteExecute,
+    InheritedOwnerReadWriteExecuteGroupReadWriteExecute,
     Other(u32),
-}
-
-pub fn path_to_string<T: AsRef<Path>>(path: T) -> String {
-    path.as_ref()
-        .to_str()
-        .unwrap_or("<Invalid path>")
-        .to_string()
 }
 
 impl From<Modes> for u32 {
@@ -79,6 +110,7 @@ impl From<Modes> for u32 {
             Modes::OwnerReadWriteGroupRead => 0o640,
             Modes::OwnerReadWriteGroupReadWrite => 0o660,
             Modes::OwnerReadWriteExecuteGroupReadWriteExecute => 0o770,
+            Modes::InheritedOwnerReadWriteExecuteGroupReadWriteExecute => 0o2770,
             Modes::Other(v) => v,
         }
     }
@@ -87,7 +119,7 @@ impl From<Modes> for u32 {
 impl std::fmt::Display for Modes {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let mode: u32 = self.to_owned().into();
-        write!(f, "0o{:o}", mode)
+        write!(f, "0o{mode:o}")
     }
 }
 
@@ -234,9 +266,15 @@ impl FileAppender for LocalFileAppender {
             return Err(FileSystemError::ParentNotFoundError(parent.to_path_buf()));
         }
 
-        let mut file = OpenOptions::new().create(true).append(true).open(path)?;
+        let previous_umask = umask(Masks::ExcludeUser.into());
+        let open_result = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .mode(Modes::OwnerReadWriteGroupReadWrite.into())
+            .open(path);
+        umask(previous_umask);
+        let mut file = open_result?;
         file.write_all(contents.as_bytes())?;
-
         Ok(())
     }
 

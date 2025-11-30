@@ -1,8 +1,7 @@
 use chrono::Utc;
-use config::constants;
-use file_system::{FileAppender, Modes, Permissions, path_to_string};
+use file_system::{FileAppender, path_to_string};
 use log::Logger;
-use std::sync::{Mutex, Once};
+use std::sync::Mutex;
 use std::{
     fmt::Debug,
     path::{Path, PathBuf},
@@ -43,22 +42,14 @@ impl std::fmt::Display for Entry {
 pub struct DeferredFileLogger {
     path: PathBuf,
     file_appender: Arc<dyn FileAppender>,
-    permissions: Arc<dyn Permissions>,
-    set_permissions: Once,
     buffer: Mutex<Vec<Entry>>,
 }
 
 impl DeferredFileLogger {
-    pub fn new(
-        path: &Path,
-        file_appender: Arc<dyn FileAppender>,
-        permissions: Arc<dyn Permissions>,
-    ) -> Self {
+    pub fn new(path: &Path, file_appender: Arc<dyn FileAppender>) -> Self {
         Self {
             path: path.to_path_buf(),
             file_appender,
-            permissions,
-            set_permissions: Once::new(),
             buffer: Mutex::new(Vec::new()),
         }
     }
@@ -74,7 +65,10 @@ impl DeferredFileLogger {
             match self.buffer.lock() {
                 Ok(mut buffer) => buffer.push(entry),
                 Err(err) => {
-                    eprintln!("Error writing log: '{err}' Original log entry: '{entry}'");
+                    eprintln!(
+                        "Error writing log {}: '{err}' Original log entry: '{entry}'",
+                        self.path.to_str().unwrap_or_default()
+                    );
                 }
             }
             return;
@@ -92,33 +86,20 @@ impl DeferredFileLogger {
                 }
             }
             Err(err) => {
-                eprintln!("Error flushing buffer: '{err}'");
+                eprintln!(
+                    "Error flushing buffer {}: '{err}'",
+                    self.path.to_str().unwrap_or_default()
+                );
             }
         }
     }
 
     fn write_entry(&self, entry: &Entry) {
-        if let Err(err) = self.file_appender.append(&self.path, entry.to_string()) {
-            eprintln!("Error writing log: '{err}' Original log entry: {entry}");
-            return;
-        }
+        let log_pretty_path = path_to_string(&self.path);
 
-        self.set_permissions.call_once(|| {
-            if let Err(err) = self.permissions.change_user_and_group_ownership(
-                &self.path,
-                credentials::ROOT_GROUP_NAME,
-                constants::RADICLE_GROUP,
-            ) {
-                eprintln!("Failed to set permissions on log file! {err}");
-                return;
-            }
-            if let Err(err) = self
-                .permissions
-                .change_mode(&self.path, &Modes::OwnerReadWriteGroupRead)
-            {
-                eprintln!("Failed to set mode on log file! {err}");
-            }
-        });
+        if let Err(err) = self.file_appender.append(&self.path, entry.to_string()) {
+            eprintln!("Error writing log: {log_pretty_path} '{err}' Original log entry: {entry}");
+        }
     }
 }
 

@@ -1,10 +1,9 @@
-use std::sync::Arc;
-
 use config::{SystemPaths, constants::RADICLE_USER};
 use credentials::Credentials;
 use file_system::{Folder, Modes, Permissions};
 use log::Logger;
 use os::EnvironmentVariableReader;
+use std::sync::Arc;
 
 use crate::bail_unless;
 
@@ -62,7 +61,7 @@ impl<'a> InitializeSystem<'a> {
                 "log root",
                 &self.system_paths.log_root(),
                 credentials::ROOT_USER_NAME,
-                Modes::OwnerReadWriteExecuteGroupReadWriteExecute,
+                Modes::InheritedOwnerReadWriteExecuteGroupReadWriteExecute,
             ) && create_system_folder.perform(
                 "runtime root",
                 &self.system_paths.runtime_root(),

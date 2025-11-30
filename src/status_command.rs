@@ -14,7 +14,6 @@ use tokio::runtime::Runtime;
 pub struct StatusCommand {
     log: Box<dyn Logger>,
     system_paths: Box<dyn SystemPaths>,
-    permissions: Arc<dyn Permissions>,
     file_appender: Arc<dyn FileAppender>,
 }
 
@@ -44,15 +43,12 @@ impl StatusCommand {
         let log_path = system_paths.log_path("douglas");
 
         let file_appender: Arc<dyn FileAppender> = Arc::new(LocalFileAppender::new());
-        let permissions: Arc<dyn Permissions> = Arc::new(LocalPermissions::new());
         Self {
             system_paths,
             file_appender: Arc::clone(&file_appender),
-            permissions: Arc::clone(&permissions),
             log: Box::new(TeeLogger::new(Box::new(DeferredFileLogger::new(
                 &log_path,
                 file_appender,
-                permissions,
             )))),
         }
     }
@@ -65,7 +61,6 @@ impl StatusCommand {
         let bract_logger = Box::new(FileLogger::new(
             self.system_paths.log_path("bract").as_path(),
             Arc::clone(&self.file_appender),
-            Arc::clone(&self.permissions),
         ));
 
         let bract_client = Client::new(bract_logger, file_reader, bract_socket_path, token_path);
@@ -95,7 +90,6 @@ impl StatusCommand {
         let docker_logger = Arc::new(FileLogger::new(
             self.system_paths.log_path("docker").as_path(),
             Arc::clone(&self.file_appender),
-            Arc::clone(&self.permissions),
         ));
 
         let rt = match Runtime::new() {
