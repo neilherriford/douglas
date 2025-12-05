@@ -79,6 +79,9 @@ struct HostConfig {
 
     #[serde(rename = "CapAdd", serialize_with = "serialize_capabilities")]
     added_capabilities: Vec<Capability>,
+
+    #[serde(rename = "GroupAdd")]
+    pub additional_groups: Vec<String>,
 }
 
 #[derive(Debug, Serialize, PartialEq)]
@@ -176,6 +179,7 @@ impl ContainerCommand {
             host_config: HostConfig {
                 mounts: definition.mounts,
                 added_capabilities: definition.added_capabilities,
+                additional_groups: vec!["1000".into()],
             },
             labels: definition.labels,
         };

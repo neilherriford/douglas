@@ -152,12 +152,14 @@ impl Client {
         &self,
         service_name: &str,
         mount_name: &str,
+        shared: bool,
     ) -> Result<Mount, ClientError> {
         let response = self
             .request(ServerRequest::CreateMount {
                 token: self.get_token()?,
                 service_name: service_name.to_string(),
                 mount_name: mount_name.to_string(),
+                shared,
             })
             .await?;
 
@@ -181,12 +183,14 @@ impl Client {
         &self,
         service_name: &str,
         mount_name: &str,
+        shared: bool,
     ) -> Result<Mount, ClientError> {
         let response = self
             .request(ServerRequest::CreateNewMountVersion {
                 token: self.get_token()?,
                 service_name: service_name.to_string(),
                 mount_name: mount_name.to_string(),
+                shared,
             })
             .await?;
 

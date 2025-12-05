@@ -102,11 +102,13 @@ pub(crate) enum Request {
         token: String,
         service_name: String,
         mount_name: String,
+        shared: bool,
     },
     CreateNewMountVersion {
         token: String,
         service_name: String,
         mount_name: String,
+        shared: bool,
     },
     ListMountVersions {
         token: String,
@@ -152,13 +154,17 @@ impl std::fmt::Display for Request {
                 token: _,
                 service_name,
                 mount_name,
-            } => format!("CreateMount service_name: '{service_name}', mount_name: '{mount_name}'",),
+                shared,
+            } => format!(
+                "CreateMount service_name: '{service_name}', mount_name: '{mount_name}', shared: {shared}",
+            ),
             Request::CreateNewMountVersion {
                 token: _,
                 service_name,
                 mount_name,
+                shared,
             } => format!(
-                "CreateNewMountVersion service_name: '{service_name}', mount_name: '{mount_name}'",
+                "CreateNewMountVersion service_name: '{service_name}', mount_name: '{mount_name}', shared: {shared}",
             ),
             Request::ListMountVersions {
                 token: _,
@@ -315,14 +321,18 @@ impl RequestHandler {
                 token,
                 service_name,
                 mount_name,
-            } => self.create_mount.create(token, service_name, mount_name),
+                shared,
+            } => self
+                .create_mount
+                .create(token, service_name, mount_name, shared),
             Request::CreateNewMountVersion {
                 token,
                 service_name,
                 mount_name,
+                shared,
             } => self
                 .create_new_mount_version
-                .create(token, service_name, mount_name),
+                .create(token, service_name, mount_name, shared),
             Request::ListMountVersions {
                 token,
                 service_name,
@@ -540,12 +550,8 @@ impl Server {
         Ok(())
     }
 
-    // TODO: tone it down
     fn assert_initalized(&self) -> Result<(), ServerError> {
-        if self.credentials.user_exists(constants::RADICLE_USER)
-            && self.credentials.group_exists(constants::RADICLE_GROUP)
-            && self.credentials.group_exists(constants::DOUGLAS_GROUP)
-        {
+        if self.credentials.group_exists(constants::DOUGLAS_GROUP) {
             Ok(())
         } else {
             Err(ServerError::NotInitialized)

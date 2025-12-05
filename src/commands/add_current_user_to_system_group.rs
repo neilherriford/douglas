@@ -1,9 +1,8 @@
-use std::env::VarError;
-
-use config::constants::RADICLE_GROUP;
+use config::constants::DOUGLAS_GROUP;
 use credentials::Credentials;
 use log::Logger;
 use os::EnvironmentVariableReader;
+use std::env::VarError;
 
 pub struct AddCurrentUserToSystemGroup<'a> {
     log: &'a dyn Logger,
@@ -29,7 +28,7 @@ impl<'a> AddCurrentUserToSystemGroup<'a> {
             Ok(user_name) => {
                 if user_name == credentials::ROOT_USER_NAME {
                     self.log.warn(&format!(
-                        "The sudo user is already root, not adding to {RADICLE_GROUP}!"
+                        "The sudo user is already root, not adding to {DOUGLAS_GROUP}!"
                     ));
                     return true;
                 }
@@ -39,7 +38,7 @@ impl<'a> AddCurrentUserToSystemGroup<'a> {
             Err(VarError::NotUnicode(_)) => {
                 self.log.warn(&format!(
                         "Could not determine initiating user?  You will need to manually add the \
-                            account you wish to interact with the Douglas CLI to the '{RADICLE_GROUP}' \
+                            account you wish to interact with the Douglas CLI to the '{DOUGLAS_GROUP}' \
                             manually!"
                     ));
                 true
@@ -49,18 +48,18 @@ impl<'a> AddCurrentUserToSystemGroup<'a> {
 
     fn add_to_system_group(&self, user_name: &str) -> bool {
         let groups = self.credentials.group_memberships(user_name);
-        if groups.contains(&RADICLE_GROUP.to_string()) {
+        if groups.contains(&DOUGLAS_GROUP.to_string()) {
             return true;
         }
 
         self.log
-            .info(&format!("Adding {user_name} to {RADICLE_GROUP}…"));
+            .info(&format!("Adding {user_name} to {DOUGLAS_GROUP}…"));
 
         self.credentials
-            .join_group(user_name, RADICLE_GROUP)
+            .join_group(user_name, DOUGLAS_GROUP)
             .map_err(|err| {
                 self.log.error(&format!(
-                    "Failed to add user {user_name} to the {RADICLE_GROUP} group: {err:?}"
+                    "Failed to add user {user_name} to the {DOUGLAS_GROUP} group: {err:?}"
                 ));
             })
             .is_ok()

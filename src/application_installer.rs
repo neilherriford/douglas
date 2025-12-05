@@ -5,7 +5,10 @@ use log::Logger;
 use std::{collections::HashMap, path::PathBuf};
 use thiserror::Error;
 
-use crate::application_definition::ApplicationDefinition;
+use crate::{
+    application_definition::ApplicationDefinition,
+    mount_file_template_expander::MountFileTemplateExpander,
+};
 
 #[derive(Error, Debug)]
 pub enum ApplicationInstallerError {
@@ -50,7 +53,12 @@ impl<'a> ApplicationInstaller<'a> {
         let image = self.install_image(definition).await?;
 
         let mount_name_to_path = self.create_mount_folders(definition).await?;
-        self.inject_files(definition).await?;
+        let mut template_expander = MountFileTemplateExpander::new();
+        template_expander
+            .with_runas_credentail(&credential)
+            .with_douglas_group();
+
+        self.inject_files(definition, &template_expander).await?;
 
         let result = self
             .create_container(definition, credential, mount_name_to_path, image)
@@ -117,7 +125,11 @@ impl<'a> ApplicationInstaller<'a> {
                 Ok(Some(mount)) => mount,
                 Ok(None) => {
                     self.bract_client
-                        .create_mount(&definition.name, &mount_template.name)
+                        .create_mount(
+                            &definition.name,
+                            &mount_template.name,
+                            mount_template.shared,
+                        )
                         .await?
                 }
                 Err(err) => return Err(err.into()),
@@ -132,6 +144,7 @@ impl<'a> ApplicationInstaller<'a> {
     async fn inject_files(
         &self,
         definition: &ApplicationDefinition,
+        template_expander: &MountFileTemplateExpander,
     ) -> Result<(), ApplicationInstallerError> {
         self.log
             .info(&format!("Adding mount files for {}…", definition.name));
@@ -147,13 +160,16 @@ impl<'a> ApplicationInstaller<'a> {
                 mount_name,
                 path_to_string(&file.relative_path),
             ));
+
+            let contents = template_expander.expand(&file.contents);
+
             self.bract_client
                 .mount_io(
                     &definition.name,
                     mount_name,
                     bract::IoOperation::WriteFile {
                         relative_path: file.relative_path.as_path(),
-                        contents: &file.contents,
+                        contents: &contents,
                     },
                 )
                 .await?;

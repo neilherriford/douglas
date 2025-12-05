@@ -7,6 +7,7 @@ mod douglas_flags_reader;
 mod file_logger;
 #[macro_use]
 pub(crate) mod macros;
+mod mount_file_template_expander;
 mod shutdown_command;
 mod start_bract_daemon_command;
 mod start_command;

@@ -25,7 +25,13 @@ impl CreateNewMountVersion {
         }
     }
 
-    pub fn create(&self, token: String, service_name: String, mount_name: String) -> Response {
+    pub fn create(
+        &self,
+        token: String,
+        service_name: String,
+        mount_name: String,
+        shared: bool,
+    ) -> Response {
         self.log.info(&format!(
             "Creating new mount version for {} {}",
             service_name, mount_name
@@ -52,7 +58,8 @@ impl CreateNewMountVersion {
                 self.version_manager.create(
                     &service_name,
                     &mount_name,
-                    new_version
+                    new_version,
+                    shared,
                 )
             );
 
@@ -155,7 +162,12 @@ mod tests {
                 Arc::new(links),
                 Arc::new(folder),
             )
-            .create("foo".to_string(), "bar".to_string(), "baz".to_string());
+            .create(
+                "foo".to_string(),
+                "bar".to_string(),
+                "baz".to_string(),
+                false,
+            );
 
             assert!(matches!(actual, Response::InvalidToken));
         }
@@ -190,20 +202,20 @@ mod tests {
                 .expect_ownership_and_mode_to_be_set(
                     "/tmp/mount_root",
                     "root",
-                    "root",
-                    Modes::OwnerReadWrite,
+                    "douglas",
+                    Modes::OwnerReadWriteExecuteGroupReadWriteExecute,
                 )
                 .expect_ownership_and_mode_to_be_set(
                     "/tmp/mount_root/bar",
                     "doug-bar",
-                    "doug-bar",
-                    Modes::OwnerReadWriteGroupReadWrite,
+                    "douglas",
+                    Modes::OwnerReadWriteExecuteGroupReadWriteExecute,
                 )
                 .expect_ownership_and_mode_to_be_set(
                     "/tmp/mount_root/bar/baz",
                     "doug-bar",
-                    "doug-bar",
-                    Modes::OwnerReadWriteGroupReadWrite,
+                    "douglas",
+                    Modes::OwnerReadWriteExecuteGroupReadWriteExecute,
                 )
                 .expect_ownership_and_mode_to_be_set(
                     "/tmp/mount_root/bar/baz/v0",
@@ -228,7 +240,12 @@ mod tests {
                 Arc::new(links),
                 Arc::new(folder),
             )
-            .create("token".to_string(), "bar".to_string(), "baz".to_string());
+            .create(
+                "token".to_string(),
+                "bar".to_string(),
+                "baz".to_string(),
+                false,
+            );
 
             assert!(matches!(actual, Response::MountSet {
                     name,
@@ -266,14 +283,14 @@ mod tests {
                 .expect_ownership_and_mode_to_be_set(
                     "/tmp/mount_root/bar",
                     "doug-bar",
-                    "doug-bar",
-                    Modes::OwnerReadWriteGroupReadWrite,
+                    "douglas",
+                    Modes::OwnerReadWriteExecuteGroupReadWriteExecute,
                 )
                 .expect_ownership_and_mode_to_be_set(
                     "/tmp/mount_root/bar/baz",
                     "doug-bar",
-                    "doug-bar",
-                    Modes::OwnerReadWriteGroupReadWrite,
+                    "douglas",
+                    Modes::OwnerReadWriteExecuteGroupReadWriteExecute,
                 )
                 .expect_ownership_and_mode_to_be_set(
                     "/tmp/mount_root/bar/baz/v0",
@@ -298,7 +315,12 @@ mod tests {
                 Arc::new(links),
                 Arc::new(folder),
             )
-            .create("token".to_string(), "bar".to_string(), "baz".to_string());
+            .create(
+                "token".to_string(),
+                "bar".to_string(),
+                "baz".to_string(),
+                false,
+            );
 
             assert!(matches!(actual, Response::MountSet {
                     name,
@@ -360,13 +382,93 @@ mod tests {
                 Arc::new(links),
                 Arc::new(folder),
             )
-            .create("token".to_string(), "bar".to_string(), "baz".to_string());
+            .create(
+                "token".to_string(),
+                "bar".to_string(),
+                "baz".to_string(),
+                false,
+            );
 
             assert!(matches!(actual, Response::MountSet {
                 name,
                     version,
                     path
                 } if name == "baz" && version == Version(1) && path == Path::new("/tmp/mount_root/bar/baz/current")));
+        }
+
+        #[test]
+        fn should_create_shared() {
+            let mut logger = MockLogger::new();
+            let mut file_reader = MockFileReader::new();
+            let file_deleter = MockFileDeleter::new();
+            let mut permissions = MockPermissions::new();
+            let mut credentials = MockCredentials::new();
+            let mut links: MockLinks = MockLinks::new();
+            let mut folder = MockFolder::new();
+            let token_path = Path::new("/tmp/token");
+            let mount_root = Path::new("/tmp/mount_root/");
+
+            logger.expect_info().return_const(());
+            file_reader.given_can_read_all_with_contents("/tmp/token", "token");
+            credentials.given_user_and_group_exist("doug-bar", "doug-bar");
+            folder
+                .given_exists("/tmp/mount_root/")
+                .given_does_not_exist("/tmp/mount_root/bar")
+                .given_does_not_exist("/tmp/mount_root/bar/baz")
+                .given_does_not_exist("/tmp/mount_root/bar/baz/current")
+                .given_does_not_exist("/tmp/mount_root/bar/baz/v0")
+                .expect_create_folder_recursively_with("/tmp/mount_root/bar")
+                .expect_create_folder_recursively_with("/tmp/mount_root/bar/baz")
+                .expect_create_folder_recursively_with("/tmp/mount_root/bar/baz/v0");
+
+            permissions
+                .expect_ownership_and_mode_to_be_set(
+                    "/tmp/mount_root/bar",
+                    "doug-bar",
+                    "douglas",
+                    Modes::OwnerReadWriteExecuteGroupReadWriteExecute,
+                )
+                .expect_ownership_and_mode_to_be_set(
+                    "/tmp/mount_root/bar/baz",
+                    "doug-bar",
+                    "douglas",
+                    Modes::OwnerReadWriteExecuteGroupReadWriteExecute,
+                )
+                .expect_ownership_and_mode_to_be_set(
+                    "/tmp/mount_root/bar/baz/v0",
+                    "doug-bar",
+                    "douglas",
+                    Modes::OwnerReadWriteExecuteGroupReadWriteExecute,
+                );
+
+            links.expect_create_with(
+                "/tmp/mount_root/bar/baz/v0",
+                "/tmp/mount_root/bar/baz/current",
+            );
+
+            let actual = build(
+                token_path,
+                mount_root,
+                Arc::new(logger),
+                Arc::new(file_reader),
+                Arc::new(file_deleter),
+                Arc::new(permissions),
+                Arc::new(credentials),
+                Arc::new(links),
+                Arc::new(folder),
+            )
+            .create(
+                "token".to_string(),
+                "bar".to_string(),
+                "baz".to_string(),
+                true,
+            );
+
+            assert!(matches!(actual, Response::MountSet {
+                    name,
+                    version,
+                    path
+                } if name == "baz" && version == Version(0) && path == Path::new("/tmp/mount_root/bar/baz/current")));
         }
     }
 }

@@ -6,6 +6,7 @@ pub trait SystemPaths: Send + Sync {
     fn config_root(&self) -> PathBuf;
     fn mount_root(&self) -> PathBuf;
     fn service_root(&self) -> PathBuf;
+    fn application_root(&self) -> PathBuf;
     fn log_path(&self, service_name: &str) -> PathBuf;
     fn log_path_std_out(&self, service_name: &str) -> PathBuf;
     fn log_path_std_err(&self, service_name: &str) -> PathBuf;
@@ -37,6 +38,10 @@ impl SystemPaths for LinuxSystemPaths {
 
     fn config_root(&self) -> PathBuf {
         PathBuf::from(format!("/etc/{APPLICATION_NAME}/"))
+    }
+
+    fn application_root(&self) -> PathBuf {
+        PathBuf::from(format!("/var/lib/{APPLICATION_NAME}/"))
     }
 
     fn mount_root(&self) -> PathBuf {
@@ -130,6 +135,10 @@ impl SystemPaths for MacOsSystemPaths {
         PathBuf::from(format!(
             "/Library/Application Support/{APPLICATION_NAME}/services/"
         ))
+    }
+
+    fn application_root(&self) -> PathBuf {
+        PathBuf::from(format!("/Library/Application Support/{APPLICATION_NAME}/"))
     }
 
     fn log_root(&self) -> PathBuf {

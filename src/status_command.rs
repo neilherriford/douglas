@@ -4,9 +4,7 @@ use crate::{
 use bract::{Client, client::ClientError};
 use config::{SystemPaths, create_system_paths};
 use docker::{SimpleSystemClient, SystemClient};
-use file_system::{
-    FileAppender, LocalFileAppender, LocalFileReader, LocalPermissions, Permissions,
-};
+use file_system::{FileAppender, LocalFileAppender, LocalFileReader};
 use log::Logger;
 use std::sync::Arc;
 use tokio::runtime::Runtime;

@@ -23,6 +23,7 @@ pub struct MountTemplate {
     pub container_path: PathBuf,
     pub writable: bool,
     pub files: Vec<MountFile>,
+    pub shared: bool,
 }
 
 pub struct ApplicationDefinition {
@@ -63,12 +64,24 @@ impl ApplicationDefinition {
         self.with_mount(name, container_path, vec![])
     }
 
+    pub fn with_empty_shared_mount(mut self, name: &str, container_path: &str) -> Self {
+        self.mount_templates.push(MountTemplate {
+            name: name.into(),
+            container_path: PathBuf::from(container_path),
+            writable: true,
+            files: vec![],
+            shared: true,
+        });
+        self
+    }
+
     pub fn with_mount(mut self, name: &str, container_path: &str, files: Vec<MountFile>) -> Self {
         self.mount_templates.push(MountTemplate {
             name: name.into(),
             container_path: PathBuf::from(container_path),
             writable: true,
             files,
+            shared: false,
         });
         self
     }

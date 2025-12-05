@@ -1,16 +1,11 @@
-use config::{SystemPaths, constants::RADICLE_USER};
+use super::{AddCurrentUserToSystemGroup, AssertRoot, CreateSystemFolder, CreateSystemGroups};
+use crate::bail_unless;
+use config::SystemPaths;
 use credentials::Credentials;
 use file_system::{Folder, Modes, Permissions};
 use log::Logger;
 use os::EnvironmentVariableReader;
 use std::sync::Arc;
-
-use crate::bail_unless;
-
-use super::{
-    AddCurrentUserToSystemGroup, AssertRoot, CreateSystemFolder, CreateSystemGroups,
-    CreateSystemUser,
-};
 
 pub struct InitializeSystem<'a> {
     system_paths: &'a dyn SystemPaths,
@@ -44,7 +39,6 @@ impl<'a> InitializeSystem<'a> {
         bail_unless!(
             AssertRoot::new(self.log, self.credentials).perform()
                 && CreateSystemGroups::new(self.log, self.credentials).perform()
-                && CreateSystemUser::new(self.log, self.credentials).perform()
                 && AddCurrentUserToSystemGroup::new(
                     self.log,
                     self.credentials,
@@ -68,14 +62,19 @@ impl<'a> InitializeSystem<'a> {
                 credentials::ROOT_USER_NAME,
                 Modes::OwnerReadWriteExecuteGroupReadWriteExecute,
             ) && create_system_folder.perform(
+                "application root",
+                &self.system_paths.application_root(),
+                credentials::ROOT_USER_NAME,
+                Modes::OwnerReadWriteExecuteGroupReadWriteExecute,
+            ) && create_system_folder.perform(
                 "service root",
                 &self.system_paths.service_root(),
-                RADICLE_USER,
+                credentials::ROOT_USER_NAME,
                 Modes::OwnerReadWriteExecuteGroupReadWriteExecute,
             ) && create_system_folder.perform(
                 "mount root",
                 &self.system_paths.mount_root(),
-                RADICLE_USER,
+                credentials::ROOT_USER_NAME,
                 Modes::OwnerReadWriteExecuteGroupReadWriteExecute,
             )
         );

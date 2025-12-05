@@ -25,7 +25,13 @@ impl CreateMount {
         }
     }
 
-    pub fn create(&self, token: String, service_name: String, mount_name: String) -> Response {
+    pub fn create(
+        &self,
+        token: String,
+        service_name: String,
+        mount_name: String,
+        shared: bool,
+    ) -> Response {
         self.log.info(&format!(
             "Creating mount for {} {}",
             service_name, mount_name
@@ -37,7 +43,8 @@ impl CreateMount {
                 self.version_manager.create(
                     &service_name,
                     &mount_name,
-                    version
+                    version,
+                    shared
                 )
             );
 
@@ -136,7 +143,12 @@ mod tests {
                 Arc::new(folder),
             );
 
-            let actual = instance.create("foo".to_string(), "bar".to_string(), "baz".to_string());
+            let actual = instance.create(
+                "foo".to_string(),
+                "bar".to_string(),
+                "baz".to_string(),
+                false,
+            );
 
             assert_eq!(Response::InvalidToken, actual);
         }
@@ -168,14 +180,14 @@ mod tests {
                 .expect_ownership_and_mode_to_be_set(
                     "/tmp/mount_root/bar",
                     "doug-bar",
-                    "doug-bar",
-                    Modes::OwnerReadWriteGroupReadWrite,
+                    "douglas",
+                    Modes::OwnerReadWriteExecuteGroupReadWriteExecute,
                 )
                 .expect_ownership_and_mode_to_be_set(
                     "/tmp/mount_root/bar/baz",
                     "doug-bar",
-                    "doug-bar",
-                    Modes::OwnerReadWriteGroupReadWrite,
+                    "douglas",
+                    Modes::OwnerReadWriteExecuteGroupReadWriteExecute,
                 )
                 .expect_ownership_and_mode_to_be_set(
                     "/tmp/mount_root/bar/baz/v0",
@@ -187,7 +199,7 @@ mod tests {
                     "/tmp/mount_root/bar/baz/current",
                     "doug-bar",
                     "doug-bar",
-                    Modes::OwnerReadWriteGroupReadWrite,
+                    Modes::OwnerReadWriteExecuteGroupReadWriteExecute,
                 );
 
             folder.given_folder_entries("/tmp/mount_root/bar/baz", vec![]);
@@ -208,7 +220,12 @@ mod tests {
                 Arc::new(links),
                 Arc::new(folder),
             )
-            .create("token".to_string(), "bar".to_string(), "baz".to_string());
+            .create(
+                "token".to_string(),
+                "bar".to_string(),
+                "baz".to_string(),
+                false,
+            );
 
             assert!(matches!(actual, Response::MountSet {
                     name,

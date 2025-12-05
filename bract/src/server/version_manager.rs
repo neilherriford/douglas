@@ -3,6 +3,7 @@ use crate::Mount;
 use crate::Service;
 use crate::encoding::safe_prefixed_credential_name;
 use crate::version::Version;
+use config::constants::DOUGLAS_GROUP;
 use credentials::Credentials;
 use file_system::{EntryKind, FileDeleter, FileSystemError, Folder, Links, Modes, Permissions};
 use std::fmt::Debug;
@@ -55,11 +56,6 @@ pub(super) struct VersionManager {
     credentials: Arc<dyn Credentials>,
 }
 
-enum ServicePathType {
-    Support,
-    Version,
-}
-
 impl VersionManager {
     pub fn new(
         mount_path_factory: Arc<MountPathFactory>,
@@ -92,34 +88,34 @@ impl VersionManager {
         service_name: &str,
         mount_name: &str,
         version: Version,
+        shared: bool,
     ) -> Result<PathBuf, VersionManagerError> {
         let (user_name, group_name) = safe_prefixed_credential_name(service_name);
         self.assert_credentials(&user_name, &group_name)?;
 
         self.initialize_mount_root()?;
-        self.create_service_path(
+        self.create_path(
             &self.mount_paths.service_path(service_name),
             &user_name,
-            &group_name,
-            ServicePathType::Support,
+            DOUGLAS_GROUP,
         )?;
-        self.create_service_path(
+
+        self.create_path(
             &self.mount_paths.mount_path(service_name, mount_name),
             &user_name,
-            &group_name,
-            ServicePathType::Support,
+            DOUGLAS_GROUP,
         )?;
 
         let version_path = self
             .mount_paths
             .version_path(service_name, mount_name, version);
 
-        let created = self.create_service_path(
+        let created = self.create_path(
             &version_path,
             &user_name,
-            &group_name,
-            ServicePathType::Version,
+            if shared { DOUGLAS_GROUP } else { &group_name },
         )?;
+
         if !created {
             return Err(VersionManagerError::VersionAlreadyExists(version));
         }
@@ -202,8 +198,8 @@ impl VersionManager {
             self.set_ownership(
                 mount_root,
                 credentials::ROOT_USER_NAME,
-                credentials::ROOT_GROUP_NAME,
-                Modes::OwnerReadWrite,
+                DOUGLAS_GROUP,
+                Modes::OwnerReadWriteExecuteGroupReadWriteExecute,
             )?;
         }
 
@@ -235,12 +231,11 @@ impl VersionManager {
         self.permissions.change_mode(path, &mode)
     }
 
-    fn create_service_path(
+    fn create_path(
         &self,
         path: &Path,
         user_name: &str,
         group_name: &str,
-        service_path_type: ServicePathType,
     ) -> Result<bool, FileSystemError> {
         if self.folder.exists(path) {
             return Ok(false);
@@ -251,10 +246,7 @@ impl VersionManager {
             path,
             user_name,
             group_name,
-            match service_path_type {
-                ServicePathType::Support => Modes::OwnerReadWriteGroupReadWrite,
-                ServicePathType::Version => Modes::OwnerReadWriteExecuteGroupReadWriteExecute,
-            },
+            Modes::OwnerReadWriteExecuteGroupReadWriteExecute,
         )?;
         Ok(true)
     }
@@ -355,8 +347,8 @@ mod tests {
             permissions.expect_ownership_and_mode_to_be_set(
                 "/tmp/mount_root/",
                 "root",
-                "root",
-                Modes::OwnerReadWrite,
+                "douglas",
+                Modes::OwnerReadWriteExecuteGroupReadWriteExecute,
             );
         }
 
@@ -368,15 +360,15 @@ mod tests {
             permissions.expect_ownership_and_mode_to_be_set(
                 "/tmp/mount_root/foo",
                 "doug-foo",
-                "doug-foo",
-                Modes::OwnerReadWriteGroupReadWrite,
+                "douglas",
+                Modes::OwnerReadWriteExecuteGroupReadWriteExecute,
             );
             folder.expect_create_folder_recursively_with("/tmp/mount_root/foo/bar");
             permissions.expect_ownership_and_mode_to_be_set(
                 "/tmp/mount_root/foo/bar",
                 "doug-foo",
-                "doug-foo",
-                Modes::OwnerReadWriteGroupReadWrite,
+                "douglas",
+                Modes::OwnerReadWriteExecuteGroupReadWriteExecute,
             );
         }
 
@@ -389,6 +381,19 @@ mod tests {
                 "/tmp/mount_root/foo/bar/v0",
                 "doug-foo",
                 "doug-foo",
+                Modes::OwnerReadWriteExecuteGroupReadWriteExecute,
+            );
+        }
+
+        fn expect_shared_version_folder_created(
+            folder: &mut MockFolder,
+            permissions: &mut MockPermissions,
+        ) {
+            folder.expect_create_folder_recursively_with("/tmp/mount_root/foo/bar/v0");
+            permissions.expect_ownership_and_mode_to_be_set(
+                "/tmp/mount_root/foo/bar/v0",
+                "doug-foo",
+                "douglas",
                 Modes::OwnerReadWriteExecuteGroupReadWriteExecute,
             );
         }
@@ -414,8 +419,8 @@ mod tests {
             permissions.expect_ownership_and_mode_to_be_set(
                 &path.clone(),
                 "doug-foo",
-                "doug-foo",
-                Modes::OwnerReadWriteGroupReadWrite,
+                "douglas",
+                Modes::OwnerReadWriteExecuteGroupReadWriteExecute,
             );
         }
 
@@ -438,7 +443,7 @@ mod tests {
                 credentials,
                 mount_root,
             )
-            .create("foo", "bar", Version(0));
+            .create("foo", "bar", Version(0), false);
 
             assert!(matches!(actual, Err(VersionManagerError::UnknownUser)));
         }
@@ -464,7 +469,7 @@ mod tests {
                 credentials,
                 mount_root,
             )
-            .create("foo", "bar", Version(0));
+            .create("foo", "bar", Version(0), false);
 
             assert!(matches!(actual, Err(VersionManagerError::UnknownGroup)));
         }
@@ -493,45 +498,7 @@ mod tests {
                 credentials,
                 mount_root,
             )
-            .create("foo", "bar", Version(0));
-
-            assert!(matches!(
-                actual,
-                Err(VersionManagerError::FileSystemError(_))
-            ));
-        }
-
-        #[test]
-        fn should_error_if_could_not_set_root_permissions() {
-            let mut folder = MockFolder::new();
-            let links = MockLinks::new();
-            let file_deleter = MockFileDeleter::new();
-            let mut permissions = MockPermissions::new();
-            let mut credentials = MockCredentials::new();
-            let mount_root = Path::new("/tmp/mount_root");
-
-            credentials.given_user_and_group_exist("doug-foo", "doug-foo");
-            folder
-                .given_does_not_exist("/tmp/mount_root")
-                .expect_create_folder_recursively_with("/tmp/mount_root");
-            permissions
-                .expect_change_user_and_group_ownership()
-                .with(
-                    predicate::eq(Path::new("/tmp/mount_root")),
-                    predicate::eq("root"),
-                    predicate::eq("root"),
-                )
-                .returning(|_, _, _| Err(FileSystemError::ExpectedFileError));
-
-            let actual = create_version_manager(
-                folder,
-                links,
-                file_deleter,
-                permissions,
-                credentials,
-                mount_root,
-            )
-            .create("foo", "bar", Version(0));
+            .create("foo", "bar", Version(0), false);
 
             assert!(matches!(
                 actual,
@@ -556,12 +523,12 @@ mod tests {
                 .expect_create_folder_recursively_with("/tmp/mount_root")
                 .expect_create_folder_recursively_with("/tmp/mount_root/foo");
 
-            permissions.expect_ownership_to_be_set("/tmp/mount_root/foo", "doug-foo", "doug-foo");
+            permissions.expect_ownership_to_be_set("/tmp/mount_root/foo", "doug-foo", "douglas");
             permissions
                 .expect_change_mode()
                 .with(
                     predicate::eq(Path::new("/tmp/mount_root/foo")),
-                    predicate::eq(Modes::OwnerReadWriteGroupReadWrite),
+                    predicate::eq(Modes::OwnerReadWriteExecuteGroupReadWriteExecute),
                 )
                 .returning(|_, _| Err(FileSystemError::ExpectedFileError));
 
@@ -573,7 +540,7 @@ mod tests {
                 credentials,
                 mount_root,
             )
-            .create("foo", "bar", Version(0));
+            .create("foo", "bar", Version(0), false);
 
             assert!(matches!(
                 actual,
@@ -610,7 +577,7 @@ mod tests {
                 credentials,
                 mount_root,
             )
-            .create("foo", "bar", Version(0));
+            .create("foo", "bar", Version(0), false);
 
             assert!(matches!(
                 actual,
@@ -640,7 +607,7 @@ mod tests {
                 .with(
                     predicate::eq(Path::new("/tmp/mount_root/foo/bar")),
                     predicate::eq("doug-foo"),
-                    predicate::eq("doug-foo"),
+                    predicate::eq("douglas"),
                 )
                 .returning(|_, _, _| Err(FileSystemError::ExpectedFileError));
 
@@ -652,7 +619,7 @@ mod tests {
                 credentials,
                 mount_root,
             )
-            .create("foo", "bar", Version(0));
+            .create("foo", "bar", Version(0), false);
 
             assert!(matches!(
                 actual,
@@ -680,13 +647,13 @@ mod tests {
             permissions.expect_ownership_to_be_set(
                 "/tmp/mount_root/foo/bar",
                 "doug-foo",
-                "doug-foo",
+                "douglas",
             );
             permissions
                 .expect_change_mode()
                 .with(
                     predicate::eq(Path::new("/tmp/mount_root/foo/bar")),
-                    predicate::eq(Modes::OwnerReadWriteGroupReadWrite),
+                    predicate::eq(Modes::OwnerReadWriteExecuteGroupReadWriteExecute),
                 )
                 .returning(|_, _| Err(FileSystemError::ExpectedFileError));
 
@@ -698,7 +665,7 @@ mod tests {
                 credentials,
                 mount_root,
             )
-            .create("foo", "bar", Version(0));
+            .create("foo", "bar", Version(0), false);
 
             assert!(matches!(
                 actual,
@@ -730,7 +697,7 @@ mod tests {
                 credentials,
                 mount_root,
             )
-            .create("foo", "bar", Version(0));
+            .create("foo", "bar", Version(0), false);
 
             assert!(
                 matches!(actual, Err(VersionManagerError::VersionAlreadyExists(version)) if version == Version(0))
@@ -766,7 +733,7 @@ mod tests {
                 credentials,
                 mount_root,
             )
-            .create("foo", "bar", Version(0));
+            .create("foo", "bar", Version(0), false);
 
             assert!(matches!(
                 actual,
@@ -808,7 +775,7 @@ mod tests {
                 credentials,
                 mount_root,
             )
-            .create("foo", "bar", Version(0));
+            .create("foo", "bar", Version(0), false);
 
             assert!(matches!(
                 actual,
@@ -854,7 +821,7 @@ mod tests {
                 credentials,
                 mount_root,
             )
-            .create("foo", "bar", Version(0));
+            .create("foo", "bar", Version(0), false);
 
             assert!(matches!(
                 actual,
@@ -893,7 +860,7 @@ mod tests {
                 credentials,
                 mount_root,
             )
-            .create("foo", "bar", Version(0));
+            .create("foo", "bar", Version(0), false);
 
             assert!(matches!(
                 actual,
@@ -937,7 +904,7 @@ mod tests {
                 credentials,
                 mount_root,
             )
-            .create("foo", "bar", Version(0));
+            .create("foo", "bar", Version(0), false);
 
             assert!(matches!(
                 actual,
@@ -967,12 +934,43 @@ mod tests {
             expect_version_folder_created(&mut folder, &mut permissions);
             expect_current_version_recreated(&mut file_deleter, &mut links);
 
-            permissions.expect_ownership_and_mode_to_be_set(
-                "/tmp/mount_root/foo/bar/current",
-                "doug-foo",
-                "doug-foo",
-                Modes::OwnerReadWriteGroupReadWrite,
-            );
+            let actual = create_version_manager(
+                folder,
+                links,
+                file_deleter,
+                permissions,
+                credentials,
+                mount_root,
+            )
+            .create("foo", "bar", Version(0), false);
+
+            assert!(matches!(
+                actual,
+                Ok(path) if path == Path::new("/tmp/mount_root/foo/bar/current").to_path_buf()
+            ));
+        }
+
+        #[test]
+        fn should_create_shared() {
+            let mut folder = MockFolder::new();
+            let mut links = MockLinks::new();
+            let mut file_deleter = MockFileDeleter::new();
+            let mut permissions = MockPermissions::new();
+            let mut credentials = MockCredentials::new();
+            let mount_root = Path::new("/tmp/mount_root");
+
+            credentials.given_user_and_group_exist("doug-foo", "doug-foo");
+            folder
+                .given_does_not_exist("/tmp/mount_root")
+                .given_does_not_exist("/tmp/mount_root/foo")
+                .given_does_not_exist("/tmp/mount_root/foo/bar")
+                .given_does_not_exist("/tmp/mount_root/foo/bar/current")
+                .given_does_not_exist("/tmp/mount_root/foo/bar/v0");
+
+            expect_create_root(&mut folder, &mut permissions);
+            expect_create_service_and_mount_root(&mut folder, &mut permissions);
+            expect_shared_version_folder_created(&mut folder, &mut permissions);
+            expect_current_version_recreated(&mut file_deleter, &mut links);
 
             let actual = create_version_manager(
                 folder,
@@ -982,7 +980,7 @@ mod tests {
                 credentials,
                 mount_root,
             )
-            .create("foo", "bar", Version(0));
+            .create("foo", "bar", Version(0), true);
 
             assert!(matches!(
                 actual,
@@ -995,7 +993,7 @@ mod tests {
             use crate::{Version, server::version_manager::VersionManagerError};
             use credentials::MockCredentials;
             use file_system::{
-                FileSystemError, MockFileDeleter, MockFolder, MockLinks, MockPermissions, Modes,
+                FileSystemError, MockFileDeleter, MockFolder, MockLinks, MockPermissions,
             };
             use mockall::predicate;
             use std::path::Path;
@@ -1124,7 +1122,7 @@ mod tests {
                 let mut folder = MockFolder::new();
                 let mut links = MockLinks::new();
                 let mut file_deleter = MockFileDeleter::new();
-                let mut permissions = MockPermissions::new();
+                let permissions = MockPermissions::new();
                 let mut credentials = MockCredentials::new();
                 let mount_root = Path::new("/tmp/mount_root");
 
@@ -1135,13 +1133,6 @@ mod tests {
                     .given_exists("/tmp/mount_root/foo/bar")
                     .given_exists("/tmp/mount_root/foo/bar/current");
                 expect_current_version_recreated(&mut file_deleter, &mut links);
-
-                permissions.expect_ownership_and_mode_to_be_set(
-                    "/tmp/mount_root/foo/bar/current",
-                    "doug-foo",
-                    "doug-foo",
-                    Modes::OwnerReadWriteGroupReadWrite,
-                );
 
                 let actual = create_version_manager(
                     folder,

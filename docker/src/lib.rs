@@ -21,6 +21,7 @@ use thiserror::Error;
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub enum Capability {
     IpcLock,
+    Chown,
 }
 
 pub(crate) fn serialize_capabilities<S>(
@@ -34,6 +35,7 @@ where
     for capability in capabilities {
         let text = match capability {
             Capability::IpcLock => "IPC_LOCK",
+            Capability::Chown => "CAP_CHOWN",
         };
 
         seq.serialize_element(&text)?;

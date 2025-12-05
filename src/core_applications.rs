@@ -6,20 +6,22 @@ pub(crate) fn open_bao() -> ApplicationDefinition {
     let config_file = MountFile::in_root(
         "config.hcl",
         r#"ui = false
-storage "file" {
-    path = "/openbao/data"
-}
+    storage "file" {
+        path = "/openbao/data"
+    }
 
-listener "tcp" {
-    address     = "0.0.0.0:8200"
-    tls_disable = 1
-}
+    listener "unix" {
+        address = "/openbao/sockets/openbao.sock"
+        socket_mode = "0660"
+        socket_user = "${runas_user_id}"
+        socket_group = "${douglas_group_id}"
+    }
 
-api_addr = "http://openbao:8200"
-cluster_addr = "http://127.0.0.1:8201"
+    api_addr = "http://openbao:8200"
+    cluster_addr = "http://127.0.0.1:8201"
 
-log_level = "info"
-"#,
+    log_level = "info"
+    "#,
     );
 
     ApplicationDefinition::new(
@@ -28,6 +30,7 @@ log_level = "info"
     )
     .with_empty_mount("data", "/openbao/data")
     .with_empty_mount("log", "/openbao/log")
+    .with_empty_shared_mount("sockets", "/openbao/sockets")
     .with_mount("config", "/openbao/config", vec![config_file])
     .with_environment_variable("VAULT_ADDR", "http://127.0.0.1:8200")
     .with_environment_variable("VAULT_API_ADDR", "http://openbao:8200")
@@ -42,4 +45,5 @@ log_level = "info"
         "8200",
     )
     .with_capability(Capability::IpcLock)
+    .with_capability(Capability::Chown)
 }

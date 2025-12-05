@@ -1,4 +1,4 @@
-use config::constants::{DOUGLAS_GROUP, RADICLE_GROUP};
+use config::constants::DOUGLAS_GROUP;
 use credentials::Credentials;
 use log::Logger;
 
@@ -13,7 +13,7 @@ impl<'a> CreateSystemGroups<'a> {
     }
 
     pub fn perform(&self) -> bool {
-        self.create_group(DOUGLAS_GROUP) && self.create_group(RADICLE_GROUP)
+        self.create_group(DOUGLAS_GROUP)
     }
 
     fn create_group(&self, name: &str) -> bool {
