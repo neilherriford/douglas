@@ -26,7 +26,7 @@ impl<'a> BootCoreApplication<'a> {
         }
     }
 
-    pub async fn perform(&mut self, application_definition: &ApplicationDefinition) -> bool {
+    pub async fn perform(&mut self, application_definition: &dyn ApplicationDefinition) -> bool {
         let mut application_installer = ApplicationInstaller::new(
             self.log,
             self.bract_client,

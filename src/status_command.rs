@@ -1,11 +1,16 @@
 use crate::{
-    deferred_file_logger::DeferredFileLogger, file_logger::FileLogger, tee_logger::TeeLogger,
+    application_definition::ApplicationDefinition,
+    core_applications::{self, OpenBao},
+    deferred_file_logger::DeferredFileLogger,
+    file_logger::FileLogger,
+    tee_logger::TeeLogger,
 };
 use bract::{Client, client::ClientError};
 use config::{SystemPaths, create_system_paths};
 use docker::{SimpleSystemClient, SystemClient};
 use file_system::{FileAppender, LocalFileAppender, LocalFileReader};
 use log::Logger;
+use openbao::OpenBaoClient;
 use std::sync::Arc;
 use tokio::runtime::Runtime;
 
@@ -15,24 +20,36 @@ pub struct StatusCommand {
     file_appender: Arc<dyn FileAppender>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub enum BractStatus {
     NotRunning,
     NotIntialized,
-    Status(bract::client::Status),
-    CannotDetermineStatus(String),
+    Running(bract::client::Status),
+    Error(String),
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
+pub enum OpenBaoStatus {
+    NotRunning,
+    Running {
+        initialized: bool,
+        sealed: bool,
+        standby: bool,
+    },
+    Error(String),
+}
+
+#[derive(Debug, PartialEq)]
 pub enum DockerStatus {
     Active,
-    DockerClientError(String),
+    Error(String),
 }
 
 #[derive(Debug)]
 pub struct DouglasStatus {
     pub bract_status: BractStatus,
     pub docker_status: DockerStatus,
+    pub openbao_status: OpenBaoStatus,
 }
 
 impl StatusCommand {
@@ -52,6 +69,77 @@ impl StatusCommand {
     }
 
     pub fn perform(&self) -> bool {
+        let bract_status = self.bract_status();
+        let docker_status = self.docker_status();
+        let openbao_status = if matches!(bract_status, BractStatus::Running(_))
+            && docker_status == DockerStatus::Active
+        {
+            self.openbao_status()
+        } else {
+            OpenBaoStatus::NotRunning
+        };
+
+        let status = DouglasStatus {
+            bract_status,
+            docker_status,
+            openbao_status,
+        };
+        self.log.info(&format!("{status:?}"));
+
+        true
+    }
+
+    fn docker_status(&self) -> DockerStatus {
+        let docker_socket_path = self.system_paths.docker_socket_path();
+        let docker_logger = Arc::new(FileLogger::new(
+            self.system_paths.log_path("docker").as_path(),
+            Arc::clone(&self.file_appender),
+        ));
+        let rt = match Runtime::new() {
+            Ok(rt) => rt,
+            Err(err) => {
+                self.log.error(&format!("Runtime error: {err}"));
+                return DockerStatus::Error(err.to_string());
+            }
+        };
+        rt.block_on(async move {
+            match SimpleSystemClient::build(docker_socket_path, docker_logger).await {
+                Ok(mut client) => match client.ping().await {
+                    Ok(_) => DockerStatus::Active,
+                    Err(err) => DockerStatus::Error(err.to_string()),
+                },
+                Err(err) => DockerStatus::Error(err.to_string()),
+            }
+        })
+    }
+
+    fn bract_status(&self) -> BractStatus {
+        let bract_client = self.create_bract_client();
+        let mut bract_status: BractStatus = BractStatus::NotRunning;
+        let rt = match Runtime::new() {
+            Ok(rt) => rt,
+            Err(err) => {
+                self.log.error(&format!("Runtime error: {err}"));
+                return BractStatus::Error(err.to_string());
+            }
+        };
+        rt.block_on(async {
+            let response = bract_client.status().await;
+
+            bract_status = match response {
+                Ok(status) => BractStatus::Running(status),
+                Err(ClientError::MissingToken) => BractStatus::NotIntialized,
+                Err(ClientError::NoResponse | ClientError::ConnectionRefused) => {
+                    BractStatus::NotRunning
+                }
+                Err(err) => BractStatus::Error(err.to_string()),
+            };
+        });
+
+        bract_status
+    }
+
+    fn create_bract_client(&self) -> Client {
         let bract_socket_path = self.system_paths.douglas_socket_path("bract");
         let token_path = self.system_paths.token_path();
         let file_reader = Box::new(LocalFileReader::new());
@@ -60,33 +148,12 @@ impl StatusCommand {
             self.system_paths.log_path("bract").as_path(),
             Arc::clone(&self.file_appender),
         ));
+        Client::new(bract_logger, file_reader, bract_socket_path, token_path)
+    }
 
-        let bract_client = Client::new(bract_logger, file_reader, bract_socket_path, token_path);
-        let mut bract_status: BractStatus = BractStatus::NotRunning;
-
-        let rt = match Runtime::new() {
-            Ok(rt) => rt,
-            Err(err) => {
-                self.log.error(&format!("Runtime error: {err}"));
-                return false;
-            }
-        };
-        rt.block_on(async {
-            let response = bract_client.status().await;
-
-            bract_status = match response {
-                Ok(status) => BractStatus::Status(status),
-                Err(ClientError::MissingToken) => BractStatus::NotIntialized,
-                Err(ClientError::NoResponse | ClientError::ConnectionRefused) => {
-                    BractStatus::NotRunning
-                }
-                Err(err) => BractStatus::CannotDetermineStatus(format!("{err:?}")),
-            };
-        });
-
-        let docker_socket_path = self.system_paths.docker_socket_path();
-        let docker_logger = Arc::new(FileLogger::new(
-            self.system_paths.log_path("docker").as_path(),
+    fn openbao_status(&self) -> OpenBaoStatus {
+        let openbao_logger: Arc<dyn Logger> = Arc::new(FileLogger::new(
+            self.system_paths.log_path("openbao").as_path(),
             Arc::clone(&self.file_appender),
         ));
 
@@ -94,26 +161,55 @@ impl StatusCommand {
             Ok(rt) => rt,
             Err(err) => {
                 self.log.error(&format!("Runtime error: {err}"));
-                return false;
+                return OpenBaoStatus::Error(err.to_string());
             }
         };
+        let bract_client = self.create_bract_client();
 
-        let docker_status = rt.block_on(async move {
-            match SimpleSystemClient::build(docker_socket_path, docker_logger).await {
-                Ok(mut client) => match client.ping().await {
-                    Ok(_) => DockerStatus::Active,
-                    Err(err) => DockerStatus::DockerClientError(format!("{err:?}")),
+        rt.block_on(async {
+            let openbao_definition = core_applications::OpenBao::new();
+
+            let mut openbao_socket_path = match bract_client
+                .active_mount_version(&openbao_definition.name(), &OpenBao::sockets_mount_name())
+                .await
+            {
+                Ok(None) => {
+                    self.log.error("OpenBao not socket mount missing");
+                    return OpenBaoStatus::Error("OpenBao not socket mount missing".into());
+                }
+                Ok(Some(mount)) => mount.path,
+                Err(err) => {
+                    self.log.error(&format!("Bract client error: {err}"));
+                    return OpenBaoStatus::Error(err.to_string());
+                }
+            };
+
+            openbao_socket_path.push(OpenBao::socket_file_name());
+
+            let mut openbao_client = match openbao::SimpleOpenBaoClient::build(
+                openbao_socket_path,
+                openbao_logger,
+            )
+            .await
+            {
+                Ok(client) => client,
+                Err(err) => {
+                    self.log.error(&format!("OpenBao client error: {err}"));
+                    return OpenBaoStatus::Error(err.to_string());
+                }
+            };
+
+            match openbao_client.status().await {
+                Ok(status) => OpenBaoStatus::Running {
+                    initialized: status.initialized,
+                    sealed: status.sealed,
+                    standby: status.standby,
                 },
-                Err(err) => DockerStatus::DockerClientError(format!("{err:?}")),
+                Err(err) => {
+                    self.log.error(&format!("OpenBao client error: {err}"));
+                    OpenBaoStatus::Error(err.to_string())
+                }
             }
-        });
-
-        let status = DouglasStatus {
-            bract_status,
-            docker_status,
-        };
-        self.log.info(&format!("{status:?}"));
-
-        true
+        })
     }
 }

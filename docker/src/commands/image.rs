@@ -1,9 +1,10 @@
-use super::json_parser::JsonParserError;
 use super::{assert_no_docker_errors, assert_non_empty_string_argument, assert_okay_with_body};
+use crate::Image;
 use crate::{DockerError, Id, ImageName};
-use crate::{Image, Parser};
 use serde_json::from_value;
 use serde_json::value::Value as Json;
+use simple_rest_client::parsers::Parser;
+use simple_rest_client::parsers::json::JsonParserError;
 use simple_rest_client::{Request, RestClient};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -184,11 +185,8 @@ mod tests {
 
     mod list {
         use super::super::*;
-        use crate::{
-            Tag,
-            commands::json_parser::{ChunkedJsonParser, JsonParser},
-        };
-        use simple_rest_client::MockRestClient;
+        use crate::{Tag, commands::json_parser::ChunkedJsonParser};
+        use simple_rest_client::{MockRestClient, parsers::json::JsonParser};
 
         #[tokio::test]
         async fn should_error_on_created() {
@@ -313,12 +311,9 @@ mod tests {
     mod pull {
         use crate::{
             DockerError, Id, Image, ImageName, Tag,
-            commands::{
-                ImageCommand,
-                json_parser::{ChunkedJsonParser, JsonParser},
-            },
+            commands::{ImageCommand, json_parser::ChunkedJsonParser},
         };
-        use simple_rest_client::MockRestClient;
+        use simple_rest_client::{MockRestClient, parsers::json::JsonParser};
         use std::sync::Arc;
 
         #[tokio::test]
@@ -525,11 +520,8 @@ mod tests {
 
     mod find_by_name {
         use super::super::*;
-        use crate::{
-            Tag,
-            commands::json_parser::{ChunkedJsonParser, JsonParser},
-        };
-        use simple_rest_client::MockRestClient;
+        use crate::{Tag, commands::json_parser::ChunkedJsonParser};
+        use simple_rest_client::{MockRestClient, parsers::json::JsonParser};
 
         #[tokio::test]
         async fn should_err_if_name_is_empty() {
@@ -703,12 +695,9 @@ mod tests {
     mod find_by_id {
         use crate::{
             DockerError, Id, Image, Tag,
-            commands::{
-                ImageCommand,
-                json_parser::{ChunkedJsonParser, JsonParser},
-            },
+            commands::{ImageCommand, json_parser::ChunkedJsonParser},
         };
-        use simple_rest_client::MockRestClient;
+        use simple_rest_client::{MockRestClient, parsers::json::JsonParser};
         use std::sync::Arc;
 
         #[tokio::test]

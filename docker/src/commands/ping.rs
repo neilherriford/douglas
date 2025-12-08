@@ -1,7 +1,6 @@
-use crate::{DockerError, Parser, PingResult};
-
 use super::assert_okay_with_body;
-use simple_rest_client::{Request, RestClient};
+use crate::{DockerError, PingResult};
+use simple_rest_client::{Request, RestClient, parsers::Parser};
 use std::sync::Arc;
 use thiserror::Error;
 

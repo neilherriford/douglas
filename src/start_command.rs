@@ -80,7 +80,7 @@ impl StartCommand {
             &mut docker_image_client,
             &mut docker_container_client,
         )
-        .perform(&core_applications::open_bao())
+        .perform(&core_applications::OpenBao::new())
         .await
     }
 

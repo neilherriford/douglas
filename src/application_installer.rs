@@ -46,9 +46,9 @@ impl<'a> ApplicationInstaller<'a> {
 
     pub async fn install(
         &mut self,
-        definition: &ApplicationDefinition,
+        definition: &dyn ApplicationDefinition,
     ) -> Result<docker::Container, ApplicationInstallerError> {
-        self.log.info(&format!("Installing {}…", definition.name));
+        self.log.info(&format!("Installing {}…", definition.name()));
         let credential = self.create_credentials(definition).await?;
         let image = self.install_image(definition).await?;
 
@@ -69,14 +69,14 @@ impl<'a> ApplicationInstaller<'a> {
 
     async fn create_credentials(
         &mut self,
-        definition: &ApplicationDefinition,
+        definition: &dyn ApplicationDefinition,
     ) -> Result<Credential, ApplicationInstallerError> {
         self.log
-            .info(&format!("Creating credentials for {}…", definition.name));
+            .info(&format!("Creating credentials for {}…", definition.name()));
 
         let result = self
             .bract_client
-            .create_credentials(&definition.name)
+            .create_credentials(&definition.name())
             .await?;
 
         Ok(result)
@@ -84,20 +84,22 @@ impl<'a> ApplicationInstaller<'a> {
 
     async fn install_image(
         &mut self,
-        definition: &ApplicationDefinition,
+        definition: &dyn ApplicationDefinition,
     ) -> Result<docker::Image, ApplicationInstallerError> {
-        self.log
-            .info(&format!("Installing Docker image for {}…", definition.name,));
+        self.log.info(&format!(
+            "Installing Docker image for {}…",
+            definition.name(),
+        ));
 
         match self
             .docker_image_client
-            .find_by_name(&definition.image_name)
+            .find_by_name(&definition.image_name())
             .await
         {
             Ok(image) => Ok(image),
             Err(DockerError::NotFoundError) => Ok(self
                 .docker_image_client
-                .pull(&definition.image_name)
+                .pull(&definition.image_name())
                 .await?),
             Err(err) => Err(err.into()),
         }
@@ -105,28 +107,31 @@ impl<'a> ApplicationInstaller<'a> {
 
     async fn create_mount_folders(
         &self,
-        definition: &ApplicationDefinition,
+        definition: &dyn ApplicationDefinition,
     ) -> Result<HashMap<String, PathBuf>, ApplicationInstallerError> {
-        self.log
-            .info(&format!("Creating mount folders for {}…", definition.name));
+        self.log.info(&format!(
+            "Creating mount folders for {}…",
+            definition.name()
+        ));
 
         let mut result = HashMap::<String, PathBuf>::new();
 
-        for mount_template in &definition.mount_templates {
+        for mount_template in &definition.mount_templates() {
             self.log.info(&format!(
                 "Creating mount storage for {}/{}…",
-                definition.name, mount_template.name
+                definition.name(),
+                mount_template.name
             ));
             let mount = match self
                 .bract_client
-                .active_mount_version(&definition.name, &mount_template.name)
+                .active_mount_version(&definition.name(), &mount_template.name)
                 .await
             {
                 Ok(Some(mount)) => mount,
                 Ok(None) => {
                     self.bract_client
                         .create_mount(
-                            &definition.name,
+                            &definition.name(),
                             &mount_template.name,
                             mount_template.shared,
                         )
@@ -143,29 +148,29 @@ impl<'a> ApplicationInstaller<'a> {
 
     async fn inject_files(
         &self,
-        definition: &ApplicationDefinition,
+        definition: &dyn ApplicationDefinition,
         template_expander: &MountFileTemplateExpander,
     ) -> Result<(), ApplicationInstallerError> {
         self.log
-            .info(&format!("Adding mount files for {}…", definition.name));
+            .info(&format!("Adding mount files for {}…", definition.name()));
 
         for (mount_name, file) in definition
-            .mount_templates
+            .mount_templates()
             .iter()
             .flat_map(|template| template.files.iter().map(|file| (&template.name, file)))
         {
             self.log.info(&format!(
                 "Writing {}:{}:{}…",
-                definition.name,
+                definition.name(),
                 mount_name,
                 path_to_string(&file.relative_path),
             ));
 
-            let contents = template_expander.expand(&file.contents);
+            let contents = template_expander.expand(&file);
 
             self.bract_client
                 .mount_io(
-                    &definition.name,
+                    &definition.name(),
                     mount_name,
                     bract::IoOperation::WriteFile {
                         relative_path: file.relative_path.as_path(),
@@ -180,38 +185,40 @@ impl<'a> ApplicationInstaller<'a> {
 
     async fn create_container(
         &mut self,
-        definition: &ApplicationDefinition,
+        definition: &dyn ApplicationDefinition,
         credential: Credential,
         mount_name_to_host_path: HashMap<String, PathBuf>,
         image: docker::Image,
     ) -> Result<docker::Container, ApplicationInstallerError> {
-        self.log
-            .info(&format!("Installing Docker container {}…", definition.name));
+        self.log.info(&format!(
+            "Installing Docker container {}…",
+            definition.name()
+        ));
 
         match self
             .docker_container_client
-            .find_by_name(&definition.name)
+            .find_by_name(&definition.name())
             .await
         {
             Ok(container) => Ok(container),
             Err(DockerError::NotFoundError) => {
                 self.log
-                    .info(&format!("Creating Docker container {}…", definition.name));
+                    .info(&format!("Creating Docker container {}…", definition.name()));
                 let container_definition = ContainerDefinition {
-                    name: definition.name.clone(),
+                    name: definition.name(),
                     run_as: Some(ContainerUser {
                         user_id: credential.user_id,
                         group_id: credential.group_id,
                     }),
-                    command: definition.command.clone(),
-                    environment_variables: definition.environment_variables.clone(),
+                    command: definition.command(),
+                    environment_variables: definition.environment_variables(),
                     image_name: docker::ImageIdentifier::Id(image.id),
                     mounts: Self::create_docker_mount_definitions(
                         definition,
                         &mount_name_to_host_path,
                     )?,
-                    added_capabilities: definition.added_capabilities.clone(),
-                    labels: definition.labels.clone(),
+                    added_capabilities: definition.added_capabilities(),
+                    labels: definition.labels(),
                 };
 
                 let container = self
@@ -225,12 +232,12 @@ impl<'a> ApplicationInstaller<'a> {
     }
 
     fn create_docker_mount_definitions(
-        defintion: &ApplicationDefinition,
+        defintion: &dyn ApplicationDefinition,
         mount_name_to_host_path: &HashMap<String, PathBuf>,
     ) -> Result<Vec<docker::MountDefinition>, ApplicationInstallerError> {
         let mut result = Vec::<docker::MountDefinition>::new();
 
-        for mount_definintion in &defintion.mount_templates {
+        for mount_definintion in &defintion.mount_templates() {
             if let Some(host_path) = mount_name_to_host_path.get(&mount_definintion.name) {
                 result.push(docker::MountDefinition {
                     name: mount_definintion.name.clone(),
@@ -240,7 +247,7 @@ impl<'a> ApplicationInstaller<'a> {
                 });
             } else {
                 return Err(ApplicationInstallerError::MissingNamedMount(
-                    defintion.name.clone(),
+                    defintion.name(),
                 ));
             }
         }

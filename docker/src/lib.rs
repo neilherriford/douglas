@@ -3,7 +3,7 @@ mod commands;
 use async_trait::async_trait;
 use commands::ImageCommand;
 use commands::container::{ContainerCommand, InspectedContainer};
-use commands::json_parser::{ChunkedJsonParser, JsonParser, JsonParserError};
+use commands::json_parser::ChunkedJsonParser;
 use commands::network::{Network, NetworkCommand};
 use commands::ping::{PingCommand, PingParser};
 use file_system::{FileSystemError, path_to_string};
@@ -11,6 +11,8 @@ use log::Logger;
 use serde::ser::{SerializeMap, SerializeSeq, SerializeStruct};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::value::Value as Json;
+use simple_rest_client::parsers::Parser;
+use simple_rest_client::parsers::json::{JsonParser, JsonParserError};
 use simple_rest_client::unix_domain_socket::{BuilderError, build_client};
 use simple_rest_client::{Request, RestClient, RestClientError};
 use std::collections::HashSet;
@@ -41,11 +43,6 @@ where
         seq.serialize_element(&text)?;
     }
     seq.end()
-}
-
-pub trait Parser<T>: Send + Sync + std::fmt::Debug {
-    type ParseError: std::error::Error + Send + Sync + 'static;
-    fn parse(&self, input: String) -> Result<T, Self::ParseError>;
 }
 
 #[derive(Debug, Deserialize, Clone, PartialEq)]

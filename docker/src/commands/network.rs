@@ -1,16 +1,15 @@
-use crate::Parser;
+use super::{
+    assert_created_with_body, assert_non_empty_string_argument, assert_okay, assert_okay_with_body,
+};
 use crate::{Container, DockerError, Label, deserialize_labels, serialize_labels};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::from_value;
 use serde_json::value::Value as Json;
+use simple_rest_client::parsers::Parser;
+use simple_rest_client::parsers::json::JsonParserError;
 use simple_rest_client::{Header, Request, Response, RestClient};
 use std::sync::Arc;
-
-use super::json_parser::JsonParserError;
-use super::{
-    assert_created_with_body, assert_non_empty_string_argument, assert_okay, assert_okay_with_body,
-};
 
 #[derive(Debug, Deserialize, PartialEq)]
 pub struct Network {
@@ -278,11 +277,8 @@ mod tests {
     }
 
     mod inspect_by_id {
-        use crate::{
-            DockerError,
-            commands::{json_parser::JsonParser, network::NetworkCommand},
-        };
-        use simple_rest_client::MockRestClient;
+        use crate::{DockerError, commands::network::NetworkCommand};
+        use simple_rest_client::{MockRestClient, parsers::json::JsonParser};
         use std::sync::Arc;
 
         #[tokio::test]
@@ -306,11 +302,8 @@ mod tests {
     }
 
     mod find_connected_containers_by_id {
-        use crate::{
-            DockerError,
-            commands::{json_parser::JsonParser, network::NetworkCommand},
-        };
-        use simple_rest_client::MockRestClient;
+        use crate::{DockerError, commands::network::NetworkCommand};
+        use simple_rest_client::{MockRestClient, parsers::json::JsonParser};
         use std::sync::Arc;
 
         #[tokio::test]
@@ -334,11 +327,8 @@ mod tests {
     }
 
     mod find_connected_containers_by_name {
-        use crate::{
-            DockerError,
-            commands::{json_parser::JsonParser, network::NetworkCommand},
-        };
-        use simple_rest_client::MockRestClient;
+        use crate::{DockerError, commands::network::NetworkCommand};
+        use simple_rest_client::{MockRestClient, parsers::json::JsonParser};
         use std::sync::Arc;
 
         #[tokio::test]
@@ -362,11 +352,8 @@ mod tests {
     }
 
     mod inspect_by_name {
-        use crate::{
-            DockerError,
-            commands::{json_parser::JsonParser, network::NetworkCommand},
-        };
-        use simple_rest_client::MockRestClient;
+        use crate::{DockerError, commands::network::NetworkCommand};
+        use simple_rest_client::{MockRestClient, parsers::json::JsonParser};
         use std::sync::Arc;
 
         #[tokio::test]
@@ -392,12 +379,9 @@ mod tests {
     mod inspect_network_by_hight {
         use crate::{
             DockerError, Label,
-            commands::{
-                json_parser::JsonParser,
-                network::{Network, NetworkCommand},
-            },
+            commands::network::{Network, NetworkCommand},
         };
-        use simple_rest_client::MockRestClient;
+        use simple_rest_client::{MockRestClient, parsers::json::JsonParser};
         use std::sync::Arc;
 
         #[tokio::test]
@@ -544,11 +528,8 @@ mod tests {
     }
 
     mod find_connected_containers_by_hight {
-        use crate::{
-            DockerError,
-            commands::{json_parser::JsonParser, network::NetworkCommand},
-        };
-        use simple_rest_client::MockRestClient;
+        use crate::{DockerError, commands::network::NetworkCommand};
+        use simple_rest_client::{MockRestClient, parsers::json::JsonParser};
         use std::sync::Arc;
 
         #[tokio::test]
@@ -672,12 +653,9 @@ mod tests {
     mod create {
         use crate::{
             DockerError, Label,
-            commands::{
-                json_parser::JsonParser,
-                network::{CreationBody, Network, NetworkCommand},
-            },
+            commands::network::{CreationBody, Network, NetworkCommand},
         };
-        use simple_rest_client::{Header, MockRestClient};
+        use simple_rest_client::{Header, MockRestClient, parsers::json::JsonParser};
         use std::sync::Arc;
 
         #[tokio::test]
@@ -848,12 +826,9 @@ mod tests {
     mod connect {
         use crate::{
             Container, DockerError, Id, Image, Status,
-            commands::{
-                json_parser::JsonParser,
-                network::{ConnectionBody, Network, NetworkCommand},
-            },
+            commands::network::{ConnectionBody, Network, NetworkCommand},
         };
-        use simple_rest_client::{Header, MockRestClient};
+        use simple_rest_client::{Header, MockRestClient, parsers::json::JsonParser};
         use std::{collections::HashSet, sync::Arc};
 
         #[tokio::test]
@@ -1095,12 +1070,9 @@ mod tests {
     mod disconnect {
         use crate::{
             Container, DockerError, Id, Image, Status,
-            commands::{
-                json_parser::JsonParser,
-                network::{ConnectionBody, Network, NetworkCommand},
-            },
+            commands::network::{ConnectionBody, Network, NetworkCommand},
         };
-        use simple_rest_client::{Header, MockRestClient};
+        use simple_rest_client::{Header, MockRestClient, parsers::json::JsonParser};
         use std::{collections::HashSet, sync::Arc};
 
         #[tokio::test]

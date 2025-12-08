@@ -1,4 +1,6 @@
+pub mod parsers;
 pub mod unix_domain_socket;
+
 use http_body_util::BodyExt;
 use hyper::client::conn::http1::SendRequest;
 use log::Logger;

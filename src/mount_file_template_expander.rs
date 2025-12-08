@@ -1,3 +1,4 @@
+use crate::application_definition::MountFile;
 use bract::client::Credential;
 use config::constants;
 use credentials::create_credentials;
@@ -46,9 +47,9 @@ impl MountFileTemplateExpander {
         self
     }
 
-    pub fn expand(&self, template: &str) -> String {
+    pub fn expand(&self, mount_file: &MountFile) -> String {
         let mut result = String::new();
-        let chars: Vec<char> = template.chars().collect();
+        let chars: Vec<char> = mount_file.contents.chars().collect();
         let mut index = 0;
 
         while index < chars.len() {
@@ -61,7 +62,12 @@ impl MountFileTemplateExpander {
                 if close_bracket_index < chars.len() {
                     let key: String = chars[index + 2..close_bracket_index].iter().collect();
 
-                    if let Some(value) = self.variables.get(key.as_str()) {
+                    let mut replacement = self.variables.get(key.as_str());
+                    if replacement.is_none() {
+                        replacement = mount_file.template_variables.get(key.as_str());
+                    }
+
+                    if let Some(value) = replacement {
                         result.push_str(value);
                         index = close_bracket_index + 1;
                         continue;

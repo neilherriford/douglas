@@ -1,8 +1,7 @@
-use super::json_parser::JsonParserError;
 use super::{assert_created_with_body, assert_non_empty_string_argument, assert_okay_with_body};
 use crate::{
     Capability, Config, ContainerDefinition, ContainerUser, DockerError, EnvironmentVariable, Id,
-    ImageIdentifier, Label, Mount, MountDefinition, Parser, Request, State, deserialize_id,
+    ImageIdentifier, Label, Mount, MountDefinition, Request, State, deserialize_id,
     serialize_capabilities, serialize_environment_variables, serialize_image_identifier,
     serialize_labels,
 };
@@ -10,6 +9,8 @@ use serde::ser::SerializeSeq;
 use serde::{Deserialize, Serialize, Serializer};
 use serde_json::from_value;
 use serde_json::value::Value as Json;
+use simple_rest_client::parsers::Parser;
+use simple_rest_client::parsers::json::JsonParserError;
 use simple_rest_client::{Header, Response, RestClient, create_path_and_query_string};
 use std::{collections::HashMap, sync::Arc};
 
@@ -332,14 +333,11 @@ mod tests {
     mod inspect_by_id {
         use crate::{
             Config, DockerError, EnvironmentVariable, Id, Label, Mount, MountType, State, Status,
-            commands::{
-                container::{ContainerCommand, InspectedContainer},
-                json_parser::JsonParser,
-            },
+            commands::container::{ContainerCommand, InspectedContainer},
         };
         use std::sync::Arc;
 
-        use simple_rest_client::MockRestClient;
+        use simple_rest_client::{MockRestClient, parsers::json::JsonParser};
 
         #[tokio::test]
         async fn should_err_if_id_is_empty() {
@@ -518,12 +516,9 @@ mod tests {
     mod find_by_name {
         use crate::{
             Config, DockerError, EnvironmentVariable, Id, Label, Mount, MountType, State, Status,
-            commands::{
-                container::{ContainerCommand, InspectedContainer},
-                json_parser::JsonParser,
-            },
+            commands::container::{ContainerCommand, InspectedContainer},
         };
-        use simple_rest_client::MockRestClient;
+        use simple_rest_client::{MockRestClient, parsers::json::JsonParser};
         use std::sync::Arc;
 
         #[tokio::test]

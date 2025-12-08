@@ -49,7 +49,7 @@ pub struct Credential {
     pub group_id: u32,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, PartialEq)]
 pub struct Status {
     pub token_path: PathBuf,
     pub mount_root: PathBuf,
