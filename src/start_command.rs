@@ -1,3 +1,4 @@
+use colored::Colorize;
 use config::{SystemPaths, create_system_paths};
 use credentials::create_credentials;
 use file_system::{
@@ -5,8 +6,10 @@ use file_system::{
     Permissions,
 };
 use log::Logger;
+use openbao::{OpenBaoClient, SimpleOpenBaoClient};
 use os::{Os, Unix, UnixEnvironmentVariableReader};
 use std::sync::Arc;
+use tokio::time::error;
 
 use crate::{
     commands, core_applications, deferred_file_logger::DeferredFileLogger, file_logger::FileLogger,
@@ -74,14 +77,76 @@ impl StartCommand {
         let mut docker_container_client =
             unwrap_or_bail!(self.create_docker_container_client(docker_logger).await);
 
-        commands::BootCoreApplication::new(
-            &self.log,
-            &mut bract_client,
-            &mut docker_image_client,
-            &mut docker_container_client,
-        )
-        .perform(&core_applications::OpenBao::new())
-        .await
+        let openbao_definition = core_applications::OpenBao::new();
+        bail_unless!(
+            commands::BootCoreApplication::new(
+                &self.log,
+                &mut bract_client,
+                &mut docker_image_client,
+                &mut docker_container_client,
+            )
+            .perform(&openbao_definition)
+            .await
+        );
+
+        self.log.info("Initializng OpenBao");
+
+        let openbao_logger: Arc<dyn Logger> = Arc::new(FileLogger::new(
+            self.system_paths.log_path("openbao").as_path(),
+            Arc::clone(&self.file_appender),
+        ));
+
+        let socket_path = match openbao_definition.qualified_socket_path(bract_client).await {
+            Ok(socket_path) => socket_path,
+            Err(err) => {
+                openbao_logger.error(&format!(
+                    "Could not determine qualified socket path for OpenBao: {err}"
+                ));
+                return false;
+            }
+        };
+
+        let mut openbao_client =
+            match SimpleOpenBaoClient::build(socket_path, Arc::clone(&openbao_logger)).await {
+                Ok(openbao_client) => openbao_client,
+                Err(err) => {
+                    openbao_logger.error(&format!(
+                        "Could not determine qualified socket path for OpenBao: {err}"
+                    ));
+                    return false;
+                }
+            };
+        match openbao_client.intialize().await {
+            Ok(response) => {
+                println!(
+                    "{}",
+                    "Record these secret keys!! They will not be shown again"
+                        .italic()
+                        .yellow()
+                );
+
+                println!("  Base 64                                       Key");
+                println!(
+                    "  ▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔  ▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔"
+                );
+                for secret in response.secrets {
+                    println!("  {}  {}", secret.base64, secret.key);
+                }
+            }
+            Err(err) => match err {
+                openbao::OpenBaoError::AlreadyInitialized => {
+                    self.log.warn("OpenBao already intialized!");
+                }
+                err => {
+                    self.log.error(&format!(
+                        "Could not determine qualified socket path for OpenBao: {err}"
+                    ));
+                    return false;
+                }
+            },
+        }
+
+        true
     }
 
     async fn initialize_docker(&self) -> bool {

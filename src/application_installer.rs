@@ -97,7 +97,7 @@ impl<'a> ApplicationInstaller<'a> {
             .await
         {
             Ok(image) => Ok(image),
-            Err(DockerError::NotFoundError) => Ok(self
+            Err(DockerError::ResourceNotFound) => Ok(self
                 .docker_image_client
                 .pull(&definition.image_name())
                 .await?),
@@ -166,7 +166,7 @@ impl<'a> ApplicationInstaller<'a> {
                 path_to_string(&file.relative_path),
             ));
 
-            let contents = template_expander.expand(&file);
+            let contents = template_expander.expand(file);
 
             self.bract_client
                 .mount_io(
@@ -201,7 +201,7 @@ impl<'a> ApplicationInstaller<'a> {
             .await
         {
             Ok(container) => Ok(container),
-            Err(DockerError::NotFoundError) => {
+            Err(DockerError::ResourceNotFound) => {
                 self.log
                     .info(&format!("Creating Docker container {}…", definition.name()));
                 let container_definition = ContainerDefinition {

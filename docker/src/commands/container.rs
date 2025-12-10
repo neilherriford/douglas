@@ -1,4 +1,4 @@
-use super::{assert_created_with_body, assert_non_empty_string_argument, assert_okay_with_body};
+use super::assert_non_empty_string_argument;
 use crate::{
     Capability, Config, ContainerDefinition, ContainerUser, DockerError, EnvironmentVariable, Id,
     ImageIdentifier, Label, Mount, MountDefinition, Request, State, deserialize_id,
@@ -9,6 +9,9 @@ use serde::ser::SerializeSeq;
 use serde::{Deserialize, Serialize, Serializer};
 use serde_json::from_value;
 use serde_json::value::Value as Json;
+use simple_rest_client::assertions::{
+    AssertionError, assert_created_with_body, assert_okay_with_body,
+};
 use simple_rest_client::parsers::Parser;
 use simple_rest_client::parsers::json::JsonParserError;
 use simple_rest_client::{Header, Response, RestClient, create_path_and_query_string};
@@ -162,7 +165,7 @@ impl ContainerCommand {
         let identified_containers: Vec<IdentifiedContainer> = from_value(json)?;
 
         match identified_containers.len() {
-            0 => Err(DockerError::NotFoundError),
+            0 => Err(DockerError::ResourceNotFound),
             1 => self.find_by_id(&identified_containers[0].id).await,
             _ => Err(DockerError::AmbiguousMatchError),
         }
@@ -219,24 +222,29 @@ impl ContainerCommand {
         };
 
         match response {
-            Response::Okay { headers: _, body } => Err(DockerError::UnexpectedResponseError {
+            Response::Okay { headers: _, body } => Err(AssertionError::UnexpectedResponseError {
                 status: 200,
                 body,
                 message: "expected NO CONTENT, but recieved OK".to_string(),
-            }),
-            Response::Created { headers: _, body } => Err(DockerError::UnexpectedResponseError {
-                status: 200,
-                body,
-                message: "expected NO CONTENT, but recieved CREATED".to_string(),
-            }),
+            }
+            .into()),
+            Response::Created { headers: _, body } => {
+                Err(AssertionError::UnexpectedResponseError {
+                    status: 200,
+                    body,
+                    message: "expected NO CONTENT, but recieved CREATED".to_string(),
+                }
+                .into())
+            }
             Response::NoContent { .. } => Ok(()),
             Response::Error { status: 304, .. } => Ok(()),
-            Response::Error { status: 404, .. } => Err(DockerError::NotFoundError),
-            Response::Error { status, body, .. } => Err(DockerError::UnexpectedResponseError {
+            Response::Error { status: 404, .. } => Err(AssertionError::NotFoundError.into()),
+            Response::Error { status, body, .. } => Err(AssertionError::UnexpectedResponseError {
                 status,
                 body,
                 message: "non successful response".to_string(),
-            }),
+            }
+            .into()),
         }
     }
 }
@@ -389,7 +397,7 @@ mod tests {
 
             assert!(matches!(
                 result,
-                Err(DockerError::UnexpectedResponseError { status: 201, .. })
+                Err(DockerError::ResponseError { status: 201, .. })
             ));
         }
 
@@ -407,7 +415,7 @@ mod tests {
 
             assert!(matches!(
                 result,
-                Err(DockerError::UnexpectedResponseError { status: 204, .. })
+                Err(DockerError::ResponseError { status: 204, .. })
             ));
         }
 
@@ -423,7 +431,7 @@ mod tests {
 
             let result = command.find_by_id("123456").await;
 
-            assert!(matches!(result, Err(DockerError::NotFoundError)));
+            assert!(matches!(result, Err(DockerError::ResourceNotFound)));
         }
 
         #[tokio::test]
@@ -440,7 +448,7 @@ mod tests {
 
             assert!(matches!(
                 result,
-                Err(DockerError::UnexpectedResponseError { status: 500, .. })
+                Err(DockerError::ResponseError { status: 500, .. })
             ));
         }
 
@@ -555,7 +563,7 @@ mod tests {
 
             assert!(matches!(
                 result,
-                Err(DockerError::UnexpectedResponseError { status: 201, .. })
+                Err(DockerError::ResponseError { status: 201, .. })
             ));
         }
 
@@ -575,7 +583,7 @@ mod tests {
 
             assert!(matches!(
                 result,
-                Err(DockerError::UnexpectedResponseError { status: 204, .. })
+                Err(DockerError::ResponseError { status: 204, .. })
             ));
         }
 
@@ -595,7 +603,7 @@ mod tests {
 
             assert!(matches!(
                 result,
-                Err(DockerError::UnexpectedResponseError { status: 500, .. })
+                Err(DockerError::ResponseError { status: 500, .. })
             ));
         }
 

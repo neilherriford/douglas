@@ -1,20 +1,26 @@
 mod commands;
-use std::{path::PathBuf, sync::Arc};
 
+use crate::commands::{
+    init::{ConfigError, InitCommand},
+    status::StatusCommand,
+};
 use async_trait::async_trait;
 use log::Logger;
 use serde::Deserialize;
 use simple_rest_client::{
     RestClient, RestClientError,
+    assertions::AssertionError,
     parsers::json::{JsonParser, JsonParserError},
     unix_domain_socket::{BuilderError, build_client},
 };
+use std::{path::PathBuf, sync::Arc};
 use thiserror::Error;
-
-use crate::commands::status::StatusCommand;
 
 #[derive(Error, Debug)]
 pub enum OpenBaoError {
+    #[error("Already initialized")]
+    AlreadyInitialized,
+
     #[error("Received unexpected response with status: {status}, {message}")]
     UnexpectedResponse {
         status: u16,
@@ -25,6 +31,9 @@ pub enum OpenBaoError {
     #[error("Client error: {0}")]
     ClientError(#[from] RestClientError),
 
+    #[error("Client error: {0}")]
+    ClientResponseError(#[from] AssertionError),
+
     #[error("Parse Error")]
     ParseError {
         line: usize,
@@ -34,6 +43,12 @@ pub enum OpenBaoError {
 
     #[error("Init error: {0}")]
     InitError(#[from] BuilderError),
+
+    #[error("Configuration error: {0}")]
+    ConfigurationError(#[from] ConfigError),
+
+    #[error("General Error")]
+    Error(String),
 }
 
 impl From<serde_json::Error> for OpenBaoError {
@@ -86,9 +101,22 @@ pub struct Status {
     pub version: String,
 }
 
+#[derive(Debug)]
+pub struct Secrets {
+    pub secrets: Vec<Secret>,
+    pub root_token: String,
+}
+
+#[derive(Debug)]
+pub struct Secret {
+    pub key: String,
+    pub base64: String,
+}
+
 #[async_trait]
 pub trait OpenBaoClient {
     async fn status(&mut self) -> Result<Status, OpenBaoError>;
+    async fn intialize(&mut self) -> Result<Secrets, OpenBaoError>;
 }
 
 pub struct SimpleOpenBaoClient {
@@ -116,5 +144,15 @@ impl OpenBaoClient for SimpleOpenBaoClient {
         Ok(StatusCommand::new(self.rest_client.as_mut(), &self.parser)
             .perform()
             .await?)
+    }
+
+    async fn intialize(&mut self) -> Result<Secrets, OpenBaoError> {
+        Ok(InitCommand::new(
+            self.rest_client.as_mut(),
+            &self.parser,
+            commands::init::Config::new(10, 3)?,
+        )
+        .perform()
+        .await?)
     }
 }

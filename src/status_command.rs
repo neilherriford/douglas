@@ -1,8 +1,5 @@
 use crate::{
-    application_definition::ApplicationDefinition,
-    core_applications::{self, OpenBao},
-    deferred_file_logger::DeferredFileLogger,
-    file_logger::FileLogger,
+    core_applications, deferred_file_logger::DeferredFileLogger, file_logger::FileLogger,
     tee_logger::TeeLogger,
 };
 use bract::{Client, client::ClientError};
@@ -169,22 +166,17 @@ impl StatusCommand {
         rt.block_on(async {
             let openbao_definition = core_applications::OpenBao::new();
 
-            let mut openbao_socket_path = match bract_client
-                .active_mount_version(&openbao_definition.name(), &OpenBao::sockets_mount_name())
-                .await
-            {
-                Ok(None) => {
-                    self.log.error("OpenBao not socket mount missing");
-                    return OpenBaoStatus::Error("OpenBao not socket mount missing".into());
-                }
-                Ok(Some(mount)) => mount.path,
-                Err(err) => {
-                    self.log.error(&format!("Bract client error: {err}"));
-                    return OpenBaoStatus::Error(err.to_string());
-                }
-            };
-
-            openbao_socket_path.push(OpenBao::socket_file_name());
+            let openbao_socket_path =
+                match openbao_definition.qualified_socket_path(bract_client).await {
+                    Ok(openbao_socket_path) => openbao_socket_path,
+                    Err(err) => {
+                        self.log
+                            .error("Could not determine qualified socket path for OpenBao");
+                        return OpenBaoStatus::Error(format!(
+                            "Could not determine qualified socket path for OpenBao: {err}",
+                        ));
+                    }
+                };
 
             let mut openbao_client = match openbao::SimpleOpenBaoClient::build(
                 openbao_socket_path,

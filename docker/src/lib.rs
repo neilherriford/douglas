@@ -11,6 +11,7 @@ use log::Logger;
 use serde::ser::{SerializeMap, SerializeSeq, SerializeStruct};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::value::Value as Json;
+use simple_rest_client::assertions::AssertionError;
 use simple_rest_client::parsers::Parser;
 use simple_rest_client::parsers::json::{JsonParser, JsonParserError};
 use simple_rest_client::unix_domain_socket::{BuilderError, build_client};
@@ -125,15 +126,18 @@ where
 
 #[derive(Error, Debug)]
 pub enum DockerError {
-    #[error("Received unexpected response with status: {status}, {message}")]
-    UnexpectedResponseError {
+    #[error("Client error: {0}")]
+    ClientError(#[from] RestClientError),
+
+    #[error("Client response error: {status}, {message}")]
+    ResponseError {
         status: u16,
         body: Option<String>,
         message: String,
     },
 
-    #[error("Client error: {0}")]
-    ClientError(#[from] RestClientError),
+    #[error("Client response conntent error: {0}")]
+    ClientResponseContentError(String),
 
     #[error("Init error: {0}")]
     InitError(#[from] BuilderError),
@@ -151,9 +155,6 @@ pub enum DockerError {
     #[error("API error {0}")]
     ApiError(String),
 
-    #[error("Not found")]
-    NotFoundError,
-
     #[error("Invalid argument, '{name}: {given}' {message}")]
     InvalidArgumentError {
         name: String,
@@ -169,6 +170,29 @@ pub enum DockerError {
 
     #[error("Invalid path")]
     PathError { path: PathBuf, message: String },
+
+    #[error("Resource not found")]
+    ResourceNotFound,
+}
+
+impl From<AssertionError> for DockerError {
+    fn from(value: AssertionError) -> Self {
+        match value {
+            AssertionError::UnexpectedResponseError {
+                status,
+                body,
+                message,
+            } => DockerError::ResponseError {
+                status,
+                body,
+                message,
+            },
+            AssertionError::MissingBody => {
+                DockerError::ClientResponseContentError("Missing body".into())
+            }
+            AssertionError::NotFoundError => DockerError::ResourceNotFound,
+        }
+    }
 }
 
 impl PartialEq for DockerError {

@@ -14,7 +14,7 @@ impl<'a> CreateNetwork<'a> {
     pub async fn perform(&mut self, name: &str) -> bool {
         match self.client.inspect_by_name("douglas").await {
             Ok(_) => true,
-            Err(DockerError::NotFoundError) => {
+            Err(DockerError::ResourceNotFound) => {
                 self.log.info("Creating Douglas core Docker network");
                 self.client
                     .create(name, Vec::new())

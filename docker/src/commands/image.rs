@@ -1,8 +1,9 @@
-use super::{assert_no_docker_errors, assert_non_empty_string_argument, assert_okay_with_body};
+use super::{assert_no_docker_errors, assert_non_empty_string_argument};
 use crate::Image;
 use crate::{DockerError, Id, ImageName};
 use serde_json::from_value;
 use serde_json::value::Value as Json;
+use simple_rest_client::assertions::assert_okay_with_body;
 use simple_rest_client::parsers::Parser;
 use simple_rest_client::parsers::json::JsonParserError;
 use simple_rest_client::{Request, RestClient};
@@ -203,7 +204,7 @@ mod tests {
 
             assert!(matches!(
                 result,
-                Err(DockerError::UnexpectedResponseError { status: 201, .. })
+                Err(DockerError::ResponseError { status: 201, .. })
             ));
         }
 
@@ -222,7 +223,7 @@ mod tests {
 
             assert!(matches!(
                 result,
-                Err(DockerError::UnexpectedResponseError { status: 204, .. })
+                Err(DockerError::ResponseError { status: 204, .. })
             ));
         }
 
@@ -241,7 +242,7 @@ mod tests {
 
             assert!(matches!(
                 result,
-                Err(DockerError::UnexpectedResponseError { status: 500, .. })
+                Err(DockerError::ResponseError { status: 500, .. })
             ));
         }
 
@@ -336,7 +337,7 @@ mod tests {
 
             assert!(matches!(
                 result,
-                Err(DockerError::UnexpectedResponseError { status: 201, .. })
+                Err(DockerError::ResponseError { status: 201, .. })
             ));
         }
 
@@ -359,7 +360,7 @@ mod tests {
 
             assert!(matches!(
                 result,
-                Err(DockerError::UnexpectedResponseError { status: 204, .. })
+                Err(DockerError::ResponseError { status: 204, .. })
             ));
         }
 
@@ -382,7 +383,7 @@ mod tests {
 
             assert!(matches!(
                 result,
-                Err(DockerError::UnexpectedResponseError { status: 500, .. })
+                Err(DockerError::ResponseError { status: 500, .. })
             ));
         }
 
@@ -403,7 +404,7 @@ mod tests {
 
             let result = command.pull(&ImageName::latest("namespace", "foo")).await;
 
-            assert!(matches!(result, Err(DockerError::NotFoundError)));
+            assert!(matches!(result, Err(DockerError::ResourceNotFound)));
         }
 
         #[tokio::test]
@@ -562,7 +563,7 @@ mod tests {
                 .await;
             assert!(matches!(
                 result,
-                Err(DockerError::UnexpectedResponseError { status: 201, .. })
+                Err(DockerError::ResponseError { status: 201, .. })
             ));
         }
 
@@ -582,7 +583,7 @@ mod tests {
                 .await;
             assert!(matches!(
                 result,
-                Err(DockerError::UnexpectedResponseError { status: 204, .. })
+                Err(DockerError::ResponseError { status: 204, .. })
             ));
         }
 
@@ -603,7 +604,7 @@ mod tests {
                 .await;
             assert!(matches!(
                 result,
-                Err(DockerError::UnexpectedResponseError { status: 500, .. })
+                Err(DockerError::ResponseError { status: 500, .. })
             ));
         }
 
@@ -621,7 +622,7 @@ mod tests {
             let result = command
                 .find_by_name(&ImageName::latest("namespace", "foo"))
                 .await;
-            assert!(matches!(result, Err(DockerError::NotFoundError)));
+            assert!(matches!(result, Err(DockerError::ResourceNotFound)));
         }
 
         #[tokio::test]
@@ -794,7 +795,7 @@ mod tests {
 
             assert!(matches!(
                 result,
-                Err(DockerError::UnexpectedResponseError { status: 201, .. })
+                Err(DockerError::ResponseError { status: 201, .. })
             ));
         }
 
@@ -818,7 +819,7 @@ mod tests {
 
             assert!(matches!(
                 result,
-                Err(DockerError::UnexpectedResponseError { status: 204, .. })
+                Err(DockerError::ResponseError { status: 204, .. })
             ));
         }
 
@@ -842,7 +843,7 @@ mod tests {
 
             assert!(matches!(
                 result,
-                Err(DockerError::UnexpectedResponseError { status: 500, .. })
+                Err(DockerError::ResponseError { status: 500, .. })
             ));
         }
 
@@ -864,7 +865,7 @@ mod tests {
                 })
                 .await;
 
-            assert!(matches!(result, Err(DockerError::NotFoundError)));
+            assert!(matches!(result, Err(DockerError::ResourceNotFound)));
         }
 
         #[tokio::test]

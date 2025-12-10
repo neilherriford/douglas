@@ -1,5 +1,7 @@
 use crate::application_definition::{ApplicationDefinition, MountFile, MountTemplate};
 use docker::{Capability, EnvironmentVariable, ImageName};
+use openbao::OpenBaoError;
+use std::path::PathBuf;
 
 pub struct OpenBao {}
 
@@ -8,12 +10,35 @@ impl OpenBao {
         Self {}
     }
 
-    pub fn sockets_mount_name() -> String {
+    fn sockets_mount_name() -> String {
         "sockets".to_string()
     }
 
-    pub fn socket_file_name() -> String {
+    fn socket_file_name() -> String {
         "openbao.sock".to_string()
+    }
+
+    pub async fn qualified_socket_path(
+        &self,
+        bract_client: bract::Client,
+    ) -> Result<PathBuf, OpenBaoError> {
+        let mut openbao_socket_path = match bract_client
+            .active_mount_version(&self.name(), &OpenBao::sockets_mount_name())
+            .await
+        {
+            Ok(None) => {
+                return Err(OpenBaoError::Error(
+                    "OpenBao not socket mount missing".into(),
+                ));
+            }
+            Ok(Some(mount)) => mount.path,
+            Err(err) => {
+                return Err(OpenBaoError::Error(err.to_string()));
+            }
+        };
+
+        openbao_socket_path.push(OpenBao::socket_file_name());
+        Ok(openbao_socket_path)
     }
 
     fn data_mount() -> MountTemplate {

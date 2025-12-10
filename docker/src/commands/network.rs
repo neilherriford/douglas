@@ -1,11 +1,12 @@
-use super::{
-    assert_created_with_body, assert_non_empty_string_argument, assert_okay, assert_okay_with_body,
-};
+use super::assert_non_empty_string_argument;
 use crate::{Container, DockerError, Label, deserialize_labels, serialize_labels};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::from_value;
 use serde_json::value::Value as Json;
+use simple_rest_client::assertions::{
+    assert_created_with_body, assert_okay, assert_okay_with_body,
+};
 use simple_rest_client::parsers::Parser;
 use simple_rest_client::parsers::json::JsonParserError;
 use simple_rest_client::{Header, Request, Response, RestClient};
@@ -432,7 +433,7 @@ mod tests {
 
             assert!(matches!(
                 result,
-                Err(DockerError::UnexpectedResponseError { status: 201, .. })
+                Err(DockerError::ResponseError { status: 201, .. })
             ));
         }
 
@@ -451,7 +452,7 @@ mod tests {
 
             assert!(matches!(
                 result,
-                Err(DockerError::UnexpectedResponseError { status: 204, .. })
+                Err(DockerError::ResponseError { status: 204, .. })
             ));
         }
 
@@ -470,7 +471,7 @@ mod tests {
 
             assert!(matches!(
                 result,
-                Err(DockerError::UnexpectedResponseError { status: 500, .. })
+                Err(DockerError::ResponseError { status: 500, .. })
             ));
         }
 
@@ -487,7 +488,7 @@ mod tests {
                 .inspect_network_by_hight::<Network>("10111213")
                 .await;
 
-            assert!(matches!(result, Err(DockerError::NotFoundError)));
+            assert!(matches!(result, Err(DockerError::ResourceNotFound)));
         }
 
         #[tokio::test]
@@ -563,7 +564,7 @@ mod tests {
 
             assert!(matches!(
                 result,
-                Err(DockerError::UnexpectedResponseError { status: 201, .. })
+                Err(DockerError::ResponseError { status: 201, .. })
             ));
         }
 
@@ -582,7 +583,7 @@ mod tests {
 
             assert!(matches!(
                 result,
-                Err(DockerError::UnexpectedResponseError { status: 204, .. })
+                Err(DockerError::ResponseError { status: 204, .. })
             ));
         }
 
@@ -601,7 +602,7 @@ mod tests {
 
             assert!(matches!(
                 result,
-                Err(DockerError::UnexpectedResponseError { status: 500, .. })
+                Err(DockerError::ResponseError { status: 500, .. })
             ));
         }
 
@@ -618,7 +619,7 @@ mod tests {
                 .find_connected_containers_by_hight("10111213")
                 .await;
 
-            assert!(matches!(result, Err(DockerError::NotFoundError)));
+            assert!(matches!(result, Err(DockerError::ResourceNotFound)));
         }
 
         #[tokio::test]
@@ -684,7 +685,7 @@ mod tests {
 
             assert!(matches!(
                 result,
-                Err(DockerError::UnexpectedResponseError { status: 200, .. })
+                Err(DockerError::ResponseError { status: 200, .. })
             ));
         }
 
@@ -789,7 +790,7 @@ mod tests {
 
             assert!(matches!(
                 result,
-                Err(DockerError::UnexpectedResponseError { status: 204, .. })
+                Err(DockerError::ResponseError { status: 204, .. })
             ));
         }
 
@@ -818,7 +819,7 @@ mod tests {
 
             assert!(matches!(
                 result,
-                Err(DockerError::UnexpectedResponseError { status: 500, .. })
+                Err(DockerError::ResponseError { status: 500, .. })
             ));
         }
     }
@@ -876,7 +877,7 @@ mod tests {
 
             assert!(matches!(
                 result,
-                Err(DockerError::UnexpectedResponseError { status: 201, .. })
+                Err(DockerError::ResponseError { status: 201, .. })
             ));
         }
 
@@ -924,7 +925,7 @@ mod tests {
 
             assert!(matches!(
                 result,
-                Err(DockerError::UnexpectedResponseError { status: 204, .. })
+                Err(DockerError::ResponseError { status: 204, .. })
             ));
         }
 
@@ -972,7 +973,7 @@ mod tests {
 
             assert!(matches!(
                 result,
-                Err(DockerError::UnexpectedResponseError { status: 500, .. })
+                Err(DockerError::ResponseError { status: 500, .. })
             ));
         }
 
@@ -1018,7 +1019,7 @@ mod tests {
 
             let result = network_command.connect(&network, &container).await;
 
-            assert!(matches!(result, Err(DockerError::NotFoundError)));
+            assert!(matches!(result, Err(DockerError::ResourceNotFound)));
         }
 
         #[tokio::test]
@@ -1119,7 +1120,7 @@ mod tests {
 
             assert!(matches!(
                 result,
-                Err(DockerError::UnexpectedResponseError { status: 204, .. })
+                Err(DockerError::ResponseError { status: 204, .. })
             ));
         }
 
@@ -1168,7 +1169,7 @@ mod tests {
 
             assert!(matches!(
                 result,
-                Err(DockerError::UnexpectedResponseError { status: 201, .. })
+                Err(DockerError::ResponseError { status: 201, .. })
             ));
         }
 
@@ -1216,7 +1217,7 @@ mod tests {
 
             assert!(matches!(
                 result,
-                Err(DockerError::UnexpectedResponseError { status: 500, .. })
+                Err(DockerError::ResponseError { status: 500, .. })
             ));
         }
 
@@ -1261,7 +1262,7 @@ mod tests {
             };
 
             let result = network_command.disconnect(&network, &container).await;
-            assert!(matches!(result, Err(DockerError::NotFoundError)));
+            assert!(matches!(result, Err(DockerError::ResourceNotFound)));
         }
 
         #[tokio::test]
