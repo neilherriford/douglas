@@ -3,6 +3,7 @@ mod commands;
 use crate::commands::{
     init::{ConfigError, InitCommand},
     status::StatusCommand,
+    unseal::UnsealCommand,
 };
 use async_trait::async_trait;
 use log::Logger;
@@ -20,6 +21,12 @@ use thiserror::Error;
 pub enum OpenBaoError {
     #[error("Already initialized")]
     AlreadyInitialized,
+
+    #[error("Insufficient Secrets")]
+    InsufficentSecrets,
+
+    #[error("Unseal error: {0:?}")]
+    UnsealError(Vec<String>),
 
     #[error("Received unexpected response with status: {status}, {message}")]
     UnexpectedResponse {
@@ -107,7 +114,7 @@ pub struct Secrets {
     pub root_token: String,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Secret {
     pub key: String,
     pub base64: String,
@@ -117,11 +124,13 @@ pub struct Secret {
 pub trait OpenBaoClient {
     async fn status(&mut self) -> Result<Status, OpenBaoError>;
     async fn intialize(&mut self) -> Result<Secrets, OpenBaoError>;
+    async fn unseal(&mut self, secrets: Secrets) -> Result<(), OpenBaoError>;
 }
 
 pub struct SimpleOpenBaoClient {
     rest_client: Box<dyn RestClient>,
     parser: JsonParser,
+    logger: Arc<dyn Logger>,
 }
 
 impl SimpleOpenBaoClient {
@@ -129,11 +138,12 @@ impl SimpleOpenBaoClient {
         socket_file_path: PathBuf,
         logger: Arc<dyn Logger>,
     ) -> Result<Self, OpenBaoError> {
-        let rest_client = build_client(socket_file_path, logger).await?;
+        let rest_client = build_client(socket_file_path, Arc::clone(&logger)).await?;
 
         Ok(Self {
             rest_client: Box::new(rest_client),
             parser: JsonParser::new(),
+            logger,
         })
     }
 }
@@ -151,6 +161,17 @@ impl OpenBaoClient for SimpleOpenBaoClient {
             self.rest_client.as_mut(),
             &self.parser,
             commands::init::Config::new(10, 3)?,
+        )
+        .perform()
+        .await?)
+    }
+
+    async fn unseal(&mut self, secrets: Secrets) -> Result<(), OpenBaoError> {
+        Ok(UnsealCommand::new(
+            self.rest_client.as_mut(),
+            &self.parser,
+            secrets.secrets,
+            Arc::clone(&self.logger),
         )
         .perform()
         .await?)

@@ -64,7 +64,7 @@ impl crate::IoStream for IoStream {}
 
 #[derive(Error, Debug)]
 pub enum BuilderError {
-    #[error("IO Error")]
+    #[error("Socket file not found")]
     SocketFileNotFound,
     #[error("Permission denied trying to open socket")]
     PermissionDenied,

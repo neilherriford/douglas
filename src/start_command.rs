@@ -9,7 +9,8 @@ use log::Logger;
 use openbao::{OpenBaoClient, SimpleOpenBaoClient};
 use os::{Os, Unix, UnixEnvironmentVariableReader};
 use std::sync::Arc;
-use tokio::time::error;
+use std::time::Duration;
+use tokio::time;
 
 use crate::{
     commands, core_applications, deferred_file_logger::DeferredFileLogger, file_logger::FileLogger,
@@ -89,7 +90,7 @@ impl StartCommand {
             .await
         );
 
-        self.log.info("Initializng OpenBao");
+        self.log.info("Initializing OpenBao");
 
         let openbao_logger: Arc<dyn Logger> = Arc::new(FileLogger::new(
             self.system_paths.log_path("openbao").as_path(),
@@ -99,24 +100,40 @@ impl StartCommand {
         let socket_path = match openbao_definition.qualified_socket_path(bract_client).await {
             Ok(socket_path) => socket_path,
             Err(err) => {
-                openbao_logger.error(&format!(
+                self.log.error(&format!(
                     "Could not determine qualified socket path for OpenBao: {err}"
                 ));
                 return false;
             }
         };
 
-        let mut openbao_client =
-            match SimpleOpenBaoClient::build(socket_path, Arc::clone(&openbao_logger)).await {
-                Ok(openbao_client) => openbao_client,
-                Err(err) => {
-                    openbao_logger.error(&format!(
-                        "Could not determine qualified socket path for OpenBao: {err}"
-                    ));
-                    return false;
-                }
-            };
-        match openbao_client.intialize().await {
+        let mut attempts = 0;
+
+        while !self.file_appender.exists(&socket_path) {
+            time::sleep(Duration::from_millis(50)).await;
+            attempts += 1;
+            if attempts == 5 {
+                self.log.error("OpenBao started, but socket not created!");
+                return false;
+            }
+        }
+
+        let mut openbao_client = match SimpleOpenBaoClient::build(
+            socket_path.clone(),
+            Arc::clone(&openbao_logger),
+        )
+        .await
+        {
+            Ok(openbao_client) => openbao_client,
+            Err(err) => {
+                self.log.error(&format!(
+                    "Failed to build OpenBao Client, using socket {socket_path:?}: {err}"
+                ));
+                return false;
+            }
+        };
+
+        let secrets = match openbao_client.intialize().await {
             Ok(response) => {
                 println!(
                     "{}",
@@ -129,23 +146,31 @@ impl StartCommand {
                 println!(
                     "  ▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔  ▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔"
                 );
-                for secret in response.secrets {
+                for secret in &response.secrets {
                     println!("  {}  {}", secret.base64, secret.key);
                 }
+                response
             }
             Err(err) => match err {
                 openbao::OpenBaoError::AlreadyInitialized => {
                     self.log.warn("OpenBao already intialized!");
+                    return false;
                 }
                 err => {
-                    self.log.error(&format!(
-                        "Could not determine qualified socket path for OpenBao: {err}"
-                    ));
+                    self.log.error(&format!("Error initializing: {err}"));
                     return false;
                 }
             },
+        };
+
+        self.log.info("Unsealing OpenBao…");
+
+        if let Err(err) = openbao_client.unseal(secrets).await {
+            self.log.error(&format!("Error unsealing: {err}"));
+            return false;
         }
 
+        self.log.info("OpenBao is unsealed!");
         true
     }
 

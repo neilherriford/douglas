@@ -59,22 +59,27 @@ impl OpenBao {
 
     fn config_file() -> MountFile {
         let contents = r#"ui = false
-    storage "file" {
-        path = "/openbao/data"
-    }
+log_level = "info"
 
-    listener "unix" {
-        address = "/openbao/sockets/${socket_file_name}"
-        socket_mode = "0660"
-        socket_user = "${runas_user_id}"
-        socket_group = "${douglas_group_id}"
-    }
+storage "file" {
+    path = "/openbao/data"
+}
 
-    api_addr = "http://openbao:8200"
-    cluster_addr = "http://127.0.0.1:8201"
+listener "unix" {
+    address = "/openbao/sockets/${socket_file_name}"
+    socket_mode = "0660"
+    socket_user = "${runas_user_id}"
+    socket_group = "${douglas_group_id}"
+}
 
-    log_level = "info"
-    "#;
+listener "tcp" {
+    address = "127.0.0.1:8201"
+    tls_disable = true
+}
+
+api_addr = "unix:///openbao/sockets/${socket_file_name}"
+cluster_addr = "http://127.0.0.1:8201"
+"#;
 
         MountFile::in_root(
             "config.hcl",
