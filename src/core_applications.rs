@@ -10,6 +10,22 @@ impl OpenBao {
         Self {}
     }
 
+    fn container_data_path() -> String {
+        "/openbao/data".to_string()
+    }
+
+    fn container_log_path() -> String {
+        "/openbao/log".to_string()
+    }
+
+    fn container_sockets_path() -> String {
+        "/openbao/sockets".to_string()
+    }
+
+    fn container_config_path() -> String {
+        "/openbao/config".to_string()
+    }
+
     fn sockets_mount_name() -> String {
         "sockets".to_string()
     }
@@ -42,19 +58,26 @@ impl OpenBao {
     }
 
     fn data_mount() -> MountTemplate {
-        MountTemplate::empty_mount("data", "/openbao/data")
+        MountTemplate::empty_mount("data", &Self::container_data_path())
     }
 
     fn log_mount() -> MountTemplate {
-        MountTemplate::empty_mount("log", "/openbao/log")
+        MountTemplate::empty_mount("log", &Self::container_log_path())
     }
 
     fn sockets_mount() -> MountTemplate {
-        MountTemplate::shared_empty_mount(&Self::sockets_mount_name(), "/openbao/sockets")
+        MountTemplate::shared_empty_mount(
+            &Self::sockets_mount_name(),
+            &Self::container_sockets_path(),
+        )
     }
 
     fn config_mount() -> MountTemplate {
-        MountTemplate::populated_mount("config", "/openbao/config", vec![Self::config_file()])
+        MountTemplate::populated_mount(
+            "config",
+            &Self::container_config_path(),
+            vec![Self::config_file()],
+        )
     }
 
     fn config_file() -> MountFile {
@@ -62,11 +85,20 @@ impl OpenBao {
 log_level = "info"
 
 storage "file" {
-    path = "/openbao/data"
+    path = "${data_path}"
+}
+
+audit "file" "file-log" {
+  type = "file"
+  description = "Primary file audit log"
+  options {
+    file_path = "${log_path}/openbao_audit.log"
+    mode = "0600"
+  }
 }
 
 listener "unix" {
-    address = "/openbao/sockets/${socket_file_name}"
+    address = "${sockets_path}/${socket_file_name}"
     socket_mode = "0660"
     socket_user = "${runas_user_id}"
     socket_group = "${douglas_group_id}"
@@ -77,14 +109,20 @@ listener "tcp" {
     tls_disable = true
 }
 
-api_addr = "unix:///openbao/sockets/${socket_file_name}"
+api_addr = "unix://${sockets_path}/${socket_file_name}"
 cluster_addr = "http://127.0.0.1:8201"
 "#;
 
         MountFile::in_root(
             "config.hcl",
             contents,
-            vec![("socket_file_name", &Self::socket_file_name())],
+            vec![
+                ("socket_file_name", &Self::socket_file_name()),
+                ("data_path", &Self::container_data_path()),
+                ("log_path", &Self::container_log_path()),
+                ("sockets_path", &Self::container_sockets_path()),
+                ("config_path", &Self::container_config_path()),
+            ],
         )
     }
 }

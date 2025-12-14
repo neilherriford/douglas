@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use crate::{OpenBaoError, Secret};
 use log::Logger;
 use rand::prelude::*;
@@ -10,6 +8,7 @@ use simple_rest_client::{
     assertions::assert_okay_with_body,
     parsers::{Parser, json::JsonParser},
 };
+use std::sync::Arc;
 
 #[derive(Debug, Deserialize, PartialEq)]
 struct Response {
