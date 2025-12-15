@@ -79,3 +79,25 @@ pub fn assert_created(response: Response) -> Result<(Vec<Header>, Option<String>
         }),
     }
 }
+
+pub fn assert_no_content(response: Response) -> Result<Vec<Header>, AssertionError> {
+    match response {
+        Response::Okay { body, .. } => Err(AssertionError::UnexpectedResponseError {
+            status: 200,
+            body,
+            message: "expected NO CONTENT, but recieved OK".to_string(),
+        }),
+        Response::Created { body, .. } => Err(AssertionError::UnexpectedResponseError {
+            status: 201,
+            body,
+            message: "expected NO CONTENT, but recieved CREATED".to_string(),
+        }),
+        Response::NoContent { headers } => Ok(headers),
+        Response::Error { status: 404, .. } => Err(AssertionError::NotFoundError),
+        Response::Error { status, body, .. } => Err(AssertionError::UnexpectedResponseError {
+            status,
+            body,
+            message: "non successful response".to_string(),
+        }),
+    }
+}

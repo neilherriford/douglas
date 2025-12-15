@@ -41,11 +41,11 @@ impl<'a> UnsealCommand<'a> {
     pub fn new(
         rest_client: &'a mut dyn RestClient,
         parser: &'a JsonParser,
-        secrets: Vec<Secret>,
+        secrets: &[Secret],
         log: Arc<dyn Logger>,
     ) -> Self {
         let mut rng = rand::rng();
-        let mut secrets = secrets.clone();
+        let mut secrets = Vec::from(secrets);
         secrets.shuffle(&mut rng);
 
         Self {

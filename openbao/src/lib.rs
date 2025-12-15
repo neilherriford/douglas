@@ -4,6 +4,7 @@ use crate::commands::{
     init::{ConfigError, InitCommand},
     status::StatusCommand,
     unseal::UnsealCommand,
+    upsert_acl_policy::UpsertAclPolicy,
 };
 use async_trait::async_trait;
 use log::Logger;
@@ -16,6 +17,10 @@ use simple_rest_client::{
 };
 use std::{path::PathBuf, sync::Arc};
 use thiserror::Error;
+
+pub mod policy {
+    pub use crate::commands::upsert_acl_policy::{Capability, Path, Policy};
+}
 
 #[derive(Error, Debug)]
 pub enum OpenBaoError {
@@ -124,7 +129,13 @@ pub struct Secret {
 pub trait OpenBaoClient {
     async fn status(&mut self) -> Result<Status, OpenBaoError>;
     async fn intialize(&mut self) -> Result<Secrets, OpenBaoError>;
-    async fn unseal(&mut self, secrets: Secrets) -> Result<(), OpenBaoError>;
+    async fn unseal(&mut self, secrets: &Secrets) -> Result<(), OpenBaoError>;
+    async fn upsert_acl_policy(
+        &mut self,
+        token: &str,
+        name: &str,
+        policy: &policy::Policy,
+    ) -> Result<(), OpenBaoError>;
 }
 
 pub struct SimpleOpenBaoClient {
@@ -166,14 +177,27 @@ impl OpenBaoClient for SimpleOpenBaoClient {
         .await?)
     }
 
-    async fn unseal(&mut self, secrets: Secrets) -> Result<(), OpenBaoError> {
+    async fn unseal(&mut self, secrets: &Secrets) -> Result<(), OpenBaoError> {
         Ok(UnsealCommand::new(
             self.rest_client.as_mut(),
             &self.parser,
-            secrets.secrets,
+            &secrets.secrets,
             Arc::clone(&self.logger),
         )
         .perform()
         .await?)
+    }
+
+    async fn upsert_acl_policy(
+        &mut self,
+        token: &str,
+        name: &str,
+        policy: &policy::Policy,
+    ) -> Result<(), OpenBaoError> {
+        Ok(
+            UpsertAclPolicy::new(self.rest_client.as_mut(), token, name, policy)
+                .perform()
+                .await?,
+        )
     }
 }

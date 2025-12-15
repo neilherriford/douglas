@@ -8,8 +8,8 @@ use file_system::{
 use log::Logger;
 use openbao::{OpenBaoClient, SimpleOpenBaoClient};
 use os::{Os, Unix, UnixEnvironmentVariableReader};
-use std::sync::Arc;
 use std::time::Duration;
+use std::{collections::HashSet, sync::Arc};
 use tokio::time;
 
 use crate::{
@@ -142,6 +142,8 @@ impl StartCommand {
                         .yellow()
                 );
 
+                println!("also this lol {}", response.root_token);
+
                 println!("  Base 64                                       Key");
                 println!(
                     "  ▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔  ▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔"
@@ -165,12 +167,39 @@ impl StartCommand {
 
         self.log.info("Unsealing OpenBao…");
 
-        if let Err(err) = openbao_client.unseal(secrets).await {
+        if let Err(err) = openbao_client.unseal(&secrets).await {
             self.log.error(&format!("Error unsealing: {err}"));
             return false;
         }
 
         self.log.info("OpenBao is unsealed!");
+        self.log.info("Creating admin policy for OpenBao…");
+
+        if let Err(err) = openbao_client
+            .upsert_acl_policy(
+                &secrets.root_token,
+                "admin",
+                &openbao::policy::Policy {
+                    path: openbao::policy::Path::All,
+                    capabilities: HashSet::from([
+                        openbao::policy::Capability::Create,
+                        openbao::policy::Capability::Delete,
+                        openbao::policy::Capability::List,
+                        openbao::policy::Capability::Read,
+                        openbao::policy::Capability::Sudo,
+                        openbao::policy::Capability::Update,
+                    ]),
+                },
+            )
+            .await
+        {
+            self.log
+                .error(&format!("Error creating admin policy: {err}"));
+
+            return false;
+        }
+        self.log.info("OpenBao admin policy created!");
+
         true
     }
 
