@@ -137,7 +137,10 @@ impl ApplicationDefinition for OpenBao {
     }
 
     fn command(&self) -> Option<String> {
-        Some("server -config=/openbao/config/config.hcl".to_string())
+        Some(format!(
+            "server -config={}/config.hcl",
+            Self::container_config_path()
+        ))
     }
 
     fn environment_variables(&self) -> Vec<docker::EnvironmentVariable> {
