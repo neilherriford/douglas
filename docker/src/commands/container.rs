@@ -183,7 +183,7 @@ impl ContainerCommand {
             host_config: HostConfig {
                 mounts: definition.mounts,
                 added_capabilities: definition.added_capabilities,
-                additional_groups: vec!["1000".into()],
+                additional_groups: vec![], // TODO
             },
             labels: definition.labels,
         };

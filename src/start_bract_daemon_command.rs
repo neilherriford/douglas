@@ -1,5 +1,5 @@
 use crate::{file_logger::FileLogger, tee_logger::TeeLogger};
-use config::{SystemPaths, constants::DOUGLAS_GROUP, create_system_paths};
+use config::{SystemPaths, constants::DOUGLAS_ADMIN_GROUP, create_system_paths};
 use credentials::{Credentials, create_credentials};
 use daemonize::Daemonize;
 use file_system::{
@@ -132,7 +132,7 @@ impl StartBractDaemonCommand {
         if let Err(err) = self.permissions.change_user_and_group_ownership(
             path,
             credentials::ROOT_USER_NAME,
-            DOUGLAS_GROUP,
+            DOUGLAS_ADMIN_GROUP,
         ) {
             self.log.error(&format!(
                 "Could not set ownership on {pretty_path}: {err:?}"

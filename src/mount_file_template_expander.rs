@@ -18,10 +18,10 @@ impl MountFileTemplateExpander {
 
     pub fn with_douglas_group(&mut self) -> &mut Self {
         let credentials = create_credentials(Arc::new(Unix::new()));
-        if let Some(group_id) = credentials.get_group_id(constants::DOUGLAS_GROUP) {
+        if let Some(group_id) = credentials.get_group_id(constants::DOUGLAS_ADMIN_GROUP) {
             self.variables.insert(
                 "douglas_group".to_string(),
-                constants::DOUGLAS_GROUP.to_string(),
+                constants::DOUGLAS_ADMIN_GROUP.to_string(),
             );
             self.variables
                 .insert("douglas_group_id".to_string(), group_id.to_string());

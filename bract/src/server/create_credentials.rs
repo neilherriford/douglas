@@ -42,7 +42,7 @@ impl CreateCredentials {
                 self.credentials.create_user(
                     &user_name,
                     &group_name,
-                    vec![constants::DOUGLAS_GROUP.to_string()],
+                    vec![constants::DOUGLAS_APP_GROUP.to_string()],
                 )
             );
 
@@ -56,11 +56,11 @@ impl CreateCredentials {
     }
 
     fn assert_marker_group_exists(&self) -> Result<(), CredentialsError> {
-        if self.credentials.group_exists(constants::DOUGLAS_GROUP) {
+        if self.credentials.group_exists(constants::DOUGLAS_APP_GROUP) {
             Ok(())
         } else {
             Err(CredentialsError::GroupNotFoundError {
-                name: constants::DOUGLAS_GROUP.to_string(),
+                name: constants::DOUGLAS_APP_GROUP.to_string(),
             })
         }
     }
@@ -111,7 +111,7 @@ mod tests {
             let token_path = Path::new("/tmp/token");
 
             logger.expect_error().return_const(());
-            credentials.given_group_does_not_exist("douglas");
+            credentials.given_group_does_not_exist("douglas-app");
 
             let actual = build(
                 Arc::new(logger),
@@ -137,7 +137,7 @@ mod tests {
                 .with(predicate::eq("Invalid token"))
                 .return_const(());
 
-            credentials.given_group_exists("douglas");
+            credentials.given_group_exists("douglas-app");
             file_reader.given_can_read_all_with_contents("/tmp/token", "token");
 
             let actual = build(
@@ -162,7 +162,7 @@ mod tests {
             logger.expect_error().return_const(());
 
             file_reader.given_can_read_all_with_contents("/tmp/token", "token");
-            credentials.given_group_does_not_exist("douglas");
+            credentials.given_group_does_not_exist("douglas-app");
 
             let actual = build(
                 Arc::new(logger),
@@ -187,7 +187,7 @@ mod tests {
 
             file_reader.given_can_read_all_with_contents("/tmp/token", "token");
             credentials
-                .given_group_exists("douglas")
+                .given_group_exists("douglas-app")
                 .expect_create_group()
                 .with(predicate::eq("doug-foo"))
                 .returning(|_| Err(CredentialsError::InvalidName));
@@ -216,12 +216,12 @@ mod tests {
             file_reader.given_can_read_all_with_contents("/tmp/token", "token");
             given_group_created(&mut credentials, "doug-foo", 1337);
             credentials
-                .given_group_exists("douglas")
+                .given_group_exists("douglas-app")
                 .expect_create_user()
                 .with(
                     predicate::eq("doug-foo"),
                     predicate::eq("doug-foo"),
-                    predicate::eq(vec!["douglas".to_string()]),
+                    predicate::eq(vec!["douglas-app".to_string()]),
                 )
                 .returning(|_, _, _| Err(CredentialsError::InvalidName));
 
@@ -249,12 +249,12 @@ mod tests {
             file_reader.given_can_read_all_with_contents("/tmp/token", "token");
             given_group_created(&mut credentials, "doug-foo", 1337);
             credentials
-                .given_group_exists("douglas")
+                .given_group_exists("douglas-app")
                 .expect_create_user()
                 .with(
                     predicate::eq("doug-foo"),
                     predicate::eq("doug-foo"),
-                    predicate::eq(vec!["douglas".to_string()]),
+                    predicate::eq(vec!["douglas-app".to_string()]),
                 )
                 .returning(|_, _, _| Ok(42));
 

@@ -3,7 +3,7 @@ use crate::Mount;
 use crate::Service;
 use crate::encoding::safe_prefixed_credential_name;
 use crate::version::Version;
-use config::constants::DOUGLAS_GROUP;
+use config::constants::DOUGLAS_ADMIN_GROUP;
 use credentials::Credentials;
 use file_system::{EntryKind, FileDeleter, FileSystemError, Folder, Links, Modes, Permissions};
 use std::fmt::Debug;
@@ -97,13 +97,15 @@ impl VersionManager {
         self.create_path(
             &self.mount_paths.service_path(service_name),
             &user_name,
-            DOUGLAS_GROUP,
+            DOUGLAS_ADMIN_GROUP,
+            false,
         )?;
 
         self.create_path(
             &self.mount_paths.mount_path(service_name, mount_name),
             &user_name,
-            DOUGLAS_GROUP,
+            DOUGLAS_ADMIN_GROUP,
+            false,
         )?;
 
         let version_path = self
@@ -113,7 +115,12 @@ impl VersionManager {
         let created = self.create_path(
             &version_path,
             &user_name,
-            if shared { DOUGLAS_GROUP } else { &group_name },
+            if shared {
+                DOUGLAS_ADMIN_GROUP
+            } else {
+                &group_name
+            },
+            shared,
         )?;
 
         if !created {
@@ -198,7 +205,7 @@ impl VersionManager {
             self.set_ownership(
                 mount_root,
                 credentials::ROOT_USER_NAME,
-                DOUGLAS_GROUP,
+                DOUGLAS_ADMIN_GROUP,
                 Modes::OwnerReadWriteExecuteGroupReadWriteExecute,
             )?;
         }
@@ -236,6 +243,7 @@ impl VersionManager {
         path: &Path,
         user_name: &str,
         group_name: &str,
+        inherit_group: bool,
     ) -> Result<bool, FileSystemError> {
         if self.folder.exists(path) {
             return Ok(false);
@@ -246,8 +254,13 @@ impl VersionManager {
             path,
             user_name,
             group_name,
-            Modes::OwnerReadWriteExecuteGroupReadWriteExecute,
+            if inherit_group {
+                Modes::InheritedOwnerReadWriteExecuteGroupReadWriteExecute
+            } else {
+                Modes::OwnerReadWriteExecuteGroupReadWriteExecute
+            },
         )?;
+
         Ok(true)
     }
 
@@ -347,7 +360,7 @@ mod tests {
             permissions.expect_ownership_and_mode_to_be_set(
                 "/tmp/mount_root/",
                 "root",
-                "douglas",
+                "douglas-admin",
                 Modes::OwnerReadWriteExecuteGroupReadWriteExecute,
             );
         }
@@ -360,14 +373,14 @@ mod tests {
             permissions.expect_ownership_and_mode_to_be_set(
                 "/tmp/mount_root/foo",
                 "doug-foo",
-                "douglas",
+                "douglas-admin",
                 Modes::OwnerReadWriteExecuteGroupReadWriteExecute,
             );
             folder.expect_create_folder_recursively_with("/tmp/mount_root/foo/bar");
             permissions.expect_ownership_and_mode_to_be_set(
                 "/tmp/mount_root/foo/bar",
                 "doug-foo",
-                "douglas",
+                "douglas-admin",
                 Modes::OwnerReadWriteExecuteGroupReadWriteExecute,
             );
         }
@@ -393,8 +406,8 @@ mod tests {
             permissions.expect_ownership_and_mode_to_be_set(
                 "/tmp/mount_root/foo/bar/v0",
                 "doug-foo",
-                "douglas",
-                Modes::OwnerReadWriteExecuteGroupReadWriteExecute,
+                "douglas-admin",
+                Modes::InheritedOwnerReadWriteExecuteGroupReadWriteExecute,
             );
         }
 
@@ -419,7 +432,7 @@ mod tests {
             permissions.expect_ownership_and_mode_to_be_set(
                 &path.clone(),
                 "doug-foo",
-                "douglas",
+                "douglas-admin",
                 Modes::OwnerReadWriteExecuteGroupReadWriteExecute,
             );
         }
@@ -523,7 +536,11 @@ mod tests {
                 .expect_create_folder_recursively_with("/tmp/mount_root")
                 .expect_create_folder_recursively_with("/tmp/mount_root/foo");
 
-            permissions.expect_ownership_to_be_set("/tmp/mount_root/foo", "doug-foo", "douglas");
+            permissions.expect_ownership_to_be_set(
+                "/tmp/mount_root/foo",
+                "doug-foo",
+                "douglas-admin",
+            );
             permissions
                 .expect_change_mode()
                 .with(
@@ -607,7 +624,7 @@ mod tests {
                 .with(
                     predicate::eq(Path::new("/tmp/mount_root/foo/bar")),
                     predicate::eq("doug-foo"),
-                    predicate::eq("douglas"),
+                    predicate::eq("douglas-admin"),
                 )
                 .returning(|_, _, _| Err(FileSystemError::ExpectedFileError));
 
@@ -647,7 +664,7 @@ mod tests {
             permissions.expect_ownership_to_be_set(
                 "/tmp/mount_root/foo/bar",
                 "doug-foo",
-                "douglas",
+                "douglas-admin",
             );
             permissions
                 .expect_change_mode()

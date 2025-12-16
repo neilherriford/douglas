@@ -1,4 +1,4 @@
-use config::constants::DOUGLAS_GROUP;
+use config::constants::DOUGLAS_ADMIN_GROUP;
 use file_system::{FileWriter, Modes, Permissions};
 use log::Logger;
 use os::Os;
@@ -41,7 +41,7 @@ impl TokenRefresher {
         self.assert_ok(self.permissions.change_user_and_group_ownership(
             &self.token_path,
             credentials::ROOT_USER_NAME,
-            DOUGLAS_GROUP,
+            DOUGLAS_ADMIN_GROUP,
         ));
 
         self.assert_ok(
@@ -129,7 +129,7 @@ mod tests {
                 .with(
                     predicate::eq(Path::new("/tmp/token")),
                     predicate::eq("root"),
-                    predicate::eq("douglas"),
+                    predicate::eq("douglas-admin"),
                 )
                 .returning(|_, _, _| Err(FileSystemError::ExpectedFileError));
             os.expect_exit_with(-1);
@@ -163,7 +163,7 @@ mod tests {
                 .expect_write_all()
                 .with(predicate::eq(Path::new("/tmp/token")), predicate::always())
                 .returning(|_, _| Ok(()));
-            permissions.expect_ownership_to_be_set("/tmp/token", "root", "douglas");
+            permissions.expect_ownership_to_be_set("/tmp/token", "root", "douglas-admin");
             permissions
                 .expect_change_mode()
                 .with(
@@ -205,7 +205,7 @@ mod tests {
             permissions.expect_ownership_and_mode_to_be_set(
                 "/tmp/token",
                 "root",
-                "douglas",
+                "douglas-admin",
                 Modes::OwnerReadWriteGroupRead,
             );
 

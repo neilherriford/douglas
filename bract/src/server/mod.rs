@@ -551,7 +551,7 @@ impl Server {
     }
 
     fn assert_initalized(&self) -> Result<(), ServerError> {
-        if self.credentials.group_exists(constants::DOUGLAS_GROUP) {
+        if self.credentials.group_exists(constants::DOUGLAS_APP_GROUP) {
             Ok(())
         } else {
             Err(ServerError::NotInitialized)

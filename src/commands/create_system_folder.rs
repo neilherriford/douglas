@@ -1,4 +1,4 @@
-use config::constants::DOUGLAS_GROUP;
+use config::constants::DOUGLAS_ADMIN_GROUP;
 use file_system::{Folder, Modes, Permissions, path_to_string};
 use log::Logger;
 use std::{path::Path, sync::Arc};
@@ -38,7 +38,7 @@ impl<'a> CreateSystemFolder<'a> {
 
         if let Err(err) =
             self.permissions
-                .change_user_and_group_ownership(path, owning_user, DOUGLAS_GROUP)
+                .change_user_and_group_ownership(path, owning_user, DOUGLAS_ADMIN_GROUP)
         {
             self.log.error(&format!(
                 "Failed to set permissions on path {pretty_path}: {err:?}"

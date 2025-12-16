@@ -202,19 +202,19 @@ mod tests {
                 .expect_ownership_and_mode_to_be_set(
                     "/tmp/mount_root",
                     "root",
-                    "douglas",
+                    "douglas-admin",
                     Modes::OwnerReadWriteExecuteGroupReadWriteExecute,
                 )
                 .expect_ownership_and_mode_to_be_set(
                     "/tmp/mount_root/bar",
                     "doug-bar",
-                    "douglas",
+                    "douglas-admin",
                     Modes::OwnerReadWriteExecuteGroupReadWriteExecute,
                 )
                 .expect_ownership_and_mode_to_be_set(
                     "/tmp/mount_root/bar/baz",
                     "doug-bar",
-                    "douglas",
+                    "douglas-admin",
                     Modes::OwnerReadWriteExecuteGroupReadWriteExecute,
                 )
                 .expect_ownership_and_mode_to_be_set(
@@ -283,13 +283,13 @@ mod tests {
                 .expect_ownership_and_mode_to_be_set(
                     "/tmp/mount_root/bar",
                     "doug-bar",
-                    "douglas",
+                    "douglas-admin",
                     Modes::OwnerReadWriteExecuteGroupReadWriteExecute,
                 )
                 .expect_ownership_and_mode_to_be_set(
                     "/tmp/mount_root/bar/baz",
                     "doug-bar",
-                    "douglas",
+                    "douglas-admin",
                     Modes::OwnerReadWriteExecuteGroupReadWriteExecute,
                 )
                 .expect_ownership_and_mode_to_be_set(
@@ -425,20 +425,20 @@ mod tests {
                 .expect_ownership_and_mode_to_be_set(
                     "/tmp/mount_root/bar",
                     "doug-bar",
-                    "douglas",
+                    "douglas-admin",
                     Modes::OwnerReadWriteExecuteGroupReadWriteExecute,
                 )
                 .expect_ownership_and_mode_to_be_set(
                     "/tmp/mount_root/bar/baz",
                     "doug-bar",
-                    "douglas",
+                    "douglas-admin",
                     Modes::OwnerReadWriteExecuteGroupReadWriteExecute,
                 )
                 .expect_ownership_and_mode_to_be_set(
                     "/tmp/mount_root/bar/baz/v0",
                     "doug-bar",
-                    "douglas",
-                    Modes::OwnerReadWriteExecuteGroupReadWriteExecute,
+                    "douglas-admin",
+                    Modes::InheritedOwnerReadWriteExecuteGroupReadWriteExecute,
                 );
 
             links.expect_create_with(

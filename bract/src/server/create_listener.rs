@@ -1,5 +1,5 @@
 use super::ServerError;
-use config::constants::DOUGLAS_GROUP;
+use config::constants::DOUGLAS_ADMIN_GROUP;
 use file_system::{FileDeleter, Listener, Modes, Permissions, UnixDomainSocket};
 use log::Logger;
 use std::path::{Path, PathBuf};
@@ -42,7 +42,7 @@ impl CreateListener {
         self.permissions.change_user_and_group_ownership(
             &self.socket_path,
             credentials::ROOT_USER_NAME,
-            DOUGLAS_GROUP,
+            DOUGLAS_ADMIN_GROUP,
         )?;
         self.permissions
             .change_mode(&self.socket_path, &Modes::OwnerReadWriteGroupReadWrite)?;
@@ -137,7 +137,7 @@ mod tests {
                 .with(
                     predicate::eq(Path::new("/tmp/socket")),
                     predicate::eq("root"),
-                    predicate::eq("douglas"),
+                    predicate::eq("douglas-admin"),
                 )
                 .returning(|_, _, _| Err(FileSystemError::ExpectedFileError));
 
@@ -164,7 +164,7 @@ mod tests {
             log.expect_info().return_const(());
             file_deleter.expect_file_to_be_deleted("/tmp/socket");
             unix_domain_socket.expect_bind_with("/tmp/socket", || Box::new(MockListener::new()));
-            permissions.expect_ownership_to_be_set("/tmp/socket", "root", "douglas");
+            permissions.expect_ownership_to_be_set("/tmp/socket", "root", "douglas-admin");
             permissions
                 .expect_change_mode()
                 .with(
@@ -199,7 +199,7 @@ mod tests {
             permissions.expect_ownership_and_mode_to_be_set(
                 "/tmp/socket",
                 "root",
-                "douglas",
+                "douglas-admin",
                 Modes::OwnerReadWriteGroupReadWrite,
             );
 
