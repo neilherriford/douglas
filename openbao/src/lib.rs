@@ -125,6 +125,11 @@ pub struct Secret {
     pub base64: String,
 }
 
+#[derive(Debug, PartialEq, Clone)]
+pub enum AuthType {
+    Certificate,
+}
+
 #[async_trait]
 pub trait OpenBaoClient {
     async fn status(&mut self) -> Result<Status, OpenBaoError>;
@@ -135,6 +140,13 @@ pub trait OpenBaoClient {
         token: &str,
         name: &str,
         policy: &policy::Policy,
+    ) -> Result<(), OpenBaoError>;
+    async fn has_auth(&mut self, token: &str, auth_type: AuthType) -> Result<bool, OpenBaoError>;
+    async fn install_auth(
+        &mut self,
+        token: &str,
+        auth_type: AuthType,
+        description: &str,
     ) -> Result<(), OpenBaoError>;
 }
 
@@ -194,10 +206,30 @@ impl OpenBaoClient for SimpleOpenBaoClient {
         name: &str,
         policy: &policy::Policy,
     ) -> Result<(), OpenBaoError> {
-        Ok(
-            UpsertAclPolicy::new(self.rest_client.as_mut(), token, name, policy)
-                .perform()
-                .await?,
+        UpsertAclPolicy::new(self.rest_client.as_mut(), token, name, policy)
+            .perform()
+            .await
+    }
+
+    async fn has_auth(&mut self, token: &str, auth_type: AuthType) -> Result<bool, OpenBaoError> {
+        commands::auth::IsInstalledCommand::new(self.rest_client.as_mut(), token.into(), auth_type)
+            .perform()
+            .await
+    }
+
+    async fn install_auth(
+        &mut self,
+        token: &str,
+        auth_type: AuthType,
+        description: &str,
+    ) -> Result<(), OpenBaoError> {
+        commands::auth::InstallAuthCommand::new(
+            self.rest_client.as_mut(),
+            token.into(),
+            auth_type,
+            description,
         )
+        .perform()
+        .await
     }
 }

@@ -6,7 +6,7 @@ use file_system::{
     Permissions,
 };
 use log::Logger;
-use openbao::{OpenBaoClient, SimpleOpenBaoClient};
+use openbao::{AuthType, OpenBaoClient, SimpleOpenBaoClient};
 use os::{Os, Unix, UnixEnvironmentVariableReader};
 use std::time::Duration;
 use std::{collections::HashSet, sync::Arc};
@@ -173,6 +173,38 @@ impl StartCommand {
         }
 
         self.log.info("OpenBao is unsealed!");
+
+        match openbao_client
+            .has_auth(&secrets.root_token, AuthType::Certificate)
+            .await
+        {
+            Ok(true) => {
+                self.log
+                    .info("OpenBao Certificate authentication already installed, skipping!");
+            }
+            Ok(false) => {
+                self.log
+                    .info("Installing certificate authentication for OpenBao…");
+                if let Err(err) = openbao_client
+                    .install_auth(
+                        &secrets.root_token,
+                        AuthType::Certificate,
+                        "Certificate authentication for administration",
+                    )
+                    .await
+                {
+                    self.log.error(&format!("Error unsealing: {err}"));
+                    return false;
+                }
+            }
+            Err(err) => {
+                self.log.error(&format!(
+                    "Error checking certificate authentication capabilities: {err}"
+                ));
+                return false;
+            }
+        }
+
         self.log.info("Creating admin policy for OpenBao…");
 
         if let Err(err) = openbao_client
