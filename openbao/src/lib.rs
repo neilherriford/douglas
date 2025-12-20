@@ -139,7 +139,7 @@ pub trait OpenBaoClient {
         &mut self,
         token: &str,
         name: &str,
-        policy: &policy::Policy,
+        policies: &[policy::Policy],
     ) -> Result<(), OpenBaoError>;
     async fn has_auth(&mut self, token: &str, auth_type: AuthType) -> Result<bool, OpenBaoError>;
     async fn install_auth(
@@ -204,9 +204,9 @@ impl OpenBaoClient for SimpleOpenBaoClient {
         &mut self,
         token: &str,
         name: &str,
-        policy: &policy::Policy,
+        policies: &[policy::Policy],
     ) -> Result<(), OpenBaoError> {
-        UpsertAclPolicy::new(self.rest_client.as_mut(), token, name, policy)
+        UpsertAclPolicy::new(self.rest_client.as_mut(), token, name, policies)
             .perform()
             .await
     }

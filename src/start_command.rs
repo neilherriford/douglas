@@ -211,17 +211,37 @@ impl StartCommand {
             .upsert_acl_policy(
                 &secrets.root_token,
                 "admin",
-                &openbao::policy::Policy {
-                    path: openbao::policy::Path::All,
-                    capabilities: HashSet::from([
-                        openbao::policy::Capability::Create,
-                        openbao::policy::Capability::Delete,
-                        openbao::policy::Capability::List,
-                        openbao::policy::Capability::Read,
-                        openbao::policy::Capability::Sudo,
-                        openbao::policy::Capability::Update,
-                    ]),
-                },
+                &[
+                    openbao::policy::Policy {
+                        path: openbao::policy::Path::All("sys".into()),
+                        capabilities: HashSet::from([
+                            openbao::policy::Capability::Create,
+                            openbao::policy::Capability::Delete,
+                            openbao::policy::Capability::List,
+                            openbao::policy::Capability::Read,
+                            openbao::policy::Capability::Sudo,
+                            openbao::policy::Capability::Update,
+                        ]),
+                    },
+                    openbao::policy::Policy {
+                        path: openbao::policy::Path::All("auth".into()),
+                        capabilities: HashSet::from([
+                            openbao::policy::Capability::Create,
+                            openbao::policy::Capability::Read,
+                            openbao::policy::Capability::Delete,
+                            openbao::policy::Capability::Update,
+                        ]),
+                    },
+                    openbao::policy::Policy {
+                        path: openbao::policy::Path::All("pki".into()),
+                        capabilities: HashSet::from([
+                            openbao::policy::Capability::Create,
+                            openbao::policy::Capability::Read,
+                            openbao::policy::Capability::Delete,
+                            openbao::policy::Capability::Update,
+                        ]),
+                    },
+                ],
             )
             .await
         {
