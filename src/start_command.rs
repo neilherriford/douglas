@@ -2,16 +2,21 @@ use colored::Colorize;
 use config::{SystemPaths, create_system_paths};
 use credentials::create_credentials;
 use file_system::{
-    FileAppender, FileReader, LocalFileAppender, LocalFileReader, LocalFolder, LocalPermissions,
-    Permissions,
+    FileAppender, FileReader, LocalFileAppender, LocalFileReader, LocalFileWriter, LocalFolder,
+    LocalPermissions, Permissions,
 };
 use log::Logger;
-use openbao::{AuthType, OpenBaoClient, SimpleOpenBaoClient};
+
+use openbao::{
+    AuthType, AuthenticatedClient, SimpleAuthenticatedClient, SimpleSystemClient, SystemClient,
+};
 use os::{Os, Unix, UnixEnvironmentVariableReader};
+use simple_rest_client::parsers::json::JsonParser;
 use std::time::Duration;
 use std::{collections::HashSet, sync::Arc};
 use tokio::time;
 
+use crate::config::{Config, ConfigStore, LocalConfigStore, OpenBaoConfig};
 use crate::{
     commands, core_applications, deferred_file_logger::DeferredFileLogger, file_logger::FileLogger,
     tee_logger::TeeLogger,
@@ -118,22 +123,20 @@ impl StartCommand {
             }
         }
 
-        let mut openbao_client = match SimpleOpenBaoClient::build(
-            socket_path.clone(),
-            Arc::clone(&openbao_logger),
-        )
-        .await
-        {
-            Ok(openbao_client) => openbao_client,
-            Err(err) => {
-                self.log.error(&format!(
-                    "Failed to build OpenBao Client, using socket {socket_path:?}: {err}"
-                ));
-                return false;
-            }
-        };
+        let mut openbao_system_client =
+            match SimpleSystemClient::build(socket_path.clone(), Arc::clone(&openbao_logger)).await
+            {
+                Ok(openbao_client) => openbao_client,
+                Err(err) => {
+                    self.log.error(&format!(
+                        "Failed to build OpenBao System Client, using socket {}: {err}",
+                        socket_path.display()
+                    ));
+                    return false;
+                }
+            };
 
-        let secrets = match openbao_client.intialize().await {
+        let secrets = match openbao_system_client.intialize().await {
             Ok(response) => {
                 println!(
                     "{}",
@@ -167,29 +170,43 @@ impl StartCommand {
 
         self.log.info("Unsealing OpenBao…");
 
-        if let Err(err) = openbao_client.unseal(&secrets).await {
+        if let Err(err) = openbao_system_client.unseal(&secrets).await {
             self.log.error(&format!("Error unsealing: {err}"));
             return false;
         }
 
         self.log.info("OpenBao is unsealed!");
 
-        match openbao_client
-            .has_auth(&secrets.root_token, AuthType::Certificate)
-            .await
+        let mut openbao_client = match SimpleAuthenticatedClient::from_token(
+            socket_path.clone(),
+            Arc::clone(&openbao_logger),
+            &secrets.root_token,
+        )
+        .await
         {
+            Ok(openbao_client) => openbao_client,
+            Err(err) => {
+                self.log.error(&format!(
+                    "Failed to build OpenBao Client, using socket {}: {err}",
+                    socket_path.display()
+                ));
+                return false;
+            }
+        };
+
+        match openbao_client.has_auth(AuthType::AppRole).await {
             Ok(true) => {
                 self.log
-                    .info("OpenBao Certificate authentication already installed, skipping!");
+                    .info("OpenBao AppRole authentication already installed, skipping!");
             }
             Ok(false) => {
                 self.log
-                    .info("Installing certificate authentication for OpenBao…");
+                    .info("Installing AppRole authentication for OpenBao…");
+
                 if let Err(err) = openbao_client
                     .install_auth(
-                        &secrets.root_token,
-                        AuthType::Certificate,
-                        "Certificate authentication for administration",
+                        AuthType::AppRole,
+                        "AppRole authentication for administration",
                     )
                     .await
                 {
@@ -209,7 +226,6 @@ impl StartCommand {
 
         if let Err(err) = openbao_client
             .upsert_acl_policy(
-                &secrets.root_token,
                 "admin",
                 &[
                     openbao::policy::Policy {
@@ -251,6 +267,79 @@ impl StartCommand {
             return false;
         }
         self.log.info("OpenBao admin policy created!");
+
+        self.log.info("Install OpenBao approle engine!");
+
+        self.log.info("Creating OpenBao admin app role…");
+
+        let role_id = match openbao_client
+            .create_app_role(AuthType::AppRole, "admin", vec!["admin"])
+            .await
+        {
+            Ok(role_id) => {
+                self.log.info("Created!");
+                self.log
+                    .info(&format!("Also, here's the role id {role_id:?}!"));
+                role_id
+            }
+            Err(err) => {
+                self.log
+                    .error(&format!("Error creating admin app role: {err}"));
+
+                return false;
+            }
+        };
+
+        let local_file_reader = LocalFileReader::new();
+        let local_file_writer = LocalFileWriter::new();
+        let local_permissions = LocalPermissions::new();
+        let json_parser = JsonParser::new();
+        let config_path = self.system_paths.config_file();
+
+        let config_store = LocalConfigStore::new(
+            &local_file_reader,
+            &local_file_writer,
+            &local_permissions,
+            &json_parser,
+            &config_path,
+        );
+
+        self.log.info("Creating OpenBao admin app role secret…");
+        match openbao_client
+            .create_app_role_secret(AuthType::AppRole, "admin")
+            .await
+        {
+            Ok(secret) => {
+                self.log.info("Created!");
+                self.log
+                    .info(&format!("Also, here's the secret {secret:?}!"));
+
+                self.log.info("Updating configuration…");
+                if let Err(err) = config_store.save(Config {
+                    open_bao: OpenBaoConfig {
+                        admin_role_id: role_id.to_string(),
+                        admin_role_secret: secret,
+                    },
+                }) {
+                    self.log.error(&format!("Error writing config: {err}"));
+                    return false;
+                }
+            }
+            Err(err) => {
+                self.log
+                    .error(&format!("Error creating admin app role secret: {err}"));
+
+                return false;
+            }
+        }
+
+        self.log.info("Revoking OpenBao root token…");
+
+        if let Err(err) = openbao_client.revoke_token(&secrets.root_token).await {
+            self.log.error(&format!("Error revoking root token: {err}"));
+            return false;
+        }
+        self.log.info("Revoked!");
 
         true
     }

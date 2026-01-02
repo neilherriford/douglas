@@ -58,14 +58,14 @@ struct Resposne {
 pub struct InitCommand<'a> {
     rest_client: &'a mut dyn RestClient,
     parser: &'a JsonParser,
-    config: Config,
+    config: &'a Config,
 }
 
 impl<'a> InitCommand<'a> {
     pub fn new(
         rest_client: &'a mut dyn RestClient,
         parser: &'a JsonParser,
-        config: Config,
+        config: &'a Config,
     ) -> Self {
         Self {
             rest_client,

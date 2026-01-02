@@ -76,6 +76,11 @@ impl<'a> InitializeSystem<'a> {
                 &self.system_paths.mount_root(),
                 credentials::ROOT_USER_NAME,
                 Modes::OwnerReadWriteExecuteGroupReadWriteExecute,
+            ) && create_system_folder.perform(
+                "config root",
+                &self.system_paths.config_root(),
+                credentials::ROOT_USER_NAME,
+                Modes::InheritedOwnerReadWriteExecuteGroupReadWriteExecute,
             )
         );
 

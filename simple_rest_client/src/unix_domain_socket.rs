@@ -117,7 +117,7 @@ where
         "localhost",
         io_stream,
         vec![Header::new("host", "localhost")],
-        Arc::clone(&logger),
+        logger,
     );
 
     Ok(result)

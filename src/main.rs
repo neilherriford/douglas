@@ -1,6 +1,7 @@
 mod application_definition;
 mod application_installer;
 mod commands;
+mod config;
 mod core_applications;
 mod deferred_file_logger;
 mod douglas_flags_reader;

@@ -8,7 +8,7 @@ pub(crate) mod utils {
     pub(crate) mod headers {
         use simple_rest_client::Header;
 
-        pub(crate) fn root_token(token: &str) -> Header {
+        pub(crate) fn valut_token(token: &str) -> Header {
             Header::new("X-Vault-Token", token)
         }
     }

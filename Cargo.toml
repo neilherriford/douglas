@@ -7,7 +7,6 @@ license = "MIT"
 
 [dependencies]
 bract = { path = "./bract" }
-certificate_factory = { path = "./certificate_factory" }
 chrono = "=0.4.41"
 clap = { version = "4.5.32", features = ["derive"] }
 colored = "3"
@@ -38,7 +37,7 @@ members = [
     "log",
     "file_system",
     "os",
-    "bract", "config", "utils", "openbao", "certificate_factory",
+    "bract", "config", "utils", "openbao",
 ]
 
 [patch.crates-io]

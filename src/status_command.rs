@@ -4,10 +4,10 @@ use crate::{
 };
 use bract::{Client, client::ClientError};
 use config::{SystemPaths, create_system_paths};
-use docker::{SimpleSystemClient, SystemClient};
+use docker::{SimpleSystemClient, SystemClient as DockerSystemClient};
 use file_system::{FileAppender, LocalFileAppender, LocalFileReader};
 use log::Logger;
-use openbao::OpenBaoClient;
+use openbao::SystemClient as OpenBaoSystemClient;
 use std::sync::Arc;
 use tokio::runtime::Runtime;
 
@@ -178,18 +178,15 @@ impl StatusCommand {
                     }
                 };
 
-            let mut openbao_client = match openbao::SimpleOpenBaoClient::build(
-                openbao_socket_path,
-                openbao_logger,
-            )
-            .await
-            {
-                Ok(client) => client,
-                Err(err) => {
-                    self.log.error(&format!("OpenBao client error: {err}"));
-                    return OpenBaoStatus::Error(err.to_string());
-                }
-            };
+            let mut openbao_client =
+                match openbao::SimpleSystemClient::build(openbao_socket_path, openbao_logger).await
+                {
+                    Ok(client) => client,
+                    Err(err) => {
+                        self.log.error(&format!("OpenBao client error: {err}"));
+                        return OpenBaoStatus::Error(err.to_string());
+                    }
+                };
 
             match openbao_client.status().await {
                 Ok(status) => OpenBaoStatus::Running {

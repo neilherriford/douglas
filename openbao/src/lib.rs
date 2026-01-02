@@ -8,7 +8,7 @@ use crate::commands::{
 };
 use async_trait::async_trait;
 use log::Logger;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use simple_rest_client::{
     RestClient, RestClientError,
     assertions::AssertionError,
@@ -22,8 +22,27 @@ pub mod policy {
     pub use crate::commands::upsert_acl_policy::{Capability, Path, Policy};
 }
 
+#[derive(Debug, PartialEq)]
+pub enum Period {
+    Hours(usize),
+}
+
+impl Serialize for Period {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match self {
+            Period::Hours(amount) => serializer.serialize_str(&format!("{amount}h")),
+        }
+    }
+}
+
 #[derive(Error, Debug)]
 pub enum OpenBaoError {
+    #[error("Unknown role: '(0)'")]
+    UnknownRole(String),
+
     #[error("Already initialized")]
     AlreadyInitialized,
 
@@ -127,36 +146,40 @@ pub struct Secret {
 
 #[derive(Debug, PartialEq, Clone)]
 pub enum AuthType {
-    Certificate,
+    AppRole,
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub struct RoleId(String);
+
+impl std::fmt::Display for RoleId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::fmt::Display for AuthType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AuthType::AppRole => f.write_str("approle"),
+        }
+    }
 }
 
 #[async_trait]
-pub trait OpenBaoClient {
+pub trait SystemClient {
     async fn status(&mut self) -> Result<Status, OpenBaoError>;
     async fn intialize(&mut self) -> Result<Secrets, OpenBaoError>;
     async fn unseal(&mut self, secrets: &Secrets) -> Result<(), OpenBaoError>;
-    async fn upsert_acl_policy(
-        &mut self,
-        token: &str,
-        name: &str,
-        policies: &[policy::Policy],
-    ) -> Result<(), OpenBaoError>;
-    async fn has_auth(&mut self, token: &str, auth_type: AuthType) -> Result<bool, OpenBaoError>;
-    async fn install_auth(
-        &mut self,
-        token: &str,
-        auth_type: AuthType,
-        description: &str,
-    ) -> Result<(), OpenBaoError>;
 }
 
-pub struct SimpleOpenBaoClient {
+pub struct SimpleSystemClient {
     rest_client: Box<dyn RestClient>,
     parser: JsonParser,
     logger: Arc<dyn Logger>,
 }
 
-impl SimpleOpenBaoClient {
+impl SimpleSystemClient {
     pub async fn build(
         socket_file_path: PathBuf,
         logger: Arc<dyn Logger>,
@@ -172,7 +195,7 @@ impl SimpleOpenBaoClient {
 }
 
 #[async_trait]
-impl OpenBaoClient for SimpleOpenBaoClient {
+impl SystemClient for SimpleSystemClient {
     async fn status(&mut self) -> Result<Status, OpenBaoError> {
         Ok(StatusCommand::new(self.rest_client.as_mut(), &self.parser)
             .perform()
@@ -183,7 +206,7 @@ impl OpenBaoClient for SimpleOpenBaoClient {
         Ok(InitCommand::new(
             self.rest_client.as_mut(),
             &self.parser,
-            commands::init::Config::new(10, 3)?,
+            &commands::init::Config::new(10, 3)?,
         )
         .perform()
         .await?)
@@ -199,37 +222,183 @@ impl OpenBaoClient for SimpleOpenBaoClient {
         .perform()
         .await?)
     }
+}
 
+#[async_trait]
+pub trait AuthenticatedClient {
     async fn upsert_acl_policy(
         &mut self,
+        name: &str,
+        policies: &[policy::Policy],
+    ) -> Result<(), OpenBaoError>;
+    async fn has_auth(&mut self, auth_type: AuthType) -> Result<bool, OpenBaoError>;
+    async fn install_auth(
+        &mut self,
+        auth_type: AuthType,
+        description: &str,
+    ) -> Result<(), OpenBaoError>;
+    async fn create_app_role(
+        &mut self,
+        auth_type: AuthType,
+        name: &str,
+        policies: Vec<&str>,
+    ) -> Result<RoleId, OpenBaoError>;
+    async fn create_app_role_secret(
+        &mut self,
+        auth_type: AuthType,
+        name: &str,
+    ) -> Result<String, OpenBaoError>;
+    async fn revoke_token(&mut self, token: &str) -> Result<(), OpenBaoError>;
+}
+
+pub struct SimpleAuthenticatedClient {
+    rest_client: Box<dyn RestClient>,
+    parser: JsonParser,
+    token: String,
+}
+
+impl SimpleAuthenticatedClient {
+    pub async fn from_token(
+        socket_file_path: PathBuf,
+        logger: Arc<dyn Logger>,
         token: &str,
+    ) -> Result<Self, OpenBaoError> {
+        let rest_client = build_client(socket_file_path, Arc::clone(&logger)).await?;
+
+        Ok(Self {
+            rest_client: Box::new(rest_client),
+            parser: JsonParser::new(),
+            token: token.into(),
+        })
+    }
+
+    pub async fn app_role_login(
+        socket_file_path: PathBuf,
+        logger: Arc<dyn Logger>,
+        name: &str,
+        secret_id: &str,
+    ) -> Result<Self, OpenBaoError> {
+        logger.info(&format!("Logging into OpenBao with app role '{name}'…"));
+
+        let mut rest_client = build_client(socket_file_path, Arc::clone(&logger)).await?;
+        let parser = JsonParser::new();
+
+        let token = commands::auth::Login::new(
+            &mut rest_client,
+            &parser,
+            &AuthType::AppRole,
+            name,
+            secret_id,
+        )
+        .perform()
+        .await?;
+
+        logger.info("Authenticated!");
+
+        Ok(Self {
+            rest_client: Box::new(rest_client),
+            parser,
+            token,
+        })
+    }
+}
+
+#[async_trait]
+impl AuthenticatedClient for SimpleAuthenticatedClient {
+    async fn upsert_acl_policy(
+        &mut self,
         name: &str,
         policies: &[policy::Policy],
     ) -> Result<(), OpenBaoError> {
-        UpsertAclPolicy::new(self.rest_client.as_mut(), token, name, policies)
+        UpsertAclPolicy::new(self.rest_client.as_mut(), &self.token, name, policies)
             .perform()
             .await
     }
 
-    async fn has_auth(&mut self, token: &str, auth_type: AuthType) -> Result<bool, OpenBaoError> {
-        commands::auth::IsInstalledCommand::new(self.rest_client.as_mut(), token.into(), auth_type)
+    async fn has_auth(&mut self, auth_type: AuthType) -> Result<bool, OpenBaoError> {
+        commands::auth::IsInstalledCommand::new(self.rest_client.as_mut(), &self.token, &auth_type)
             .perform()
             .await
     }
 
     async fn install_auth(
         &mut self,
-        token: &str,
         auth_type: AuthType,
         description: &str,
     ) -> Result<(), OpenBaoError> {
         commands::auth::InstallAuthCommand::new(
             self.rest_client.as_mut(),
-            token.into(),
-            auth_type,
+            &self.token,
+            &auth_type,
             description,
         )
         .perform()
         .await
+    }
+
+    async fn create_app_role(
+        &mut self,
+        auth_type: AuthType,
+        name: &str,
+        policies: Vec<&str>,
+    ) -> Result<RoleId, OpenBaoError> {
+        if !commands::auth::RoleExists::new(
+            self.rest_client.as_mut(),
+            &self.token,
+            &auth_type,
+            name,
+        )
+        .perform()
+        .await?
+        {
+            commands::auth::CreateRole::new(
+                self.rest_client.as_mut(),
+                &self.token,
+                &auth_type,
+                name,
+                policies,
+            )
+            .perform()
+            .await?;
+        }
+
+        commands::auth::GetRoleId::new(
+            self.rest_client.as_mut(),
+            &self.parser,
+            &self.token,
+            &auth_type,
+            name,
+        )
+        .perform()
+        .await
+    }
+
+    async fn create_app_role_secret(
+        &mut self,
+        auth_type: AuthType,
+        name: &str,
+    ) -> Result<String, OpenBaoError> {
+        if commands::auth::RoleExists::new(self.rest_client.as_mut(), &self.token, &auth_type, name)
+            .perform()
+            .await?
+        {
+            return commands::auth::CreateSecret::new(
+                self.rest_client.as_mut(),
+                &self.parser,
+                &self.token,
+                &auth_type,
+                name,
+            )
+            .perform()
+            .await;
+        }
+
+        Err(OpenBaoError::UnknownRole(name.into()))
+    }
+
+    async fn revoke_token(&mut self, token: &str) -> Result<(), OpenBaoError> {
+        commands::auth::RevokeToken::new(self.rest_client.as_mut(), token)
+            .perform()
+            .await
     }
 }
