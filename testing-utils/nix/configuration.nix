@@ -13,11 +13,11 @@ let
       (builtins.attrNames (builtins.readDir userKeysDir));
 
   # Version information for your dev image
-  devImageVersion = "0.0.2g";
-  devImageDate = "2025-10-20";
+  devImageVersion = "0.0.2h";
+  devImageDate = "2026-01-19";
   devImageName = "Douglas Development Environment";
 
-  # Define our development packages explicitly - CHOOSE ONE RUST APPROACH
+  # Define our development packages explicitly
   devPackages = with pkgs; [
     # GNU build toolchain
     gcc
@@ -33,10 +33,10 @@ let
 
     # Rust toolchain - USE ONLY RUSTUP (not individual packages)
     rustup
+    lldb
 
     # Development utilities
     git
-    vim
     curl
     jq
     docker
@@ -51,6 +51,14 @@ let
   ];
 in
 {
+  ######################## DOCUMENTATION DISABLE ######################
+  # Disable all documentation to avoid docbook issues
+  documentation.enable = false;
+  documentation.nixos.enable = false;
+  documentation.man.enable = false;
+  documentation.info.enable = false;
+  documentation.doc.enable = false;
+
   ############################ BOOT SETTINGS ###########################
   boot.kernelModules = [ "virtiofs" ];
   boot.loader.grub.enable = false;
@@ -370,7 +378,7 @@ in
     makeUsbBootable = true;
 
     # Include system build dependencies to ensure our packages are available
-    includeSystemBuildDependencies = true;
+    includeSystemBuildDependencies = false;
   };
 
   # System configuration
