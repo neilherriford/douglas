@@ -13,7 +13,7 @@ let
       (builtins.attrNames (builtins.readDir userKeysDir));
 
   # Version information for your dev image
-  devImageVersion = "0.0.2h";
+  devImageVersion = "0.0.2i";
   devImageDate = "2026-01-19";
   devImageName = "Douglas Development Environment";
 
@@ -146,6 +146,7 @@ in
   virtualisation.docker = {
     enable = true;
     enableOnBoot = true;
+    storageDriver = "overlay2";
   };
 
   ######################### RUSTUP CONFIGURATION #######################
@@ -283,7 +284,14 @@ in
   fileSystems."/scratch" = {
     device = "tmpfs";
     fsType = "tmpfs";
-    options = [ "defaults" "size=4G" "mode=1777" ];
+    options = [ "defaults" "size=2G" "mode=1777" ];
+  };
+
+  # Dedicated Docker storage
+  fileSystems."/var/lib/docker" = {
+    device = "tmpfs";
+    fsType = "tmpfs";
+    options = [ "defaults" "size=8G" "mode=0755" ];  # 8GB for Docker
   };
 
   # Ensure scratch directory is created
