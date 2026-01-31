@@ -13,7 +13,7 @@ let
       (builtins.attrNames (builtins.readDir userKeysDir));
 
   # Version information for your dev image
-  devImageVersion = "0.0.2i";
+  devImageVersion = "0.0.2j";
   devImageDate = "2026-01-19";
   devImageName = "Douglas Development Environment";
 
@@ -42,6 +42,11 @@ let
     docker
     socat
     lsof
+
+    # Network utilities
+    bind          # Provides nslookup, dig, host, nslookup
+    nettools      # Provides netstat, ifconfig, route
+    iproute2      # Provides ip (modern replacement for ifconfig)
 
     # Additional useful development tools
     tree
