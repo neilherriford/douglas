@@ -1,26 +1,21 @@
-use crate::{Service, Version};
-use active_mount_version::ActiveMountVersion;
+use crate::Service;
+use crate::server::create_listener::CreateListener;
 use config::{SystemPaths, constants};
-use create_credentials::CreateCredentials;
-use create_listener::CreateListener;
-use create_mount::CreateMount;
-use create_new_mount_version::CreateNewMountVersion;
 use credentials::{Credentials, CredentialsError};
+use file_system::path_to_string;
 use file_system::{
     FileDeleter, FileReader, FileSystemError, FileWriter, Folder, Links, Listener, Permissions,
     UnixDomainSocket,
 };
 use futures::{SinkExt, StreamExt};
-use list_mount_versions::ListMountVersions;
 use log::Logger;
 use mount_io::MountIo;
-use mount_path_factory::MountPathFactory;
 use mount_writer::MountWriter;
 use os::{Os, OsError};
 use serde::{Deserialize, Serialize};
-use set_mount_version::SetMountVersion;
 use shutdown::Shutdown;
 use status::Status;
+use std::collections::HashSet;
 use std::fmt::Debug;
 use std::path::Path;
 use std::path::PathBuf;
@@ -34,46 +29,62 @@ use tokio::time;
 use tokio_serde::Framed as SerdeFramed;
 use tokio_serde::formats::Json;
 use tokio_util::codec::{Framed, LengthDelimitedCodec};
-use version_manager::VersionManager;
 
 #[macro_use]
 mod macros;
-mod active_mount_version;
-mod create_credentials;
 mod create_listener;
-mod create_mount;
-mod create_new_mount_version;
-mod list_mount_versions;
+mod create_service_mounts;
 mod mount_io;
-mod mount_path_factory;
 mod mount_writer;
-mod set_mount_version;
+mod service_account_manager;
+mod service_mount_manager;
 mod shutdown;
 mod status;
 mod token_refresher;
 mod token_validator;
-mod version_manager;
+
+#[derive(Debug, Clone, PartialEq, Hash)]
+pub struct Name {
+    pub display: String,
+    pub system: String,
+}
+
+impl Name {
+    fn from_non_truncated(non_truncated: &str) -> Self {
+        Self {
+            display: non_truncated.to_string(),
+            system: non_truncated.to_string(),
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug, PartialEq, Eq, Hash, Clone)]
+pub struct Credential {
+    pub id: u32,
+    pub display_name: String,
+    pub system_name: String,
+}
+impl Credential {
+    fn from_name(id: u32, name: Name) -> Self {
+        Self {
+            id,
+            display_name: name.display,
+            system_name: name.system,
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub struct CreatedMountDefinition {
+    pub name: String,
+    pub shared: Shared,
+    pub share_group: Option<Credential>,
+    pub ephemeral: bool,
+}
 
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "status", content = "data")]
 pub(crate) enum Response {
-    CredentialsCreated {
-        user: String,
-        user_id: u32,
-        group: String,
-        group_id: u32,
-    },
-    MountSet {
-        name: String,
-        version: Version,
-        path: PathBuf,
-    },
-    NoActiveMountVersion,
-    MountVersionListed {
-        version: Version,
-        path: PathBuf,
-    },
-    MountVersionsListed(Vec<Version>),
     InvalidToken,
     Status {
         token_path: PathBuf,
@@ -81,39 +92,77 @@ pub(crate) enum Response {
         services: Vec<Service>,
     },
     Error(String),
-    ShuttingDown,
-    Stopped,
-    WroteToMount,
+    Success,
+    Plan(Vec<String>),
+    Progress {
+        index: usize,
+        step: String,
+        message: String,
+    },
+    CreatedServiceMounts {
+        token: String,
+        service_name: String,
+        mounts: HashSet<CreatedMountDefinition>,
+        user: Credential,
+        group: Credential,
+    },
+}
+
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Hash, Clone)]
+pub enum Shared {
+    No,
+    WithServices(Vec<String>),
+}
+
+impl std::fmt::Display for Shared {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Shared::No => f.write_str("No"),
+            Shared::WithServices(names) => f.write_str(&format!(
+                "WithServices:[{}]",
+                names.iter().fold(String::new(), |mut acc, name| {
+                    if !acc.is_empty() {
+                        acc.push_str(", ");
+                    }
+                    acc.push_str(name.as_str());
+                    acc
+                })
+            )),
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Hash, Clone)]
+pub struct MountDefinition {
+    pub name: String,
+    pub shared: Shared,
+    pub ephemeral: bool,
+}
+
+impl std::fmt::Display for MountDefinition {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&format!(
+            "Name: {} shared: {} ephemeral: {}",
+            self.name, self.shared, self.ephemeral
+        ))
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(tag = "type", content = "payload")]
 pub(crate) enum Request {
-    ActiveMountVersion {
+    CreateServiceMounts {
         token: String,
         service_name: String,
-        mount_name: String,
+        mounts: HashSet<MountDefinition>,
     },
-    CreateCredentials {
+    SetupEphemeralMounts {
         token: String,
         service_name: String,
     },
-    CreateMount {
+    TearDownEphemeralMounts {
         token: String,
         service_name: String,
-        mount_name: String,
-        shared: bool,
-    },
-    CreateNewMountVersion {
-        token: String,
-        service_name: String,
-        mount_name: String,
-        shared: bool,
-    },
-    ListMountVersions {
-        token: String,
-        service_name: String,
-        mount_name: String,
     },
     WriteToMount {
         token: String,
@@ -121,12 +170,6 @@ pub(crate) enum Request {
         mount_name: String,
         relative_path: PathBuf,
         contents: String,
-    },
-    SetMountVersion {
-        token: String,
-        service_name: String,
-        mount_name: String,
-        version: Version,
     },
     Status {
         token: String,
@@ -138,78 +181,40 @@ pub(crate) enum Request {
 
 impl std::fmt::Display for Request {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let value = match self {
-            Request::ActiveMountVersion {
-                token: _,
+        match self {
+            Request::CreateServiceMounts {
                 service_name,
-                mount_name,
-            } => format!(
-                "ActiveMountVersion service_name: '{service_name}', mount_name: '{mount_name}'"
-            ),
-            Request::CreateCredentials {
-                token: _,
-                service_name,
-            } => format!("CreateCredentials service_name: '{service_name}'"),
-            Request::CreateMount {
-                token: _,
-                service_name,
-                mount_name,
-                shared,
-            } => format!(
-                "CreateMount service_name: '{service_name}', mount_name: '{mount_name}', shared: {shared}",
-            ),
-            Request::CreateNewMountVersion {
-                token: _,
-                service_name,
-                mount_name,
-                shared,
-            } => format!(
-                "CreateNewMountVersion service_name: '{service_name}', mount_name: '{mount_name}', shared: {shared}",
-            ),
-            Request::ListMountVersions {
-                token: _,
-                service_name,
-                mount_name,
-            } => format!(
-                "ListMountVersions service_name: '{service_name}', mount_name: '{mount_name}'",
-            ),
-            Request::SetMountVersion {
-                token: _,
-                service_name,
-                mount_name,
-                version,
-            } => format!(
-                "SetMountVersion service_name: '{service_name}', mount_name: '{mount_name}', version: '{version}'",
-            ),
-            Request::Status { token: _ } => "Status".to_string(),
-            Request::Shutdown { token: _ } => "Shutdown".to_string(),
+                mounts,
+                ..
+            } => {
+                let pretty_mounts = mounts.iter().fold(String::new(), |mut acc, definition| {
+                    if !acc.is_empty() {
+                        acc.push_str(", ");
+                    }
+                    acc.push_str(&format!("({}: shared: {}, ephemeral: {})",definition.name, definition.shared,definition.ephemeral));
+                    acc
+                });
+
+                f.write_str(&format!("CreateServiceMounts service_name: {service_name} mounts: [{pretty_mounts}]"))
+            },
+            Request::SetupEphemeralMounts { service_name, .. } => f.write_str(&format!("SetupEphemeralMounts service_name: {service_name}")),
+            Request::TearDownEphemeralMounts { service_name, .. } => f.write_str(&format!("TearDownEphemeralMounts service_name: {service_name}")),
             Request::WriteToMount {
-                token: _,
                 service_name,
                 mount_name,
                 relative_path,
-                contents,
-            } => format!(
-                "WriteToMount service_name: '{service_name}', mount_name: '{mount_name}', relative_path: '{}', size: '{}' ",
-                relative_path.to_str().unwrap_or("unknown"),
-                contents.len()
-            ),
-        };
-
-        write!(f, "{}", value)
+                ..
+            } => f.write_str(&format!("WriteToMount service_name: {service_name} mount_name: {mount_name}, relative_path: {}", path_to_string(relative_path))),
+            Request::Status { .. } => f.write_str("Status"),
+            Request::Shutdown { .. } => f.write_str("Shutdown"),
+        }
     }
 }
 
 struct RequestHandler {
-    active_mount_version: ActiveMountVersion,
-    create_credentials: CreateCredentials,
-    create_mount: CreateMount,
-    create_new_mount_version: CreateNewMountVersion,
-    list_mount_versions: ListMountVersions,
-    mount_writer: MountWriter,
-    set_mount_version: SetMountVersion,
     status: Status,
     shutdown: Shutdown,
+    mount_writer: MountWriter,
     shutdown_sender: Sender<()>,
 }
 
@@ -234,68 +239,21 @@ impl RequestHandler {
             token_path,
         ));
 
-        let mount_path_factory = Arc::new(MountPathFactory::new(
-            mount_root,
-            Arc::clone(&folder),
-            Arc::clone(&links),
-        ));
-
-        let version_manager = Arc::new(VersionManager::new(
-            Arc::clone(&mount_path_factory),
-            Arc::clone(&folder),
-            Arc::clone(&links),
-            file_deleter,
-            Arc::clone(&permissions),
-            Arc::clone(&credentials),
-        ));
-
         let mount_io = Arc::new(MountIo::new(
-            Arc::clone(&mount_path_factory),
             Arc::clone(&folder),
             file_writer,
             Arc::clone(&permissions),
         ));
 
         Self {
-            active_mount_version: ActiveMountVersion::new(
-                Arc::clone(&log),
-                Arc::clone(&token_validator),
-                Arc::clone(&mount_path_factory),
-            ),
-            create_credentials: CreateCredentials::new(
-                Arc::clone(&log),
-                Arc::clone(&token_validator),
-                Arc::clone(&credentials),
-            ),
-            create_mount: CreateMount::new(
-                Arc::clone(&log),
-                Arc::clone(&token_validator),
-                Arc::clone(&version_manager),
-            ),
-            create_new_mount_version: CreateNewMountVersion::new(
-                Arc::clone(&log),
-                Arc::clone(&token_validator),
-                Arc::clone(&version_manager),
-            ),
-            list_mount_versions: ListMountVersions::new(
-                Arc::clone(&log),
-                Arc::clone(&token_validator),
-                Arc::clone(&version_manager),
-            ),
             mount_writer: MountWriter::new(
                 Arc::clone(&log),
                 Arc::clone(&token_validator),
                 Arc::clone(&mount_io),
             ),
-            set_mount_version: SetMountVersion::new(
-                Arc::clone(&log),
-                Arc::clone(&token_validator),
-                Arc::clone(&version_manager),
-            ),
             status: Status::new(
                 Arc::clone(&log),
                 Arc::clone(&token_validator),
-                Arc::clone(&version_manager),
                 token_path,
                 mount_root,
             ),
@@ -306,52 +264,6 @@ impl RequestHandler {
 
     pub fn handle(&self, request: Request) -> Response {
         match request {
-            Request::ActiveMountVersion {
-                token,
-                service_name,
-                mount_name,
-            } => self
-                .active_mount_version
-                .perform(token, service_name, mount_name),
-            Request::CreateCredentials {
-                token,
-                service_name,
-            } => self.create_credentials.create(token, service_name),
-            Request::CreateMount {
-                token,
-                service_name,
-                mount_name,
-                shared,
-            } => self
-                .create_mount
-                .create(token, service_name, mount_name, shared),
-            Request::CreateNewMountVersion {
-                token,
-                service_name,
-                mount_name,
-                shared,
-            } => self
-                .create_new_mount_version
-                .create(token, service_name, mount_name, shared),
-            Request::ListMountVersions {
-                token,
-                service_name,
-                mount_name,
-            } => self
-                .list_mount_versions
-                .list(token, service_name, mount_name),
-            Request::SetMountVersion {
-                token,
-                service_name,
-                mount_name,
-                version,
-            } => self
-                .set_mount_version
-                .perform(token, service_name, mount_name, version),
-            Request::Status { token } => self.status.perform(token),
-            Request::Shutdown { token } => {
-                self.shutdown.perform(token, self.shutdown_sender.clone())
-            }
             Request::WriteToMount {
                 token,
                 service_name,
@@ -365,6 +277,21 @@ impl RequestHandler {
                 relative_path,
                 &contents,
             ),
+            Request::CreateServiceMounts {
+                token,
+                service_name,
+                mounts,
+            } => todo!(),
+            Request::SetupEphemeralMounts {
+                token,
+                service_name,
+            } => todo!(),
+            Request::TearDownEphemeralMounts {
+                token,
+                service_name,
+            } => todo!(),
+            Request::Status { token } => self.status.perform(token),
+            Request::Shutdown { token } => self.shutdown.perform(token, &self.shutdown_sender),
         }
     }
 }

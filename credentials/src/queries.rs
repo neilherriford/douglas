@@ -10,6 +10,7 @@ pub(crate) trait Queries: Send + Sync {
     fn is_root(&self) -> bool;
     fn user_exists(&self, name: &str) -> bool;
     fn group_exists(&self, name: &str) -> bool;
+    fn get_primary_group_id(&self, name: &str) -> Option<u32>;
 }
 
 #[derive(Default)]
@@ -52,5 +53,9 @@ impl Queries for LocalQueries {
 
     fn group_exists(&self, name: &str) -> bool {
         get_group_by_name(name).is_some()
+    }
+
+    fn get_primary_group_id(&self, name: &str) -> Option<u32> {
+        get_user_by_name(name).and_then(|user| Some(user.primary_group_id()))
     }
 }

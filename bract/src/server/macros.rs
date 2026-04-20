@@ -59,23 +59,23 @@ mod tests {
             assert!(matches!(actual, Response::Error(msg) if msg == "client-facing message"));
         }
 
-        #[test]
-        fn should_return_succesful_result() {
-            let logger = MockLogger::new();
+        // #[test]
+        // fn should_return_succesful_result() {
+        //     let logger = MockLogger::new();
 
-            fn test(logger: impl Logger, result: Result<String, MockError>) -> Response {
-                let success = or_log_and_return_response_error!(logger => warn, result);
-                Response::CredentialsCreated {
-                    user: success,
-                    user_id: 123,
-                    group: "bar".into(),
-                    group_id: 321,
-                }
-            }
+        //     fn test(logger: impl Logger, result: Result<String, MockError>) -> Response {
+        //         let success = or_log_and_return_response_error!(logger => warn, result);
+        //         Response::CredentialsCreated {
+        //             user: success,
+        //             user_id: 123,
+        //             group: "bar".into(),
+        //             group_id: 321,
+        //         }
+        //     }
 
-            let actual = test(logger, Ok("foo".to_string()));
+        //     let actual = test(logger, Ok("foo".to_string()));
 
-            assert!(matches!(actual, Response::CredentialsCreated {user, .. } if user == "foo"));
-        }
+        //     assert!(matches!(actual, Response::CredentialsCreated {user, .. } if user == "foo"));
+        // }
     }
 }

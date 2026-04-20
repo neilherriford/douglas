@@ -33,15 +33,16 @@ impl MountWriter {
         self.log.info(&format!(
             "Writing into active mount for {service_name} {mount_name} {relative_path:?}",
         ));
+        todo!();
 
-        self.token.perform_if_valid(token, move || {
-            or_log_and_return_response_error!(
-                self.log => warn,
-                self.mount_io
-                    .write_file(service_name, mount_name, relative_path, contents)
-            );
+        // self.token.perform_if_valid(token, move || {
+        //     or_log_and_return_response_error!(
+        //         self.log => warn,
+        //         self.mount_io
+        //             .write_file(service_name, mount_name, relative_path, contents)
+        //     );
 
-            Response::WroteToMount
-        })
+        //     Response::WroteToMount
+        // })
     }
 }

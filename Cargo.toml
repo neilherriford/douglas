@@ -37,7 +37,7 @@ members = [
     "log",
     "file_system",
     "os",
-    "bract", "config", "utils", "openbao",
+    "bract", "config", "utils", "openbao", "blueprint",
 ]
 
 [patch.crates-io]

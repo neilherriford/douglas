@@ -1,5 +1,5 @@
 use crate::server::{Request as ServerRequest, Response as ServerResponse};
-use crate::{Mount, Service, Version};
+use crate::{Mount, Service};
 use file_system::FileReader;
 use futures::{SinkExt, StreamExt};
 use log::Logger;
@@ -103,49 +103,51 @@ impl Client {
         service_name: &str,
         mount_name: &str,
     ) -> Result<Option<Mount>, ClientError> {
-        let response = self
-            .request(ServerRequest::ActiveMountVersion {
-                token: self.get_token()?,
-                service_name: service_name.to_string(),
-                mount_name: mount_name.to_string(),
-            })
-            .await?;
+        todo!();
+        // let response = self
+        //     .request(ServerRequest::ActiveMountVersion {
+        //         token: self.get_token()?,
+        //         service_name: service_name.to_string(),
+        //         mount_name: mount_name.to_string(),
+        //     })
+        //     .await?;
 
-        match response {
-            ServerResponse::MountVersionListed { version, path } => Ok(Some(Mount {
-                name: mount_name.into(),
-                version,
-                path,
-            })),
-            ServerResponse::NoActiveMountVersion => Ok(None),
-            _ => Err(self.create_unexpected_response("MountVersionListed", response)),
-        }
+        // match response {
+        //     ServerResponse::MountVersionListed { version, path } => Ok(Some(Mount {
+        //         name: mount_name.into(),
+        //         version,
+        //         path,
+        //     })),
+        //     ServerResponse::NoActiveMountVersion => Ok(None),
+        //     _ => Err(self.create_unexpected_response("MountVersionListed", response)),
+        // }
     }
 
     pub async fn create_credentials(&self, service_name: &str) -> Result<Credential, ClientError> {
-        let response = self
-            .request(ServerRequest::CreateCredentials {
-                token: self.get_token()?,
-                service_name: service_name.to_string(),
-            })
-            .await?;
+        todo!();
+        // let response = self
+        //     .request(ServerRequest::CreateCredentials {
+        //         token: self.get_token()?,
+        //         service_name: service_name.to_string(),
+        //     })
+        //     .await?;
 
-        if let ServerResponse::CredentialsCreated {
-            user,
-            user_id,
-            group,
-            group_id,
-        } = response
-        {
-            Ok(Credential {
-                user,
-                user_id,
-                group,
-                group_id,
-            })
-        } else {
-            Err(self.create_unexpected_response("CredentialsCreated", response))
-        }
+        // if let ServerResponse::CredentialsCreated {
+        //     user,
+        //     user_id,
+        //     group,
+        //     group_id,
+        // } = response
+        // {
+        //     Ok(Credential {
+        //         user,
+        //         user_id,
+        //         group,
+        //         group_id,
+        //     })
+        // } else {
+        //     Err(self.create_unexpected_response("CredentialsCreated", response))
+        // }
     }
 
     pub async fn create_mount(
@@ -154,29 +156,30 @@ impl Client {
         mount_name: &str,
         shared: bool,
     ) -> Result<Mount, ClientError> {
-        let response = self
-            .request(ServerRequest::CreateMount {
-                token: self.get_token()?,
-                service_name: service_name.to_string(),
-                mount_name: mount_name.to_string(),
-                shared,
-            })
-            .await?;
+        todo!();
+        // let response = self
+        //     .request(ServerRequest::CreateMount {
+        //         token: self.get_token()?,
+        //         service_name: service_name.to_string(),
+        //         mount_name: mount_name.to_string(),
+        //         shared,
+        //     })
+        //     .await?;
 
-        if let ServerResponse::MountSet {
-            name,
-            version,
-            path,
-        } = response
-        {
-            Ok(Mount {
-                name,
-                version,
-                path,
-            })
-        } else {
-            Err(self.create_unexpected_response("MountSet", response))
-        }
+        // if let ServerResponse::MountSet {
+        //     name,
+        //     version,
+        //     path,
+        // } = response
+        // {
+        //     Ok(Mount {
+        //         name,
+        //         version,
+        //         path,
+        //     })
+        // } else {
+        //     Err(self.create_unexpected_response("MountSet", response))
+        // }
     }
 
     pub async fn create_new_mount_version(
@@ -185,81 +188,84 @@ impl Client {
         mount_name: &str,
         shared: bool,
     ) -> Result<Mount, ClientError> {
-        let response = self
-            .request(ServerRequest::CreateNewMountVersion {
-                token: self.get_token()?,
-                service_name: service_name.to_string(),
-                mount_name: mount_name.to_string(),
-                shared,
-            })
-            .await?;
+        todo!();
+        // let response = self
+        //     .request(ServerRequest::CreateNewMountVersion {
+        //         token: self.get_token()?,
+        //         service_name: service_name.to_string(),
+        //         mount_name: mount_name.to_string(),
+        //         shared,
+        //     })
+        //     .await?;
 
-        if let ServerResponse::MountSet {
-            name,
-            version,
-            path,
-        } = response
-        {
-            Ok(Mount {
-                name,
-                version,
-                path,
-            })
-        } else {
-            Err(self.create_unexpected_response("MountSet", response))
-        }
+        // if let ServerResponse::MountSet {
+        //     name,
+        //     version,
+        //     path,
+        // } = response
+        // {
+        //     Ok(Mount {
+        //         name,
+        //         version,
+        //         path,
+        //     })
+        // } else {
+        //     Err(self.create_unexpected_response("MountSet", response))
+        // }
     }
 
-    pub async fn list_mount_versions(
-        &self,
-        service_name: &str,
-        mount_name: &str,
-    ) -> Result<Vec<Version>, ClientError> {
-        let response = self
-            .request(ServerRequest::ListMountVersions {
-                token: self.get_token()?,
-                service_name: service_name.to_string(),
-                mount_name: mount_name.to_string(),
-            })
-            .await?;
+    // pub async fn list_mount_versions(
+    //     &self,
+    //     service_name: &str,
+    //     mount_name: &str,
+    // ) -> Result<Vec<Version>, ClientError> {
+    //     todo!();
+    //     // let response = self
+    //     //     .request(ServerRequest::ListMountVersions {
+    //     //         token: self.get_token()?,
+    //     //         service_name: service_name.to_string(),
+    //     //         mount_name: mount_name.to_string(),
+    //     //     })
+    //     //     .await?;
 
-        if let ServerResponse::MountVersionsListed(versions) = response {
-            Ok(versions)
-        } else {
-            Err(self.create_unexpected_response("MountVersionsListed", response))
-        }
-    }
+    //     // if let ServerResponse::MountVersionsListed(versions) = response {
+    //     //     Ok(versions)
+    //     // } else {
+    //     //     Err(self.create_unexpected_response("MountVersionsListed", response))
+    //     // }
+    // }
 
-    pub async fn set_mount_version(
-        &self,
-        service_name: &str,
-        mount_name: &str,
-        version: Version,
-    ) -> Result<Mount, ClientError> {
-        let response = self
-            .request(ServerRequest::SetMountVersion {
-                token: self.get_token()?,
-                service_name: service_name.to_string(),
-                mount_name: mount_name.to_string(),
-                version,
-            })
-            .await?;
+    // pub async fn set_mount_version(
+    //     &self,
+    //     service_name: &str,
+    //     mount_name: &str,
+    //     version: Version,
+    // ) -> Result<Mount, ClientError> {
+    //     todo!();
+    //     // let response = self
+    //     //     .request(ServerRequest::SetMountVersion {
+    //     //         token: self.get_token()?,
+    //     //         service_name: service_name.to_string(),
+    //     //         mount_name: mount_name.to_string(),
+    //     //         version,
+    //     //     })
+    //     //     .await?;
 
-        if let ServerResponse::MountSet {
-            name,
-            version,
-            path,
-        } = response
-        {
-            Ok(Mount {
-                name,
-                version,
-                path,
-            })
-        } else {
-            Err(self.create_unexpected_response("MountSet", response))
-        }
-    }
+    //     // if let ServerResponse::MountSet {
+    //     //     name,
+    //     //     version,
+    //     //     path,
+    //     // } = response
+    //     // {
+    //     //     Ok(Mount {
+    //     //         name,
+    //     //         version,
+    //     //         path,
+    //     //     })
+    //     // } else {
+    //     //     Err(self.create_unexpected_response("MountSet", response))
+    //     // }
+    // }
 
     pub async fn status(&self) -> Result<Status, ClientError> {
         let response = self
@@ -290,42 +296,44 @@ impl Client {
         mount_name: &str,
         operation: IoOperation<'_>,
     ) -> Result<(), ClientError> {
-        match operation {
-            IoOperation::WriteFile {
-                relative_path,
-                contents,
-            } => {
-                let response = self
-                    .request(ServerRequest::WriteToMount {
-                        token: self.get_token()?,
-                        service_name: service_name.to_string(),
-                        mount_name: mount_name.to_string(),
-                        relative_path: relative_path.to_owned(),
-                        contents: contents.to_string(),
-                    })
-                    .await?;
+        todo!();
+        // match operation {
+        //     IoOperation::WriteFile {
+        //         relative_path,
+        //         contents,
+        //     } => {
+        //         let response = self
+        //             .request(ServerRequest::WriteToMount {
+        //                 token: self.get_token()?,
+        //                 service_name: service_name.to_string(),
+        //                 mount_name: mount_name.to_string(),
+        //                 relative_path: relative_path.to_owned(),
+        //                 contents: contents.to_string(),
+        //             })
+        //             .await?;
 
-                if let ServerResponse::WroteToMount = response {
-                    Ok(())
-                } else {
-                    Err(self.create_unexpected_response("WroteToMount", response))
-                }
-            }
-        }
+        //         if let ServerResponse::WroteToMount = response {
+        //             Ok(())
+        //         } else {
+        //             Err(self.create_unexpected_response("WroteToMount", response))
+        //         }
+        //     }
+        // }
     }
 
     pub async fn shutdown(&self) -> Result<(), ClientError> {
-        let response = self
-            .request(ServerRequest::Shutdown {
-                token: self.get_token()?,
-            })
-            .await?;
+        todo!();
+        // let response = self
+        //     .request(ServerRequest::Shutdown {
+        //         token: self.get_token()?,
+        //     })
+        //     .await?;
 
-        if let ServerResponse::ShuttingDown = response {
-            Ok(())
-        } else {
-            Err(self.create_unexpected_response("ShuttingDown", response))
-        }
+        // if let ServerResponse::ShuttingDown = response {
+        //     Ok(())
+        // } else {
+        //     Err(self.create_unexpected_response("ShuttingDown", response))
+        // }
     }
 
     async fn request(&self, request: ServerRequest) -> Result<ServerResponse, ClientError> {
@@ -358,24 +366,25 @@ impl Client {
     }
 
     fn create_unexpected_response(&self, expected: &str, response: ServerResponse) -> ClientError {
-        let received = match response {
-            ServerResponse::CredentialsCreated { .. } => "CredentialsCreated",
-            ServerResponse::MountSet { .. } => "MountSet",
-            ServerResponse::MountVersionListed { .. } => "MountVersionListed",
-            ServerResponse::NoActiveMountVersion => "NoActiveMountVersion",
-            ServerResponse::MountVersionsListed(_) => "MountVersionsListed",
-            ServerResponse::InvalidToken => "InvalidToken",
-            ServerResponse::Status { .. } => "Status",
-            ServerResponse::Error(_) => "Error",
-            ServerResponse::ShuttingDown => "ShuttingDown",
-            ServerResponse::Stopped => "Stopped",
-            ServerResponse::WroteToMount => "WroteToMount",
-        };
+        todo!();
+        // let received = match response {
+        //     ServerResponse::CredentialsCreated { .. } => "CredentialsCreated",
+        //     ServerResponse::MountSet { .. } => "MountSet",
+        //     ServerResponse::MountVersionListed { .. } => "MountVersionListed",
+        //     ServerResponse::NoActiveMountVersion => "NoActiveMountVersion",
+        //     ServerResponse::MountVersionsListed(_) => "MountVersionsListed",
+        //     ServerResponse::InvalidToken => "InvalidToken",
+        //     ServerResponse::Status { .. } => "Status",
+        //     ServerResponse::Error(_) => "Error",
+        //     ServerResponse::ShuttingDown => "ShuttingDown",
+        //     ServerResponse::Stopped => "Stopped",
+        //     ServerResponse::WroteToMount => "WroteToMount",
+        // };
 
-        ClientError::UnexpectedResponse {
-            expected: expected.to_string(),
-            received: received.to_string(),
-            details: format!("{response:?}"),
-        }
+        // ClientError::UnexpectedResponse {
+        //     expected: expected.to_string(),
+        //     received: received.to_string(),
+        //     details: format!("{response:?}"),
+        // }
     }
 }

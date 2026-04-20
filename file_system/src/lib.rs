@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 #[cfg(feature = "mock")]
 use mockall::predicate;
-use nix::sys::stat::{Mode, umask};
+use nix::sys::stat::{Mode, stat, umask};
 use std::ffi::OsString;
 use std::fs::OpenOptions;
 use std::fs::{
@@ -31,6 +31,10 @@ pub enum FileSystemError {
     InvalidFileNameError(OsString),
     #[error("Expected path to be a file")]
     ExpectedFileError,
+    #[error("System error: {0}")]
+    SystemError(String),
+    #[error("String not representable in UTF8: {0}")]
+    NonUtfString(String),
 }
 
 impl ClientErrorDisplay for FileSystemError {
@@ -342,6 +346,11 @@ pub trait Permissions: Send + Sync {
         group_name: &str,
     ) -> Result<(), FileSystemError>;
     fn change_mode(&self, path: &Path, mode: &Modes) -> Result<(), FileSystemError>;
+    fn get_user_and_group_ownership(
+        &self,
+        path: &Path,
+    ) -> Result<(String, String), FileSystemError>;
+    fn get_mode(&self, path: &Path) -> Result<Modes, FileSystemError>;
 }
 
 #[derive(Default)]
@@ -350,6 +359,20 @@ pub struct LocalPermissions {}
 impl LocalPermissions {
     pub fn new() -> Self {
         Self {}
+    }
+
+    fn try_to_string(
+        name: &std::ffi::OsStr,
+        name_kind: &str,
+        id: &u32,
+    ) -> Result<String, FileSystemError> {
+        if let Some(name) = name.to_str() {
+            Ok(name.to_string())
+        } else {
+            Err(FileSystemError::NonUtfString(format!(
+                "{name_kind} for {id}",
+            )))
+        }
     }
 }
 
@@ -374,6 +397,52 @@ impl Permissions for LocalPermissions {
     fn change_mode(&self, path: &Path, mode: &Modes) -> Result<(), FileSystemError> {
         let result = set_permissions(path, Perms::from_mode(mode.to_owned().into()));
         Ok(result?)
+    }
+
+    fn get_user_and_group_ownership(
+        &self,
+        path: &Path,
+    ) -> Result<(String, String), FileSystemError> {
+        let stat_result = match stat(path) {
+            Ok(stat_result) => stat_result,
+            Err(errno) => return Err(FileSystemError::SystemError(errno.to_string())),
+        };
+
+        let user_name = match users::get_user_by_uid(stat_result.st_uid) {
+            Some(user) => Self::try_to_string(user.name(), "user name", &stat_result.st_uid)?,
+            None => {
+                return Err(FileSystemError::UserNotFoundError(
+                    stat_result.st_uid.to_string(),
+                ));
+            }
+        };
+        let group_name = match users::get_group_by_gid(stat_result.st_gid) {
+            Some(group) => Self::try_to_string(group.name(), "group name", &stat_result.st_gid)?,
+            None => {
+                return Err(FileSystemError::UserNotFoundError(
+                    stat_result.st_uid.to_string(),
+                ));
+            }
+        };
+
+        Ok((user_name, group_name))
+    }
+
+    fn get_mode(&self, path: &Path) -> Result<Modes, FileSystemError> {
+        let stat_result = match stat(path) {
+            Ok(stat_result) => stat_result,
+            Err(errno) => return Err(FileSystemError::SystemError(errno.to_string())),
+        };
+
+        Ok(match stat_result.st_mode {
+            0 => Modes::None,
+            0o600 => Modes::OwnerReadWrite,
+            0o640 => Modes::OwnerReadWriteGroupRead,
+            0o660 => Modes::OwnerReadWriteGroupReadWrite,
+            0o770 => Modes::OwnerReadWriteExecuteGroupReadWriteExecute,
+            0o2770 => Modes::InheritedOwnerReadWriteExecuteGroupReadWriteExecute,
+            other => Modes::Other(other as u32),
+        })
     }
 }
 

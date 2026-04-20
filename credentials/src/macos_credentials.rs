@@ -8,6 +8,7 @@ use std::sync::Arc;
 enum ObjectKind {
     User,
     Group,
+    GroupMembership,
 }
 
 impl std::fmt::Display for ObjectKind {
@@ -15,6 +16,7 @@ impl std::fmt::Display for ObjectKind {
         let value = match self {
             ObjectKind::User => "Users".to_string(),
             ObjectKind::Group => "Groups".to_string(),
+            ObjectKind::GroupMembership => "GroupMembership".to_string(),
         };
 
         write!(f, "{}", value)
@@ -131,6 +133,7 @@ impl MacOSCredentials {
         let id_attribute = match kind {
             ObjectKind::User => ObjectAttribute::UniqueID,
             ObjectKind::Group => ObjectAttribute::PrimaryGroupID,
+            ObjectKind::GroupMembership => todo!(),
         };
 
         let output = self.list(kind, id_attribute)?;
@@ -297,6 +300,80 @@ impl Credentials for MacOSCredentials {
 
     fn join_group(&self, user_name: &str, group_name: &str) -> Result<(), CredentialsError> {
         self.add_to_group(user_name, group_name)
+    }
+
+    fn leave_group(&self, user_name: &str, group_name: &str) -> Result<(), CredentialsError> {
+        if !self.group_exists(group_name) {
+            return Err(CredentialsError::GroupNotFoundError {
+                name: group_name.to_string(),
+            });
+        }
+
+        if !self.user_exists(user_name) {
+            return Err(CredentialsError::UserNotFoundError {
+                name: user_name.to_string(),
+            });
+        }
+
+        let path = self.named_object_path(group_name, ObjectKind::Group);
+        self.execute(
+            Operation::Delete,
+            &path,
+            vec![
+                ObjectAttribute::GroupMembership.to_string(),
+                user_name.to_string(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    fn get_primary_group(&self, user_name: &str) -> Result<u32, CredentialsError> {
+        if self.queries.user_exists(user_name) {
+            if let Some(gid) = self.queries.get_primary_group_id(user_name) {
+                Ok(gid)
+            } else {
+                Err(CredentialsError::PrimaryGroupNotFoundError {
+                    user_name: user_name.to_string(),
+                })
+            }
+        } else {
+            Err(CredentialsError::UserNotFoundError {
+                name: user_name.to_string(),
+            })
+        }
+    }
+
+    fn set_primary_group(
+        &self,
+        user_name: &str,
+        group_name: &str,
+    ) -> Result<u32, CredentialsError> {
+        if let Some(new_gid) = self.queries.get_group_id(group_name) {
+            self.set_primary_group_id(user_name, new_gid)
+        } else {
+            Err(CredentialsError::GroupNotFoundError {
+                name: group_name.to_string(),
+            })
+        }
+    }
+
+    fn set_primary_group_id(&self, user_name: &str, gid: u32) -> Result<u32, CredentialsError> {
+        if self.queries.user_exists(user_name) {
+            let previous_gid = self.queries.get_primary_group_id(user_name);
+
+            self.set_object_attribute(
+                user_name,
+                ObjectKind::User,
+                ObjectAttribute::PrimaryGroupID,
+                gid.to_string(),
+            )?;
+
+            Ok(previous_gid.unwrap_or_default())
+        } else {
+            Err(CredentialsError::UserNotFoundError {
+                name: user_name.to_string(),
+            })
+        }
     }
 }
 

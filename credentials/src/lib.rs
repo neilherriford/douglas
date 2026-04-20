@@ -21,6 +21,8 @@ pub enum CredentialsError {
     UserNotFoundError { name: String },
     #[error("Could not find group '{name}'")]
     GroupNotFoundError { name: String },
+    #[error("Could not determine primary group for user '{user_name}'")]
+    PrimaryGroupNotFoundError { user_name: String },
     #[error("OS error '{0}'")]
     IoError(#[from] OsError),
     #[error("General error '{0}'")]
@@ -55,6 +57,11 @@ pub trait Credentials: Send + Sync {
     fn delete_group(&self, name: &str) -> Result<(), CredentialsError>;
     fn list_users(&self) -> Result<Vec<String>, CredentialsError>;
     fn join_group(&self, user_name: &str, group_name: &str) -> Result<(), CredentialsError>;
+    fn leave_group(&self, user_name: &str, group_name: &str) -> Result<(), CredentialsError>;
+    fn get_primary_group(&self, user_name: &str) -> Result<u32, CredentialsError>;
+    fn set_primary_group(&self, user_name: &str, group_name: &str)
+    -> Result<u32, CredentialsError>;
+    fn set_primary_group_id(&self, user_name: &str, gid: u32) -> Result<u32, CredentialsError>;
 }
 
 #[cfg(feature = "mock")]

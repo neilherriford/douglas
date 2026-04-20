@@ -8,3 +8,5 @@ douglas-dev.iso
 **/cargo-test*.profraw
 journal.md
 journal.markdown
+.claude/**
+.local/**

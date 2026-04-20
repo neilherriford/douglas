@@ -1,16 +1,19 @@
 use crate::queries::{LocalQueries, Queries};
 use crate::{Credentials, CredentialsError};
 use os::Os;
+use std::collections::HashSet;
+use std::ops::Index;
 use std::sync::Arc;
+// use users::{get_group_by_name, get_user_by_name};
 
 pub(crate) struct LinuxCredentials {
-    os: Arc<dyn Os >,
-    queries: Box<dyn Queries >,
+    os: Arc<dyn Os>,
+    queries: Box<dyn Queries>,
 }
 
 impl LinuxCredentials {
     #![allow(dead_code)]
-    pub fn new(os: Arc<dyn Os >) -> Self {
+    pub fn new(os: Arc<dyn Os>) -> Self {
         Self {
             os: os.clone(),
             queries: Box::new(LocalQueries::new()),
@@ -158,6 +161,83 @@ impl Credentials for LinuxCredentials {
 
     fn join_group(&self, user_name: &str, group_name: &str) -> Result<(), CredentialsError> {
         self.add_to_group(user_name, group_name)
+    }
+
+    fn leave_group(&self, user_name: &str, group_name: &str) -> Result<(), CredentialsError> {
+        if self.queries.user_exists(user_name) {
+            let mut groups = self.queries.group_memberships(user_name);
+
+            if let Some(index) = groups.iter().position(|name| name == group_name) {
+                groups.remove(index);
+
+                // Overwrite group membership
+                self.os.execute(
+                    "usermod",
+                    vec![
+                        "--groups".to_string(),
+                        groups.join(","),
+                        user_name.to_string(),
+                    ],
+                    Vec::new(),
+                )?;
+            } else {
+                return Err(CredentialsError::GroupNotFoundError {
+                    name: group_name.to_string(),
+                });
+            }
+        } else {
+            return Err(CredentialsError::UserNotFoundError {
+                name: user_name.to_string(),
+            });
+        }
+
+        Ok(())
+    }
+
+    fn get_primary_group(&self, user_name: &str) -> Result<u32, CredentialsError> {
+        if self.queries.user_exists(user_name) {
+            if let Some(gid) = self.queries.get_primary_group_id(user_name) {
+                Ok(gid)
+            } else {
+                Err(CredentialsError::PrimaryGroupNotFoundError {
+                    user_name: user_name.to_string(),
+                })
+            }
+        } else {
+            Err(CredentialsError::UserNotFoundError {
+                name: user_name.to_string(),
+            })
+        }
+    }
+
+    fn set_primary_group(
+        &self,
+        user_name: &str,
+        group_name: &str,
+    ) -> Result<u32, CredentialsError> {
+        if let Some(new_gid) = self.queries.get_group_id(group_name) {
+            self.set_primary_group_id(user_name, new_gid)
+        } else {
+            Err(CredentialsError::GroupNotFoundError {
+                name: group_name.to_string(),
+            })
+        }
+    }
+
+    fn set_primary_group_id(&self, user_name: &str, gid: u32) -> Result<u32, CredentialsError> {
+        if self.queries.user_exists(user_name) {
+            let previous_gid = self.queries.get_primary_group_id(user_name);
+            self.os.execute(
+                "usermod",
+                vec!["--gid".to_string(), gid.to_string(), user_name.to_string()],
+                Vec::new(),
+            )?;
+            Ok(previous_gid.unwrap_or_default())
+        } else {
+            Err(CredentialsError::UserNotFoundError {
+                name: user_name.to_string(),
+            })
+        }
     }
 }
 
