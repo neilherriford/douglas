@@ -25,6 +25,7 @@ use thiserror::Error;
 use token_refresher::TokenRefresher;
 use token_validator::TokenValidator;
 use tokio::sync::broadcast::{self, Sender};
+use tokio::sync::mpsc;
 use tokio::time;
 use tokio_serde::Framed as SerdeFramed;
 use tokio_serde::formats::Json;
@@ -106,6 +107,12 @@ pub(crate) enum Response {
         user: Credential,
         group: Credential,
     },
+}
+
+impl Response {
+    pub fn is_terminal(&self) -> bool {
+        !matches!(self, Response::Progress { .. } | Response::Plan(_))
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Hash, Clone)]
@@ -262,8 +269,8 @@ impl RequestHandler {
         }
     }
 
-    pub fn handle(&self, request: Request) -> Response {
-        match request {
+    pub async fn handle(&self, request: Request, tx: mpsc::Sender<Response>) {
+        let response = match request {
             Request::WriteToMount {
                 token,
                 service_name,
@@ -292,7 +299,8 @@ impl RequestHandler {
             } => todo!(),
             Request::Status { token } => self.status.perform(token),
             Request::Shutdown { token } => self.shutdown.perform(token, &self.shutdown_sender),
-        }
+        };
+        tx.send(response).await.ok();
     }
 }
 
@@ -389,7 +397,7 @@ impl Server {
         let rt = tokio::runtime::Runtime::new()
             .inspect_err(|e| self.log.error(&format!("Runtime error: {e}")))?;
         rt.block_on(async {
-            log.info("Creating listner");
+            log.info("Creating listener");
             let listener = self
                 .listener_factory
                 .create()
@@ -438,8 +446,19 @@ impl Server {
                 match transport.next().await {
                     Some(Ok(request)) => {
                         log.info(&format!("Received request {}", request));
-                        let response = handler.handle(request.clone());
-                        let _ = transport.send(response).await;
+
+                        let (tx, mut rx) = mpsc::channel(32);
+                        let handler = Arc::clone(&handler);
+                        tokio::spawn(async move {
+                            handler.handle(request, tx).await;
+                        });
+
+                        while let Some(response) = rx.recv().await {
+                            if transport.send(response).await.is_err() {
+                                break;
+                            }
+                        }
+
                         log.info("Completed request");
                     }
                     None => {
@@ -482,6 +501,172 @@ impl Server {
             Ok(())
         } else {
             Err(ServerError::NotInitialized)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    mod is_terminal {
+        use crate::server::Response;
+        use std::path::PathBuf;
+
+        #[test]
+        fn success_is_terminal() {
+            assert!(Response::Success.is_terminal());
+        }
+
+        #[test]
+        fn invalid_token_is_terminal() {
+            assert!(Response::InvalidToken.is_terminal());
+        }
+
+        #[test]
+        fn error_is_terminal() {
+            assert!(Response::Error("boom".into()).is_terminal());
+        }
+
+        #[test]
+        fn status_is_terminal() {
+            assert!(
+                Response::Status {
+                    token_path: PathBuf::from("/tmp/token"),
+                    mount_root: PathBuf::from("/tmp/mounts"),
+                    services: vec![],
+                }
+                .is_terminal()
+            );
+        }
+
+        #[test]
+        fn progress_is_not_terminal() {
+            assert!(
+                !Response::Progress {
+                    index: 0,
+                    step: "Create user".into(),
+                    message: "Done".into(),
+                }
+                .is_terminal()
+            );
+        }
+
+        #[test]
+        fn plan_is_not_terminal() {
+            assert!(!Response::Plan(vec!["step one".into()]).is_terminal());
+        }
+    }
+
+    mod streaming {
+        use crate::server::{Request, Response};
+        use futures::{SinkExt, StreamExt};
+        use tokio::net::UnixStream;
+        use tokio::sync::mpsc;
+        use tokio_serde::Framed as SerdeFramed;
+        use tokio_serde::formats::Json;
+        use tokio_util::codec::{Framed, LengthDelimitedCodec};
+
+        // Verifies that multiple Progress frames sent to the mpsc channel all arrive
+        // on the other end of the socket before the terminal frame — i.e. the
+        // channel→transport forwarding loop in request_handler_task works correctly.
+        #[tokio::test]
+        async fn progress_frames_arrive_before_terminal() {
+            let (server_stream, client_stream) = UnixStream::pair().unwrap();
+
+            // Server side: receives from the mpsc channel and writes to the socket.
+            let server_framed = Framed::new(server_stream, LengthDelimitedCodec::new());
+            let mut server_transport: SerdeFramed<_, Request, Response, Json<Request, Response>> =
+                SerdeFramed::new(server_framed, Json::default());
+
+            // Client side: reads raw frames from the socket.
+            let client_framed = Framed::new(client_stream, LengthDelimitedCodec::new());
+            let mut client_transport: SerdeFramed<_, Response, Request, Json<Response, Request>> =
+                SerdeFramed::new(client_framed, Json::default());
+
+            let (tx, mut rx) = mpsc::channel::<Response>(32);
+
+            // Simulate a handler that emits two Progress frames then terminates.
+            tokio::spawn(async move {
+                tx.send(Response::Progress {
+                    index: 0,
+                    step: "Create user".into(),
+                    message: "User 'svc' created (uid 1042)".into(),
+                })
+                .await
+                .ok();
+                tx.send(Response::Progress {
+                    index: 1,
+                    step: "Create group".into(),
+                    message: "Group 'svc' created (gid 1042)".into(),
+                })
+                .await
+                .ok();
+                tx.send(Response::Success).await.ok();
+                // tx dropped here → rx.recv() returns None → forwarding loop exits
+            });
+
+            // Simulate the forwarding loop from request_handler_task.
+            tokio::spawn(async move {
+                while let Some(response) = rx.recv().await {
+                    if server_transport.send(response).await.is_err() {
+                        break;
+                    }
+                }
+            });
+
+            let frame1 = client_transport.next().await.unwrap().unwrap();
+            let frame2 = client_transport.next().await.unwrap().unwrap();
+            let frame3 = client_transport.next().await.unwrap().unwrap();
+
+            assert!(!frame1.is_terminal(), "first frame should be non-terminal");
+            assert!(
+                matches!(frame1, Response::Progress { index: 0, .. }),
+                "first frame should be Progress(0)"
+            );
+
+            assert!(!frame2.is_terminal(), "second frame should be non-terminal");
+            assert!(
+                matches!(frame2, Response::Progress { index: 1, .. }),
+                "second frame should be Progress(1)"
+            );
+
+            assert!(frame3.is_terminal(), "third frame should be terminal");
+            assert!(
+                matches!(frame3, Response::Success),
+                "third frame should be Success"
+            );
+        }
+
+        // Verifies that a handler emitting only a single terminal frame still works —
+        // the existing Status/Shutdown handlers take this path.
+        #[tokio::test]
+        async fn single_terminal_frame_is_forwarded() {
+            let (server_stream, client_stream) = UnixStream::pair().unwrap();
+
+            let server_framed = Framed::new(server_stream, LengthDelimitedCodec::new());
+            let mut server_transport: SerdeFramed<_, Request, Response, Json<Request, Response>> =
+                SerdeFramed::new(server_framed, Json::default());
+
+            let client_framed = Framed::new(client_stream, LengthDelimitedCodec::new());
+            let mut client_transport: SerdeFramed<_, Response, Request, Json<Response, Request>> =
+                SerdeFramed::new(client_framed, Json::default());
+
+            let (tx, mut rx) = mpsc::channel::<Response>(32);
+
+            tokio::spawn(async move {
+                tx.send(Response::InvalidToken).await.ok();
+            });
+
+            tokio::spawn(async move {
+                while let Some(response) = rx.recv().await {
+                    if server_transport.send(response).await.is_err() {
+                        break;
+                    }
+                }
+            });
+
+            let frame = client_transport.next().await.unwrap().unwrap();
+            assert!(frame.is_terminal());
+            assert!(matches!(frame, Response::InvalidToken));
         }
     }
 }
