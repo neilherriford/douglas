@@ -1,7 +1,8 @@
 use crate::OpenBaoError;
+use log::{Reporter, Span};
 use serde::Serialize;
 use simple_rest_client::{Header, Request, RestClient, assertions::assert_no_content};
-use std::collections::HashSet;
+use std::{collections::HashSet, sync::Arc};
 
 #[derive(Debug, PartialEq)]
 pub enum Path {
@@ -82,6 +83,7 @@ struct Body<'a> {
 }
 
 pub(crate) struct UpsertAclPolicy<'a> {
+    reporter: Arc<dyn Reporter>,
     rest_client: &'a mut dyn RestClient,
     name: &'a str,
     polices: &'a [Policy],
@@ -90,12 +92,14 @@ pub(crate) struct UpsertAclPolicy<'a> {
 
 impl<'a> UpsertAclPolicy<'a> {
     pub fn new(
+        reporter: Arc<dyn Reporter>,
         rest_client: &'a mut dyn RestClient,
         vault_token: &'a str,
         name: &'a str,
         polices: &'a [Policy],
     ) -> Self {
         Self {
+            reporter,
             rest_client,
             vault_token,
             name,
@@ -104,6 +108,12 @@ impl<'a> UpsertAclPolicy<'a> {
     }
 
     pub async fn perform(&mut self) -> Result<(), OpenBaoError> {
+        let guard = Span::new(
+            Arc::clone(&self.reporter),
+            "OpenBao upsert ACL policy",
+            log::ScopeKind::Task,
+        )
+        .start_guard();
         let req = Request::Post {
             path: format!("/v1/sys/policies/acl/{}", self.name),
             headers: vec![Header::new("X-Vault-Token", self.vault_token)],
@@ -112,8 +122,8 @@ impl<'a> UpsertAclPolicy<'a> {
             })?),
         };
 
-        let response = self.rest_client.execute(&req).await?;
-        assert_no_content(response)?;
+        let response = self.rest_client.execute(guard.span(), &req).await?;
+        guard.finish(assert_no_content(response))?;
 
         Ok(())
     }

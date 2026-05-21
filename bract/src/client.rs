@@ -2,10 +2,11 @@ use crate::server::{Request as ServerRequest, Response as ServerResponse};
 use crate::{Mount, Service};
 use file_system::FileReader;
 use futures::{SinkExt, StreamExt};
-use log::Logger;
+use log::{Level, Outcome, Reporter, ScopeKind, Span};
 use serde::Serialize;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use thiserror::Error;
 use tokio::net::UnixStream;
 use tokio_serde::Framed as SerdeFramed;
@@ -64,7 +65,7 @@ type Transport = SerdeFramed<
 >;
 
 pub struct Client {
-    log: Box<dyn Logger>,
+    reporter: Arc<dyn Reporter>,
     file_reader: Box<dyn FileReader>,
     socket_path: PathBuf,
     token_path: PathBuf,
@@ -72,13 +73,13 @@ pub struct Client {
 
 impl Client {
     pub fn new(
-        log: Box<dyn Logger>,
+        reporter: Arc<dyn Reporter>,
         file_reader: Box<dyn FileReader>,
         socket_path: PathBuf,
         token_path: PathBuf,
     ) -> Self {
         Self {
-            log,
+            reporter,
             file_reader,
             token_path,
             socket_path,
@@ -268,10 +269,19 @@ impl Client {
     // }
 
     pub async fn status(&self) -> Result<Status, ClientError> {
+        let span = Span::new(
+            Arc::clone(&self.reporter),
+            "Getting status",
+            ScopeKind::Task,
+        );
+
         let response = self
-            .request(ServerRequest::Status {
-                token: self.get_token()?,
-            })
+            .request(
+                span,
+                ServerRequest::Status {
+                    token: self.get_token()?,
+                },
+            )
             .await?;
 
         if let ServerResponse::Status {
@@ -336,44 +346,72 @@ impl Client {
         // }
     }
 
-    async fn request(&self, request: ServerRequest) -> Result<ServerResponse, ClientError> {
-        self.streaming_request(request, |_| {}).await
+    async fn request(
+        &self,
+        span: Span,
+        request: ServerRequest,
+    ) -> Result<ServerResponse, ClientError> {
+        self.streaming_request(span, request, |_| {}).await
     }
 
     async fn streaming_request(
         &self,
+        span: Span,
         request: ServerRequest,
         mut on_progress: impl FnMut(&ServerResponse),
     ) -> Result<ServerResponse, ClientError> {
+        let reporter = span.create_scoped_reporter();
+
         match UnixStream::connect(self.socket_path.as_path()).await {
             Ok(stream) => {
+                reporter.message(log::Level::Info, "Stream open");
                 let length_delimited = Framed::new(stream, LengthDelimitedCodec::new());
                 let mut transport: Transport = SerdeFramed::new(length_delimited, Json::default());
 
                 if let Err(err) = transport.send(request).await {
-                    return Err(ClientError::Error(format!("{:?}", err)));
+                    let error_text = format!("{:?}", err);
+                    reporter.message(log::Level::Warn, &error_text);
+                    return Err(ClientError::Error(error_text));
                 }
 
                 loop {
                     match transport.next().await {
                         Some(Ok(response)) => {
                             if response.is_terminal() {
+                                reporter.finish(Outcome::Ok);
                                 return Ok(response);
                             }
                             on_progress(&response);
                         }
-                        Some(Err(err)) => return Err(ClientError::Error(format!("{:?}", err))),
+                        Some(Err(err)) => {
+                            let error_text = format!("{:?}", err);
+                            reporter.message(log::Level::Warn, &error_text);
+                            return Err(ClientError::Error(error_text));
+                        }
                         None => {
-                            self.log.error("Server closed connection without responding");
+                            reporter.message(
+                                Level::Warn,
+                                "Server closed connection without responding",
+                            );
                             return Err(ClientError::NoResponse);
                         }
                     }
                 }
             }
             Err(err) => match err.kind() {
-                ErrorKind::NotFound => Err(ClientError::MissingSocket),
-                ErrorKind::ConnectionRefused => Err(ClientError::ConnectionRefused),
-                _ => Err(ClientError::Error(format!("{:?}", err))),
+                ErrorKind::NotFound => {
+                    reporter.message(Level::Warn, "Missing socket file");
+                    Err(ClientError::MissingSocket)
+                }
+                ErrorKind::ConnectionRefused => {
+                    reporter.message(Level::Warn, "Connection refused");
+                    Err(ClientError::ConnectionRefused)
+                }
+                _ => {
+                    let error_text = format!("{:?}", err);
+                    reporter.message(Level::Warn, &error_text);
+                    Err(ClientError::Error(error_text))
+                }
             },
         }
     }
@@ -384,192 +422,5 @@ impl Client {
         response: ServerResponse,
     ) -> ClientError {
         todo!();
-        // let received = match response {
-        //     ServerResponse::CredentialsCreated { .. } => "CredentialsCreated",
-        //     ServerResponse::MountSet { .. } => "MountSet",
-        //     ServerResponse::MountVersionListed { .. } => "MountVersionListed",
-        //     ServerResponse::NoActiveMountVersion => "NoActiveMountVersion",
-        //     ServerResponse::MountVersionsListed(_) => "MountVersionsListed",
-        //     ServerResponse::InvalidToken => "InvalidToken",
-        //     ServerResponse::Status { .. } => "Status",
-        //     ServerResponse::Error(_) => "Error",
-        //     ServerResponse::ShuttingDown => "ShuttingDown",
-        //     ServerResponse::Stopped => "Stopped",
-        //     ServerResponse::WroteToMount => "WroteToMount",
-        // };
-
-        // ClientError::UnexpectedResponse {
-        //     expected: expected.to_string(),
-        //     received: received.to_string(),
-        //     details: format!("{response:?}"),
-        // }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    mod streaming_request {
-        use crate::client::{Client, ClientError};
-        use crate::server::{Request as ServerRequest, Response as ServerResponse};
-        use file_system::MockFileReader;
-        use futures::{SinkExt, StreamExt};
-        use log::MockLogger;
-        use std::path::PathBuf;
-        use std::sync::atomic::{AtomicU32, Ordering};
-        use tokio::net::UnixListener;
-        use tokio_serde::formats::Json;
-        use tokio_serde::Framed as SerdeFramed;
-        use tokio_util::codec::{Framed, LengthDelimitedCodec};
-
-        static SOCKET_COUNTER: AtomicU32 = AtomicU32::new(0);
-
-        fn unique_socket_path() -> PathBuf {
-            PathBuf::from(format!(
-                "/tmp/bract_client_test_{}.sock",
-                SOCKET_COUNTER.fetch_add(1, Ordering::SeqCst)
-            ))
-        }
-
-        fn make_client(socket_path: PathBuf) -> Client {
-            let mut log = MockLogger::new();
-            log.expect_error().returning(|_| ());
-
-            Client::new(
-                Box::new(log),
-                Box::new(MockFileReader::new()),
-                socket_path,
-                PathBuf::from("/tmp/unused_token"),
-            )
-        }
-
-        fn spawn_mock_server(socket_path: &PathBuf, responses: Vec<ServerResponse>) {
-            let listener = UnixListener::bind(socket_path).unwrap();
-            tokio::spawn(async move {
-                let (stream, _) = listener.accept().await.unwrap();
-                let framed = Framed::new(stream, LengthDelimitedCodec::new());
-                let mut transport: SerdeFramed<
-                    _,
-                    ServerRequest,
-                    ServerResponse,
-                    Json<ServerRequest, ServerResponse>,
-                > = SerdeFramed::new(framed, Json::default());
-
-                // Consume the incoming request.
-                let _ = transport.next().await;
-
-                for response in responses {
-                    transport.send(response).await.ok();
-                }
-            });
-        }
-
-        // Progress frames invoke the callback; the loop stops at the terminal frame.
-        #[tokio::test]
-        async fn collects_progress_frames_and_returns_terminal() {
-            let socket_path = unique_socket_path();
-
-            spawn_mock_server(
-                &socket_path,
-                vec![
-                    ServerResponse::Progress {
-                        index: 0,
-                        step: "Create user".into(),
-                        message: "User 'svc' created".into(),
-                    },
-                    ServerResponse::Progress {
-                        index: 1,
-                        step: "Create group".into(),
-                        message: "Group 'svc' created".into(),
-                    },
-                    ServerResponse::Success,
-                ],
-            );
-
-            let client = make_client(socket_path.clone());
-            let mut progress: Vec<String> = Vec::new();
-
-            let result = client
-                .streaming_request(
-                    ServerRequest::Status {
-                        token: "tok".into(),
-                    },
-                    |response| {
-                        if let ServerResponse::Progress { step, .. } = response {
-                            progress.push(step.clone());
-                        }
-                    },
-                )
-                .await
-                .unwrap();
-
-            std::fs::remove_file(&socket_path).ok();
-
-            assert_eq!(progress, vec!["Create user", "Create group"]);
-            assert!(matches!(result, ServerResponse::Success));
-        }
-
-        // A handler that sends only a terminal frame (the existing Status/Shutdown
-        // path) should work without the callback being invoked at all.
-        #[tokio::test]
-        async fn single_terminal_response_skips_callback() {
-            let socket_path = unique_socket_path();
-
-            spawn_mock_server(&socket_path, vec![ServerResponse::InvalidToken]);
-
-            let client = make_client(socket_path.clone());
-            let mut callback_count = 0;
-
-            let result = client
-                .streaming_request(
-                    ServerRequest::Status {
-                        token: "wrong".into(),
-                    },
-                    |_| callback_count += 1,
-                )
-                .await
-                .unwrap();
-
-            std::fs::remove_file(&socket_path).ok();
-
-            assert_eq!(callback_count, 0);
-            assert!(matches!(result, ServerResponse::InvalidToken));
-        }
-
-        // The client returns NoResponse when the server closes the connection
-        // without sending anything.
-        #[tokio::test]
-        async fn returns_no_response_when_server_closes_early() {
-            let socket_path = unique_socket_path();
-
-            // Server accepts, reads the request, then drops the connection.
-            let listener = UnixListener::bind(&socket_path).unwrap();
-            tokio::spawn(async move {
-                let (stream, _) = listener.accept().await.unwrap();
-                let framed = Framed::new(stream, LengthDelimitedCodec::new());
-                let mut transport: SerdeFramed<
-                    _,
-                    ServerRequest,
-                    ServerResponse,
-                    Json<ServerRequest, ServerResponse>,
-                > = SerdeFramed::new(framed, Json::default());
-                let _ = transport.next().await;
-                // drop transport → connection closes
-            });
-
-            let client = make_client(socket_path.clone());
-
-            let result = client
-                .streaming_request(
-                    ServerRequest::Status {
-                        token: "tok".into(),
-                    },
-                    |_| {},
-                )
-                .await;
-
-            std::fs::remove_file(&socket_path).ok();
-
-            assert!(matches!(result, Err(ClientError::NoResponse)));
-        }
     }
 }

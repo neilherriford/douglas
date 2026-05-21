@@ -1,4 +1,5 @@
 use crate::{OpenBaoError, Secret, Secrets};
+use log::{Reporter, Span};
 use serde::{Deserialize, Serialize};
 use serde_json::from_value;
 use simple_rest_client::{
@@ -6,6 +7,7 @@ use simple_rest_client::{
     assertions::assert_okay_with_body,
     parsers::{Parser, json::JsonParser},
 };
+use std::sync::Arc;
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -49,13 +51,14 @@ impl Config {
 }
 
 #[derive(Debug, Deserialize, PartialEq)]
-struct Resposne {
+struct Response {
     keys: Vec<String>,
     keys_base64: Vec<String>,
     root_token: String,
 }
 
 pub struct InitCommand<'a> {
+    reporter: Arc<dyn Reporter>,
     rest_client: &'a mut dyn RestClient,
     parser: &'a JsonParser,
     config: &'a Config,
@@ -63,11 +66,13 @@ pub struct InitCommand<'a> {
 
 impl<'a> InitCommand<'a> {
     pub fn new(
+        reporter: Arc<dyn Reporter>,
         rest_client: &'a mut dyn RestClient,
         parser: &'a JsonParser,
         config: &'a Config,
     ) -> Self {
         Self {
+            reporter,
             rest_client,
             parser,
             config,
@@ -75,19 +80,26 @@ impl<'a> InitCommand<'a> {
     }
 
     pub async fn perform(&mut self) -> Result<Secrets, OpenBaoError> {
-        if self.is_intialized().await? {
+        let guard = Span::new(
+            Arc::clone(&self.reporter),
+            "OpenBao initialize",
+            log::ScopeKind::Task,
+        )
+        .start_guard();
+
+        if self.is_initialized(guard.span()).await? {
             return Err(OpenBaoError::AlreadyInitialized);
         }
-        self.intialize().await
+        guard.finish(self.initialize(guard.span()).await)
     }
 
-    async fn is_intialized(&mut self) -> Result<bool, OpenBaoError> {
+    async fn is_initialized(&mut self, span: &Span) -> Result<bool, OpenBaoError> {
         let req = Request::Get {
             path: "/v1/sys/init".to_string(),
             headers: vec![],
         };
 
-        let body = assert_okay_with_body(self.rest_client.execute(&req).await?)?;
+        let body = assert_okay_with_body(self.rest_client.execute(span, &req).await?)?;
 
         match self.parser.parse(body) {
             Ok(json) => {
@@ -102,18 +114,18 @@ impl<'a> InitCommand<'a> {
         }
     }
 
-    async fn intialize(&mut self) -> Result<Secrets, OpenBaoError> {
+    async fn initialize(&mut self, span: &Span) -> Result<Secrets, OpenBaoError> {
         let req = Request::Post {
             path: "/v1/sys/init".to_string(),
             headers: vec![],
             body: Some(serde_json::to_string(&self.config)?),
         };
 
-        let body = assert_okay_with_body(self.rest_client.execute(&req).await?)?;
+        let body = assert_okay_with_body(self.rest_client.execute(span, &req).await?)?;
 
         match self.parser.parse(body) {
             Ok(json) => {
-                let response: Resposne = from_value(json)?;
+                let response: Response = from_value(json)?;
                 let secrets = (0..response.keys.len())
                     .map(|index| Secret {
                         key: response.keys[index].clone(),

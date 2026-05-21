@@ -434,7 +434,9 @@ impl Permissions for LocalPermissions {
             Err(errno) => return Err(FileSystemError::SystemError(errno.to_string())),
         };
 
-        Ok(match stat_result.st_mode {
+        // st_mode includes file-type bits in the high nibble (e.g. 0o40000 for
+        // directories). Mask them off so we only compare permission bits.
+        Ok(match stat_result.st_mode & 0o7777 {
             0 => Modes::None,
             0o600 => Modes::OwnerReadWrite,
             0o640 => Modes::OwnerReadWriteGroupRead,

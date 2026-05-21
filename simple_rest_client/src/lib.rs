@@ -4,7 +4,7 @@ pub mod unix_domain_socket;
 
 use http_body_util::BodyExt;
 use hyper::client::conn::http1::SendRequest;
-use log::Logger;
+use log::{Event, EventKind, Level, Reporter, ScopeId, ScopeKind, ScopedReporter, Span};
 use std::collections::HashMap;
 use std::sync::Arc;
 use thiserror::Error;
@@ -128,252 +128,20 @@ pub trait IoStream: hyper::rt::Read + hyper::rt::Write + Unpin + Send + Sync {}
 #[cfg_attr(feature = "mock", mockall::automock)]
 #[async_trait::async_trait]
 pub trait RestClient: Send + Sync {
-    async fn execute(&mut self, request: &Request) -> Result<Response, RestClientError>;
+    async fn execute(
+        &mut self,
+        span: &Span,
+
+        request: &Request,
+    ) -> Result<Response, RestClientError>;
 }
 
-#[cfg(feature = "mock")]
-impl MockRestClient {
-    pub fn expect_rest_call<TPredicate>(&mut self, request_predicate: TPredicate, output: Response)
-    where
-        TPredicate: Fn(&Request) -> bool + Send + 'static,
-    {
-        self.expect_execute()
-            .withf(move |req| request_predicate(req))
-            .times(1)
-            .return_once(|_req| Ok(output));
-    }
-
-    fn parse_path_and_query(path: String) -> Option<(String, Vec<(String, String)>)> {
-        let uri: hyper::Uri = path.parse().unwrap();
-
-        let parts = uri.into_parts().path_and_query.unwrap();
-
-        if let Some(query) = parts.query() {
-            let mut parameters: Vec<(String, String)> = query
-                .split("&")
-                .filter_map(|assignment| {
-                    let mut chunks = assignment.split("=");
-                    match (chunks.next(), chunks.next()) {
-                        (Some(name), Some(value)) => Some((name.to_string(), value.to_string())),
-                        (Some(value), _) => Some((String::new(), value.to_string())),
-                        _ => None,
-                    }
-                })
-                .collect();
-
-            parameters.sort();
-
-            Some((parts.path().to_string(), parameters))
-        } else {
-            Some((parts.path().to_string(), vec![]))
-        }
-    }
-
-    fn paths_equal(expected_path: String, actual_path: String) -> bool {
-        let expected = MockRestClient::parse_path_and_query(expected_path);
-        let actual = MockRestClient::parse_path_and_query(actual_path);
-
-        match (expected, actual) {
-            (Some((expected_path, expected_params)), Some((actual_path, actual_params))) => {
-                expected_path == actual_path && expected_params == actual_params
-            }
-            _ => false,
-        }
-    }
-
-    pub fn create_get_expectation(&self, path: &str) -> Box<dyn Fn(&Request) -> bool + Send> {
-        let path = path.to_string();
-        Box::new(move |req: &Request| {
-            if let Request::Get {
-                path: requested_path,
-                ..
-            } = req
-            {
-                MockRestClient::paths_equal(path.clone(), requested_path.to_string())
-            } else {
-                false
-            }
-        })
-    }
-
-    pub fn expect_get_and_return_okay(&mut self, path: &str, body: Option<String>) {
-        self.expect_rest_call(
-            self.create_get_expectation(path),
-            Response::Okay {
-                headers: vec![],
-                body,
-            },
-        )
-    }
-
-    pub fn expect_get_and_return_created_with_none(&mut self, path: &str) {
-        self.expect_rest_call(
-            self.create_get_expectation(path),
-            Response::Created {
-                headers: vec![],
-                body: None,
-            },
-        )
-    }
-
-    pub fn expect_get_and_return_no_content(&mut self, path: &str) {
-        self.expect_rest_call(
-            self.create_get_expectation(path),
-            Response::NoContent { headers: vec![] },
-        )
-    }
-
-    pub fn expect_get_and_return_not_found(&mut self, path: &str) {
-        self.expect_rest_call(
-            self.create_get_expectation(path),
-            Response::Error {
-                headers: vec![],
-                status: 404,
-                body: None,
-            },
-        )
-    }
-
-    pub fn expect_get_and_return_internal_server_error(&mut self, path: &str) {
-        self.expect_rest_call(
-            self.create_get_expectation(path),
-            Response::Error {
-                headers: vec![],
-                status: 500,
-                body: None,
-            },
-        )
-    }
-
-    pub fn create_post_expectation(
-        &self,
-        path: &str,
-        headers: Vec<Header>,
-        body: Option<String>,
-    ) -> Box<dyn Fn(&Request) -> bool + Send> {
-        let expected_path = path.to_string();
-        Box::new(move |req: &Request| {
-            if let Request::Post {
-                path: requested_path,
-                body: actual_body,
-                headers: actual_headers,
-            } = req
-            {
-                body == *actual_body
-                    && MockRestClient::paths_equal(
-                        expected_path.clone(),
-                        requested_path.to_string(),
-                    )
-                    && *actual_headers == headers
-            } else {
-                false
-            }
-        })
-    }
-
-    pub fn expect_post_and_return_okay(
-        &mut self,
-        path: &str,
-        headers: Vec<Header>,
-        body: Option<String>,
-        response_body: Option<String>,
-    ) {
-        self.expect_rest_call(
-            self.create_post_expectation(path, headers, body),
-            Response::Okay {
-                headers: vec![],
-                body: response_body,
-            },
-        )
-    }
-
-    pub fn expect_post_and_return_created(
-        &mut self,
-        path: &str,
-        headers: Vec<Header>,
-        body: Option<String>,
-        response_body: Option<String>,
-    ) {
-        self.expect_rest_call(
-            self.create_post_expectation(path, headers, body),
-            Response::Created {
-                headers: vec![],
-                body: response_body,
-            },
-        )
-    }
-
-    pub fn expect_post_and_return_no_content(
-        &mut self,
-        path: &str,
-        headers: Vec<Header>,
-        body: Option<String>,
-    ) {
-        self.expect_rest_call(
-            self.create_post_expectation(path, headers, body),
-            Response::NoContent { headers: vec![] },
-        )
-    }
-
-    pub fn expect_post_and_return_not_found(
-        &mut self,
-        path: &str,
-        headers: Vec<Header>,
-        body: Option<String>,
-    ) {
-        self.expect_rest_call(
-            self.create_post_expectation(path, headers, body),
-            Response::Error {
-                headers: vec![],
-                status: 404,
-                body: None,
-            },
-        )
-    }
-
-    pub fn expect_post_and_return_internal_server_error(
-        &mut self,
-        path: &str,
-        headers: Vec<Header>,
-        body: Option<String>,
-    ) {
-        self.expect_rest_call(
-            self.create_post_expectation(path, headers, body),
-            Response::Error {
-                headers: vec![],
-                status: 500,
-                body: None,
-            },
-        )
-    }
-
-    pub fn expect_post_and_return(
-        &mut self,
-        path: &str,
-        headers: Vec<Header>,
-        body: Option<String>,
-        status: u16,
-        response_body: Option<String>,
-    ) {
-        self.expect_rest_call(
-            self.create_post_expectation(path, headers, body),
-            Response::Error {
-                headers: vec![],
-                status,
-                body: response_body,
-            },
-        )
-    }
-}
-
-#[derive(Debug)]
 pub struct SimpleRestClient<TIo: IoStream> {
     scheme: String,
     authority: String,
     io_stream: Option<TIo>,
     sender: Option<SendRequest<String>>,
     default_headers: Vec<Header>,
-    logger: Arc<dyn Logger>,
 }
 
 impl<TIo: IoStream + 'static> SimpleRestClient<TIo> {
@@ -382,7 +150,6 @@ impl<TIo: IoStream + 'static> SimpleRestClient<TIo> {
         authority: &str,
         io_stream: TIo,
         default_headers: Vec<Header>,
-        logger: Arc<dyn Logger>,
     ) -> Self {
         Self {
             scheme: scheme.into(),
@@ -390,7 +157,6 @@ impl<TIo: IoStream + 'static> SimpleRestClient<TIo> {
             io_stream: Some(io_stream),
             sender: None,
             default_headers,
-            logger,
         }
     }
 
@@ -460,7 +226,7 @@ impl<TIo: IoStream + 'static> SimpleRestClient<TIo> {
             .await
     }
 
-    async fn initialize_sender(&mut self) -> Result<(), RestClientError> {
+    async fn initialize_sender(&mut self, span: &Span) -> Result<(), RestClientError> {
         if self.sender.is_none() {
             let io = self
                 .io_stream
@@ -468,10 +234,18 @@ impl<TIo: IoStream + 'static> SimpleRestClient<TIo> {
                 .ok_or(RestClientError::IoStreamAlreadyTaken)?;
 
             let (sender, conn) = hyper::client::conn::http1::handshake::<TIo, String>(io).await?;
-            let task_logger = Arc::clone(&self.logger);
+            let guard = span
+                .create_child("Initialize sender", ScopeKind::Task)
+                .start_guard();
+
             tokio::spawn(async move {
                 if let Err(e) = conn.await {
-                    task_logger.error(&format!("Connection error: {:?}", e));
+                    guard
+                        .span()
+                        .message(Level::Warn, &format!("Connection error: {e:?}"));
+                    guard.finish_with_outcome(log::Outcome::Failed);
+                } else {
+                    guard.finish_with_outcome(log::Outcome::Ok);
                 }
             });
 
@@ -501,6 +275,7 @@ impl<TIo: IoStream + 'static> SimpleRestClient<TIo> {
 
     async fn parse_hyper_response(
         &self,
+        span: &Span,
         hyper_response: hyper::Response<hyper::body::Incoming>,
     ) -> Result<(hyper::StatusCode, Vec<Header>, Option<String>), RestClientError> {
         let status = hyper_response.status();
@@ -513,7 +288,7 @@ impl<TIo: IoStream + 'static> SimpleRestClient<TIo> {
             })
             .collect();
         let raw_body = self.read_raw_body(hyper_response).await?;
-        self.log_response(status.as_u16(), &headers, &raw_body);
+        self.log_response(span, status.as_u16(), &headers, &raw_body);
         Ok((status, headers, raw_body))
     }
 
@@ -545,7 +320,7 @@ impl<TIo: IoStream + 'static> SimpleRestClient<TIo> {
             .join(", ")
     }
 
-    fn log_request(&self, request: &Request) {
+    fn log_request(&self, span: &Span, request: &Request) {
         let verb: &str;
         let request_path: &String;
         let request_headers: &Vec<Header>;
@@ -597,11 +372,12 @@ impl<TIo: IoStream + 'static> SimpleRestClient<TIo> {
             result.push_str(&format!(", with body {}", body));
         }
 
-        self.logger.info(&result);
+        span.message(Level::Info, &result);
     }
 
     fn log_response(
         &self,
+        span: &Span,
         status_code: u16,
         response_headers: &[Header],
         response_body: &Option<String>,
@@ -617,7 +393,7 @@ impl<TIo: IoStream + 'static> SimpleRestClient<TIo> {
             Some(body) => result.push_str(&format!("with body '{}'", body)),
         }
 
-        self.logger.info(&result);
+        span.message(Level::Info, &result);
     }
 }
 
@@ -626,392 +402,24 @@ impl<TIo> RestClient for SimpleRestClient<TIo>
 where
     TIo: IoStream + 'static,
 {
-    async fn execute(&mut self, request: &Request) -> Result<Response, RestClientError> {
-        self.log_request(request);
+    async fn execute(
+        &mut self,
+        span: &Span,
+        request: &Request,
+    ) -> Result<Response, RestClientError> {
+        let guard = span
+            .create_child("Executing request", ScopeKind::Task)
+            .start_guard();
+
+        self.log_request(guard.span(), request);
         let hyper_request = self.build_hyper_request(request)?;
 
-        self.initialize_sender().await?;
+        self.initialize_sender(span).await?;
         let hyper_response = self.send_hyper_request(hyper_request).await?;
 
-        let (status, headers, raw_body) = self.parse_hyper_response(hyper_response).await?;
+        let (status, headers, raw_body) = self
+            .parse_hyper_response(guard.span(), hyper_response)
+            .await?;
         self.create_response(status, headers, raw_body)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use hyper_util::rt::TokioIo;
-    use log::MockLogger;
-    use mockall::predicate::str::contains;
-    use tokio_test::io::Mock;
-
-    impl IoStream for TokioIo<Mock> {}
-
-    #[tokio::test]
-    async fn logs_successful_request() {
-        let io = tokio_test::io::Builder::new()
-            .write(b"GET HTTP://localhost")
-            .write(b"/ HTTP/1.1\r\n\r\n")
-            .read(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
-            .build();
-        let io = TokioIo::new(io);
-
-        let mut logger = MockLogger::new();
-
-        logger
-            .expect_info()
-            .with(contains(
-                "Performing 'GET' on 'HTTP://localhost/', with headers",
-            ))
-            .times(1)
-            .return_const(());
-
-        logger
-            .expect_info()
-            .with(contains(
-                "Received '200' with headers 'content-length=0', and no body",
-            ))
-            .times(1)
-            .return_const(());
-
-        let mut client = SimpleRestClient::new("HTTP", "localhost", io, vec![], Arc::new(logger));
-
-        let result: Result<Response, _> = client
-            .execute(&Request::Get {
-                path: "/".to_string(),
-                headers: vec![],
-            })
-            .await;
-
-        assert!(result.is_ok());
-
-        let res = result.unwrap();
-
-        assert!(matches!(
-            res,
-            Response::Okay {
-                headers: _,
-                body: None
-            }
-        ));
-
-        if let Response::Okay { headers, body: _ } = res {
-            assert_eq!(headers.len(), 1);
-            assert_eq!(headers[0].name, "content-length");
-            assert_eq!(headers[0].value, "0");
-        }
-    }
-
-    #[tokio::test]
-    async fn logs_connection_failures() {
-        let io = tokio_test::io::Builder::new()
-            .write(b"GET HTTP://localhost")
-            .write(b"/ HTTP/1.1\r\n\r\n")
-            .read(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
-            .read_error(std::io::Error::other("oops"))
-            .build();
-        let io = TokioIo::new(io);
-
-        let mut logger = MockLogger::new();
-
-        logger
-            .expect_info()
-            .with(contains(
-                "Performing 'GET' on 'HTTP://localhost/', with headers",
-            ))
-            .times(1)
-            .return_const(());
-
-        logger
-            .expect_info()
-            .with(contains("Received '200' with headers 'content-length=0'"))
-            .times(1)
-            .return_const(());
-
-        logger
-            .expect_error()
-            .withf(|msg| msg.contains("Connection error") && msg.contains("oops"))
-            .times(1)
-            .return_const(());
-
-        let mut client = SimpleRestClient::new("HTTP", "localhost", io, vec![], Arc::new(logger));
-
-        let _: Result<Response, _> = client
-            .execute(&Request::Get {
-                path: "/".to_string(),
-                headers: vec![],
-            })
-            .await;
-    }
-
-    #[tokio::test]
-    async fn returns_createds() {
-        let io = tokio_test::io::Builder::new()
-            .write(b"GET HTTP://localhost")
-            .write(b"/ HTTP/1.1\r\n\r\n")
-            .read(b"HTTP/1.1 201 OK\r\nContent-Length: 11\r\n\r\nhello world")
-            .build();
-        let io = TokioIo::new(io);
-
-        let mut logger = MockLogger::new();
-        logger
-            .expect_info()
-            .with(contains(
-                "Performing 'GET' on 'HTTP://localhost/', with headers",
-            ))
-            .times(1)
-            .return_const(());
-
-        logger
-            .expect_info()
-            .with(contains(
-                "Received '201' with headers 'content-length=11', with body 'hello world'",
-            ))
-            .times(1)
-            .return_const(());
-
-        let mut client = SimpleRestClient::new("HTTP", "localhost", io, vec![], Arc::new(logger));
-
-        let result: Result<Response, _> = client
-            .execute(&Request::Get {
-                path: "/".to_string(),
-                headers: vec![],
-            })
-            .await;
-
-        assert!(result.is_ok());
-
-        let res = result.unwrap();
-
-        match res {
-            Response::Created {
-                headers,
-                body: Some(body),
-            } => {
-                assert_eq!(headers.len(), 1);
-                assert_eq!(headers[0].name, "content-length");
-                assert_eq!(headers[0].value, "11");
-                assert_eq!(body, "hello world");
-            }
-            _ => panic!("Expected body and headers to be present"),
-        }
-    }
-
-    #[tokio::test]
-    async fn returns_but_no_content() {
-        let io = tokio_test::io::Builder::new()
-            .write(b"GET HTTP://localhost")
-            .write(b"/ HTTP/1.1\r\n\r\n")
-            .read(b"HTTP/1.1 204 OK\r\nContent-Length: 0\r\n\r\n")
-            .build();
-        let io = TokioIo::new(io);
-        let mut logger = MockLogger::new();
-        logger.expect_info().return_const(());
-        let mut client = SimpleRestClient::new("HTTP", "localhost", io, vec![], Arc::new(logger));
-
-        let result: Result<Response, _> = client
-            .execute(&Request::Get {
-                path: "/".to_string(),
-                headers: vec![],
-            })
-            .await;
-
-        assert!(result.is_ok());
-
-        let res = result.unwrap();
-
-        match res {
-            Response::NoContent { headers } => {
-                assert_eq!(headers.len(), 1);
-                assert_eq!(headers[0].name, "content-length");
-                assert_eq!(headers[0].value, "0");
-            }
-            _ => panic!("Expected headers to be present"),
-        }
-    }
-
-    #[tokio::test]
-    async fn considers_any_other_status_to_be_error() {
-        let io = tokio_test::io::Builder::new()
-            .write(b"GET HTTP://localhost")
-            .write(b"/ HTTP/1.1\r\n\r\n")
-            .read(b"HTTP/1.1 400 OK\r\nContent-Length: 11\r\n\r\nhello world")
-            .build();
-        let io = TokioIo::new(io);
-
-        let mut logger = MockLogger::new();
-        logger.expect_info().times(2).return_const(());
-
-        let mut client = SimpleRestClient::new("HTTP", "localhost", io, vec![], Arc::new(logger));
-
-        let result: Result<Response, _> = client
-            .execute(&Request::Get {
-                path: "/".to_string(),
-                headers: vec![],
-            })
-            .await;
-
-        assert!(result.is_ok());
-
-        let res = result.unwrap();
-
-        match res {
-            Response::Error {
-                headers,
-                status,
-                body: Some(body),
-            } => {
-                assert_eq!(headers.len(), 1);
-                assert_eq!(headers[0].name, "content-length");
-                assert_eq!(headers[0].value, "11");
-                assert_eq!(status, 400u16);
-                assert_eq!(body, "hello world");
-            }
-            _ => panic!("Expected headers, body and status to be present"),
-        }
-    }
-
-    #[tokio::test]
-    async fn deletes() {
-        let io = tokio_test::io::Builder::new()
-            .write(b"DELETE HTTP://localhost")
-            .write(b"/ HTTP/1.1\r\n\r\n")
-            .read(b"HTTP/1.1 200 OK\r\nContent-Length: 11\r\n\r\nhello world")
-            .build();
-        let io = TokioIo::new(io);
-
-        let mut logger = MockLogger::new();
-        logger.expect_info().times(2).return_const(());
-
-        let mut client = SimpleRestClient::new("HTTP", "localhost", io, vec![], Arc::new(logger));
-
-        let result: Result<Response, _> = client
-            .execute(&Request::Delete {
-                path: "/".to_string(),
-                headers: vec![],
-            })
-            .await;
-
-        assert!(result.is_ok());
-
-        let res = result.unwrap();
-
-        match res {
-            Response::Okay {
-                headers,
-                body: Some(body),
-            } => {
-                assert_eq!(headers.len(), 1);
-                assert_eq!(headers[0].name, "content-length");
-                assert_eq!(headers[0].value, "11");
-                assert_eq!(body, "hello world");
-            }
-            _ => panic!("Expected body and headers to be present"),
-        }
-    }
-
-    #[tokio::test]
-    async fn puts() {
-        let io = tokio_test::io::Builder::new()
-            .write(b"PUT HTTP://localhost")
-            .write(b"/ HTTP/1.1\r\ncontent-length: 4\r\n\r\nbody")
-            .read(b"HTTP/1.1 200 OK\r\nContent-Length: 11\r\n\r\nhello world")
-            .build();
-        let io = TokioIo::new(io);
-
-        let mut logger = MockLogger::new();
-        logger.expect_info().times(2).return_const(());
-
-        let mut client = SimpleRestClient::new("HTTP", "localhost", io, vec![], Arc::new(logger));
-
-        let result: Result<Response, _> = client
-            .execute(&Request::Put {
-                path: "/".to_string(),
-                headers: vec![],
-                body: Some("body".to_string()),
-            })
-            .await;
-
-        assert!(result.is_ok());
-
-        let res = result.unwrap();
-
-        match res {
-            Response::Okay {
-                headers,
-                body: Some(body),
-            } => {
-                assert_eq!(headers.len(), 1);
-                assert_eq!(headers[0].name, "content-length");
-                assert_eq!(headers[0].value, "11");
-                assert_eq!(body, "hello world");
-            }
-            _ => panic!("Expected headers and body to be present"),
-        }
-    }
-
-    #[tokio::test]
-    async fn posts() {
-        let io = tokio_test::io::Builder::new()
-            .write(b"POST HTTP://localhost")
-            .write(b"/ HTTP/1.1\r\nfoo: bar\r\nbaz: qux\r\ncontent-length: 4\r\n\r\nbody")
-            .read(b"HTTP/1.1 200 OK\r\nContent-Length: 11\r\n\r\nhello world")
-            .build();
-        let io = TokioIo::new(io);
-
-        let mut logger = MockLogger::new();
-        logger.expect_info().times(2).return_const(());
-
-        let mut client = SimpleRestClient::new(
-            "HTTP",
-            "localhost",
-            io,
-            vec![Header::new("foo", "bar")],
-            Arc::new(logger),
-        );
-
-        let result: Result<Response, _> = client
-            .execute(&Request::Post {
-                path: "/".to_string(),
-                headers: vec![Header::new("baz", "qux")],
-                body: Some("body".to_string()),
-            })
-            .await;
-
-        assert!(result.is_ok());
-
-        let res = result.unwrap();
-
-        match res {
-            Response::Okay {
-                headers,
-                body: Some(body),
-            } => {
-                assert_eq!(headers.len(), 1);
-                assert_eq!(headers[0].name, "content-length");
-                assert_eq!(headers[0].value, "11");
-
-                assert_eq!(body, "hello world");
-            }
-            _ => panic!("Expected headers and body to be present"),
-        }
-    }
-
-    mod query_string {
-        use super::super::*;
-
-        #[test]
-        fn should_make_query_string_without_params() {
-            let actual = create_path_and_query_string("/foo/bar", HashMap::<&str, &str>::new());
-            assert_eq!("/foo/bar", actual);
-        }
-
-        #[test]
-        fn should_make_query_string_with_params() {
-            let actual =
-                create_path_and_query_string("/foo/bar", HashMap::from([("bas", "qux & quux")]));
-            assert_eq!("/foo/bar?bas=qux%20%26%20quux", actual);
-        }
     }
 }

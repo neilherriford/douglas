@@ -3,28 +3,24 @@ mod application_installer;
 mod commands;
 mod config;
 mod core_applications;
-mod deferred_file_logger;
 mod douglas_flags_reader;
-mod file_logger;
 #[macro_use]
 pub(crate) mod macros;
+mod cli_reporter;
 mod mount_file_template_expander;
-mod shutdown_command;
-mod start_bract_daemon_command;
-mod start_command;
-mod status_command;
-mod tee_logger;
 
+use ::config::DouglasFolders;
 use clap::{Parser, Subcommand, ValueEnum};
-use douglas_flags_reader::{
-    DouglasFlag, DouglasFlagsReader, EnvironmentVariableDouglasFlagsReader,
-};
-use os::{EnvironmentVariableReader, UnixEnvironmentVariableReader};
-use start_bract_daemon_command::StartBractDaemonCommand;
+use credentials::create_credentials;
+use file_system::{LocalFileReader, LocalFolder, LocalPermissions};
+use log::{BufferedFileReporter, TeeReporter};
+use os::{Os, Unix, UnixEnvironmentVariableReader};
 use std::{
     fmt::{Debug, Display},
     sync::Arc,
 };
+
+use crate::cli_reporter::CliReporter;
 
 #[derive(ValueEnum, Clone, Debug, Copy)]
 enum OutputStyle {
@@ -58,7 +54,7 @@ struct Cli {
         global = true,
         value_enum,
         default_value_t = Switch::Enabled,
-        help = "When enabled, intermidiate messagse are displayed, hidden otherwise."
+        help = "When enabled, intermediate messages are displayed, hidden otherwise."
     )]
     verbose: Switch,
 }
@@ -71,9 +67,17 @@ enum Commands {
         #[arg(
             long,
             default_value_t = false,
-            help = "Required: When true, bract is run as daemon.  Defaults to false"
+            help = "Optional: When true, bract is run as daemon.  Defaults to false"
         )]
-        daemonize: bool,
+        bract: bool,
+        #[arg(long, help = "The file descriptor to stream boot information to.")]
+        notify_fd: Option<i32>,
+        #[arg(
+            long,
+            default_value_t = false,
+            help = "Optional: When true, only displays the start plan"
+        )]
+        plan_only: bool,
     },
     #[command(long_about = "Request Bract status")]
     Status,
@@ -84,7 +88,13 @@ enum Commands {
 impl Display for Commands {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Commands::Start { daemonize } => f.write_str("start"),
+            Commands::Start { bract, .. } => {
+                if *bract {
+                    f.write_str("start bract")
+                } else {
+                    f.write_str("start")
+                }
+            }
             Commands::Status => f.write_str("status"),
             Commands::Shutdown => f.write_str("shutdown"),
         }
@@ -95,26 +105,45 @@ fn main() {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Start { daemonize } => {
-            let douglas_flags_reader = EnvironmentVariableDouglasFlagsReader::new(Arc::new(
-                UnixEnvironmentVariableReader::new(),
-            )
-                as Arc<dyn EnvironmentVariableReader>);
-
-            if douglas_flags_reader
-                .read()
-                .contains(&DouglasFlag::BractOnly)
-            {
-                StartBractDaemonCommand::new().run();
+        Commands::Start {
+            bract,
+            notify_fd,
+            plan_only,
+        } => {
+            if bract {
+                todo!()
             } else {
                 match tokio::runtime::Runtime::new() {
                     Ok(rt) => {
                         rt.block_on(async {
-                            if start_command::StartCommand::new().perform().await {
-                                println!("Done-ish!");
-                            } else {
-                                eprintln!("Failed to start, exiting…");
-                            }
+                            let Ok(cli_reporter) = CliReporter::start() else {
+                                panic!()
+                            };
+                            let config = DouglasFolders::new();
+                            let file_reader = Arc::new(LocalFileReader::new());
+                            let folder = Arc::new(LocalFolder::new());
+                            let permissions = Arc::new(LocalPermissions::new());
+                            let reporter = Arc::new(TeeReporter::new(vec![
+                                Box::new(BufferedFileReporter::new(config.log_file("douglas-cli"))),
+                                Box::new(cli_reporter),
+                            ]));
+                            let os: Arc<dyn Os> = Arc::new(Unix::new());
+                            let credentials = Arc::from(create_credentials(Arc::clone(&os)));
+                            let environment_variable_reader =
+                                Arc::new(UnixEnvironmentVariableReader::new());
+
+                            commands::cli_start(
+                                reporter,
+                                plan_only,
+                                credentials,
+                                folder,
+                                file_reader,
+                                permissions,
+                                os,
+                                environment_variable_reader,
+                                config,
+                            )
+                            .await;
                         });
                     }
                     Err(err) => eprintln!("Runtime error: {err}"),
@@ -122,14 +151,10 @@ fn main() {
             }
         }
         Commands::Status => {
-            if !status_command::StatusCommand::new().perform() {
-                eprintln!("Failed to determine status, exiting…");
-            }
+            todo!()
         }
         Commands::Shutdown => {
-            if !shutdown_command::ShutdownCommand::new().perform() {
-                eprintln!("Failed to shutdown, exiting…");
-            }
+            todo!()
         }
     }
 }

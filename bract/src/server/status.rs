@@ -1,45 +1,38 @@
+use log::{Level, Outcome, Span};
+
 use super::Response;
 use super::token_validator::TokenValidator;
-use log::Logger;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use utils::ClientErrorDisplay;
 
 pub(super) struct Status {
-    log: Arc<dyn Logger + Sync + Send>,
     token: Arc<TokenValidator>,
     token_path: PathBuf,
     mount_root: PathBuf,
 }
 
 impl Status {
-    pub fn new(
-        log: Arc<dyn Logger + Sync + Send>,
-        token_validator: Arc<TokenValidator>,
-        token_path: &Path,
-        mount_root: &Path,
-    ) -> Self {
+    pub fn new(token_validator: Arc<TokenValidator>, token_path: &Path, mount_root: &Path) -> Self {
         Self {
-            log,
             token: token_validator,
             token_path: token_path.to_path_buf(),
             mount_root: mount_root.to_path_buf(),
         }
     }
 
-    pub fn perform(&self, token: String) -> Response {
-        self.log.info("Reporting status");
-        self.token.perform_if_valid(token, move || {
-            // let services = or_log_and_return_response_error!(
-            //     self.log => warn,
-            //     self.version_manager.list()
-            // );
+    pub fn perform(&self, span: &Span, token: String) -> Response {
+        let reporter = span.create_scoped_reporter();
+        reporter.message(Level::Info, "Reporting status");
 
-            Response::Status {
+        self.token.perform_if_valid(span, token, move || {
+            let result = Response::Status {
                 token_path: self.token_path.to_path_buf(),
                 mount_root: self.mount_root.to_path_buf(),
-                services: vec![], // services,
-            }
+                services: vec![],
+            };
+            reporter.message(Level::Info, &result.to_string());
+            reporter.finish(Outcome::Ok);
+            result
         })
     }
 }

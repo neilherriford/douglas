@@ -8,5 +8,7 @@ default = []
 mock = ["mockall"]
 
 [dependencies]
-colored = "3"
 mockall = { version = "0.13.1", optional = true }
+serde = { version = "1.0.219", features = ["derive"] }
+uuid = "1.23.1"
+humantime = "2.3.0"

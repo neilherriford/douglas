@@ -1,6 +1,6 @@
 #[cfg(test)]
 use mockall::automock;
-use users::{get_group_by_name, get_user_by_name};
+use users::{get_group_by_name, get_user_by_name, os::unix::GroupExt};
 
 #[cfg_attr(test, automock)]
 pub(crate) trait Queries: Send + Sync {
@@ -24,12 +24,12 @@ impl LocalQueries {
 
 impl Queries for LocalQueries {
     fn group_memberships(&self, name: &str) -> Vec<String> {
-        get_user_by_name(name)
-            .and_then(|user| user.groups())
-            .map(|groups| {
-                groups
+        get_group_by_name(name)
+            .map(|group| {
+                group
+                    .members()
                     .iter()
-                    .filter_map(|g| g.name().to_str().map(String::from))
+                    .filter_map(|m| m.to_str().map(String::from))
                     .collect()
             })
             .unwrap_or_default()

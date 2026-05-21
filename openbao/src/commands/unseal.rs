@@ -1,5 +1,5 @@
 use crate::{OpenBaoError, Secret};
-use log::Logger;
+use log::{Level, Reporter, Span};
 use rand::prelude::*;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::from_value;
@@ -31,60 +31,68 @@ struct UnsealRequest {
 }
 
 pub struct UnsealCommand<'a> {
+    reporter: Arc<dyn Reporter>,
     rest_client: &'a mut dyn RestClient,
     parser: &'a JsonParser,
     secrets: Vec<Secret>,
-    log: Arc<dyn Logger>,
 }
 
 impl<'a> UnsealCommand<'a> {
     pub fn new(
+        reporter: Arc<dyn Reporter>,
         rest_client: &'a mut dyn RestClient,
         parser: &'a JsonParser,
         secrets: &[Secret],
-        log: Arc<dyn Logger>,
     ) -> Self {
         let mut rng = rand::rng();
         let mut secrets = Vec::from(secrets);
         secrets.shuffle(&mut rng);
 
         Self {
+            reporter,
             rest_client,
             parser,
             secrets,
-            log,
         }
     }
 
     pub async fn perform(&mut self) -> Result<(), OpenBaoError> {
+        let guard = Span::new(
+            Arc::clone(&self.reporter),
+            "OpenBao unseal",
+            log::ScopeKind::Task,
+        )
+        .start_guard();
         let mut secrets = self.secrets.clone();
         let mut key_attempt = 1;
 
         loop {
             let secret = secrets.pop().ok_or(OpenBaoError::InsufficentSecrets)?;
 
-            self.log.info(&format!("Applying key #{key_attempt}…"));
+            guard
+                .span()
+                .message(Level::Info, &format!("Applying key #{key_attempt}…"));
 
-            let response = self.unseal(secret.key).await?;
+            let response = self.unseal(guard.span(), secret.key).await?;
             if !response.sealed {
                 break;
             }
             key_attempt += 1
         }
 
-        self.log.info("OpenBao is unsealed!");
+        guard.span().message(Level::Info, "OpenBao is unsealed!");
 
-        Ok(())
+        guard.finish(Ok(()))
     }
 
-    async fn unseal(&mut self, key: String) -> Result<Response, OpenBaoError> {
+    async fn unseal(&mut self, span: &Span, key: String) -> Result<Response, OpenBaoError> {
         let req = Request::Post {
             path: "/v1/sys/unseal".to_string(),
             body: Some(serde_json::to_string(&UnsealRequest { key })?),
             headers: vec![],
         };
 
-        let resposne = self.rest_client.execute(&req).await?;
+        let resposne = self.rest_client.execute(span, &req).await?;
 
         if let simple_rest_client::Response::Error { body, .. } = resposne {
             if let Some(body) = body {

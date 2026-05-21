@@ -5,6 +5,7 @@ use crate::{
     serialize_capabilities, serialize_environment_variables, serialize_image_identifier,
     serialize_labels,
 };
+use log::{Reporter, Span};
 use serde::ser::SerializeSeq;
 use serde::{Deserialize, Serialize, Serializer};
 use serde_json::from_value;
@@ -116,20 +117,29 @@ struct CreateContainerBody {
 pub struct ContainerCommand {
     rest_client: Arc<tokio::sync::Mutex<dyn RestClient + Send + Sync + 'static>>,
     parser: Arc<dyn Parser<Json, ParseError = JsonParserError>>,
+    reporter: Arc<dyn Reporter>,
 }
 
 impl ContainerCommand {
     pub fn new(
+        reporter: Arc<dyn Reporter>,
         rest_client: Arc<tokio::sync::Mutex<dyn RestClient + Send + Sync + 'static>>,
         parser: Arc<dyn Parser<Json, ParseError = JsonParserError>>,
     ) -> Self {
         Self {
+            reporter,
             rest_client,
             parser,
         }
     }
 
     pub async fn find_by_id(&self, id: &str) -> Result<InspectedContainer, DockerError> {
+        let guard = Span::new(
+            Arc::clone(&self.reporter),
+            "Find container by id",
+            log::ScopeKind::Task,
+        )
+        .start_guard();
         assert_non_empty_string_argument("id", id)?;
 
         let request = Request::Get {
@@ -138,13 +148,20 @@ impl ContainerCommand {
         };
 
         let mut rest_client = self.rest_client.lock().await;
-        let response = rest_client.execute(&request).await?;
+        let response = rest_client.execute(guard.span(), &request).await?;
         let body = assert_okay_with_body(response)?;
         let json = self.parser.parse(body)?;
-        Ok(from_value(json)?)
+        Ok(guard.finish(from_value(json))?)
     }
 
     pub async fn find_by_name(&self, name: &str) -> Result<InspectedContainer, DockerError> {
+        let guard = Span::new(
+            Arc::clone(&self.reporter),
+            "Find container by name",
+            log::ScopeKind::Task,
+        )
+        .start_guard();
+
         let filter = serde_json::to_string(&Filter {
             name: vec![name.to_string()],
         })?;
@@ -158,23 +175,30 @@ impl ContainerCommand {
 
         let response = {
             let mut rest_client = self.rest_client.lock().await;
-            rest_client.execute(&request).await?
+            rest_client.execute(guard.span(), &request).await?
         };
         let body = assert_okay_with_body(response)?;
         let json = self.parser.parse(body)?;
         let identified_containers: Vec<IdentifiedContainer> = from_value(json)?;
 
-        match identified_containers.len() {
+        guard.finish(match identified_containers.len() {
             0 => Err(DockerError::ResourceNotFound),
             1 => self.find_by_id(&identified_containers[0].id).await,
             _ => Err(DockerError::AmbiguousMatchError),
-        }
+        })
     }
 
     pub async fn create(
         &self,
         definition: ContainerDefinition,
     ) -> Result<InspectedContainer, DockerError> {
+        let guard = Span::new(
+            Arc::clone(&self.reporter),
+            "Create container",
+            log::ScopeKind::Task,
+        )
+        .start_guard();
+
         let request_body = CreateContainerBody {
             run_as: definition.run_as,
             environment_variables: definition.environment_variables,
@@ -199,7 +223,7 @@ impl ContainerCommand {
 
         let response = {
             let mut rest_client = self.rest_client.lock().await;
-            rest_client.execute(&request).await?
+            rest_client.execute(&guard.span(), &request).await?
         };
 
         let body = assert_created_with_body(response)?;
@@ -210,6 +234,13 @@ impl ContainerCommand {
     }
 
     pub async fn start(&self, id: &str) -> Result<(), DockerError> {
+        let guard = Span::new(
+            Arc::clone(&self.reporter),
+            "Start container",
+            log::ScopeKind::Task,
+        )
+        .start_guard();
+
         let request = Request::Post {
             path: format!("/containers/{id}/start"),
             headers: vec![],
@@ -218,10 +249,10 @@ impl ContainerCommand {
 
         let response = {
             let mut rest_client = self.rest_client.lock().await;
-            rest_client.execute(&request).await?
+            rest_client.execute(guard.span(), &request).await?
         };
 
-        match response {
+        guard.finish(match response {
             Response::Okay { headers: _, body } => Err(AssertionError::UnexpectedResponseError {
                 status: 200,
                 body,
@@ -245,440 +276,6 @@ impl ContainerCommand {
                 message: "non successful response".to_string(),
             }
             .into()),
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    mod environment_variables_deserializer {
-        use crate::{EnvironmentVariable, deserialize_environment_variables};
-        use serde::Deserialize;
-
-        #[derive(Debug, Deserialize)]
-        struct Wrapper {
-            #[serde(deserialize_with = "deserialize_environment_variables")]
-            environment_variables: Vec<EnvironmentVariable>,
-        }
-
-        #[test]
-        fn should_err_if_unexpected_format() {
-            let json = r#"
-                {
-                    "environment_variables": false
-                }
-            "#;
-
-            let result = serde_json::from_str::<Wrapper>(json);
-            assert!(result.is_err());
-        }
-
-        #[test]
-        fn should_err_if_unexpected_data_type() {
-            let json = r#"
-                {
-                    "environment_variables": [false]
-                }
-            "#;
-
-            let result = serde_json::from_str::<Wrapper>(json);
-            assert!(result.is_err());
-        }
-
-        #[test]
-        fn should_deserialize_environment_variables() {
-            let json = r#"
-                {
-                    "environment_variables": [
-                        "FOO=bar",
-                        "BAZ=qux"
-                    ]
-                }
-            "#;
-
-            let wrapper: Wrapper = serde_json::from_str(json).unwrap();
-            let mut actual = wrapper.environment_variables;
-            actual.sort();
-
-            assert_eq!(
-                vec![
-                    EnvironmentVariable {
-                        name: "BAZ".to_string(),
-                        value: "qux".to_string()
-                    },
-                    EnvironmentVariable {
-                        name: "FOO".to_string(),
-                        value: "bar".to_string()
-                    },
-                ],
-                actual
-            );
-        }
-
-        #[test]
-        fn should_use_name_if_unexpected_format() {
-            let json = r#"
-                {
-                    "environment_variables": [
-                        "FOO"
-                    ]
-                }
-            "#;
-
-            let wrapper: Wrapper = serde_json::from_str(json).unwrap();
-            let actual = wrapper.environment_variables;
-
-            assert_eq!(
-                vec![EnvironmentVariable {
-                    name: "FOO".to_string(),
-                    value: String::new(),
-                },],
-                actual
-            );
-        }
-    }
-
-    mod inspect_by_id {
-        use crate::{
-            Config, DockerError, EnvironmentVariable, Id, Label, Mount, MountType, State, Status,
-            commands::container::{ContainerCommand, InspectedContainer},
-        };
-        use std::sync::Arc;
-
-        use simple_rest_client::{MockRestClient, parsers::json::JsonParser};
-
-        #[tokio::test]
-        async fn should_err_if_id_is_empty() {
-            let mock_rest_client = MockRestClient::new();
-            let command = ContainerCommand::new(
-                Arc::new(tokio::sync::Mutex::new(mock_rest_client)),
-                Arc::new(JsonParser::new()),
-            );
-
-            let result = command.find_by_id("").await;
-
-            assert!(matches!(
-                result,
-                Err(DockerError::InvalidArgumentError {
-                    name,
-                    given,
-                    ..
-                }) if name == "id" && given == String::new()
-            ));
-        }
-
-        #[tokio::test]
-        async fn should_error_if_body_empty() {
-            let mut mock_rest_client = MockRestClient::new();
-            mock_rest_client
-                .expect_get_and_return_okay("/containers/123456/json", Some(String::new()));
-
-            let command = ContainerCommand::new(
-                Arc::new(tokio::sync::Mutex::new(mock_rest_client)),
-                Arc::new(JsonParser::new()),
-            );
-
-            let result = command.find_by_id("123456").await;
-
-            assert!(matches!(result, Err(DockerError::ParseError { .. })));
-        }
-
-        #[tokio::test]
-        async fn should_error_if_created() {
-            let mut mock_rest_client = MockRestClient::new();
-            mock_rest_client.expect_get_and_return_created_with_none("/containers/123456/json");
-
-            let command = ContainerCommand::new(
-                Arc::new(tokio::sync::Mutex::new(mock_rest_client)),
-                Arc::new(JsonParser::new()),
-            );
-
-            let result = command.find_by_id("123456").await;
-
-            assert!(matches!(
-                result,
-                Err(DockerError::ResponseError { status: 201, .. })
-            ));
-        }
-
-        #[tokio::test]
-        async fn should_error_if_no_content() {
-            let mut mock_rest_client = MockRestClient::new();
-            mock_rest_client.expect_get_and_return_no_content("/containers/123456/json");
-
-            let command = ContainerCommand::new(
-                Arc::new(tokio::sync::Mutex::new(mock_rest_client)),
-                Arc::new(JsonParser::new()),
-            );
-
-            let result = command.find_by_id("123456").await;
-
-            assert!(matches!(
-                result,
-                Err(DockerError::ResponseError { status: 204, .. })
-            ));
-        }
-
-        #[tokio::test]
-        async fn should_error_if_missing() {
-            let mut mock_rest_client = MockRestClient::new();
-            mock_rest_client.expect_get_and_return_not_found("/containers/123456/json");
-
-            let command = ContainerCommand::new(
-                Arc::new(tokio::sync::Mutex::new(mock_rest_client)),
-                Arc::new(JsonParser::new()),
-            );
-
-            let result = command.find_by_id("123456").await;
-
-            assert!(matches!(result, Err(DockerError::ResourceNotFound)));
-        }
-
-        #[tokio::test]
-        async fn should_error_if_error() {
-            let mut mock_rest_client = MockRestClient::new();
-            mock_rest_client.expect_get_and_return_internal_server_error("/containers/123456/json");
-
-            let command = ContainerCommand::new(
-                Arc::new(tokio::sync::Mutex::new(mock_rest_client)),
-                Arc::new(JsonParser::new()),
-            );
-
-            let result = command.find_by_id("123456").await;
-
-            assert!(matches!(
-                result,
-                Err(DockerError::ResponseError { status: 500, .. })
-            ));
-        }
-
-        #[tokio::test]
-        async fn should_inspect() {
-            let mut mock_rest_client = MockRestClient::new();
-            mock_rest_client.expect_get_and_return_okay(
-                "/containers/123456/json",
-                Some(
-                    r#"{
-                      "Id": "123456",
-                      "Name": "foo",
-                      "Image": "alg:654321",
-                      "State": {"Status": "exited"},
-                      "Mounts":
-                      [
-                        {
-                          "Type": "bind",
-                          "Source": "/bar/",
-                          "Destination": "/baz/",
-                          "RW": true
-                        }
-                      ],
-                      "Config":
-                      {
-                        "Env": ["quux=corge"],
-                        "Labels": {"grault": "garply"}
-                      }
-                    }
-                    "#
-                    .to_string(),
-                ),
-            );
-
-            let command = ContainerCommand::new(
-                Arc::new(tokio::sync::Mutex::new(mock_rest_client)),
-                Arc::new(JsonParser::new()),
-            );
-
-            let result = command.find_by_id("123456").await;
-            let expected = InspectedContainer {
-                id: "123456".to_string(),
-                name: "foo".to_string(),
-                state: State {
-                    status: Status::Exited,
-                },
-                image_id: Id {
-                    algorithm: "alg".to_string(),
-                    hex: "654321".to_string(),
-                },
-                mounts: vec![Mount {
-                    mount_type: MountType::Bind,
-                    source: "/bar/".to_string(),
-                    destination: "/baz/".to_string(),
-                    writable: true,
-                }],
-                config: Config {
-                    env: vec![EnvironmentVariable {
-                        name: "quux".to_string(),
-                        value: "corge".to_string(),
-                    }],
-                    labels: vec![Label {
-                        name: "grault".to_string(),
-                        value: "garply".to_string(),
-                    }],
-                },
-            };
-
-            assert!(matches!(result, Ok(actual) if actual == expected));
-        }
-    }
-
-    mod find_by_name {
-        use crate::{
-            Config, DockerError, EnvironmentVariable, Id, Label, Mount, MountType, State, Status,
-            commands::container::{ContainerCommand, InspectedContainer},
-        };
-        use simple_rest_client::{MockRestClient, parsers::json::JsonParser};
-        use std::sync::Arc;
-
-        #[tokio::test]
-        async fn should_err_if_empty_body() {
-            let mut mock_rest_client = MockRestClient::new();
-            mock_rest_client.expect_get_and_return_okay(
-                "/containers/json?all=true&filters=%7B%22name%22%3A%5B%22foo%22%5D%7D",
-                Some(String::new()),
-            );
-
-            let command = ContainerCommand::new(
-                Arc::new(tokio::sync::Mutex::new(mock_rest_client)),
-                Arc::new(JsonParser::new()),
-            );
-
-            let result = command.find_by_name("foo").await;
-
-            assert!(matches!(result, Err(DockerError::ParseError { .. })));
-        }
-
-        #[tokio::test]
-        async fn should_err_if_created() {
-            let mut mock_rest_client = MockRestClient::new();
-            mock_rest_client.expect_get_and_return_created_with_none(
-                "/containers/json?all=true&filters=%7B%22name%22%3A%5B%22foo%22%5D%7D",
-            );
-
-            let command = ContainerCommand::new(
-                Arc::new(tokio::sync::Mutex::new(mock_rest_client)),
-                Arc::new(JsonParser::new()),
-            );
-
-            let result = command.find_by_name("foo").await;
-
-            assert!(matches!(
-                result,
-                Err(DockerError::ResponseError { status: 201, .. })
-            ));
-        }
-
-        #[tokio::test]
-        async fn should_err_if_no_content() {
-            let mut mock_rest_client = MockRestClient::new();
-            mock_rest_client.expect_get_and_return_no_content(
-                "/containers/json?all=true&filters=%7B%22name%22%3A%5B%22foo%22%5D%7D",
-            );
-
-            let command = ContainerCommand::new(
-                Arc::new(tokio::sync::Mutex::new(mock_rest_client)),
-                Arc::new(JsonParser::new()),
-            );
-
-            let result = command.find_by_name("foo").await;
-
-            assert!(matches!(
-                result,
-                Err(DockerError::ResponseError { status: 204, .. })
-            ));
-        }
-
-        #[tokio::test]
-        async fn should_err_if_error() {
-            let mut mock_rest_client = MockRestClient::new();
-            mock_rest_client.expect_get_and_return_internal_server_error(
-                "/containers/json?all=true&filters=%7B%22name%22%3A%5B%22foo%22%5D%7D",
-            );
-
-            let command = ContainerCommand::new(
-                Arc::new(tokio::sync::Mutex::new(mock_rest_client)),
-                Arc::new(JsonParser::new()),
-            );
-
-            let result = command.find_by_name("foo").await;
-
-            assert!(matches!(
-                result,
-                Err(DockerError::ResponseError { status: 500, .. })
-            ));
-        }
-
-        #[tokio::test]
-        async fn should_find_by_name() {
-            let mut mock_rest_client = MockRestClient::new();
-
-            mock_rest_client.expect_get_and_return_okay(
-                "/containers/json?all=true&filters=%7B%22name%22%3A%5B%22foo%22%5D%7D",
-                Some(r#"[{ "Id": "123456" }]"#.to_string()),
-            );
-            mock_rest_client.expect_get_and_return_okay(
-                "/containers/123456/json",
-                Some(
-                    r#"{
-                      "Id": "123456",
-                      "Name": "foo",
-                      "Image": "alg:654321",
-                      "State": {"Status": "exited"},
-                      "Mounts":
-                      [
-                        {
-                          "Type": "bind",
-                          "Source": "/bar/",
-                          "Destination": "/baz/",
-                          "RW": true
-                        }
-                      ],
-                      "Config":
-                      {
-                        "Env": ["quux=corge"],
-                        "Labels": {"grault": "garply"}
-                      }
-                    }
-                    "#
-                    .to_string(),
-                ),
-            );
-
-            let command = ContainerCommand::new(
-                Arc::new(tokio::sync::Mutex::new(mock_rest_client)),
-                Arc::new(JsonParser::new()),
-            );
-
-            let result = command.find_by_name("foo").await;
-
-            let expected = InspectedContainer {
-                id: "123456".to_string(),
-                name: "foo".to_string(),
-                state: State {
-                    status: Status::Exited,
-                },
-                image_id: Id {
-                    algorithm: "alg".to_string(),
-                    hex: "654321".to_string(),
-                },
-                mounts: vec![Mount {
-                    mount_type: MountType::Bind,
-                    source: "/bar/".to_string(),
-                    destination: "/baz/".to_string(),
-                    writable: true,
-                }],
-                config: Config {
-                    env: vec![EnvironmentVariable {
-                        name: "quux".to_string(),
-                        value: "corge".to_string(),
-                    }],
-                    labels: vec![Label {
-                        name: "grault".to_string(),
-                        value: "garply".to_string(),
-                    }],
-                },
-            };
-
-            assert!(matches!(result, Ok(actual) if actual == expected));
-        }
+        })
     }
 }

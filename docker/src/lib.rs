@@ -7,7 +7,7 @@ use commands::json_parser::ChunkedJsonParser;
 use commands::network::{Network, NetworkCommand};
 use commands::ping::{PingCommand, PingParser};
 use file_system::{FileSystemError, path_to_string};
-use log::Logger;
+use log::Reporter;
 use serde::ser::{SerializeMap, SerializeSeq, SerializeStruct};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::value::Value as Json;
@@ -495,12 +495,13 @@ pub struct SimpleSystemClient {
 impl SimpleSystemClient {
     pub async fn build(
         socket_file_path: PathBuf,
-        logger: Arc<dyn Logger>,
+        reporter: Arc<dyn Reporter>,
     ) -> Result<Self, DockerError> {
-        let rest_client = build_client(socket_file_path, logger).await?;
+        let rest_client = build_client(socket_file_path).await?;
 
         Ok(Self {
             command: PingCommand::new(
+                reporter,
                 Arc::new(tokio::sync::Mutex::new(rest_client)),
                 Box::new(PingParser::new()),
             ),
@@ -530,12 +531,13 @@ pub struct SimpleImageClient {
 impl SimpleImageClient {
     pub async fn build(
         socket_file_path: PathBuf,
-        logger: Arc<dyn Logger>,
+        reporter: Arc<dyn Reporter>,
     ) -> Result<Self, DockerError> {
-        let rest_client = build_client(socket_file_path, logger).await?;
+        let rest_client = build_client(socket_file_path).await?;
 
         Ok(Self {
             command: ImageCommand::new(
+                reporter,
                 Arc::new(tokio::sync::Mutex::new(rest_client)),
                 Arc::new(JsonParser::new()),
                 Arc::new(ChunkedJsonParser::new()),
@@ -639,10 +641,10 @@ pub struct SimpleContainerClient {
 
 impl SimpleContainerClient {
     pub async fn build(
+        reporter: Arc<dyn Reporter>,
         socket_file_path: PathBuf,
-        logger: Arc<dyn Logger>,
     ) -> Result<Self, DockerError> {
-        let rest_client = build_client(socket_file_path, logger).await?;
+        let rest_client = build_client(socket_file_path).await?;
         let rest_client: Arc<tokio::sync::Mutex<dyn RestClient + Send + Sync>> =
             Arc::new(tokio::sync::Mutex::new(rest_client));
 
@@ -653,11 +655,12 @@ impl SimpleContainerClient {
 
         Ok(Self {
             image_command: ImageCommand::new(
+                Arc::clone(&reporter),
                 Arc::clone(&rest_client),
                 Arc::clone(&json_parser),
                 Arc::clone(&chunked_json_parser),
             ),
-            container_command: ContainerCommand::new(rest_client, json_parser),
+            container_command: ContainerCommand::new(reporter, rest_client, json_parser),
         })
     }
 
@@ -744,10 +747,10 @@ pub struct SimpleNetworkClient {
 
 impl SimpleNetworkClient {
     pub async fn build(
+        reporter: Arc<dyn Reporter>,
         socket_file_path: PathBuf,
-        logger: Arc<dyn Logger>,
     ) -> Result<Self, DockerError> {
-        let rest_client = build_client(socket_file_path, logger).await?;
+        let rest_client = build_client(socket_file_path).await?;
         let rest_client: Arc<tokio::sync::Mutex<dyn RestClient + Send + Sync>> =
             Arc::new(tokio::sync::Mutex::new(rest_client));
 
@@ -759,16 +762,18 @@ impl SimpleNetworkClient {
         Ok(Self {
             container_client: SimpleContainerClient {
                 container_command: ContainerCommand::new(
+                    Arc::clone(&reporter),
                     Arc::clone(&rest_client),
                     Arc::clone(&json_parser),
                 ),
                 image_command: ImageCommand::new(
+                    Arc::clone(&reporter),
                     Arc::clone(&rest_client),
                     Arc::clone(&json_parser),
                     Arc::clone(&chunked_json_parser),
                 ),
             },
-            network_command: NetworkCommand::new(rest_client, json_parser),
+            network_command: NetworkCommand::new(reporter, rest_client, json_parser),
         })
     }
 

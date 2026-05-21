@@ -1,21 +1,2 @@
-mod add_current_user_to_system_group;
-mod assert_docker_is_running;
-mod assert_root;
-mod boot_core_application;
-mod create_network;
-mod create_system_folder;
-mod create_system_groups;
-mod initialize_docker;
-mod initialize_system;
-mod start_bract;
-
-pub use add_current_user_to_system_group::AddCurrentUserToSystemGroup;
-pub use assert_docker_is_running::AssertDockerIsRunning;
-pub use assert_root::AssertRoot;
-pub use boot_core_application::BootCoreApplication;
-pub use create_network::CreateNetwork;
-pub use create_system_folder::CreateSystemFolder;
-pub use create_system_groups::CreateSystemGroups;
-pub use initialize_docker::InitializeDocker;
-pub use initialize_system::InitializeSystem;
-pub use start_bract::StartBract;
+mod cli_start;
+pub use cli_start::{DouglasBootstrapError, cli_start};

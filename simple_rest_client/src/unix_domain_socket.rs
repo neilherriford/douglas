@@ -1,5 +1,6 @@
-use crate::{Header, Logger, RestClient, SimpleRestClient};
+use crate::{Header, RestClient, SimpleRestClient};
 use hyper_util::rt::TokioIo;
+use log::Reporter;
 use std::fmt::Formatter;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -100,10 +101,7 @@ impl From<std::io::Error> for BuilderError {
     }
 }
 
-pub async fn build_client(
-    socket_file_path: PathBuf,
-    logger: Arc<dyn Logger>,
-) -> Result<impl RestClient, BuilderError>
+pub async fn build_client(socket_file_path: PathBuf) -> Result<impl RestClient, BuilderError>
 where
 {
     let unix_stream = UnixStream::connect(socket_file_path.as_path()).await?;
@@ -117,7 +115,6 @@ where
         "localhost",
         io_stream,
         vec![Header::new("host", "localhost")],
-        logger,
     );
 
     Ok(result)

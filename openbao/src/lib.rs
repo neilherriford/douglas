@@ -7,7 +7,7 @@ use crate::commands::{
     upsert_acl_policy::UpsertAclPolicy,
 };
 use async_trait::async_trait;
-use log::Logger;
+use log::{Level, Reporter, Span};
 use serde::{Deserialize, Serialize};
 use simple_rest_client::{
     RestClient, RestClientError,
@@ -174,22 +174,22 @@ pub trait SystemClient {
 }
 
 pub struct SimpleSystemClient {
+    reporter: Arc<dyn Reporter>,
     rest_client: Box<dyn RestClient>,
     parser: JsonParser,
-    logger: Arc<dyn Logger>,
 }
 
 impl SimpleSystemClient {
     pub async fn build(
+        reporter: Arc<dyn Reporter>,
         socket_file_path: PathBuf,
-        logger: Arc<dyn Logger>,
     ) -> Result<Self, OpenBaoError> {
-        let rest_client = build_client(socket_file_path, Arc::clone(&logger)).await?;
+        let rest_client = build_client(socket_file_path).await?;
 
         Ok(Self {
+            reporter,
             rest_client: Box::new(rest_client),
             parser: JsonParser::new(),
-            logger,
         })
     }
 }
@@ -197,13 +197,18 @@ impl SimpleSystemClient {
 #[async_trait]
 impl SystemClient for SimpleSystemClient {
     async fn status(&mut self) -> Result<Status, OpenBaoError> {
-        Ok(StatusCommand::new(self.rest_client.as_mut(), &self.parser)
-            .perform()
-            .await?)
+        Ok(StatusCommand::new(
+            Arc::clone(&self.reporter),
+            self.rest_client.as_mut(),
+            &self.parser,
+        )
+        .perform()
+        .await?)
     }
 
     async fn intialize(&mut self) -> Result<Secrets, OpenBaoError> {
         Ok(InitCommand::new(
+            Arc::clone(&self.reporter),
             self.rest_client.as_mut(),
             &self.parser,
             &commands::init::Config::new(10, 3)?,
@@ -214,10 +219,10 @@ impl SystemClient for SimpleSystemClient {
 
     async fn unseal(&mut self, secrets: &Secrets) -> Result<(), OpenBaoError> {
         Ok(UnsealCommand::new(
+            Arc::clone(&self.reporter),
             self.rest_client.as_mut(),
             &self.parser,
             &secrets.secrets,
-            Arc::clone(&self.logger),
         )
         .perform()
         .await?)
@@ -252,6 +257,7 @@ pub trait AuthenticatedClient {
 }
 
 pub struct SimpleAuthenticatedClient {
+    reporter: Arc<dyn Reporter>,
     rest_client: Box<dyn RestClient>,
     parser: JsonParser,
     token: String,
@@ -259,13 +265,14 @@ pub struct SimpleAuthenticatedClient {
 
 impl SimpleAuthenticatedClient {
     pub async fn from_token(
+        reporter: Arc<dyn Reporter>,
         socket_file_path: PathBuf,
-        logger: Arc<dyn Logger>,
         token: &str,
     ) -> Result<Self, OpenBaoError> {
-        let rest_client = build_client(socket_file_path, Arc::clone(&logger)).await?;
+        let rest_client = build_client(socket_file_path).await?;
 
         Ok(Self {
+            reporter,
             rest_client: Box::new(rest_client),
             parser: JsonParser::new(),
             token: token.into(),
@@ -273,17 +280,28 @@ impl SimpleAuthenticatedClient {
     }
 
     pub async fn app_role_login(
+        reporter: Arc<dyn Reporter>,
         socket_file_path: PathBuf,
-        logger: Arc<dyn Logger>,
         name: &str,
         secret_id: &str,
     ) -> Result<Self, OpenBaoError> {
-        logger.info(&format!("Logging into OpenBao with app role '{name}'…"));
+        let guard = Span::new(
+            Arc::clone(&reporter),
+            "app role login",
+            log::ScopeKind::Task,
+        )
+        .start_guard();
 
-        let mut rest_client = build_client(socket_file_path, Arc::clone(&logger)).await?;
+        guard.span().message(
+            Level::Info,
+            &format!("Logging into OpenBao with app role '{name}'…"),
+        );
+
+        let mut rest_client = build_client(socket_file_path).await?;
         let parser = JsonParser::new();
 
         let token = commands::auth::Login::new(
+            Arc::clone(&reporter),
             &mut rest_client,
             &parser,
             &AuthType::AppRole,
@@ -293,13 +311,14 @@ impl SimpleAuthenticatedClient {
         .perform()
         .await?;
 
-        logger.info("Authenticated!");
+        guard.span().message(Level::Info, "Authenticated!");
 
-        Ok(Self {
+        guard.finish(Ok(Self {
+            reporter,
             rest_client: Box::new(rest_client),
             parser,
             token,
-        })
+        }))
     }
 }
 
@@ -310,15 +329,26 @@ impl AuthenticatedClient for SimpleAuthenticatedClient {
         name: &str,
         policies: &[policy::Policy],
     ) -> Result<(), OpenBaoError> {
-        UpsertAclPolicy::new(self.rest_client.as_mut(), &self.token, name, policies)
-            .perform()
-            .await
+        UpsertAclPolicy::new(
+            Arc::clone(&self.reporter),
+            self.rest_client.as_mut(),
+            &self.token,
+            name,
+            policies,
+        )
+        .perform()
+        .await
     }
 
     async fn has_auth(&mut self, auth_type: AuthType) -> Result<bool, OpenBaoError> {
-        commands::auth::IsInstalledCommand::new(self.rest_client.as_mut(), &self.token, &auth_type)
-            .perform()
-            .await
+        commands::auth::IsInstalledCommand::new(
+            Arc::clone(&self.reporter),
+            self.rest_client.as_mut(),
+            &self.token,
+            &auth_type,
+        )
+        .perform()
+        .await
     }
 
     async fn install_auth(
@@ -327,6 +357,7 @@ impl AuthenticatedClient for SimpleAuthenticatedClient {
         description: &str,
     ) -> Result<(), OpenBaoError> {
         commands::auth::InstallAuthCommand::new(
+            Arc::clone(&self.reporter),
             self.rest_client.as_mut(),
             &self.token,
             &auth_type,
@@ -343,6 +374,7 @@ impl AuthenticatedClient for SimpleAuthenticatedClient {
         policies: Vec<&str>,
     ) -> Result<RoleId, OpenBaoError> {
         if !commands::auth::RoleExists::new(
+            Arc::clone(&self.reporter),
             self.rest_client.as_mut(),
             &self.token,
             &auth_type,
@@ -352,6 +384,7 @@ impl AuthenticatedClient for SimpleAuthenticatedClient {
         .await?
         {
             commands::auth::CreateRole::new(
+                Arc::clone(&self.reporter),
                 self.rest_client.as_mut(),
                 &self.token,
                 &auth_type,
@@ -363,6 +396,7 @@ impl AuthenticatedClient for SimpleAuthenticatedClient {
         }
 
         commands::auth::GetRoleId::new(
+            Arc::clone(&self.reporter),
             self.rest_client.as_mut(),
             &self.parser,
             &self.token,
@@ -378,11 +412,18 @@ impl AuthenticatedClient for SimpleAuthenticatedClient {
         auth_type: AuthType,
         name: &str,
     ) -> Result<String, OpenBaoError> {
-        if commands::auth::RoleExists::new(self.rest_client.as_mut(), &self.token, &auth_type, name)
-            .perform()
-            .await?
+        if commands::auth::RoleExists::new(
+            Arc::clone(&self.reporter),
+            self.rest_client.as_mut(),
+            &self.token,
+            &auth_type,
+            name,
+        )
+        .perform()
+        .await?
         {
             return commands::auth::CreateSecret::new(
+                Arc::clone(&self.reporter),
                 self.rest_client.as_mut(),
                 &self.parser,
                 &self.token,
@@ -397,8 +438,12 @@ impl AuthenticatedClient for SimpleAuthenticatedClient {
     }
 
     async fn revoke_token(&mut self, token: &str) -> Result<(), OpenBaoError> {
-        commands::auth::RevokeToken::new(self.rest_client.as_mut(), token)
-            .perform()
-            .await
+        commands::auth::RevokeToken::new(
+            Arc::clone(&self.reporter),
+            self.rest_client.as_mut(),
+            token,
+        )
+        .perform()
+        .await
     }
 }

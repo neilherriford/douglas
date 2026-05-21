@@ -1,8 +1,8 @@
 use bract::client::Credential;
 use docker::{ContainerDefinition, ContainerUser, DockerError};
 use file_system::path_to_string;
-use log::Logger;
-use std::{collections::HashMap, path::PathBuf};
+use log::{Level, Reporter, ScopeKind, Span};
+use std::{collections::HashMap, path::PathBuf, sync::Arc};
 use thiserror::Error;
 
 use crate::{
@@ -23,24 +23,24 @@ pub enum ApplicationInstallerError {
 }
 
 pub struct ApplicationInstaller<'a> {
+    reporter: Arc<dyn Reporter>,
     bract_client: &'a bract::Client,
     docker_image_client: &'a mut Box<dyn docker::ImageClient>,
     docker_container_client: &'a mut Box<dyn docker::ContainerClient>,
-    log: &'a dyn Logger,
 }
 
 impl<'a> ApplicationInstaller<'a> {
     pub fn new(
-        log: &'a dyn Logger,
+        reporter: Arc<dyn Reporter>,
         bract_client: &'a bract::Client,
         docker_image_client: &'a mut Box<dyn docker::ImageClient>,
         docker_container_client: &'a mut Box<dyn docker::ContainerClient>,
     ) -> Self {
         Self {
+            reporter,
             bract_client,
             docker_image_client,
             docker_container_client,
-            log,
         }
     }
 
@@ -48,7 +48,16 @@ impl<'a> ApplicationInstaller<'a> {
         &mut self,
         definition: &dyn ApplicationDefinition,
     ) -> Result<docker::Container, ApplicationInstallerError> {
-        self.log.info(&format!("Installing {}…", definition.name()));
+        let guard = Span::new(
+            Arc::clone(&self.reporter),
+            "Installer: Install application",
+            ScopeKind::Task,
+        )
+        .start_guard();
+
+        guard
+            .span()
+            .message(Level::Info, &format!("Installing {}…", definition.name()));
         let credential = self.create_credentials(definition).await?;
         let image = self.install_image(definition).await?;
 
@@ -64,64 +73,88 @@ impl<'a> ApplicationInstaller<'a> {
             .create_container(definition, credential, mount_name_to_path, image)
             .await?;
 
-        Ok(result)
+        guard.finish(Ok(result))
     }
 
     async fn create_credentials(
         &mut self,
         definition: &dyn ApplicationDefinition,
     ) -> Result<Credential, ApplicationInstallerError> {
-        self.log
-            .info(&format!("Creating credentials for {}…", definition.name()));
+        let guard = Span::new(
+            Arc::clone(&self.reporter),
+            "Installer: Create credentials",
+            ScopeKind::Task,
+        )
+        .start_guard();
+
+        guard.span().message(
+            Level::Info,
+            &format!("Creating credentials for {}…", definition.name()),
+        );
 
         let result = self
             .bract_client
             .create_credentials(&definition.name())
             .await?;
 
-        Ok(result)
+        guard.finish(Ok(result))
     }
 
     async fn install_image(
         &mut self,
         definition: &dyn ApplicationDefinition,
     ) -> Result<docker::Image, ApplicationInstallerError> {
-        self.log.info(&format!(
-            "Installing Docker image for {}…",
-            definition.name(),
-        ));
+        let guard =
+            Span::new(Arc::clone(&self.reporter), "Install image", ScopeKind::Task).start_guard();
 
-        match self
-            .docker_image_client
-            .find_by_name(&definition.image_name())
-            .await
-        {
-            Ok(image) => Ok(image),
-            Err(DockerError::ResourceNotFound) => Ok(self
+        guard.span().message(
+            Level::Info,
+            &format!("Installing Docker image for {}…", definition.name(),),
+        );
+
+        guard.finish(
+            match self
                 .docker_image_client
-                .pull(&definition.image_name())
-                .await?),
-            Err(err) => Err(err.into()),
-        }
+                .find_by_name(&definition.image_name())
+                .await
+            {
+                Ok(image) => Ok(image),
+                Err(DockerError::ResourceNotFound) => Ok(self
+                    .docker_image_client
+                    .pull(&definition.image_name())
+                    .await?),
+                Err(err) => Err(err.into()),
+            },
+        )
     }
 
     async fn create_mount_folders(
         &self,
         definition: &dyn ApplicationDefinition,
     ) -> Result<HashMap<String, PathBuf>, ApplicationInstallerError> {
-        self.log.info(&format!(
-            "Creating mount folders for {}…",
-            definition.name()
-        ));
+        let guard = Span::new(
+            Arc::clone(&self.reporter),
+            "Installer: Create mount folders",
+            ScopeKind::Task,
+        )
+        .start_guard();
+
+        guard.span().message(
+            Level::Info,
+            &format!("Creating mount folders for {}…", definition.name()),
+        );
 
         let mut result = HashMap::<String, PathBuf>::new();
 
         for mount_template in &definition.mount_templates() {
-            self.log.info(&format!(
-                "Creating mount storage for {}/{}…",
-                definition.name(),
-                mount_template.name
-            ));
+            guard.span().message(
+                Level::Info,
+                &format!(
+                    "Creating mount storage for {}/{}…",
+                    definition.name(),
+                    mount_template.name
+                ),
+            );
             let mount = match self
                 .bract_client
                 .active_mount_version(&definition.name(), &mount_template.name)
@@ -143,7 +176,7 @@ impl<'a> ApplicationInstaller<'a> {
             result.insert(mount_template.name.clone(), mount.path);
         }
 
-        Ok(result)
+        guard.finish(Ok(result))
     }
 
     async fn inject_files(
@@ -151,20 +184,32 @@ impl<'a> ApplicationInstaller<'a> {
         definition: &dyn ApplicationDefinition,
         template_expander: &MountFileTemplateExpander,
     ) -> Result<(), ApplicationInstallerError> {
-        self.log
-            .info(&format!("Adding mount files for {}…", definition.name()));
+        let guard = Span::new(
+            Arc::clone(&self.reporter),
+            "Installer: Inject files",
+            ScopeKind::Task,
+        )
+        .start_guard();
+
+        guard.span().message(
+            Level::Info,
+            &format!("Adding mount files for {}…", definition.name()),
+        );
 
         for (mount_name, file) in definition
             .mount_templates()
             .iter()
             .flat_map(|template| template.files.iter().map(|file| (&template.name, file)))
         {
-            self.log.info(&format!(
-                "Writing {}:{}:{}…",
-                definition.name(),
-                mount_name,
-                path_to_string(&file.relative_path),
-            ));
+            guard.span().message(
+                Level::Info,
+                &format!(
+                    "Writing {}:{}:{}…",
+                    definition.name(),
+                    mount_name,
+                    path_to_string(&file.relative_path),
+                ),
+            );
 
             let contents = template_expander.expand(file);
 
@@ -180,7 +225,7 @@ impl<'a> ApplicationInstaller<'a> {
                 .await?;
         }
 
-        Ok(())
+        guard.finish(Ok(()))
     }
 
     async fn create_container(
@@ -190,10 +235,16 @@ impl<'a> ApplicationInstaller<'a> {
         mount_name_to_host_path: HashMap<String, PathBuf>,
         image: docker::Image,
     ) -> Result<docker::Container, ApplicationInstallerError> {
-        self.log.info(&format!(
-            "Installing Docker container {}…",
-            definition.name()
-        ));
+        let guard = Span::new(
+            Arc::clone(&self.reporter),
+            "Installer create container",
+            log::ScopeKind::Task,
+        )
+        .start_guard();
+        guard.span().message(
+            Level::Info,
+            &format!("Installing Docker container {}…", definition.name()),
+        );
 
         match self
             .docker_container_client
@@ -202,8 +253,10 @@ impl<'a> ApplicationInstaller<'a> {
         {
             Ok(container) => Ok(container),
             Err(DockerError::ResourceNotFound) => {
-                self.log
-                    .info(&format!("Creating Docker container {}…", definition.name()));
+                guard.span().message(
+                    Level::Info,
+                    &format!("Creating Docker container {}…", definition.name()),
+                );
                 let container_definition = ContainerDefinition {
                     name: definition.name(),
                     run_as: Some(ContainerUser {
@@ -232,12 +285,12 @@ impl<'a> ApplicationInstaller<'a> {
     }
 
     fn create_docker_mount_definitions(
-        defintion: &dyn ApplicationDefinition,
+        definition: &dyn ApplicationDefinition,
         mount_name_to_host_path: &HashMap<String, PathBuf>,
     ) -> Result<Vec<docker::MountDefinition>, ApplicationInstallerError> {
         let mut result = Vec::<docker::MountDefinition>::new();
 
-        for mount_definintion in &defintion.mount_templates() {
+        for mount_definintion in &definition.mount_templates() {
             if let Some(host_path) = mount_name_to_host_path.get(&mount_definintion.name) {
                 result.push(docker::MountDefinition {
                     name: mount_definintion.name.clone(),
@@ -247,7 +300,7 @@ impl<'a> ApplicationInstaller<'a> {
                 });
             } else {
                 return Err(ApplicationInstallerError::MissingNamedMount(
-                    defintion.name(),
+                    definition.name(),
                 ));
             }
         }

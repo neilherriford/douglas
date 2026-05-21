@@ -6,7 +6,9 @@ publish = false
 license = "MIT"
 
 [dependencies]
+blueprint = { path = "./blueprint" }
 bract = { path = "./bract" }
+crossterm = "0.29.0"
 chrono = "=0.4.41"
 clap = { version = "4.5.32", features = ["derive"] }
 colored = "3"
@@ -15,10 +17,12 @@ credentials = { path = "./credentials" }
 daemonize = "0.5.0"
 docker = { path = "./docker" }
 file_system = { path = "./file_system" }
+humantime = "2.3.0"
 log = { path = "./log" }
 mockall = { version = "0.13.1" }
 openbao = { path = "./openbao" }
 os = { path = "./os" }
+ratatui = "0.30.0"
 serde = { version = "1.0.219", features = ["derive"] }
 serde_json = "1.0.140"
 simple_rest_client = { path = "./simple_rest_client" }
@@ -37,7 +41,7 @@ members = [
     "log",
     "file_system",
     "os",
-    "bract", "config", "utils", "openbao", "blueprint",
+    "bract", "config", "utils", "openbao", "blueprint", "service_library",
 ]
 
 [patch.crates-io]

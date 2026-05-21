@@ -1,6 +1,6 @@
 #[cfg(feature = "mock")]
 use mockall::predicate;
-use nix::sys::signal::kill;
+use nix::sys::signal::{Signal, kill};
 use nix::unistd::Pid;
 #[cfg(feature = "mock")]
 use std::os::unix::process::ExitStatusExt;
@@ -17,9 +17,13 @@ use thiserror::Error;
 pub enum OsError {
     #[error("Invalid PID")]
     PidTooLarge,
+    #[error("No such PID {0}")]
+    NoSuchPid(u32),
+    #[error("Insufficient access to kill pid {0}")]
+    InsufficientAccessToKillPid(u32),
     #[error("IO error: {0}")]
     IoError(#[from] std::io::Error),
-    #[error("Proccess '{name}' returned a non success status")]
+    #[error("Process '{name}' returned a non success status")]
     ProccessExitStatusError {
         name: String,
         code: Option<i32>,
@@ -51,6 +55,7 @@ pub trait Os: Send + Sync {
         env: Vec<(String, String)>,
     ) -> Result<u32, OsError>;
     fn is_active_pid(&self, pid: u32) -> Result<bool, OsError>;
+    fn kill(&self, pid: u32) -> Result<(), OsError>;
     fn exit(&self, code: i32);
     fn sleep(&self, duration: Duration);
 }
@@ -199,6 +204,17 @@ impl Os for Unix {
 
     fn sleep(&self, duration: Duration) {
         std::thread::sleep(duration);
+    }
+
+    fn kill(&self, pid: u32) -> Result<(), OsError> {
+        let pid_i32 = i32::try_from(pid).map_err(|_| OsError::PidTooLarge)?;
+
+        match kill(Pid::from_raw(pid_i32), Signal::SIGKILL) {
+            Ok(_) => Ok(()),
+            Err(nix::errno::Errno::ESRCH) => Err(OsError::NoSuchPid(pid)), // No such process
+            Err(nix::errno::Errno::EPERM) => Err(OsError::InsufficientAccessToKillPid(pid)), // Process exists, but we lack permission
+            Err(errno) => Err(OsError::ErrorNumber(errno as i32)),
+        }
     }
 }
 

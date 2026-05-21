@@ -1,18 +1,12 @@
-use std::sync::Arc;
-
-use log::Logger;
+use log::{Level, Span};
 use thiserror::Error;
 
 pub trait Command<TContext>: std::fmt::Display {
     type Error: std::fmt::Display;
 
-    fn name(&self) -> &str;
-    fn run(&mut self, logger: &dyn Logger, context: &mut TContext) -> Result<(), Self::Error>;
-    fn rollback(
-        &mut self,
-        _logger: &dyn Logger,
-        _context: &mut TContext,
-    ) -> Result<(), Self::Error> {
+    fn name(&self) -> String;
+    fn run(&mut self, span: &Span, context: &mut TContext) -> Result<(), Self::Error>;
+    fn rollback(&mut self, _span: &Span, _context: &mut TContext) -> Result<(), Self::Error> {
         Ok(())
     }
     fn skip(&self, _context: &TContext) -> bool {
@@ -78,24 +72,27 @@ pub trait CommandExecutor<TContext> {
 
     fn run(
         &mut self,
+        span: &Span,
         context: &mut TContext,
         commands: Vec<Box<dyn Command<TContext, Error = Self::Error>>>,
     ) -> ExecutionResult<Self::Error>;
 
-    fn rollback(&mut self, context: &mut TContext) -> Vec<Self::Error>;
+    fn rollback(&mut self, span: &Span, context: &mut TContext) -> Vec<Self::Error>;
 }
 
 pub struct JournalingExecutor<TContext, TError> {
-    logger: Arc<dyn Logger>,
     journal: Vec<Box<dyn Command<TContext, Error = TError>>>,
 }
 
 impl<TContext, TError> JournalingExecutor<TContext, TError> {
-    pub fn new(logger: Arc<dyn Logger>) -> Self {
-        Self {
-            logger,
-            journal: vec![],
-        }
+    pub fn new() -> Self {
+        Self { journal: vec![] }
+    }
+}
+
+impl<TContext, TError> Default for JournalingExecutor<TContext, TError> {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -107,6 +104,7 @@ where
 
     fn run(
         &mut self,
+        span: &Span,
         context: &mut TContext,
         commands: Vec<Box<dyn Command<TContext, Error = Self::Error>>>,
     ) -> ExecutionResult<Self::Error> {
@@ -114,19 +112,19 @@ where
             let step_name = command.name().to_string();
 
             if command.skip(context) {
-                self.logger
-                    .info(&format!("[{step_name}] already satisfied, skipping"));
+                span.message(
+                    Level::Info,
+                    &format!("[{step_name}] already satisfied, skipping"),
+                );
                 self.journal.push(command);
                 continue;
             }
 
-            self.logger.info(&format!("{command} performing"));
+            span.message(log::Level::Info, &format!("{command} performing"));
 
-            if let Err(err) = command.run(&*self.logger, context) {
-                self.logger.error(&format!("[{step_name}] failed: {err}"));
-                self.logger.info("beginning rollback");
-
-                let rollback_errors = self.rollback(context);
+            if let Err(err) = command.run(span, context) {
+                span.message(log::Level::Warn, &format!("[{step_name}] failed: {err}"));
+                let rollback_errors = self.rollback(span, context);
                 return ExecutionResult::Failed {
                     failed_at_step: step_index,
                     failed_at_step_name: step_name,
@@ -135,21 +133,23 @@ where
                 };
             }
 
-            self.logger.info(&format!("{command} succeeded"));
+            span.message(Level::Info, &format!("{command} succeeded"));
+
             self.journal.push(command);
         }
         ExecutionResult::Success
     }
 
-    fn rollback(&mut self, context: &mut TContext) -> Vec<Self::Error> {
+    fn rollback(&mut self, span: &Span, context: &mut TContext) -> Vec<Self::Error> {
         let mut errors = Vec::new();
         for mut cmd in self.journal.drain(..).rev() {
-            self.logger
-                .info(&format!("[Rolling back {}…] ", cmd.name()));
+            span.message(Level::Info, &format!("[Rolling back {}…] ", cmd.name()));
 
-            if let Err(err) = cmd.rollback(&*self.logger, context) {
-                self.logger
-                    .error(&format!("[{}] rollback failed: {err}", cmd.name()));
+            if let Err(err) = cmd.rollback(span, context) {
+                span.message(
+                    Level::Warn,
+                    &format!("[{}] rollback failed: {err}", cmd.name()),
+                );
                 errors.push(err);
             }
         }

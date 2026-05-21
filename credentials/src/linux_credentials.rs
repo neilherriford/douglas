@@ -1,10 +1,7 @@
 use crate::queries::{LocalQueries, Queries};
 use crate::{Credentials, CredentialsError};
 use os::Os;
-use std::collections::HashSet;
-use std::ops::Index;
 use std::sync::Arc;
-// use users::{get_group_by_name, get_user_by_name};
 
 pub(crate) struct LinuxCredentials {
     os: Arc<dyn Os>,

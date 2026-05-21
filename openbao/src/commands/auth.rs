@@ -1,4 +1,7 @@
-use crate::{AuthType, OpenBaoError, Period, RoleId, commands::utils::headers::valut_token};
+use std::sync::Arc;
+
+use crate::{AuthType, OpenBaoError, Period, RoleId, commands::utils::headers::vault_token};
+use log::{Reporter, Span};
 use serde::{Deserialize, Serialize};
 use simple_rest_client::{
     Request, RestClient,
@@ -25,6 +28,7 @@ impl Serialize for AuthType {
 }
 
 pub struct IsInstalledCommand<'a> {
+    reporter: Arc<dyn Reporter>,
     rest_client: &'a mut dyn RestClient,
     token: &'a str,
     auth_type: &'a AuthType,
@@ -32,11 +36,13 @@ pub struct IsInstalledCommand<'a> {
 
 impl<'a> IsInstalledCommand<'a> {
     pub fn new(
+        reporter: Arc<dyn Reporter>,
         rest_client: &'a mut dyn RestClient,
         token: &'a str,
         auth_type: &'a AuthType,
     ) -> Self {
         Self {
+            reporter,
             rest_client,
             token,
             auth_type,
@@ -44,25 +50,32 @@ impl<'a> IsInstalledCommand<'a> {
     }
 
     pub async fn perform(&mut self) -> Result<bool, OpenBaoError> {
+        let guard = Span::new(
+            Arc::clone(&self.reporter),
+            "OpenBao is initialized",
+            log::ScopeKind::Task,
+        )
+        .start_guard();
+
         let req = Request::Get {
             path: format!("/v1/sys/auth/{}", self.auth_type.mount_name()),
-            headers: vec![valut_token(self.token)],
+            headers: vec![vault_token(self.token)],
         };
 
-        match self.rest_client.execute(&req).await? {
+        guard.finish(match self.rest_client.execute(guard.span(), &req).await? {
             simple_rest_client::Response::Okay { .. } => Ok(true),
             simple_rest_client::Response::Created { body, .. } => {
                 Err(OpenBaoError::UnexpectedResponse {
                     status: 201,
                     body,
-                    message: "expected OK, but recieved CREATED".to_string(),
+                    message: "expected OK, but received CREATED".to_string(),
                 })
             }
             simple_rest_client::Response::NoContent { .. } => {
                 Err(OpenBaoError::UnexpectedResponse {
                     status: 204,
                     body: None,
-                    message: "expected OK, but recieved NO CONTENT".to_string(),
+                    message: "expected OK, but received NO CONTENT".to_string(),
                 })
             }
             simple_rest_client::Response::Error { status: 400, .. } => Ok(false),
@@ -73,7 +86,7 @@ impl<'a> IsInstalledCommand<'a> {
                     message: "unexpected error".to_string(),
                 })
             }
-        }
+        })
     }
 }
 
@@ -85,43 +98,56 @@ struct AuthRequest {
 }
 
 pub struct InstallAuthCommand<'a> {
+    reporter: Arc<dyn Reporter>,
     rest_client: &'a mut dyn RestClient,
     token: &'a str,
     auth_type: &'a AuthType,
-    decription: &'a str,
+    description: &'a str,
 }
 
 impl<'a> InstallAuthCommand<'a> {
     pub fn new(
+        reporter: Arc<dyn Reporter>,
         rest_client: &'a mut dyn RestClient,
         token: &'a str,
         auth_type: &'a AuthType,
-        decription: &'a str,
+        description: &'a str,
     ) -> Self {
         Self {
+            reporter,
             rest_client,
             token,
             auth_type,
-            decription,
+            description,
         }
     }
 
     pub async fn perform(&mut self) -> Result<(), OpenBaoError> {
+        let guard = Span::new(
+            Arc::clone(&self.reporter),
+            "OpenBao install auth",
+            log::ScopeKind::Task,
+        )
+        .start_guard();
+
         let req = Request::Post {
             path: format!("/v1/sys/auth/{}", self.auth_type.mount_name()),
-            headers: vec![valut_token(self.token)],
+            headers: vec![vault_token(self.token)],
             body: Some(serde_json::to_string(&AuthRequest {
                 auth_type: self.auth_type.clone(),
-                description: self.decription.to_string(),
+                description: self.description.to_string(),
             })?),
         };
 
-        assert_no_content(self.rest_client.execute(&req).await?)?;
+        guard.finish(assert_no_content(
+            self.rest_client.execute(guard.span(), &req).await?,
+        ))?;
         Ok(())
     }
 }
 
 pub struct RoleExists<'a> {
+    reporter: Arc<dyn Reporter>,
     rest_client: &'a mut dyn RestClient,
     token: &'a str,
     auth_type: &'a AuthType,
@@ -130,12 +156,14 @@ pub struct RoleExists<'a> {
 
 impl<'a> RoleExists<'a> {
     pub fn new(
+        reporter: Arc<dyn Reporter>,
         rest_client: &'a mut dyn RestClient,
         token: &'a str,
         auth_type: &'a AuthType,
         name: &'a str,
     ) -> Self {
         Self {
+            reporter,
             rest_client,
             token,
             auth_type,
@@ -144,29 +172,36 @@ impl<'a> RoleExists<'a> {
     }
 
     pub async fn perform(&mut self) -> Result<bool, OpenBaoError> {
+        let guard = Span::new(
+            Arc::clone(&self.reporter),
+            "OpenBao role exists",
+            log::ScopeKind::Task,
+        )
+        .start_guard();
+
         let req = Request::Get {
             path: format!(
                 "/v1/auth/{}/role/{}/role-id",
                 self.auth_type.mount_name(),
                 self.name
             ),
-            headers: vec![valut_token(self.token)],
+            headers: vec![vault_token(self.token)],
         };
 
-        match self.rest_client.execute(&req).await? {
+        guard.finish(match self.rest_client.execute(guard.span(), &req).await? {
             simple_rest_client::Response::Okay { .. } => Ok(true),
             simple_rest_client::Response::Created { body, .. } => {
                 Err(OpenBaoError::UnexpectedResponse {
                     status: 201,
                     body,
-                    message: "expected OK, but recieved CREATED".to_string(),
+                    message: "expected OK, but received CREATED".to_string(),
                 })
             }
             simple_rest_client::Response::NoContent { .. } => {
                 Err(OpenBaoError::UnexpectedResponse {
                     status: 204,
                     body: None,
-                    message: "expected OK, but recieved NO CONTENT".to_string(),
+                    message: "expected OK, but received NO CONTENT".to_string(),
                 })
             }
             simple_rest_client::Response::Error { status: 404, .. } => Ok(false),
@@ -177,7 +212,7 @@ impl<'a> RoleExists<'a> {
                     message: "unexpected error".to_string(),
                 })
             }
-        }
+        })
     }
 }
 
@@ -207,6 +242,7 @@ struct RoleIdData {
 }
 
 pub struct CreateRole<'a> {
+    reporter: Arc<dyn Reporter>,
     rest_client: &'a mut dyn RestClient,
     token: &'a str,
     auth_type: &'a AuthType,
@@ -216,6 +252,7 @@ pub struct CreateRole<'a> {
 
 impl<'a> CreateRole<'a> {
     pub fn new(
+        reporter: Arc<dyn Reporter>,
         rest_client: &'a mut dyn RestClient,
         token: &'a str,
         auth_type: &'a AuthType,
@@ -223,6 +260,7 @@ impl<'a> CreateRole<'a> {
         policies: Vec<&str>,
     ) -> Self {
         Self {
+            reporter,
             rest_client,
             token,
             auth_type,
@@ -232,13 +270,19 @@ impl<'a> CreateRole<'a> {
     }
 
     pub async fn perform(&mut self) -> Result<(), OpenBaoError> {
+        let guard = Span::new(
+            Arc::clone(&self.reporter),
+            "OpenBao create role",
+            log::ScopeKind::Task,
+        )
+        .start_guard();
         let req = Request::Post {
             path: format!(
                 "/v1/auth/{}/role/{}",
                 self.auth_type.mount_name(),
                 self.name
             ),
-            headers: vec![valut_token(self.token)],
+            headers: vec![vault_token(self.token)],
             body: Some(serde_json::to_string(&CreateRoleBody {
                 policies: self.policies.clone(),
                 token_ttl: Period::Hours(1),
@@ -249,12 +293,15 @@ impl<'a> CreateRole<'a> {
             })?),
         };
 
-        assert_no_content(self.rest_client.execute(&req).await?)?;
+        guard.finish(assert_no_content(
+            self.rest_client.execute(guard.span(), &req).await?,
+        ))?;
         Ok(())
     }
 }
 
 pub struct GetRoleId<'a> {
+    reporter: Arc<dyn Reporter>,
     rest_client: &'a mut dyn RestClient,
     parser: &'a JsonParser,
     token: &'a str,
@@ -264,6 +311,7 @@ pub struct GetRoleId<'a> {
 
 impl<'a> GetRoleId<'a> {
     pub fn new(
+        reporter: Arc<dyn Reporter>,
         rest_client: &'a mut dyn RestClient,
         parser: &'a JsonParser,
         token: &'a str,
@@ -271,6 +319,7 @@ impl<'a> GetRoleId<'a> {
         name: &'a str,
     ) -> Self {
         Self {
+            reporter,
             rest_client,
             parser,
             token,
@@ -280,21 +329,27 @@ impl<'a> GetRoleId<'a> {
     }
 
     pub async fn perform(&mut self) -> Result<RoleId, OpenBaoError> {
+        let guard = Span::new(
+            Arc::clone(&self.reporter),
+            "OpenBao get role id",
+            log::ScopeKind::Task,
+        )
+        .start_guard();
         let req = Request::Get {
             path: format!(
                 "/v1/auth/{}/role/{}/role-id",
                 self.auth_type.mount_name(),
                 self.name
             ),
-            headers: vec![valut_token(self.token)],
+            headers: vec![vault_token(self.token)],
         };
 
-        let response = self.rest_client.execute(&req).await?;
+        let response = self.rest_client.execute(guard.span(), &req).await?;
         let body = assert_okay_with_body(response)?;
         let json = self.parser.parse(body)?;
         let parsed = serde_json::from_value::<DataWrapper<RoleIdData>>(json)?;
 
-        Ok(RoleId(parsed.data.role_id))
+        guard.finish(Ok(RoleId(parsed.data.role_id)))
     }
 }
 
@@ -304,6 +359,7 @@ struct SecretData {
 }
 
 pub struct CreateSecret<'a> {
+    reporter: Arc<dyn Reporter>,
     rest_client: &'a mut dyn RestClient,
     parser: &'a JsonParser,
     token: &'a str,
@@ -313,6 +369,7 @@ pub struct CreateSecret<'a> {
 
 impl<'a> CreateSecret<'a> {
     pub fn new(
+        reporter: Arc<dyn Reporter>,
         rest_client: &'a mut dyn RestClient,
         parser: &'a JsonParser,
         token: &'a str,
@@ -320,6 +377,7 @@ impl<'a> CreateSecret<'a> {
         name: &'a str,
     ) -> Self {
         Self {
+            reporter,
             rest_client,
             parser,
             token,
@@ -329,22 +387,28 @@ impl<'a> CreateSecret<'a> {
     }
 
     pub async fn perform(&mut self) -> Result<String, OpenBaoError> {
+        let guard = Span::new(
+            Arc::clone(&self.reporter),
+            "OpenBao create secret",
+            log::ScopeKind::Task,
+        )
+        .start_guard();
         let req = Request::Post {
             path: format!(
                 "/v1/auth/{}/role/{}/secret-id",
                 self.auth_type.mount_name(),
                 self.name
             ),
-            headers: vec![valut_token(self.token)],
+            headers: vec![vault_token(self.token)],
             body: None,
         };
 
-        let response = self.rest_client.execute(&req).await?;
+        let response = self.rest_client.execute(guard.span(), &req).await?;
         let body = assert_okay_with_body(response)?;
         let json = self.parser.parse(body)?;
         let parsed = serde_json::from_value::<DataWrapper<SecretData>>(json)?;
 
-        Ok(parsed.data.secret_id)
+        guard.finish(Ok(parsed.data.secret_id))
     }
 }
 
@@ -360,6 +424,7 @@ struct LoginData {
 }
 
 pub struct Login<'a> {
+    reporter: Arc<dyn Reporter>,
     rest_client: &'a mut dyn RestClient,
     parser: &'a JsonParser,
     auth_type: &'a AuthType,
@@ -369,6 +434,7 @@ pub struct Login<'a> {
 
 impl<'a> Login<'a> {
     pub fn new(
+        reporter: Arc<dyn Reporter>,
         rest_client: &'a mut dyn RestClient,
         parser: &'a JsonParser,
         auth_type: &'a AuthType,
@@ -376,6 +442,7 @@ impl<'a> Login<'a> {
         secret: &'a str,
     ) -> Self {
         Self {
+            reporter,
             rest_client,
             parser,
             auth_type,
@@ -385,6 +452,13 @@ impl<'a> Login<'a> {
     }
 
     pub async fn perform(&mut self) -> Result<String, OpenBaoError> {
+        let guard = Span::new(
+            Arc::clone(&self.reporter),
+            "OpenBao log in",
+            log::ScopeKind::Task,
+        )
+        .start_guard();
+
         let req = Request::Post {
             path: format!("/v1/auth/{}/login", self.auth_type.mount_name()),
             headers: vec![],
@@ -394,33 +468,50 @@ impl<'a> Login<'a> {
             })?),
         };
 
-        let response = self.rest_client.execute(&req).await?;
+        let response = self.rest_client.execute(guard.span(), &req).await?;
         let body = assert_okay_with_body(response)?;
         let json = self.parser.parse(body)?;
         let parsed = serde_json::from_value::<AuthWrapper<LoginData>>(json)?;
 
-        Ok(parsed.auth.client_token)
+        guard.finish(Ok(parsed.auth.client_token))
     }
 }
 
 pub struct RevokeToken<'a> {
+    reporter: Arc<dyn Reporter>,
     rest_client: &'a mut dyn RestClient,
     token: &'a str,
 }
 
 impl<'a> RevokeToken<'a> {
-    pub fn new(rest_client: &'a mut dyn RestClient, token: &'a str) -> Self {
-        Self { rest_client, token }
+    pub fn new(
+        reporter: Arc<dyn Reporter>,
+        rest_client: &'a mut dyn RestClient,
+        token: &'a str,
+    ) -> Self {
+        Self {
+            reporter,
+            rest_client,
+            token,
+        }
     }
 
     pub async fn perform(&mut self) -> Result<(), OpenBaoError> {
+        let guard = Span::new(
+            Arc::clone(&self.reporter),
+            "OpenBao revoke token",
+            log::ScopeKind::Task,
+        )
+        .start_guard();
         let req = Request::Post {
             path: "/v1/auth/token/revoke-self".into(),
-            headers: vec![valut_token(self.token)],
+            headers: vec![vault_token(self.token)],
             body: None,
         };
 
-        assert_no_content(self.rest_client.execute(&req).await?)?;
+        guard.finish(assert_no_content(
+            self.rest_client.execute(guard.span(), &req).await?,
+        ))?;
         Ok(())
     }
 }

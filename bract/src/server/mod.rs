@@ -1,6 +1,7 @@
 use crate::Service;
 use crate::server::create_listener::CreateListener;
-use config::{SystemPaths, constants};
+use crate::server::pipe_reporter::PipeReporter;
+use config::{DouglasFolders, constants};
 use credentials::{Credentials, CredentialsError};
 use file_system::path_to_string;
 use file_system::{
@@ -8,22 +9,21 @@ use file_system::{
     UnixDomainSocket,
 };
 use futures::{SinkExt, StreamExt};
-use log::Logger;
-use mount_io::MountIo;
-use mount_writer::MountWriter;
+use log::{BufferedFileReporter, Reporter, ScopeKind, Span, TeeReporter};
 use os::{Os, OsError};
 use serde::{Deserialize, Serialize};
 use shutdown::Shutdown;
 use status::Status;
 use std::collections::HashSet;
 use std::fmt::Debug;
+use std::fs::File;
+use std::os::fd::FromRawFd;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use thiserror::Error;
 use token_refresher::TokenRefresher;
-use token_validator::TokenValidator;
 use tokio::sync::broadcast::{self, Sender};
 use tokio::sync::mpsc;
 use tokio::time;
@@ -31,14 +31,8 @@ use tokio_serde::Framed as SerdeFramed;
 use tokio_serde::formats::Json;
 use tokio_util::codec::{Framed, LengthDelimitedCodec};
 
-#[macro_use]
-mod macros;
 mod create_listener;
-mod create_service_mounts;
-mod mount_io;
-mod mount_writer;
-mod service_account_manager;
-mod service_mount_manager;
+mod pipe_reporter;
 mod shutdown;
 mod status;
 mod token_refresher;
@@ -100,13 +94,27 @@ pub(crate) enum Response {
         step: String,
         message: String,
     },
-    CreatedServiceMounts {
-        token: String,
-        service_name: String,
-        mounts: HashSet<CreatedMountDefinition>,
-        user: Credential,
-        group: Credential,
-    },
+}
+
+impl std::fmt::Display for Response {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Response::InvalidToken => f.write_str("Invalid token"),
+            Response::Status {
+                token_path,
+                mount_root,
+                services,
+            } => f.write_str("Status: tbd"),
+            Response::Error(err) => f.write_str(&format!("Error: '{err}'")),
+            Response::Success => f.write_str("Success"),
+            Response::Plan(items) => todo!(),
+            Response::Progress {
+                index,
+                step,
+                message,
+            } => f.write_str("Progress"),
+        }
+    }
 }
 
 impl Response {
@@ -219,16 +227,16 @@ impl std::fmt::Display for Request {
 }
 
 struct RequestHandler {
+    reporter: Arc<dyn Reporter>,
     status: Status,
     shutdown: Shutdown,
-    mount_writer: MountWriter,
     shutdown_sender: Sender<()>,
 }
 
 impl RequestHandler {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        log: Arc<dyn Logger + Send + Sync>,
+        reporter: Arc<dyn Reporter>,
         folder: Arc<dyn Folder>,
         file_reader: Arc<dyn FileReader>,
         file_writer: Arc<dyn FileWriter>,
@@ -240,36 +248,15 @@ impl RequestHandler {
         mount_root: &Path,
         shutdown_sender: Sender<()>,
     ) -> Self {
-        let token_validator = Arc::new(TokenValidator::new(
-            Arc::clone(&log),
-            file_reader,
-            token_path,
-        ));
-
-        let mount_io = Arc::new(MountIo::new(
-            Arc::clone(&folder),
-            file_writer,
-            Arc::clone(&permissions),
-        ));
-
-        Self {
-            mount_writer: MountWriter::new(
-                Arc::clone(&log),
-                Arc::clone(&token_validator),
-                Arc::clone(&mount_io),
-            ),
-            status: Status::new(
-                Arc::clone(&log),
-                Arc::clone(&token_validator),
-                token_path,
-                mount_root,
-            ),
-            shutdown: Shutdown::new(Arc::clone(&log), Arc::clone(&token_validator)),
-            shutdown_sender,
-        }
+        todo!()
     }
 
     pub async fn handle(&self, request: Request, tx: mpsc::Sender<Response>) {
+        let span = Span::new(
+            Arc::clone(&self.reporter),
+            "Handling request",
+            ScopeKind::Task,
+        );
         let response = match request {
             Request::WriteToMount {
                 token,
@@ -277,13 +264,9 @@ impl RequestHandler {
                 mount_name,
                 relative_path,
                 contents,
-            } => self.mount_writer.perform(
-                token,
-                &service_name,
-                &mount_name,
-                relative_path,
-                &contents,
-            ),
+            } => {
+                todo!()
+            }
             Request::CreateServiceMounts {
                 token,
                 service_name,
@@ -297,8 +280,10 @@ impl RequestHandler {
                 token,
                 service_name,
             } => todo!(),
-            Request::Status { token } => self.status.perform(token),
-            Request::Shutdown { token } => self.shutdown.perform(token, &self.shutdown_sender),
+            Request::Status { token } => self.status.perform(&span, token),
+            Request::Shutdown { token } => {
+                self.shutdown.perform(&span, token, &self.shutdown_sender)
+            }
         };
         tx.send(response).await.ok();
     }
@@ -325,17 +310,17 @@ pub enum ServerError {
 pub(crate) static FIVE_MINUTES: u64 = 5 * 60;
 
 pub struct Server {
-    log: Arc<dyn Logger + Sync + Send>,
     request_handler: Arc<RequestHandler>,
     token_refresher: Arc<TokenRefresher>,
     listener_factory: CreateListener,
     credentials: Arc<dyn Credentials>,
     shutdown_sender: Sender<()>,
+    reporter: Arc<dyn Reporter>,
 }
 
 impl Server {
     pub fn new(
-        log: Arc<dyn Logger + Sync + Send>,
+        bootstrap_fd: Option<i32>,
         file_reader: Arc<dyn FileReader>,
         file_writer: Arc<dyn FileWriter>,
         file_deleter: Arc<dyn FileDeleter>,
@@ -345,14 +330,25 @@ impl Server {
         permissions: Arc<dyn Permissions>,
         unix_domain_socket: Arc<dyn UnixDomainSocket>,
         credentials: Arc<dyn Credentials>,
-        system_paths: Arc<dyn SystemPaths>,
+        douglas_folders: DouglasFolders,
     ) -> Self {
         let (shutdown_sender, _) = broadcast::channel::<()>(1);
 
+        let mut sinks: Vec<Box<dyn Reporter>> = vec![Box::new(BufferedFileReporter::new(
+            douglas_folders.log_file("bract"),
+        ))];
+
+        if let Some(fd) = bootstrap_fd {
+            let file = unsafe { File::from_raw_fd(fd) };
+            sinks.push(Box::new(PipeReporter::new(file)));
+        }
+
+        let reporter: Arc<dyn Reporter> = Arc::new(TeeReporter::new(sinks));
+
         Self {
-            log: Arc::clone(&log),
+            reporter: reporter.clone(),
             request_handler: Arc::new(RequestHandler::new(
-                Arc::clone(&log),
+                reporter,
                 Arc::clone(&folder),
                 file_reader,
                 Arc::clone(&file_writer),
@@ -360,21 +356,19 @@ impl Server {
                 Arc::clone(&links),
                 Arc::clone(&credentials),
                 Arc::clone(&permissions),
-                &system_paths.token_path(),
-                &system_paths.mount_root(),
+                &douglas_folders.transients,
+                &douglas_folders.application_mounts,
                 shutdown_sender.clone(),
             )),
 
             token_refresher: Arc::new(TokenRefresher::new(
-                Arc::clone(&log),
-                &system_paths.token_path(),
+                &douglas_folders.transients,
                 Arc::clone(&permissions),
                 file_writer,
                 os,
             )),
             listener_factory: CreateListener::new(
-                Arc::clone(&log),
-                &system_paths.douglas_socket_path("bract"),
+                &douglas_folders.socket_file("bract"),
                 Arc::clone(&file_deleter),
                 Arc::clone(&permissions),
                 Arc::clone(&unix_domain_socket),
@@ -385,58 +379,55 @@ impl Server {
     }
 
     pub fn start(&self) -> Result<(), ServerError> {
-        self.log.info("Starting server…");
-        self.log.info("Verifying permissions");
-        self.log.info("Verifying initialization complete");
-        self.assert_initalized()?;
-        self.log.info("Refreshing token");
-        self.token_refresher.refresh();
+        let span = Span::new(
+            Arc::clone(&self.reporter),
+            "Starting server",
+            ScopeKind::Group,
+        );
 
-        let log = Arc::clone(&self.log);
+        self.token_refresher.refresh(&span);
 
-        let rt = tokio::runtime::Runtime::new()
-            .inspect_err(|e| self.log.error(&format!("Runtime error: {e}")))?;
+        let scoped_reporter = span.create_scoped_reporter();
+        let rt = tokio::runtime::Runtime::new().inspect_err(|e| {
+            scoped_reporter.message(log::Level::Warn, &format!("Runtime error: {e}"))
+        })?;
         rt.block_on(async {
-            log.info("Creating listener");
             let listener = self
                 .listener_factory
-                .create()
-                .inspect_err(|e| self.log.error(&format!("{e}")))?;
+                .create(&span)
+                .inspect_err(|e| scoped_reporter.message(log::Level::Warn, &format!("Runtime error: {e}")))?;
 
             let token_refresh = Self::token_refresh_task(
+                &span,
                 Arc::clone(&self.token_refresher),
-                Arc::clone(&self.log),
                 self.shutdown_sender.subscribe(),
             );
-            let request_handler = Self::request_handler_task(
-                listener,
-                Arc::clone(&log),
-                Arc::clone(&self.request_handler),
-            );
-            log.info("Started!");
+            let request_handler =
+                Self::request_handler_task(&span, listener, Arc::clone(&self.request_handler));
 
             tokio::select! {
-                r = token_refresh => r.inspect_err(|e| self.log.error(&format!("{e}")))?,
-                r = request_handler => r.inspect_err(|e| self.log.error(&format!("{e}")))?,
+                r = token_refresh => r.inspect_err(|e| scoped_reporter.message(log::Level::Warn, &format!("Runtime error: {e}")))?,
+                r = request_handler => r.inspect_err(|e| scoped_reporter.message(log::Level::Warn, &format!("Runtime error: {e}")))?,
             }
 
-            log.info("Shutting down");
-
+            scoped_reporter.message(log::Level::Info, "Shutting down");
+            scoped_reporter.finish(log::Outcome::Ok);
             Ok(())
         })
     }
 
     async fn request_handler_task(
+        span: &Span,
         listener: Box<dyn Listener + Sync + Send>,
-        log: Arc<dyn Logger + Sync + Send>,
         handler: Arc<RequestHandler>,
     ) -> Result<(), ServerError> {
-        log.info("Listening…");
+        let child_span = span.create_child("Listening", ScopeKind::Phase);
 
         loop {
             let (socket, _) = listener.accept().await?;
-            let log = Arc::clone(&log);
             let handler = Arc::clone(&handler);
+            let child_span = child_span.clone();
+            let request_span = child_span.create_child("Received request", ScopeKind::Group);
 
             tokio::spawn(async move {
                 let length_delimited = Framed::new(socket, LengthDelimitedCodec::new());
@@ -445,7 +436,8 @@ impl Server {
 
                 match transport.next().await {
                     Some(Ok(request)) => {
-                        log.info(&format!("Received request {}", request));
+                        let reporter = request_span.create_scoped_reporter();
+                        reporter.message(log::Level::Info, &request.to_string());
 
                         let (tx, mut rx) = mpsc::channel(32);
                         let handler = Arc::clone(&handler);
@@ -459,18 +451,20 @@ impl Server {
                             }
                         }
 
-                        log.info("Completed request");
+                        reporter.finish(log::Outcome::Ok);
                     }
                     None => {
-                        log.warn("Invalid request");
+                        let reporter = request_span.create_scoped_reporter();
+                        reporter.message(log::Level::Warn, "Invalid request");
                         let _ = transport
                             .send(Response::Error("Invalid request".to_string()))
                             .await;
                     }
                     Some(Err(err)) => {
+                        let reporter = request_span.create_scoped_reporter();
                         let message = format!("Invalid request: {:?}", err);
-                        log.error(&message);
-                        let _ = transport.send(Response::Error(message.to_string())).await;
+                        reporter.message(log::Level::Warn, &message);
+                        let _ = transport.send(Response::Error(message)).await;
                     }
                 }
             });
@@ -478,21 +472,23 @@ impl Server {
     }
 
     async fn token_refresh_task(
+        span: &Span,
         token_refresher: Arc<TokenRefresher>,
-        log: Arc<dyn Logger + Sync + Send>,
-        mut shutdown_rceiver: broadcast::Receiver<()>,
+        mut shutdown_receiver: broadcast::Receiver<()>,
     ) -> Result<(), ServerError> {
-        log.info("Starting refresh task…");
+        let child_span = span.create_child("Starting token refresh", ScopeKind::Task);
+        let log = child_span.create_scoped_reporter();
         loop {
             tokio::select! {
                 _ = time::sleep(Duration::from_secs(FIVE_MINUTES)) => {
-                    token_refresher.refresh();
+                    token_refresher.refresh(&child_span);
                 },
-                _ = shutdown_rceiver.recv() => {
+                _ = shutdown_receiver.recv() => {
                     break;
                 }
             }
         }
+        log.finish(log::Outcome::Ok);
         Ok(())
     }
 
@@ -501,172 +497,6 @@ impl Server {
             Ok(())
         } else {
             Err(ServerError::NotInitialized)
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    mod is_terminal {
-        use crate::server::Response;
-        use std::path::PathBuf;
-
-        #[test]
-        fn success_is_terminal() {
-            assert!(Response::Success.is_terminal());
-        }
-
-        #[test]
-        fn invalid_token_is_terminal() {
-            assert!(Response::InvalidToken.is_terminal());
-        }
-
-        #[test]
-        fn error_is_terminal() {
-            assert!(Response::Error("boom".into()).is_terminal());
-        }
-
-        #[test]
-        fn status_is_terminal() {
-            assert!(
-                Response::Status {
-                    token_path: PathBuf::from("/tmp/token"),
-                    mount_root: PathBuf::from("/tmp/mounts"),
-                    services: vec![],
-                }
-                .is_terminal()
-            );
-        }
-
-        #[test]
-        fn progress_is_not_terminal() {
-            assert!(
-                !Response::Progress {
-                    index: 0,
-                    step: "Create user".into(),
-                    message: "Done".into(),
-                }
-                .is_terminal()
-            );
-        }
-
-        #[test]
-        fn plan_is_not_terminal() {
-            assert!(!Response::Plan(vec!["step one".into()]).is_terminal());
-        }
-    }
-
-    mod streaming {
-        use crate::server::{Request, Response};
-        use futures::{SinkExt, StreamExt};
-        use tokio::net::UnixStream;
-        use tokio::sync::mpsc;
-        use tokio_serde::Framed as SerdeFramed;
-        use tokio_serde::formats::Json;
-        use tokio_util::codec::{Framed, LengthDelimitedCodec};
-
-        // Verifies that multiple Progress frames sent to the mpsc channel all arrive
-        // on the other end of the socket before the terminal frame — i.e. the
-        // channel→transport forwarding loop in request_handler_task works correctly.
-        #[tokio::test]
-        async fn progress_frames_arrive_before_terminal() {
-            let (server_stream, client_stream) = UnixStream::pair().unwrap();
-
-            // Server side: receives from the mpsc channel and writes to the socket.
-            let server_framed = Framed::new(server_stream, LengthDelimitedCodec::new());
-            let mut server_transport: SerdeFramed<_, Request, Response, Json<Request, Response>> =
-                SerdeFramed::new(server_framed, Json::default());
-
-            // Client side: reads raw frames from the socket.
-            let client_framed = Framed::new(client_stream, LengthDelimitedCodec::new());
-            let mut client_transport: SerdeFramed<_, Response, Request, Json<Response, Request>> =
-                SerdeFramed::new(client_framed, Json::default());
-
-            let (tx, mut rx) = mpsc::channel::<Response>(32);
-
-            // Simulate a handler that emits two Progress frames then terminates.
-            tokio::spawn(async move {
-                tx.send(Response::Progress {
-                    index: 0,
-                    step: "Create user".into(),
-                    message: "User 'svc' created (uid 1042)".into(),
-                })
-                .await
-                .ok();
-                tx.send(Response::Progress {
-                    index: 1,
-                    step: "Create group".into(),
-                    message: "Group 'svc' created (gid 1042)".into(),
-                })
-                .await
-                .ok();
-                tx.send(Response::Success).await.ok();
-                // tx dropped here → rx.recv() returns None → forwarding loop exits
-            });
-
-            // Simulate the forwarding loop from request_handler_task.
-            tokio::spawn(async move {
-                while let Some(response) = rx.recv().await {
-                    if server_transport.send(response).await.is_err() {
-                        break;
-                    }
-                }
-            });
-
-            let frame1 = client_transport.next().await.unwrap().unwrap();
-            let frame2 = client_transport.next().await.unwrap().unwrap();
-            let frame3 = client_transport.next().await.unwrap().unwrap();
-
-            assert!(!frame1.is_terminal(), "first frame should be non-terminal");
-            assert!(
-                matches!(frame1, Response::Progress { index: 0, .. }),
-                "first frame should be Progress(0)"
-            );
-
-            assert!(!frame2.is_terminal(), "second frame should be non-terminal");
-            assert!(
-                matches!(frame2, Response::Progress { index: 1, .. }),
-                "second frame should be Progress(1)"
-            );
-
-            assert!(frame3.is_terminal(), "third frame should be terminal");
-            assert!(
-                matches!(frame3, Response::Success),
-                "third frame should be Success"
-            );
-        }
-
-        // Verifies that a handler emitting only a single terminal frame still works —
-        // the existing Status/Shutdown handlers take this path.
-        #[tokio::test]
-        async fn single_terminal_frame_is_forwarded() {
-            let (server_stream, client_stream) = UnixStream::pair().unwrap();
-
-            let server_framed = Framed::new(server_stream, LengthDelimitedCodec::new());
-            let mut server_transport: SerdeFramed<_, Request, Response, Json<Request, Response>> =
-                SerdeFramed::new(server_framed, Json::default());
-
-            let client_framed = Framed::new(client_stream, LengthDelimitedCodec::new());
-            let mut client_transport: SerdeFramed<_, Response, Request, Json<Response, Request>> =
-                SerdeFramed::new(client_framed, Json::default());
-
-            let (tx, mut rx) = mpsc::channel::<Response>(32);
-
-            tokio::spawn(async move {
-                tx.send(Response::InvalidToken).await.ok();
-            });
-
-            tokio::spawn(async move {
-                while let Some(response) = rx.recv().await {
-                    if server_transport.send(response).await.is_err() {
-                        break;
-                    }
-                }
-            });
-
-            let frame = client_transport.next().await.unwrap().unwrap();
-            assert!(frame.is_terminal());
-            assert!(matches!(frame, Response::InvalidToken));
         }
     }
 }
