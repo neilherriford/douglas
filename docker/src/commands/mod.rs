@@ -5,7 +5,6 @@ pub(crate) mod network;
 pub(crate) mod ping;
 
 use crate::DockerError;
-pub use image::ImageCommand;
 use serde_json::Value as Json;
 
 fn assert_non_empty_string_argument(

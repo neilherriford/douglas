@@ -6,6 +6,7 @@ use std::path::PathBuf;
 
 pub use client::{Client, ClientError, IoOperation};
 use serde::{Deserialize, Serialize};
+pub use server::{Server, ServerError};
 
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
 pub struct Service {

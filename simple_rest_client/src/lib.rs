@@ -4,7 +4,8 @@ pub mod unix_domain_socket;
 
 use http_body_util::BodyExt;
 use hyper::client::conn::http1::SendRequest;
-use log::{Event, EventKind, Level, Reporter, ScopeId, ScopeKind, ScopedReporter, Span};
+use hyper_util::client::legacy::ResponseFuture;
+use log::{Event, EventKind, Level, Outcome, Reporter, ScopeId, ScopeKind, ScopedReporter, Span};
 use std::collections::HashMap;
 use std::sync::Arc;
 use thiserror::Error;
@@ -63,6 +64,17 @@ pub enum Request {
         headers: Vec<Header>,
         body: Option<String>,
     },
+}
+
+impl Request {
+    pub fn to_short_description(&self) -> String {
+        match self {
+            Request::Delete { path, .. } => format!("DELETE {path}"),
+            Request::Get { path, .. } => format!("GET {path}"),
+            Request::Post { path, .. } => format!("POST {path}"),
+            Request::Put { path, .. } => format!("PUT {path}"),
+        }
+    }
 }
 
 #[derive(Debug, PartialEq)]
@@ -136,12 +148,24 @@ pub trait RestClient: Send + Sync {
     ) -> Result<Response, RestClientError>;
 }
 
+/*
+ * hyper's HTTP/1.1 connection future resolves to Err when the server
+ * closes the connection (e.g. after a keep-alive timeout or a single
+ * request connection)
+ */
+#[derive(Debug, PartialEq, Eq)]
+pub enum ServerClosedConnections {
+    Ignore,
+    TreatAsError,
+}
+
 pub struct SimpleRestClient<TIo: IoStream> {
     scheme: String,
     authority: String,
     io_stream: Option<TIo>,
     sender: Option<SendRequest<String>>,
     default_headers: Vec<Header>,
+    server_closed_connections: ServerClosedConnections,
 }
 
 impl<TIo: IoStream + 'static> SimpleRestClient<TIo> {
@@ -150,6 +174,7 @@ impl<TIo: IoStream + 'static> SimpleRestClient<TIo> {
         authority: &str,
         io_stream: TIo,
         default_headers: Vec<Header>,
+        server_closed_connections: ServerClosedConnections,
     ) -> Self {
         Self {
             scheme: scheme.into(),
@@ -157,6 +182,7 @@ impl<TIo: IoStream + 'static> SimpleRestClient<TIo> {
             io_stream: Some(io_stream),
             sender: None,
             default_headers,
+            server_closed_connections,
         }
     }
 
@@ -228,24 +254,41 @@ impl<TIo: IoStream + 'static> SimpleRestClient<TIo> {
 
     async fn initialize_sender(&mut self, span: &Span) -> Result<(), RestClientError> {
         if self.sender.is_none() {
+            let guard = span
+                .create_child("Initialize sender", ScopeKind::Task)
+                .start_guard();
+
             let io = self
                 .io_stream
                 .take()
                 .ok_or(RestClientError::IoStreamAlreadyTaken)?;
 
             let (sender, conn) = hyper::client::conn::http1::handshake::<TIo, String>(io).await?;
-            let guard = span
-                .create_child("Initialize sender", ScopeKind::Task)
-                .start_guard();
 
+            guard.finish_with_outcome(Outcome::Ok);
+
+            /*
+             * Use a weak reference so this background task doesn't keep
+             * the reporter alive. If the reporter is already gone when
+             * the connection closes, the error is silently dropped.
+             * It's the responsibility of the caller to clean that up
+             */
+            let conn_reporter = Arc::downgrade(&span.reporter);
+            let conn_scope_id = span.id;
+            let report_closed_connections =
+                self.server_closed_connections == ServerClosedConnections::TreatAsError;
             tokio::spawn(async move {
-                if let Err(e) = conn.await {
-                    guard
-                        .span()
-                        .message(Level::Warn, &format!("Connection error: {e:?}"));
-                    guard.finish_with_outcome(log::Outcome::Failed);
-                } else {
-                    guard.finish_with_outcome(log::Outcome::Ok);
+                if let Err(e) = conn.await
+                    && (report_closed_connections || (!e.is_closed() && !e.is_incomplete_message()))
+                    && let Some(reporter) = conn_reporter.upgrade()
+                {
+                    reporter.emit(log::Event::new(
+                        conn_scope_id,
+                        log::EventKind::Message {
+                            level: Level::Warn,
+                            text: format!("Connection error: {e:?}"),
+                        },
+                    ));
                 }
             });
 
@@ -408,18 +451,21 @@ where
         request: &Request,
     ) -> Result<Response, RestClientError> {
         let guard = span
-            .create_child("Executing request", ScopeKind::Task)
+            .create_child(
+                &format!("Executing request '{}'", request.to_short_description()),
+                ScopeKind::Task,
+            )
             .start_guard();
 
         self.log_request(guard.span(), request);
         let hyper_request = self.build_hyper_request(request)?;
 
-        self.initialize_sender(span).await?;
+        self.initialize_sender(guard.span()).await?;
         let hyper_response = self.send_hyper_request(hyper_request).await?;
 
         let (status, headers, raw_body) = self
             .parse_hyper_response(guard.span(), hyper_response)
             .await?;
-        self.create_response(status, headers, raw_body)
+        guard.finish(self.create_response(status, headers, raw_body))
     }
 }

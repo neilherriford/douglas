@@ -1,5 +1,4 @@
 mod application_definition;
-mod application_installer;
 mod commands;
 mod config;
 mod core_applications;
@@ -9,18 +8,19 @@ pub(crate) mod macros;
 mod cli_reporter;
 mod mount_file_template_expander;
 
+use crate::cli_reporter::CliReporter;
 use ::config::DouglasFolders;
 use clap::{Parser, Subcommand, ValueEnum};
 use credentials::create_credentials;
-use file_system::{LocalFileReader, LocalFolder, LocalPermissions};
-use log::{BufferedFileReporter, TeeReporter};
-use os::{Os, Unix, UnixEnvironmentVariableReader};
+use daemonize::Daemonize;
+use file_system::LocalFileReader;
+use log::{BufferedFileReporter, Reporter, TeeReporter};
+use os::{Os, Unix};
 use std::{
     fmt::{Debug, Display},
+    process::ExitCode,
     sync::Arc,
 };
-
-use crate::cli_reporter::CliReporter;
 
 #[derive(ValueEnum, Clone, Debug, Copy)]
 enum OutputStyle {
@@ -101,60 +101,94 @@ impl Display for Commands {
     }
 }
 
-fn main() {
+fn main() -> ExitCode {
     let cli = Cli::parse();
 
     match cli.command {
         Commands::Start {
-            bract,
-            notify_fd,
+            bract: true,
             plan_only,
-        } => {
-            if bract {
-                todo!()
-            } else {
-                match tokio::runtime::Runtime::new() {
-                    Ok(rt) => {
-                        rt.block_on(async {
-                            let Ok(cli_reporter) = CliReporter::start() else {
-                                panic!()
-                            };
-                            let config = DouglasFolders::new();
-                            let file_reader = Arc::new(LocalFileReader::new());
-                            let folder = Arc::new(LocalFolder::new());
-                            let permissions = Arc::new(LocalPermissions::new());
-                            let reporter = Arc::new(TeeReporter::new(vec![
-                                Box::new(BufferedFileReporter::new(config.log_file("douglas-cli"))),
-                                Box::new(cli_reporter),
-                            ]));
-                            let os: Arc<dyn Os> = Arc::new(Unix::new());
-                            let credentials = Arc::from(create_credentials(Arc::clone(&os)));
-                            let environment_variable_reader =
-                                Arc::new(UnixEnvironmentVariableReader::new());
+            notify_fd,
+        } => start_bract(plan_only, notify_fd),
+        Commands::Start { plan_only, .. } => run_with_tokio(start(plan_only)),
+        Commands::Status => todo!(),
+        Commands::Shutdown => todo!(),
+    }
+}
 
-                            commands::cli_start(
-                                reporter,
-                                plan_only,
-                                credentials,
-                                folder,
-                                file_reader,
-                                permissions,
-                                os,
-                                environment_variable_reader,
-                                config,
-                            )
-                            .await;
-                        });
-                    }
-                    Err(err) => eprintln!("Runtime error: {err}"),
-                }
-            }
-        }
-        Commands::Status => {
-            todo!()
-        }
-        Commands::Shutdown => {
-            todo!()
+fn run_with_tokio(fut: impl std::future::Future<Output = ExitCode>) -> ExitCode {
+    match tokio::runtime::Runtime::new() {
+        Ok(rt) => rt.block_on(fut),
+        Err(err) => {
+            eprintln!("Failed to start async runtime: {err}");
+            ExitCode::from(1)
         }
     }
+}
+
+/// Daemonise bract and start the server.
+///
+/// This is intentionally a plain synchronous function. `fork()` (called
+/// inside `Daemonize::start`) must happen before any tokio runtime exists —
+/// forking inside a running runtime leaves the child with broken worker-thread
+/// state and a deadlocked scheduler.
+fn start_bract(_plan_only: bool, reporting_fd: Option<i32>) -> ExitCode {
+    match Daemonize::new().start() {
+        Ok(()) => {
+            // Child process — no tokio runtime exists yet, safe to create one.
+            run_with_tokio(run_bract_server(reporting_fd))
+        }
+        Err(err) => {
+            eprintln!("Failed to daemonize bract server: {err:?}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+async fn run_bract_server(reporting_fd: Option<i32>) -> ExitCode {
+    let server = match bract::Server::build(reporting_fd).await {
+        Ok(server) => server,
+        Err(err) => {
+            eprintln!("Failed to bootstrap bract: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    match server.start() {
+        Ok(()) => ExitCode::from(0),
+        Err(err) => {
+            eprintln!("Failed to start bract: {err:?}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+async fn start(plan_only: bool) -> ExitCode {
+    let Ok(cli_reporter) = CliReporter::start() else {
+        eprintln!("Failed to start TUI reporter");
+        return ExitCode::from(1);
+    };
+
+    let douglas_folders = DouglasFolders::new();
+    let file_reader = Arc::new(LocalFileReader::new());
+    let os: Arc<dyn Os> = Arc::new(Unix::new());
+    let credentials = Arc::from(create_credentials(Arc::clone(&os)));
+
+    let reporter: Arc<dyn Reporter> = Arc::new(TeeReporter::new(vec![
+        Box::new(BufferedFileReporter::new(
+            douglas_folders.log_file("douglas-cli"),
+        )),
+        Box::new(cli_reporter),
+    ]));
+
+    commands::cli_start(
+        reporter,
+        plan_only,
+        credentials,
+        file_reader,
+        os,
+        douglas_folders,
+    )
+    .await;
+
+    ExitCode::from(0)
 }

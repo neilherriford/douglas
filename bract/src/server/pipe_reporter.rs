@@ -1,32 +1,30 @@
 use log::{Event, Reporter};
 use std::fs::File;
 use std::io::{BufWriter, Write};
+use std::os::fd::FromRawFd;
 use std::sync::Mutex;
 
 pub struct PipeReporter {
-    writer: Mutex<Option<BufWriter<File>>>,
+    writer: Mutex<BufWriter<File>>,
 }
 
 impl PipeReporter {
-    pub fn new(file: File) -> Self {
+    pub unsafe fn from_raw_fd(fd: i32) -> Self {
+        let file = unsafe { File::from_raw_fd(fd) };
         Self {
-            writer: Mutex::new(Some(BufWriter::new(file))),
+            writer: Mutex::new(BufWriter::new(file)),
         }
     }
 }
 
 impl Reporter for PipeReporter {
     fn emit(&self, event: Event) {
-        let mut guard = self.writer.lock().unwrap();
-        let Some(writer) = guard.as_mut() else { return };
-
-        let result = serde_json::to_string(&event)
-            .map_err(|_| ())
-            .and_then(|line| writeln!(writer, "{line}").map_err(|_| ()))
-            .and_then(|_| writer.flush().map_err(|_| ()));
-
-        if result.is_err() {
-            *guard = None;
+        let Ok(mut w) = self.writer.lock() else {
+            return;
+        };
+        if let Ok(line) = serde_json::to_string(&event) {
+            let _ = writeln!(w, "{line}");
+            let _ = w.flush();
         }
     }
 }

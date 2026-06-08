@@ -44,8 +44,7 @@ impl CliReporter {
         let terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
 
         let handle = thread::spawn(move || {
-            render_loop(terminal, &rx);
-            let _ = restore_term();
+            render_loop(terminal, &rx); // handles cleanup itself
         });
 
         Ok(Self {
@@ -87,8 +86,6 @@ fn restore_term() -> io::Result<()> {
     execute!(io::stdout(), LeaveAlternateScreen)?;
     Ok(())
 }
-
-// ── State ─────────────────────────────────────────────────────────────────────
 
 struct ActiveScope {
     label: String,
@@ -153,8 +150,6 @@ impl AppState {
     }
 }
 
-// ── Render loop ───────────────────────────────────────────────────────────────
-
 fn render_loop(mut terminal: Terminal<CrosstermBackend<Stdout>>, rx: &mpsc::Receiver<Event>) {
     let mut state = AppState::default();
     let tick_rate = Duration::from_millis(80);
@@ -174,7 +169,7 @@ fn render_loop(mut terminal: Terminal<CrosstermBackend<Stdout>>, rx: &mpsc::Rece
             && let Ok(CtEvent::Key(k)) = crossterm::event::read()
             && (k.code == KeyCode::Char('q') || k.code == KeyCode::Enter)
         {
-            return;
+            break 'running;
         }
 
         if last_tick.elapsed() >= tick_rate {
@@ -193,8 +188,6 @@ fn render_loop(mut terminal: Terminal<CrosstermBackend<Stdout>>, rx: &mpsc::Rece
         println!("{line}");
     }
 }
-
-// ── Drawing ───────────────────────────────────────────────────────────────────
 
 fn draw(f: &mut Frame, state: &AppState) {
     let area = f.area();

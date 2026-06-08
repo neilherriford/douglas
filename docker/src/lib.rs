@@ -1,24 +1,15 @@
+mod client;
 mod commands;
-
-use async_trait::async_trait;
-use commands::ImageCommand;
-use commands::container::{ContainerCommand, InspectedContainer};
-use commands::json_parser::ChunkedJsonParser;
-use commands::network::{Network, NetworkCommand};
-use commands::ping::{PingCommand, PingParser};
+pub use client::{Ping, UdsPing};
 use file_system::{FileSystemError, path_to_string};
-use log::Reporter;
 use serde::ser::{SerializeMap, SerializeSeq, SerializeStruct};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::value::Value as Json;
 use simple_rest_client::assertions::AssertionError;
-use simple_rest_client::parsers::Parser;
-use simple_rest_client::parsers::json::{JsonParser, JsonParserError};
-use simple_rest_client::unix_domain_socket::{BuilderError, build_client};
-use simple_rest_client::{Request, RestClient, RestClientError};
+use simple_rest_client::unix_domain_socket::BuilderError;
+use simple_rest_client::{Request, RestClientError};
 use std::collections::HashSet;
 use std::path::PathBuf;
-use std::sync::Arc;
 use thiserror::Error;
 
 #[derive(Debug, PartialEq, Eq, Clone)]
@@ -126,6 +117,9 @@ where
 
 #[derive(Error, Debug)]
 pub enum DockerError {
+    #[error("Ping failed: {0}")]
+    PingFailed(String),
+
     #[error("Client error: {0}")]
     ClientError(#[from] RestClientError),
 
@@ -478,104 +472,6 @@ where
     Ok(tags)
 }
 
-pub enum PingResult {
-    Ok,
-    Error(String),
-}
-
-#[async_trait]
-pub trait SystemClient {
-    async fn ping(&mut self) -> Result<PingResult, DockerError>;
-}
-
-pub struct SimpleSystemClient {
-    command: PingCommand,
-}
-
-impl SimpleSystemClient {
-    pub async fn build(
-        socket_file_path: PathBuf,
-        reporter: Arc<dyn Reporter>,
-    ) -> Result<Self, DockerError> {
-        let rest_client = build_client(socket_file_path).await?;
-
-        Ok(Self {
-            command: PingCommand::new(
-                reporter,
-                Arc::new(tokio::sync::Mutex::new(rest_client)),
-                Box::new(PingParser::new()),
-            ),
-        })
-    }
-}
-
-#[async_trait]
-impl SystemClient for SimpleSystemClient {
-    async fn ping(&mut self) -> Result<PingResult, DockerError> {
-        Ok(self.command.ping().await?)
-    }
-}
-
-#[async_trait]
-pub trait ImageClient {
-    async fn find_by_id(&mut self, id: &Id) -> Result<Image, DockerError>;
-    async fn find_by_name(&mut self, image_name: &ImageName) -> Result<Image, DockerError>;
-    async fn list(&mut self) -> Result<Vec<Image>, DockerError>;
-    async fn pull(&mut self, image_name: &ImageName) -> Result<Image, DockerError>;
-}
-
-pub struct SimpleImageClient {
-    command: ImageCommand,
-}
-
-impl SimpleImageClient {
-    pub async fn build(
-        socket_file_path: PathBuf,
-        reporter: Arc<dyn Reporter>,
-    ) -> Result<Self, DockerError> {
-        let rest_client = build_client(socket_file_path).await?;
-
-        Ok(Self {
-            command: ImageCommand::new(
-                reporter,
-                Arc::new(tokio::sync::Mutex::new(rest_client)),
-                Arc::new(JsonParser::new()),
-                Arc::new(ChunkedJsonParser::new()),
-            ),
-        })
-    }
-}
-
-#[async_trait]
-impl ImageClient for SimpleImageClient {
-    async fn find_by_id(&mut self, id: &Id) -> Result<Image, DockerError> {
-        self.command.find_by_id(id).await
-    }
-
-    async fn find_by_name(&mut self, image_name: &ImageName) -> Result<Image, DockerError> {
-        self.command.find_by_name(image_name).await
-    }
-
-    async fn list(&mut self) -> Result<Vec<Image>, DockerError> {
-        self.command.list().await
-    }
-
-    async fn pull(&mut self, image_name: &ImageName) -> Result<Image, DockerError> {
-        self.command.pull(image_name).await
-    }
-}
-
-#[async_trait]
-pub trait ContainerClient {
-    async fn find_by_id(&mut self, id: &str) -> Result<Container, DockerError>;
-    async fn find_by_name(&mut self, name: &str) -> Result<Container, DockerError>;
-    async fn create(
-        &mut self,
-        container_definition: ContainerDefinition,
-    ) -> Result<Container, DockerError>;
-    async fn start(&mut self, id: &str) -> Result<(), DockerError>;
-}
-
 #[derive(Debug, PartialEq, Clone)]
 pub struct MountDefinition {
     pub name: String,
@@ -632,215 +528,6 @@ pub struct ContainerDefinition {
     pub mounts: Vec<MountDefinition>,
     pub added_capabilities: Vec<Capability>,
     pub labels: Vec<Label>,
-}
-
-pub struct SimpleContainerClient {
-    container_command: ContainerCommand,
-    image_command: ImageCommand,
-}
-
-impl SimpleContainerClient {
-    pub async fn build(
-        reporter: Arc<dyn Reporter>,
-        socket_file_path: PathBuf,
-    ) -> Result<Self, DockerError> {
-        let rest_client = build_client(socket_file_path).await?;
-        let rest_client: Arc<tokio::sync::Mutex<dyn RestClient + Send + Sync>> =
-            Arc::new(tokio::sync::Mutex::new(rest_client));
-
-        let json_parser: Arc<dyn Parser<Json, ParseError = JsonParserError>> =
-            Arc::new(JsonParser::new());
-        let chunked_json_parser: Arc<dyn Parser<Vec<Json>, ParseError = JsonParserError>> =
-            Arc::new(ChunkedJsonParser::new());
-
-        Ok(Self {
-            image_command: ImageCommand::new(
-                Arc::clone(&reporter),
-                Arc::clone(&rest_client),
-                Arc::clone(&json_parser),
-                Arc::clone(&chunked_json_parser),
-            ),
-            container_command: ContainerCommand::new(reporter, rest_client, json_parser),
-        })
-    }
-
-    async fn create_container(
-        &mut self,
-        inspected_container: InspectedContainer,
-    ) -> Result<Container, DockerError> {
-        let image = self
-            .image_command
-            .find_by_id(&inspected_container.image_id)
-            .await?;
-
-        let result = Container {
-            id: inspected_container.id,
-            name: inspected_container.name,
-            image,
-            status: inspected_container.state.status,
-            mounts: inspected_container.mounts,
-            environment_variables: inspected_container.config.env,
-            labels: inspected_container.config.labels,
-        };
-
-        Ok(result)
-    }
-}
-
-#[async_trait]
-impl ContainerClient for SimpleContainerClient {
-    async fn find_by_id(&mut self, id: &str) -> Result<Container, DockerError> {
-        let inspected_container = self.container_command.find_by_id(id).await?;
-        let result = self.create_container(inspected_container).await?;
-        Ok(result)
-    }
-
-    async fn find_by_name(&mut self, name: &str) -> Result<Container, DockerError> {
-        let inspected_container = self.container_command.find_by_name(name).await?;
-        let result = self.create_container(inspected_container).await?;
-        Ok(result)
-    }
-
-    async fn create(
-        &mut self,
-        container_definition: ContainerDefinition,
-    ) -> Result<Container, DockerError> {
-        let inspected_container = self.container_command.create(container_definition).await?;
-        let result = self.create_container(inspected_container).await?;
-        Ok(result)
-    }
-
-    async fn start(&mut self, id: &str) -> Result<(), DockerError> {
-        self.container_command.start(id).await
-    }
-}
-
-#[async_trait]
-pub trait NetworkClient {
-    async fn inspect_by_id(&mut self, id: &str) -> Result<Network, DockerError>;
-    async fn inspect_by_name(&mut self, name: &str) -> Result<Network, DockerError>;
-    async fn find_connected_containers_by_id(
-        &mut self,
-        network_id: &str,
-    ) -> Result<Vec<Container>, DockerError>;
-    async fn find_connected_containers_by_name(
-        &mut self,
-        network_name: &str,
-    ) -> Result<Vec<Container>, DockerError>;
-    async fn create(&mut self, name: &str, labels: Vec<Label>) -> Result<Network, DockerError>;
-    async fn connect(
-        &mut self,
-        network: &Network,
-        container: &Container,
-    ) -> Result<(), DockerError>;
-    async fn disconnect(
-        &mut self,
-        network: &Network,
-        container: &Container,
-    ) -> Result<(), DockerError>;
-}
-
-pub struct SimpleNetworkClient {
-    network_command: NetworkCommand,
-    container_client: SimpleContainerClient,
-}
-
-impl SimpleNetworkClient {
-    pub async fn build(
-        reporter: Arc<dyn Reporter>,
-        socket_file_path: PathBuf,
-    ) -> Result<Self, DockerError> {
-        let rest_client = build_client(socket_file_path).await?;
-        let rest_client: Arc<tokio::sync::Mutex<dyn RestClient + Send + Sync>> =
-            Arc::new(tokio::sync::Mutex::new(rest_client));
-
-        let json_parser: Arc<dyn Parser<Json, ParseError = JsonParserError>> =
-            Arc::new(JsonParser::new());
-        let chunked_json_parser: Arc<dyn Parser<Vec<Json>, ParseError = JsonParserError>> =
-            Arc::new(ChunkedJsonParser::new());
-
-        Ok(Self {
-            container_client: SimpleContainerClient {
-                container_command: ContainerCommand::new(
-                    Arc::clone(&reporter),
-                    Arc::clone(&rest_client),
-                    Arc::clone(&json_parser),
-                ),
-                image_command: ImageCommand::new(
-                    Arc::clone(&reporter),
-                    Arc::clone(&rest_client),
-                    Arc::clone(&json_parser),
-                    Arc::clone(&chunked_json_parser),
-                ),
-            },
-            network_command: NetworkCommand::new(reporter, rest_client, json_parser),
-        })
-    }
-
-    async fn load_containers(&mut self, container_ids: Vec<String>) -> Vec<Container> {
-        let mut result = Vec::with_capacity(container_ids.len());
-
-        for id in container_ids {
-            if let Ok(container) = self.container_client.find_by_id(&id).await {
-                result.push(container);
-            }
-        }
-
-        result
-    }
-}
-
-#[async_trait]
-impl NetworkClient for SimpleNetworkClient {
-    async fn inspect_by_id(&mut self, id: &str) -> Result<Network, DockerError> {
-        self.network_command.inspect_by_id(id).await
-    }
-
-    async fn inspect_by_name(&mut self, name: &str) -> Result<Network, DockerError> {
-        self.network_command.inspect_by_name(name).await
-    }
-
-    async fn find_connected_containers_by_id(
-        &mut self,
-        network_id: &str,
-    ) -> Result<Vec<Container>, DockerError> {
-        let container_ids = self
-            .network_command
-            .find_connected_containers_by_id(network_id)
-            .await?;
-
-        Ok(self.load_containers(container_ids).await)
-    }
-    async fn find_connected_containers_by_name(
-        &mut self,
-        network_name: &str,
-    ) -> Result<Vec<Container>, DockerError> {
-        let container_ids = self
-            .network_command
-            .find_connected_containers_by_name(network_name)
-            .await?;
-
-        Ok(self.load_containers(container_ids).await)
-    }
-    async fn create(&mut self, name: &str, labels: Vec<Label>) -> Result<Network, DockerError> {
-        self.network_command.create(name, labels).await
-    }
-
-    async fn connect(
-        &mut self,
-        network: &Network,
-        container: &Container,
-    ) -> Result<(), DockerError> {
-        self.network_command.connect(network, container).await
-    }
-
-    async fn disconnect(
-        &mut self,
-        network: &Network,
-        container: &Container,
-    ) -> Result<(), DockerError> {
-        self.network_command.disconnect(network, container).await
-    }
 }
 
 #[cfg(test)]

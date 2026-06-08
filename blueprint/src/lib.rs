@@ -156,3 +156,17 @@ where
         errors
     }
 }
+
+pub enum CommandResult {
+    Ok,
+    Error,
+    PlanOnly,
+}
+
+#[derive(Default, PartialEq, Eq)]
+pub enum RunningStatus {
+    Running,
+    #[default]
+    NotRunning,
+    Unknown,
+}

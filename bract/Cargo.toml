@@ -9,6 +9,7 @@ blueprint = { path = "../blueprint" }
 colored = "3"
 config = { path = "../config" }
 credentials = { path = "../credentials" }
+docker = { path = "../docker" }
 file_system = { path = "../file_system" }
 futures = "0.3.31"
 log = { path = "../log" }

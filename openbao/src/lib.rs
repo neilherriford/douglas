@@ -10,7 +10,7 @@ use async_trait::async_trait;
 use log::{Level, Reporter, Span};
 use serde::{Deserialize, Serialize};
 use simple_rest_client::{
-    RestClient, RestClientError,
+    RestClient, RestClientError, ServerClosedConnections,
     assertions::AssertionError,
     parsers::json::{JsonParser, JsonParserError},
     unix_domain_socket::{BuilderError, build_client},
@@ -184,7 +184,11 @@ impl SimpleSystemClient {
         reporter: Arc<dyn Reporter>,
         socket_file_path: PathBuf,
     ) -> Result<Self, OpenBaoError> {
-        let rest_client = build_client(socket_file_path).await?;
+        let rest_client = build_client(
+            socket_file_path,
+            simple_rest_client::ServerClosedConnections::TreatAsError, // TODO: is this true?
+        )
+        .await?;
 
         Ok(Self {
             reporter,
@@ -269,7 +273,11 @@ impl SimpleAuthenticatedClient {
         socket_file_path: PathBuf,
         token: &str,
     ) -> Result<Self, OpenBaoError> {
-        let rest_client = build_client(socket_file_path).await?;
+        let rest_client = build_client(
+            socket_file_path,
+            ServerClosedConnections::TreatAsError, // TODO: is this true
+        )
+        .await?;
 
         Ok(Self {
             reporter,
@@ -297,7 +305,11 @@ impl SimpleAuthenticatedClient {
             &format!("Logging into OpenBao with app role '{name}'…"),
         );
 
-        let mut rest_client = build_client(socket_file_path).await?;
+        let mut rest_client = build_client(
+            socket_file_path,
+            ServerClosedConnections::TreatAsError, // TODO: is this correct
+        )
+        .await?;
         let parser = JsonParser::new();
 
         let token = commands::auth::Login::new(
