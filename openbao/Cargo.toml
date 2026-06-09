@@ -4,10 +4,10 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-async-trait = "0.1"
-log = { path = "../log" }
+async-trait = { workspace = true }
+log = { workspace = true }
 rand = "0.9.2"
-serde = { version = "1.0.219", features = ["derive"] }
-serde_json = "1.0.140"
-simple_rest_client = { path = "../simple_rest_client" }
-thiserror = "1"
+serde = { workspace = true }
+serde_json = { workspace = true }
+simple_rest_client = { workspace = true }
+thiserror = { workspace = true }
