@@ -7,9 +7,9 @@ use config::constants::DOUGLAS_ADMIN_GROUP;
 use config::{DouglasFolders, constants};
 use credentials::{Credentials, CredentialsError, create_credentials};
 use file_system::{
-    FileDeleter, FileReader, FileSystemError, FileWriter, Folder, Links, Listener,
-    LocalFileDeleter, LocalFileReader, LocalFileWriter, LocalFolder, LocalLinks, LocalPermissions,
-    LocalUnixDomainSocket, Modes, Permissions, UnixDomainSocket, path_to_string,
+    BindableUnixDomainSocketFile, FileDeleter, FileReader, FileSystemError, FileWriter, Folder,
+    Links, Listener, LocalFileWriter, Modes, Permissions, UnixDomainSocket, UnixFileDeleter,
+    UnixFileReader, UnixFolder, UnixLinks, UnixPermissions, path_to_string,
 };
 use futures::{SinkExt, StreamExt};
 use log::{BufferedFileReporter, Level, Outcome, Reporter, ScopeKind, Span, TeeReporter};
@@ -340,13 +340,13 @@ impl Server {
     pub async fn build(reporting_fd: Option<i32>) -> Result<Self, ServerError> {
         let os: Arc<dyn Os> = Arc::new(Unix::new());
         let credentials = create_credentials(Arc::clone(&os));
-        let folder = Box::new(LocalFolder::new());
-        let file_reader = Box::new(LocalFileReader::new());
+        let folder = Box::new(UnixFolder::new());
+        let file_reader = Box::new(UnixFileReader::new());
         let file_writer = Box::new(LocalFileWriter::new());
-        let file_deleter = Box::new(LocalFileDeleter::new());
-        let links = Box::new(LocalLinks::new());
-        let unix_domain_socket = Box::new(LocalUnixDomainSocket::new());
-        let permissions = Box::new(LocalPermissions::new());
+        let file_deleter = Box::new(UnixFileDeleter::new());
+        let links = Box::new(UnixLinks::new());
+        let unix_domain_socket = Box::new(UnixDomainSocket::new());
+        let permissions = Box::new(UnixPermissions::new());
         let environment_variable_reader = Box::new(UnixEnvironmentVariableReader::new());
         let douglas_folders = DouglasFolders::new();
 
@@ -431,7 +431,7 @@ impl Server {
         credentials: Arc<dyn Credentials>,
         permissions: Arc<dyn Permissions>,
         shutdown_sender: Sender<()>,
-        unix_domain_socket: Box<dyn UnixDomainSocket>,
+        unix_domain_socket: Box<dyn BindableUnixDomainSocketFile>,
         os: Arc<dyn Os>,
         douglas_folders: &DouglasFolders,
     ) -> Server {

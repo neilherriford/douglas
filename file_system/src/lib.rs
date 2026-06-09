@@ -254,15 +254,15 @@ pub trait FileAppender: Send + Sync {
 }
 
 #[derive(Default)]
-pub struct LocalFileAppender {}
+pub struct UnixFileAppender {}
 
-impl LocalFileAppender {
+impl UnixFileAppender {
     pub fn new() -> Self {
         Self {}
     }
 }
 
-impl FileAppender for LocalFileAppender {
+impl FileAppender for UnixFileAppender {
     fn append(&self, path: &Path, contents: String) -> Result<(), FileSystemError> {
         if let Some(parent) = path.parent()
             && !self.exists(parent)
@@ -288,15 +288,15 @@ impl FileAppender for LocalFileAppender {
 }
 
 #[derive(Default)]
-pub struct LocalFileReader {}
+pub struct UnixFileReader {}
 
-impl LocalFileReader {
+impl UnixFileReader {
     pub fn new() -> Self {
         Self {}
     }
 }
 
-impl FileReader for LocalFileReader {
+impl FileReader for UnixFileReader {
     fn read_all(&self, path: &Path) -> Result<String, FileSystemError> {
         Ok(read_to_string(path)?)
     }
@@ -306,15 +306,15 @@ impl FileReader for LocalFileReader {
 }
 
 #[derive(Default)]
-pub struct LocalFileDeleter {}
+pub struct UnixFileDeleter {}
 
-impl LocalFileDeleter {
+impl UnixFileDeleter {
     pub fn new() -> Self {
         Self {}
     }
 }
 
-impl FileDeleter for LocalFileDeleter {
+impl FileDeleter for UnixFileDeleter {
     fn delete(&self, path: &Path) -> Result<(), FileSystemError> {
         if path.exists() {
             remove_file(path)?;
@@ -324,14 +324,14 @@ impl FileDeleter for LocalFileDeleter {
 }
 
 #[derive(Default)]
-pub struct LocalFileRenamer {}
+pub struct UnixFileRenamer {}
 
-impl LocalFileRenamer {
+impl UnixFileRenamer {
     pub fn new() -> Self {
         Self {}
     }
 }
-impl FileRenamer for LocalFileRenamer {
+impl FileRenamer for UnixFileRenamer {
     fn rename(&self, from: &Path, to: &Path) -> Result<(), FileSystemError> {
         Ok(rename(from, to)?)
     }
@@ -354,9 +354,9 @@ pub trait Permissions: Send + Sync {
 }
 
 #[derive(Default)]
-pub struct LocalPermissions {}
+pub struct UnixPermissions {}
 
-impl LocalPermissions {
+impl UnixPermissions {
     pub fn new() -> Self {
         Self {}
     }
@@ -376,7 +376,7 @@ impl LocalPermissions {
     }
 }
 
-impl Permissions for LocalPermissions {
+impl Permissions for UnixPermissions {
     fn change_user_and_group_ownership(
         &self,
         path: &Path,
@@ -508,7 +508,7 @@ impl Listener for tokio::net::UnixListener {
 }
 
 #[cfg_attr(feature = "mock", mockall::automock)]
-pub trait UnixDomainSocket {
+pub trait BindableUnixDomainSocketFile {
     fn bind(
         &self,
         path: &Path,
@@ -516,15 +516,15 @@ pub trait UnixDomainSocket {
 }
 
 #[derive(Default)]
-pub struct LocalUnixDomainSocket {}
+pub struct UnixDomainSocket {}
 
-impl LocalUnixDomainSocket {
+impl UnixDomainSocket {
     pub fn new() -> Self {
         Self {}
     }
 }
 
-impl UnixDomainSocket for LocalUnixDomainSocket {
+impl BindableUnixDomainSocketFile for UnixDomainSocket {
     fn bind(
         &self,
         path: &Path,
@@ -534,7 +534,7 @@ impl UnixDomainSocket for LocalUnixDomainSocket {
 }
 
 #[cfg(feature = "mock")]
-impl MockUnixDomainSocket {
+impl MockBindableUnixDomainSocketFile {
     pub fn expect_bind_with<F>(&mut self, path: &str, factory: F) -> &mut Self
     where
         F: Fn() -> Box<dyn Listener + Send + Sync + 'static> + Send + 'static,
@@ -557,15 +557,15 @@ pub trait Links: Send + Sync {
 }
 
 #[derive(Default)]
-pub struct LocalLinks {}
+pub struct UnixLinks {}
 
-impl LocalLinks {
+impl UnixLinks {
     pub fn new() -> Self {
         Self {}
     }
 }
 
-impl Links for LocalLinks {
+impl Links for UnixLinks {
     fn create(&self, from: &Path, to: &Path) -> Result<(), FileSystemError> {
         Ok(symlink(from, to)?)
     }
@@ -614,15 +614,15 @@ pub trait Inspect {
 }
 
 #[derive(Default)]
-pub struct LocalInspect {}
+pub struct UnixInspect {}
 
-impl LocalInspect {
+impl UnixInspect {
     pub fn new() -> Self {
         Self {}
     }
 }
 
-impl Inspect for LocalInspect {
+impl Inspect for UnixInspect {
     fn is_directory(&self, path: &Path) -> bool {
         path.is_dir()
     }
@@ -658,15 +658,15 @@ pub trait Folder: Send + Sync {
 }
 
 #[derive(Default)]
-pub struct LocalFolder {}
+pub struct UnixFolder {}
 
-impl LocalFolder {
+impl UnixFolder {
     pub fn new() -> Self {
         Self {}
     }
 }
 
-impl Folder for LocalFolder {
+impl Folder for UnixFolder {
     fn canonicalize(&self, path: &Path) -> Result<PathBuf, FileSystemError> {
         Ok(path.canonicalize()?)
     }

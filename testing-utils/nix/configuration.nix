@@ -86,6 +86,67 @@ in
     wantedBy = [ "multi-user.target" ];
   };
 
+  ############################## UTM CACHE #############################
+  # Second virtiofs share for persistent build artifacts (~/.cargo, ~/.rustup).
+  # In UTM: add a shared folder pointing at a stable directory on the host,
+  # set its tag to "cache". If the share isn't configured the mount will fail
+  # but that's non-fatal — users just get a normal (ephemeral) ~/.cargo.
+  systemd.services.mount-utm-cache = {
+    description = "Mount UTM Cache Folder";
+    after = [ "local-fs.target" ];
+    preStart = ''
+      mkdir -p /mnt/cache
+    '';
+    serviceConfig = {
+      Type = "oneshot";
+      ExecStart = "${pkgs.util-linux}/bin/mount -t virtiofs cache /mnt/cache";
+      RemainAfterExit = true;
+    };
+    wantedBy = [ "multi-user.target" ];
+  };
+
+  # Wire ~/.cargo and ~/.rustup for every user in /home to the persistent cache.
+  # Uses `wants` (not `requires`) so a missing/unconfigured cache share is
+  # non-fatal — the system boots fine and users get ephemeral cargo dirs instead.
+  systemd.services.setup-cache-symlinks = {
+    description = "Symlink ~/.cargo and ~/.rustup to UTM cache share";
+    after = [ "mount-utm-cache.service" ];
+    wants = [ "mount-utm-cache.service" ];
+    wantedBy = [ "multi-user.target" ];
+    serviceConfig = {
+      Type = "oneshot";
+      RemainAfterExit = true;
+      ExecStart = pkgs.writeShellScript "setup-cache-symlinks" ''
+        # Bail out silently if the cache share isn't mounted.
+        if ! mountpoint -q /mnt/cache; then
+          echo "setup-cache-symlinks: /mnt/cache not mounted, skipping"
+          exit 0
+        fi
+
+        mkdir -p /mnt/cache/cargo /mnt/cache/rustup
+
+        for user_home in /home/*; do
+          [ -d "$user_home" ] || continue
+          user=$(basename "$user_home")
+
+          # Only replace real directories; leave existing symlinks alone so
+          # re-running this service is idempotent.
+          if [ ! -L "$user_home/.cargo" ]; then
+            rm -rf "$user_home/.cargo"
+            ln -s /mnt/cache/cargo "$user_home/.cargo"
+            chown -h "$user:users" "$user_home/.cargo"
+          fi
+
+          if [ ! -L "$user_home/.rustup" ]; then
+            rm -rf "$user_home/.rustup"
+            ln -s /mnt/cache/rustup "$user_home/.rustup"
+            chown -h "$user:users" "$user_home/.rustup"
+          fi
+        done
+      '';
+    };
+  };
+
   ############################## ZEROCONF ##############################
   services.avahi = {
     enable = true;
@@ -353,6 +414,11 @@ in
     # Show development environment info
     if [ -n "$SSH_CONNECTION" ]; then
       echo "📁 Available: /scratch (4GB tmpfs), /mnt/share (UTM share)"
+      if mountpoint -q /mnt/cache 2>/dev/null; then
+        echo "📦 Build cache: ~/.cargo and ~/.rustup → /mnt/cache (persistent)"
+      else
+        echo "📦 Build cache: ephemeral (add a 'cache' virtiofs share in UTM to persist)"
+      fi
       echo "🔧 Run 'verify-tools' to check all development tools"
     fi
   '';

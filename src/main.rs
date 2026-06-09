@@ -13,7 +13,7 @@ use ::config::DouglasFolders;
 use clap::{Parser, Subcommand, ValueEnum};
 use credentials::create_credentials;
 use daemonize::Daemonize;
-use file_system::LocalFileReader;
+use file_system::UnixFileReader;
 use log::{BufferedFileReporter, Reporter, TeeReporter};
 use os::{Os, Unix};
 use std::{
@@ -169,7 +169,7 @@ async fn start(plan_only: bool) -> ExitCode {
     };
 
     let douglas_folders = DouglasFolders::new();
-    let file_reader = Arc::new(LocalFileReader::new());
+    let file_reader = Arc::new(UnixFileReader::new());
     let os: Arc<dyn Os> = Arc::new(Unix::new());
     let credentials = Arc::from(create_credentials(Arc::clone(&os)));
 

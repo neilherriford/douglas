@@ -1,6 +1,6 @@
 use super::ServerError;
 use config::constants::DOUGLAS_ADMIN_GROUP;
-use file_system::{FileDeleter, Listener, Modes, Permissions, UnixDomainSocket};
+use file_system::{BindableUnixDomainSocketFile, FileDeleter, Listener, Modes, Permissions};
 use log::{Outcome, ScopeKind, Span};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -9,7 +9,7 @@ pub(super) struct CreateListener {
     socket_path: PathBuf,
     file_deleter: Arc<dyn FileDeleter>,
     permissions: Arc<dyn Permissions>,
-    unix_domain_socket: Arc<dyn UnixDomainSocket>,
+    bindable_unix_domain_socket_file: Arc<dyn BindableUnixDomainSocketFile>,
 }
 
 impl CreateListener {
@@ -17,13 +17,13 @@ impl CreateListener {
         socket_path: &Path,
         file_deleter: Arc<dyn FileDeleter>,
         permissions: Arc<dyn Permissions>,
-        unix_domain_socket: Arc<dyn UnixDomainSocket>,
+        bindable_unix_domain_socket_file: Arc<dyn BindableUnixDomainSocketFile>,
     ) -> Self {
         Self {
             socket_path: socket_path.to_path_buf(),
             file_deleter,
             permissions,
-            unix_domain_socket,
+            bindable_unix_domain_socket_file,
         }
     }
 
@@ -38,7 +38,9 @@ impl CreateListener {
         let log = child_span.create_scoped_reporter();
         self.file_deleter.delete(&self.socket_path)?;
 
-        let listener = self.unix_domain_socket.bind(&self.socket_path)?;
+        let listener = self
+            .bindable_unix_domain_socket_file
+            .bind(&self.socket_path)?;
 
         self.permissions.change_user_and_group_ownership(
             &self.socket_path,
