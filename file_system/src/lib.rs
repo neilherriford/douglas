@@ -226,15 +226,15 @@ pub trait FileRenamer {
 }
 
 #[derive(Default)]
-pub struct LocalFileWriter {}
+pub struct UnixFileWriter {}
 
-impl LocalFileWriter {
+impl UnixFileWriter {
     pub fn new() -> Self {
         Self {}
     }
 }
 
-impl FileWriter for LocalFileWriter {
+impl FileWriter for UnixFileWriter {
     fn write_all(&self, path: &Path, contents: &str) -> Result<(), FileSystemError> {
         let mut file = File::create(path)?;
         file.write_all(contents.as_bytes())?;

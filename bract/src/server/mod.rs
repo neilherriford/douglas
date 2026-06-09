@@ -8,8 +8,8 @@ use config::{DouglasFolders, constants};
 use credentials::{Credentials, CredentialsError, create_credentials};
 use file_system::{
     BindableUnixDomainSocketFile, FileDeleter, FileReader, FileSystemError, FileWriter, Folder,
-    Links, Listener, LocalFileWriter, Modes, Permissions, UnixDomainSocket, UnixFileDeleter,
-    UnixFileReader, UnixFolder, UnixLinks, UnixPermissions, path_to_string,
+    Links, Listener, Modes, Permissions, UnixDomainSocket, UnixFileDeleter, UnixFileReader,
+    UnixFileWriter, UnixFolder, UnixLinks, UnixPermissions, path_to_string,
 };
 use futures::{SinkExt, StreamExt};
 use log::{BufferedFileReporter, Level, Outcome, Reporter, ScopeKind, Span, TeeReporter};
@@ -342,7 +342,7 @@ impl Server {
         let credentials = create_credentials(Arc::clone(&os));
         let folder = Box::new(UnixFolder::new());
         let file_reader = Box::new(UnixFileReader::new());
-        let file_writer = Box::new(LocalFileWriter::new());
+        let file_writer = Box::new(UnixFileWriter::new());
         let file_deleter = Box::new(UnixFileDeleter::new());
         let links = Box::new(UnixLinks::new());
         let unix_domain_socket = Box::new(UnixDomainSocket::new());
