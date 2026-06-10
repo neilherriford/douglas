@@ -25,6 +25,7 @@ openbao = { workspace = true }
 os = { workspace = true }
 os_pipe = "1.2.3"
 ratatui = "0.30.0"
+resin = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 simple_rest_client = { workspace = true }
@@ -74,6 +75,7 @@ file_system = { path = "./file_system" }
 log = { path = "./log" }
 openbao = { path = "./openbao" }
 os = { path = "./os" }
+resin = { path = "./resin" }
 simple_rest_client = { path = "./simple_rest_client" }
 utils = { path = "./utils" }
 

@@ -79,6 +79,8 @@ enum Commands {
         )]
         plan_only: bool,
     },
+    #[command(long_about = "Start the resin server")]
+    Resin,
     #[command(long_about = "Request Bract status")]
     Status,
     #[command(long_about = "Shutdown the bract server")]
@@ -95,6 +97,7 @@ impl Display for Commands {
                     f.write_str("start")
                 }
             }
+            Commands::Resin => f.write_str("status"),
             Commands::Status => f.write_str("status"),
             Commands::Shutdown => f.write_str("shutdown"),
         }
@@ -111,6 +114,7 @@ fn main() -> ExitCode {
             notify_fd,
         } => start_bract(plan_only, notify_fd),
         Commands::Start { plan_only, .. } => run_with_tokio(start(plan_only)),
+        Commands::Resin => run_with_tokio(resin()),
         Commands::Status => todo!(),
         Commands::Shutdown => todo!(),
     }
@@ -191,4 +195,17 @@ async fn start(plan_only: bool) -> ExitCode {
     .await;
 
     ExitCode::from(0)
+}
+
+async fn resin() -> ExitCode {
+    let Ok(cli_reporter) = CliReporter::start() else {
+        eprintln!("Failed to start TUI reporter");
+        return ExitCode::from(1);
+    };
+
+    let server = resin::Server::new(Arc::new(cli_reporter));
+    match server.start().await {
+        Ok(()) => ExitCode::from(0),
+        Err(_) => ExitCode::from(1),
+    }
 }
