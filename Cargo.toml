@@ -43,7 +43,7 @@ members = [
     "log",
     "file_system",
     "os",
-    "bract", "config", "utils", "openbao", "blueprint", "service_library", "application_definition_repository",
+    "bract", "config", "utils", "openbao", "blueprint", "service_library", "application_definition_repository", "resin",
 ]
 
 [workspace.dependencies]
@@ -64,6 +64,7 @@ toml = "1.1.2"
 users = "=0.11"
 uuid = { version = "1.23.1", features = ["v7"] }
 # Internal
+application_definition_repository = { path = "./application_definition_repository" }
 blueprint = { path = "./blueprint" }
 bract = { path = "./bract" }
 config = { path = "./config" }

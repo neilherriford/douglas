@@ -2,6 +2,7 @@ use crate::Service;
 use crate::server::create_listener::CreateListener;
 use crate::server::pipe_reporter::PipeReporter;
 use crate::server::token_validator::TokenValidator;
+use application_definition_repository::ApplicationDefinition;
 use blueprint::{Command, CommandExecutor, JournalingExecutor, RunningStatus};
 use config::constants::DOUGLAS_ADMIN_GROUP;
 use config::{DouglasFolders, constants};
@@ -171,25 +172,25 @@ impl std::fmt::Display for MountDefinition {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(tag = "type", content = "payload")]
 pub(crate) enum Request {
-    CreateServiceMounts {
+    ApplicationExists {
         token: String,
-        service_name: String,
-        mounts: HashSet<MountDefinition>,
+        application_name: String,
     },
-    SetupEphemeralMounts {
+    ApplicationStatus {
         token: String,
-        service_name: String,
+        application_name: String,
     },
-    TearDownEphemeralMounts {
+    CreateApplicaton {
         token: String,
-        service_name: String,
+        definition: ApplicationDefinition,
     },
-    WriteToMount {
+    DeployApplication {
         token: String,
-        service_name: String,
-        mount_name: String,
-        relative_path: PathBuf,
-        contents: String,
+        application_name: String,
+    },
+    RollbackApplication {
+        token: String,
+        application_name: String,
     },
     Status {
         token: String,
@@ -202,29 +203,21 @@ pub(crate) enum Request {
 impl std::fmt::Display for Request {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Request::CreateServiceMounts {
-                service_name,
-                mounts,
-                ..
-            } => {
-                let pretty_mounts = mounts.iter().fold(String::new(), |mut acc, definition| {
-                    if !acc.is_empty() {
-                        acc.push_str(", ");
-                    }
-                    acc.push_str(&format!("({}: shared: {}, ephemeral: {})",definition.name, definition.shared,definition.ephemeral));
-                    acc
-                });
-
-                f.write_str(&format!("CreateServiceMounts service_name: {service_name} mounts: [{pretty_mounts}]"))
-            },
-            Request::SetupEphemeralMounts { service_name, .. } => f.write_str(&format!("SetupEphemeralMounts service_name: {service_name}")),
-            Request::TearDownEphemeralMounts { service_name, .. } => f.write_str(&format!("TearDownEphemeralMounts service_name: {service_name}")),
-            Request::WriteToMount {
-                service_name,
-                mount_name,
-                relative_path,
-                ..
-            } => f.write_str(&format!("WriteToMount service_name: {service_name} mount_name: {mount_name}, relative_path: {}", path_to_string(relative_path))),
+            Request::ApplicationExists {
+                application_name, ..
+            } => f.write_str(&format!("Application '{application_name}' exists?")),
+            Request::ApplicationStatus {
+                application_name, ..
+            } => f.write_str(&format!("Application '{application_name}' status")),
+            Request::CreateApplicaton { definition, .. } => {
+                f.write_str(&format!("Create Application '{}'", definition.display_name))
+            }
+            Request::DeployApplication {
+                application_name, ..
+            } => f.write_str(&format!("Deploy '{application_name}'")),
+            Request::RollbackApplication {
+                application_name, ..
+            } => f.write_str(&format!("Rollback '{application_name}'")),
             Request::Status { .. } => f.write_str("Status"),
             Request::Shutdown { .. } => f.write_str("Shutdown"),
         }
@@ -270,27 +263,22 @@ impl RequestHandler {
             ScopeKind::Task,
         );
         let response = match request {
-            Request::WriteToMount {
+            Request::ApplicationExists {
                 token,
-                service_name,
-                mount_name,
-                relative_path,
-                contents,
-            } => {
-                todo!()
-            }
-            Request::CreateServiceMounts {
-                token,
-                service_name,
-                mounts,
+                application_name,
             } => todo!(),
-            Request::SetupEphemeralMounts {
+            Request::ApplicationStatus {
                 token,
-                service_name,
+                application_name,
             } => todo!(),
-            Request::TearDownEphemeralMounts {
+            Request::CreateApplicaton { token, definition } => todo!(),
+            Request::DeployApplication {
                 token,
-                service_name,
+                application_name,
+            } => todo!(),
+            Request::RollbackApplication {
+                token,
+                application_name,
             } => todo!(),
             Request::Status { token } => self.status.perform(&span, token),
             Request::Shutdown { token } => {
