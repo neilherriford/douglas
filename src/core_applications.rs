@@ -38,23 +38,7 @@ impl OpenBao {
         &self,
         bract_client: bract::Client,
     ) -> Result<PathBuf, OpenBaoError> {
-        let mut openbao_socket_path = match bract_client
-            .active_mount_version(&self.name(), &OpenBao::sockets_mount_name())
-            .await
-        {
-            Ok(None) => {
-                return Err(OpenBaoError::Error(
-                    "OpenBao not socket mount missing".into(),
-                ));
-            }
-            Ok(Some(mount)) => mount.path,
-            Err(err) => {
-                return Err(OpenBaoError::Error(err.to_string()));
-            }
-        };
-
-        openbao_socket_path.push(OpenBao::socket_file_name());
-        Ok(openbao_socket_path)
+        todo!();
     }
 
     fn data_mount() -> MountTemplate {

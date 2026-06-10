@@ -284,6 +284,12 @@ impl Span {
         result
     }
 
+    pub fn record(reporter: Arc<dyn Reporter>, label: &str, kind: ScopeKind, outcome: Outcome) {
+        Self::new(reporter, label, kind)
+            .start_guard()
+            .finish_with_outcome(outcome);
+    }
+
     pub fn create_child(&self, label: &str, kind: ScopeKind) -> Self {
         let child_scope_id = ScopeId::new();
         self.reporter

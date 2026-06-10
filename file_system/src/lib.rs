@@ -1,3 +1,4 @@
+pub mod encoding;
 use async_trait::async_trait;
 #[cfg(feature = "mock")]
 use mockall::predicate;
@@ -127,13 +128,13 @@ impl std::fmt::Display for Modes {
     }
 }
 
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, PartialEq, Eq, Clone)]
 pub enum EntryKind {
     File,
     Directory,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Entry {
     pub name: String,
     pub kind: EntryKind,

@@ -231,6 +231,23 @@ impl std::fmt::Display for Version {
     }
 }
 
+impl std::str::FromStr for Version {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let s = s.trim();
+        if s.is_empty() {
+            return Err("Versions cannot be empty".to_string());
+        }
+
+        if s == "latest" {
+            Ok(Version::Latest)
+        } else {
+            Ok(Version::Specific(s.to_string()))
+        }
+    }
+}
+
 #[derive(Debug, PartialEq, Clone)]
 pub struct ImageName {
     pub namespace: String,

@@ -11,6 +11,7 @@ mock = ["mockall"]
 async-trait = { workspace = true }
 mockall = { workspace = true, optional = true }
 nix = { workspace = true }
+percent-encoding = "2"
 thiserror = { workspace = true }
 tokio = { workspace = true }
 users = { workspace = true }

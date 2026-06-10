@@ -10,7 +10,7 @@ use os_pipe::{PipeReader, PipeWriter};
 use std::os::{fd::OwnedFd, unix::io::AsRawFd};
 use std::{
     num::ParseIntError,
-    path::{Path, PathBuf},
+    path::Path,
     sync::{Arc, mpsc},
     time::{Duration, Instant},
 };
@@ -87,9 +87,10 @@ impl StateObserver {
         let guard = span
             .create_child("Discovering current state", ScopeKind::Phase)
             .start_guard();
-        let mut result = State::default();
-
-        result.is_root = self.credentials.is_root();
+        let mut result = State {
+            is_root: self.credentials.is_root(),
+            ..Default::default()
+        };
         result.is_bract_running = match self.get_bract_pid(&config.transients)? {
             Some(pid) => {
                 if self.os.is_active_pid(pid)? {
