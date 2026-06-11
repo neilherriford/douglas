@@ -34,13 +34,6 @@ impl OpenBao {
         "openbao.sock".to_string()
     }
 
-    pub async fn qualified_socket_path(
-        &self,
-        bract_client: bract::Client,
-    ) -> Result<PathBuf, OpenBaoError> {
-        todo!();
-    }
-
     fn data_mount() -> MountTemplate {
         MountTemplate::empty_mount("data", &Self::container_data_path())
     }

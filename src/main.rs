@@ -6,7 +6,6 @@ mod douglas_flags_reader;
 #[macro_use]
 pub(crate) mod macros;
 mod cli_reporter;
-mod mount_file_template_expander;
 
 use crate::cli_reporter::CliReporter;
 use ::config::DouglasFolders;
@@ -62,44 +61,40 @@ struct Cli {
 #[derive(Subcommand, Debug)]
 #[command(name = "douglas", about = "My awesome CLI", version = "1.0")]
 enum Commands {
-    #[command(long_about = "Starts the bract server")]
+    #[command(about = "Start Douglas")]
     Start {
-        #[arg(
-            long,
-            default_value_t = false,
-            help = "Optional: When true, bract is run as daemon.  Defaults to false"
-        )]
-        bract: bool,
-        #[arg(long, help = "The file descriptor to stream boot information to.")]
-        notify_fd: Option<i32>,
-        #[arg(
-            long,
-            default_value_t = false,
-            help = "Optional: When true, only displays the start plan"
-        )]
+        #[arg(long, default_value_t = false, help = "Only display the start plan")]
         plan_only: bool,
     },
-    #[command(long_about = "Start the resin server")]
+    #[command(about = "Stop Douglas")]
+    Stop,
+    #[command(hide = true)]
+    Service {
+        #[command(subcommand)]
+        service: ServiceCommand,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum ServiceCommand {
+    Bract {
+        #[arg(long, help = "File descriptor to stream boot information to")]
+        notify_fd: i32,
+    },
     Resin,
-    #[command(long_about = "Request Bract status")]
-    Status,
-    #[command(long_about = "Shutdown the bract server")]
-    Shutdown,
 }
 
 impl Display for Commands {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Commands::Start { bract, .. } => {
-                if *bract {
-                    f.write_str("start bract")
-                } else {
-                    f.write_str("start")
-                }
-            }
-            Commands::Resin => f.write_str("status"),
-            Commands::Status => f.write_str("status"),
-            Commands::Shutdown => f.write_str("shutdown"),
+            Commands::Start { .. } => f.write_str("start"),
+            Commands::Stop => f.write_str("stop"),
+            Commands::Service {
+                service: ServiceCommand::Bract { .. },
+            } => f.write_str("service bract"),
+            Commands::Service {
+                service: ServiceCommand::Resin,
+            } => f.write_str("service resin"),
         }
     }
 }
@@ -108,15 +103,14 @@ fn main() -> ExitCode {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Start {
-            bract: true,
-            plan_only,
-            notify_fd,
-        } => start_bract(plan_only, notify_fd),
-        Commands::Start { plan_only, .. } => run_with_tokio(start(plan_only)),
-        Commands::Resin => run_with_tokio(resin()),
-        Commands::Status => todo!(),
-        Commands::Shutdown => todo!(),
+        Commands::Start { plan_only } => run_with_tokio(start(plan_only)),
+        Commands::Stop => todo!(),
+        Commands::Service {
+            service: ServiceCommand::Bract { notify_fd },
+        } => start_bract(notify_fd),
+        Commands::Service {
+            service: ServiceCommand::Resin,
+        } => run_with_tokio(resin()),
     }
 }
 
@@ -136,7 +130,7 @@ fn run_with_tokio(fut: impl std::future::Future<Output = ExitCode>) -> ExitCode 
 /// inside `Daemonize::start`) must happen before any tokio runtime exists —
 /// forking inside a running runtime leaves the child with broken worker-thread
 /// state and a deadlocked scheduler.
-fn start_bract(_plan_only: bool, reporting_fd: Option<i32>) -> ExitCode {
+fn start_bract(reporting_fd: i32) -> ExitCode {
     match Daemonize::new().start() {
         Ok(()) => {
             // Child process — no tokio runtime exists yet, safe to create one.
@@ -149,21 +143,20 @@ fn start_bract(_plan_only: bool, reporting_fd: Option<i32>) -> ExitCode {
     }
 }
 
-async fn run_bract_server(reporting_fd: Option<i32>) -> ExitCode {
-    let server = match bract::Server::build(reporting_fd).await {
-        Ok(server) => server,
+async fn run_bract_server(reporting_fd: i32) -> ExitCode {
+    let bract = match bract::Bract::build(reporting_fd).await {
+        Ok(bract) => bract,
         Err(err) => {
-            eprintln!("Failed to bootstrap bract: {err}");
+            eprintln!("Failed to start bract: {err:?}");
             return ExitCode::from(1);
         }
     };
-    match server.start() {
-        Ok(()) => ExitCode::from(0),
-        Err(err) => {
-            eprintln!("Failed to start bract: {err:?}");
-            ExitCode::from(1)
-        }
+
+    if let Err(err) = bract.start().await {
+        eprintln!("Failed to start bract: {err:?}");
+        return ExitCode::from(1);
     }
+    ExitCode::from(0)
 }
 
 async fn start(plan_only: bool) -> ExitCode {

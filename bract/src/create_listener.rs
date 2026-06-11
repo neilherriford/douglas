@@ -1,11 +1,13 @@
-use super::ServerError;
 use config::constants::DOUGLAS_ADMIN_GROUP;
-use file_system::{BindableUnixDomainSocketFile, FileDeleter, Listener, Modes, Permissions};
+use file_system::{
+    BindableUnixDomainSocketFile, FileDeleter, FileSystemError, Listener, Modes, Permissions,
+};
 use log::{Outcome, ScopeKind, Span};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use thiserror::Error;
 
-pub(super) struct CreateListener {
+pub(crate) struct CreateListener {
     socket_path: PathBuf,
     file_deleter: Arc<dyn FileDeleter>,
     permissions: Arc<dyn Permissions>,
@@ -30,7 +32,7 @@ impl CreateListener {
     pub fn create(
         &self,
         span: &Span,
-    ) -> Result<Box<dyn Listener + Send + Sync + 'static>, ServerError> {
+    ) -> Result<Box<dyn Listener + Send + Sync + 'static>, FileSystemError> {
         let child_span = span.create_child(
             &format!("Refreshing socket '{}'", self.socket_path.to_string_lossy()),
             ScopeKind::Step,

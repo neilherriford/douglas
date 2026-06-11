@@ -206,12 +206,12 @@ impl Command<Context> for StartBract {
 
         let fd = pipe_writer.as_raw_fd();
         match std::process::Command::new(context.os.current_executable()?)
-            .args(["start", "--bract", "--notify-fd", &fd.to_string()])
+            .args(["service", "bract", "--notify-fd", &fd.to_string()])
             .fd_mappings(vec![FdMapping {
                 parent_fd: OwnedFd::from(pipe_writer),
                 child_fd: fd,
             }]) {
-            Ok(mut cmd) => cmd.spawn()?,
+            Ok(cmd) => cmd.spawn()?,
             Err(err) => return guard.finish(Err(SpawnError(err))),
         };
 
