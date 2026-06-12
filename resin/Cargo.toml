@@ -6,4 +6,5 @@ edition = "2024"
 [dependencies]
 axum = "0.8.9"
 log = { workspace = true }
+config = { workspace = true }
 tokio = { workspace = true }

@@ -4,8 +4,7 @@ pub mod unix_domain_socket;
 
 use http_body_util::BodyExt;
 use hyper::client::conn::http1::SendRequest;
-use hyper_util::client::legacy::ResponseFuture;
-use log::{Event, EventKind, Level, Outcome, Reporter, ScopeId, ScopeKind, ScopedReporter, Span};
+use log::{Level, Outcome, ScopeKind, Span};
 use std::collections::HashMap;
 use std::sync::Arc;
 use thiserror::Error;

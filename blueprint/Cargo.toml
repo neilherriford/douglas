@@ -4,5 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+credentials = { workspace = true }
+file_system = { workspace = true }
 log = { workspace = true }
 thiserror = { workspace = true }

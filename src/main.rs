@@ -2,7 +2,6 @@ mod application_definition;
 mod commands;
 mod config;
 mod core_applications;
-mod douglas_flags_reader;
 #[macro_use]
 pub(crate) mod macros;
 mod cli_reporter;
@@ -10,11 +9,14 @@ mod cli_reporter;
 use crate::cli_reporter::CliReporter;
 use ::config::DouglasFolders;
 use clap::{Parser, Subcommand, ValueEnum};
-use credentials::create_credentials;
+use credentials::{
+    create_credentials,
+    well_known::{DOUGLAS_RESIN_GROUP, DOUGLAS_RESIN_USER},
+};
 use daemonize::Daemonize;
-use file_system::UnixFileReader;
+use file_system::{FileReader, Folder, Permissions, UnixFileReader, UnixFolder, UnixPermissions};
 use log::{BufferedFileReporter, Reporter, TeeReporter};
-use os::{Os, Unix};
+use os::{EnvironmentVariableReader, Os, Unix, UnixEnvironmentVariableReader};
 use std::{
     fmt::{Debug, Display},
     process::ExitCode,
@@ -81,7 +83,10 @@ enum ServiceCommand {
         #[arg(long, help = "File descriptor to stream boot information to")]
         notify_fd: i32,
     },
-    Resin,
+    Resin {
+        #[arg(long, default_value_t = false, help = "Debug mode")]
+        dbg: bool,
+    },
 }
 
 impl Display for Commands {
@@ -93,7 +98,7 @@ impl Display for Commands {
                 service: ServiceCommand::Bract { .. },
             } => f.write_str("service bract"),
             Commands::Service {
-                service: ServiceCommand::Resin,
+                service: ServiceCommand::Resin { .. },
             } => f.write_str("service resin"),
         }
     }
@@ -109,8 +114,18 @@ fn main() -> ExitCode {
             service: ServiceCommand::Bract { notify_fd },
         } => start_bract(notify_fd),
         Commands::Service {
-            service: ServiceCommand::Resin,
-        } => run_with_tokio(resin()),
+            service: ServiceCommand::Resin { dbg },
+        } => {
+            if dbg {
+                if let Err(err) = drop_to_resin_user() {
+                    eprintln!("Failed to drop to resin user: {err}");
+                    return ExitCode::from(1);
+                }
+                run_with_tokio(resin_debug_mode())
+            } else {
+                start_resin()
+            }
+        }
     }
 }
 
@@ -132,10 +147,7 @@ fn run_with_tokio(fut: impl std::future::Future<Output = ExitCode>) -> ExitCode 
 /// state and a deadlocked scheduler.
 fn start_bract(reporting_fd: i32) -> ExitCode {
     match Daemonize::new().start() {
-        Ok(()) => {
-            // Child process — no tokio runtime exists yet, safe to create one.
-            run_with_tokio(run_bract_server(reporting_fd))
-        }
+        Ok(()) => run_with_tokio(run_bract_server(reporting_fd)),
         Err(err) => {
             eprintln!("Failed to daemonize bract server: {err:?}");
             ExitCode::from(1)
@@ -159,6 +171,28 @@ async fn run_bract_server(reporting_fd: i32) -> ExitCode {
     ExitCode::from(0)
 }
 
+fn start_resin() -> ExitCode {
+    match Daemonize::new()
+        .user(DOUGLAS_RESIN_USER)
+        .group(DOUGLAS_RESIN_GROUP)
+        .start()
+    {
+        Ok(()) => run_with_tokio(run_resin_server()),
+        Err(err) => {
+            eprintln!("Failed to daemonize bract server: {err:?}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+async fn run_resin_server() -> ExitCode {
+    let server = resin::Server::default();
+    match server.start().await {
+        Ok(()) => ExitCode::from(0),
+        Err(_) => ExitCode::from(1),
+    }
+}
+
 async fn start(plan_only: bool) -> ExitCode {
     let Ok(cli_reporter) = CliReporter::start() else {
         eprintln!("Failed to start TUI reporter");
@@ -166,9 +200,13 @@ async fn start(plan_only: bool) -> ExitCode {
     };
 
     let douglas_folders = DouglasFolders::new();
-    let file_reader = Arc::new(UnixFileReader::new());
+    let file_reader: Arc<dyn FileReader> = Arc::new(UnixFileReader::new());
+    let folder: Arc<dyn Folder> = Arc::new(UnixFolder::new());
     let os: Arc<dyn Os> = Arc::new(Unix::new());
     let credentials = Arc::from(create_credentials(Arc::clone(&os)));
+    let permissions: Arc<dyn Permissions> = Arc::new(UnixPermissions::new());
+    let environment_variable_reader: Arc<dyn EnvironmentVariableReader> =
+        Arc::new(UnixEnvironmentVariableReader::new());
 
     let reporter: Arc<dyn Reporter> = Arc::new(TeeReporter::new(vec![
         Box::new(BufferedFileReporter::new(
@@ -181,6 +219,9 @@ async fn start(plan_only: bool) -> ExitCode {
         reporter,
         plan_only,
         credentials,
+        permissions,
+        environment_variable_reader,
+        folder,
         file_reader,
         os,
         douglas_folders,
@@ -190,7 +231,18 @@ async fn start(plan_only: bool) -> ExitCode {
     ExitCode::from(0)
 }
 
-async fn resin() -> ExitCode {
+fn drop_to_resin_user() -> Result<(), Box<dyn std::error::Error>> {
+    use nix::unistd::{User, setgid, setuid};
+
+    let user = User::from_name(DOUGLAS_RESIN_USER)?
+        .ok_or_else(|| format!("user '{DOUGLAS_RESIN_USER}' not found",))?;
+
+    setgid(user.gid)?; // gid first — once you drop uid you can't change gid
+    setuid(user.uid)?;
+    Ok(())
+}
+
+async fn resin_debug_mode() -> ExitCode {
     let Ok(cli_reporter) = CliReporter::start() else {
         eprintln!("Failed to start TUI reporter");
         return ExitCode::from(1);

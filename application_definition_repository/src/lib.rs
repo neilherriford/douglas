@@ -3,7 +3,7 @@ use file_system::{
     UnixFolder, encoding,
 };
 use serde::{Deserialize, Serialize};
-use std::{fs::OpenOptions, path::PathBuf};
+use std::path::PathBuf;
 use thiserror::Error;
 
 #[derive(Error, Debug)]

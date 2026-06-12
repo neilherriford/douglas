@@ -1,14 +1,17 @@
 mod pipe_reporter;
 
 use crate::{BootstrapError, bootstrap::pipe_reporter::PipeReporter};
-use blueprint::{Command, CommandExecutor, JournalingExecutor, RunningStatus};
-use config::{DouglasFolders, constants::DOUGLAS_ADMIN_GROUP};
-use credentials::Credentials;
-use file_system::{Folder, Modes, Permissions, path_to_string};
+use blueprint::commands::{AddUserToGroup, CreateFolder, CreateGroup, SetMode, SetOwnership};
+use blueprint::{
+    Command, CommandExecutor, FolderModeRequirement, FolderOwnershipRequirement,
+    GroupMembershipRequirement, HasCredentials, HasFolder, HasPermissions, JournalingExecutor,
+    RunningStatus,
+};
+use config::DouglasFolders;
+use credentials::{Credentials, well_known::DOUGLAS_ADMIN_GROUP};
+use file_system::{Folder, Modes, Permissions};
 use log::{BufferedFileReporter, Level, Reporter, ScopeKind, Span, TeeReporter};
-use os::EnvironmentVariableReader;
 use std::{
-    env::VarError,
     os::unix::net::UnixStream,
     path::{Path, PathBuf},
     sync::Arc,
@@ -19,7 +22,6 @@ pub async fn bootstrap(
     credentials: &dyn Credentials,
     folder: &dyn Folder,
     permissions: &dyn Permissions,
-    environment_variable_reader: &dyn EnvironmentVariableReader,
     douglas_folders: &DouglasFolders,
 ) -> Result<(), BootstrapError> {
     let boot_reporter: Arc<dyn Reporter> = {
@@ -50,13 +52,8 @@ pub async fn bootstrap(
         };
 
     let state = {
-        let mut state_observer = StateObserver::new(
-            credentials,
-            folder,
-            permissions,
-            environment_variable_reader,
-            &mut *docker_ping,
-        );
+        let mut state_observer =
+            StateObserver::new(credentials, folder, permissions, &mut *docker_ping);
         state_observer
             .discover(guard.span(), douglas_folders)
             .await?
@@ -128,26 +125,28 @@ pub async fn bootstrap(
     }
 }
 
-struct FolderOwnershipRequirement {
-    path: PathBuf,
-    owning_user_name: String,
-    owning_group_name: String,
-}
-
-struct FolderModeRequirement {
-    path: PathBuf,
-    mode: Modes,
-}
-
-struct GroupMembershipRequirement {
-    group_name: String,
-    user_name: String,
-}
-
 struct Context<'a> {
     credentials: &'a dyn Credentials,
     folder: &'a dyn Folder,
     permissions: &'a dyn Permissions,
+}
+
+impl<'a> HasCredentials for Context<'a> {
+    fn credentials(&self) -> &dyn Credentials {
+        self.credentials
+    }
+}
+
+impl<'a> HasFolder for Context<'a> {
+    fn folder(&self) -> &dyn Folder {
+        self.folder
+    }
+}
+
+impl<'a> HasPermissions for Context<'a> {
+    fn permissions(&self) -> &dyn Permissions {
+        self.permissions
+    }
 }
 
 #[derive(Default)]
@@ -166,7 +165,6 @@ struct StateObserver<'a> {
     credentials: &'a dyn Credentials,
     folder: &'a dyn Folder,
     permissions: &'a dyn Permissions,
-    environment_variable_reader: &'a dyn EnvironmentVariableReader,
     docker_ping: &'a mut dyn docker::Ping,
 }
 
@@ -175,14 +173,12 @@ impl<'a> StateObserver<'a> {
         credentials: &'a dyn Credentials,
         folder: &'a dyn Folder,
         permissions: &'a dyn Permissions,
-        environment_variable_reader: &'a dyn EnvironmentVariableReader,
         docker_ping: &'a mut dyn docker::Ping,
     ) -> Self {
         Self {
             credentials,
             folder,
             permissions,
-            environment_variable_reader,
             docker_ping,
         }
     }
@@ -193,7 +189,10 @@ impl<'a> StateObserver<'a> {
         douglas_folders: &DouglasFolders,
     ) -> Result<State, BootstrapError> {
         let guard = span
-            .create_child("Bract Start: Discover", ScopeKind::Phase)
+            .create_child(
+                "Starting bract system, discovering current state",
+                ScopeKind::Phase,
+            )
             .start_guard();
 
         let mut result = State {
@@ -209,7 +208,6 @@ impl<'a> StateObserver<'a> {
             return guard.finish(Ok(result));
         }
         result.is_root = true;
-        self.check_admin_group_membership(guard.span(), &mut result);
         self.check_system_folders(&mut result, douglas_folders)?;
         result.docker_running_status = self.check_docker_running_status(guard.span()).await;
         if result.docker_running_status != RunningStatus::Running {
@@ -253,35 +251,6 @@ impl<'a> StateObserver<'a> {
             self.check_system_folder(result, path, expected_mode)?;
         }
         Ok(())
-    }
-
-    fn check_admin_group_membership(&mut self, span: &Span, result: &mut State) {
-        let (non_sudoer, valid_non_sudoer) = self.get_non_sudoer(span);
-        if self.credentials.group_exists(DOUGLAS_ADMIN_GROUP) {
-            if valid_non_sudoer
-                && !self
-                    .credentials
-                    .group_memberships(DOUGLAS_ADMIN_GROUP)
-                    .contains(&non_sudoer)
-            {
-                result
-                    .group_members_missing
-                    .push(GroupMembershipRequirement {
-                        group_name: DOUGLAS_ADMIN_GROUP.to_string(),
-                        user_name: non_sudoer,
-                    });
-            }
-        } else {
-            result.groups_missing.push(DOUGLAS_ADMIN_GROUP.to_string());
-            if valid_non_sudoer {
-                result
-                    .group_members_missing
-                    .push(GroupMembershipRequirement {
-                        group_name: DOUGLAS_ADMIN_GROUP.to_string(),
-                        user_name: non_sudoer,
-                    });
-            }
-        }
     }
 
     fn check_system_folder(
@@ -361,24 +330,6 @@ impl<'a> StateObserver<'a> {
         }
     }
 
-    fn get_non_sudoer(&self, span: &Span) -> (String, bool) {
-        match self.environment_variable_reader.read("SUDO_USER") {
-            Ok(user_name) => {
-                let valid = user_name != credentials::ROOT_USER_NAME;
-                (user_name, valid)
-            }
-            Err(VarError::NotPresent) => (credentials::ROOT_USER_NAME.to_string(), false),
-            Err(VarError::NotUnicode(_)) => {
-                span.message(Level::Warn, &format!(
-                            "Could not determine initiating user?  You will need to manually add the \
-                                account you wish to interact with the Douglas CLI to the '{DOUGLAS_ADMIN_GROUP}' \
-                                manually!"
-                        ));
-                (credentials::ROOT_USER_NAME.to_string(), false)
-            }
-        }
-    }
-
     async fn check_docker_running_status(&mut self, span: &Span) -> RunningStatus {
         match self.docker_ping.execute(span).await {
             Ok(()) => RunningStatus::Running,
@@ -390,12 +341,9 @@ impl<'a> StateObserver<'a> {
     }
 }
 
-type Step = Box<dyn for<'a> Command<Context<'a>, Error = BootstrapError>>;
+type Step = Box<dyn for<'a> Command<Context<'a>>>;
 
-fn push_step(
-    steps: &mut Vec<Step>,
-    command: impl for<'a> Command<Context<'a>, Error = BootstrapError> + 'static,
-) {
+fn push_step(steps: &mut Vec<Step>, command: impl for<'a> Command<Context<'a>> + 'static) {
     steps.push(Box::new(command));
 }
 
@@ -447,229 +395,4 @@ fn create_plan(state: State) -> Result<Vec<Step>, BootstrapError> {
     }
 
     Ok(result)
-}
-
-struct CreateGroup {
-    group_name: String,
-}
-
-impl CreateGroup {
-    pub fn new(group_name: &str) -> Self {
-        Self {
-            group_name: group_name.to_string(),
-        }
-    }
-}
-
-impl std::fmt::Display for CreateGroup {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&format!("Create group '{}'", self.group_name))
-    }
-}
-
-impl<'a> Command<Context<'a>> for CreateGroup {
-    type Error = BootstrapError;
-
-    fn name(&self) -> String {
-        "Create group".to_string()
-    }
-
-    fn run(&mut self, span: &Span, context: &mut Context<'a>) -> Result<(), Self::Error> {
-        let guard = span
-            .create_child(
-                &format!("Creating group '{}'…", self.group_name),
-                ScopeKind::Step,
-            )
-            .start_guard();
-
-        context.credentials.create_group(&self.group_name)?;
-        guard.finish(Ok(()))
-    }
-}
-
-struct AddUserToGroup {
-    user_name: String,
-    group_name: String,
-}
-
-impl AddUserToGroup {
-    pub fn new(user_name: &str, group_name: &str) -> Self {
-        Self {
-            user_name: user_name.to_string(),
-            group_name: group_name.to_string(),
-        }
-    }
-}
-
-impl std::fmt::Display for AddUserToGroup {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&format!(
-            "Add user '{}' to group '{}'",
-            self.user_name, self.group_name
-        ))
-    }
-}
-
-impl<'a> Command<Context<'a>> for AddUserToGroup {
-    type Error = BootstrapError;
-
-    fn name(&self) -> String {
-        "Add user to group".to_string()
-    }
-
-    fn run(&mut self, span: &Span, context: &mut Context<'a>) -> Result<(), Self::Error> {
-        let guard = span
-            .create_child(
-                &format!(
-                    "Adding user '{}' to group '{}'…",
-                    self.user_name, self.group_name
-                ),
-                ScopeKind::Step,
-            )
-            .start_guard();
-
-        context
-            .credentials
-            .join_group(&self.user_name, &self.group_name)?;
-        guard.finish(Ok(()))
-    }
-}
-
-struct CreateFolder {
-    folder: PathBuf,
-}
-
-impl CreateFolder {
-    pub fn new(folder: PathBuf) -> Self {
-        Self { folder }
-    }
-}
-
-impl std::fmt::Display for CreateFolder {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&format!("Create folder '{}'", path_to_string(&self.folder)))
-    }
-}
-
-impl<'a> Command<Context<'a>> for CreateFolder {
-    type Error = BootstrapError;
-
-    fn name(&self) -> String {
-        "Create folder".to_string()
-    }
-
-    fn run(&mut self, span: &Span, context: &mut Context<'a>) -> Result<(), Self::Error> {
-        let guard = span
-            .create_child(
-                &format!("Creating folder '{}'…", path_to_string(&self.folder)),
-                ScopeKind::Step,
-            )
-            .start_guard();
-
-        context.folder.create_recursively(&self.folder)?;
-        guard.finish(Ok(()))
-    }
-}
-
-struct SetOwnership {
-    path: PathBuf,
-    user_name: String,
-    group_name: String,
-}
-
-impl SetOwnership {
-    pub fn new(path: PathBuf, user_name: &str, group_name: &str) -> Self {
-        Self {
-            path,
-            user_name: user_name.to_string(),
-            group_name: group_name.to_string(),
-        }
-    }
-}
-
-impl std::fmt::Display for SetOwnership {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&format!(
-            "Set ownership on '{}', to group '{}' and user '{}'",
-            path_to_string(&self.path),
-            self.group_name,
-            self.user_name
-        ))
-    }
-}
-
-impl<'a> Command<Context<'a>> for SetOwnership {
-    type Error = BootstrapError;
-
-    fn name(&self) -> String {
-        "Set ownership".to_string()
-    }
-
-    fn run(&mut self, span: &Span, context: &mut Context<'a>) -> Result<(), Self::Error> {
-        let guard = span
-            .create_child(
-                &format!(
-                    "Setting ownership for '{}' to group '{}' and user '{}'…",
-                    path_to_string(&self.path),
-                    self.group_name,
-                    self.user_name,
-                ),
-                ScopeKind::Step,
-            )
-            .start_guard();
-
-        context.permissions.change_user_and_group_ownership(
-            &self.path,
-            &self.user_name,
-            &self.group_name,
-        )?;
-
-        guard.finish(Ok(()))
-    }
-}
-
-struct SetMode {
-    path: PathBuf,
-    mode: Modes,
-}
-
-impl SetMode {
-    pub fn new(path: PathBuf, mode: Modes) -> Self {
-        Self { path, mode }
-    }
-}
-
-impl std::fmt::Display for SetMode {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&format!(
-            "Set mode on '{}' to '{}'",
-            path_to_string(&self.path),
-            self.mode,
-        ))
-    }
-}
-
-impl<'a> Command<Context<'a>> for SetMode {
-    type Error = BootstrapError;
-
-    fn name(&self) -> String {
-        "Set mode".to_string()
-    }
-
-    fn run(&mut self, span: &Span, context: &mut Context<'a>) -> Result<(), Self::Error> {
-        let guard = span
-            .create_child(
-                &format!(
-                    "Setting mode on '{}' to '{}'…",
-                    path_to_string(&self.path),
-                    self.mode,
-                ),
-                ScopeKind::Step,
-            )
-            .start_guard();
-
-        context.permissions.change_mode(&self.path, &self.mode)?;
-
-        guard.finish(Ok(()))
-    }
 }

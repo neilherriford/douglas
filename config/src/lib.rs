@@ -1,7 +1,4 @@
 use std::path::PathBuf;
-
-pub mod constants;
-
 pub struct DouglasFolders {
     pub logs: PathBuf,
     pub transients: PathBuf,
@@ -9,6 +6,7 @@ pub struct DouglasFolders {
     pub application_services: PathBuf,
     pub application_mounts: PathBuf,
     pub configs: PathBuf,
+    pub resin: PathBuf,
 }
 
 impl DouglasFolders {
@@ -42,6 +40,7 @@ impl DouglasFolders {
             application_services: PathBuf::from("/Library/Application Support/douglas/services/"),
             application_mounts: PathBuf::from("/Library/Application Support/douglas/mounts/"),
             configs: PathBuf::from("/Library/Preferences/douglas/"),
+            resin: PathBuf::from("/Library/Application Support/douglas/resin/"),
         }
     }
 }
@@ -57,6 +56,7 @@ impl DouglasFolders {
             application_services: PathBuf::from("/var/lib/douglas/services/"),
             application_mounts: PathBuf::from("/var/lib/douglas/mounts/"),
             configs: PathBuf::from("/etc/douglas/"),
+            resin: PathBuf::from("/var/lib/douglas/resin/"),
         }
     }
 }

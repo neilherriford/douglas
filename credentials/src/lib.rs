@@ -38,6 +38,13 @@ impl ClientErrorDisplay for CredentialsError {
 pub static ROOT_USER_NAME: &str = "root";
 pub static ROOT_GROUP_NAME: &str = "root";
 
+pub mod well_known {
+    pub static DOUGLAS_ADMIN_GROUP: &str = "douglas-admin";
+    pub static DOUGLAS_APP_GROUP: &str = "douglas-app";
+    pub static DOUGLAS_RESIN_USER: &str = "douglas-resin";
+    pub static DOUGLAS_RESIN_GROUP: &str = "douglas-resin";
+}
+
 #[cfg_attr(feature = "mock", automock)]
 pub trait Credentials: Send + Sync {
     fn is_root(&self) -> bool;

@@ -1,11 +1,9 @@
-use config::constants::DOUGLAS_ADMIN_GROUP;
 use file_system::{
     BindableUnixDomainSocketFile, FileDeleter, FileSystemError, Listener, Modes, Permissions,
 };
 use log::{Outcome, ScopeKind, Span};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use thiserror::Error;
 
 pub(crate) struct CreateListener {
     socket_path: PathBuf,
@@ -47,7 +45,7 @@ impl CreateListener {
         self.permissions.change_user_and_group_ownership(
             &self.socket_path,
             credentials::ROOT_USER_NAME,
-            DOUGLAS_ADMIN_GROUP,
+            credentials::well_known::DOUGLAS_ADMIN_GROUP,
         )?;
         self.permissions
             .change_mode(&self.socket_path, &Modes::OwnerReadWriteGroupReadWrite)?;

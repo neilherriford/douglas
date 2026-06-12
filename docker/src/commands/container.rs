@@ -223,7 +223,7 @@ impl ContainerCommand {
 
         let response = {
             let mut rest_client = self.rest_client.lock().await;
-            rest_client.execute(&guard.span(), &request).await?
+            rest_client.execute(guard.span(), &request).await?
         };
 
         let body = assert_created_with_body(response)?;

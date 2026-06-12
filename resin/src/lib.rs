@@ -1,9 +1,20 @@
 use axum::{Router, extract::State, http::StatusCode, response::IntoResponse, routing::get};
-use log::{Outcome, Reporter, ScopeKind, Span};
+use config::DouglasFolders;
+use log::{BufferedFileReporter, Outcome, Reporter, ScopeKind, Span};
 use std::sync::Arc;
 
 pub struct Server {
     reporter: Arc<dyn Reporter>,
+}
+
+impl Default for Server {
+    fn default() -> Self {
+        let douglas_folders = DouglasFolders::new();
+        let reporter: Arc<dyn Reporter> =
+            Arc::new(BufferedFileReporter::new(douglas_folders.log_file("resin")));
+
+        Server::new(reporter)
+    }
 }
 
 impl Server {

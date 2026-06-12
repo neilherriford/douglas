@@ -10,7 +10,7 @@ use file_system::{
     UnixFileDeleter, UnixFolder, UnixPermissions,
 };
 use log::{BufferedFileReporter, Reporter, ScopeKind, Span};
-use os::{Os, Unix, UnixEnvironmentVariableReader};
+use os::{Os, Unix};
 use serde::{Deserialize, Serialize};
 use std::{path::PathBuf, sync::Arc};
 use thiserror::Error;
@@ -67,7 +67,6 @@ impl Bract {
         let unix_domain_socket: Arc<dyn BindableUnixDomainSocketFile> =
             Arc::new(UnixDomainSocket::new());
         let permissions = Box::new(UnixPermissions::new());
-        let environment_variable_reader = Box::new(UnixEnvironmentVariableReader::new());
         let douglas_folders = DouglasFolders::new();
         let (shutdown_sender, _) = broadcast::channel::<()>(1);
 
@@ -76,7 +75,6 @@ impl Bract {
             &*credentials,
             &*folder,
             &*permissions,
-            &*environment_variable_reader,
             &douglas_folders,
         )
         .await?;

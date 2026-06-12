@@ -275,6 +275,8 @@ dependencies = [
 name = "blueprint"
 version = "0.1.0"
 dependencies = [
+ "credentials",
+ "file_system",
  "log 0.1.0",
  "thiserror 1.0.69",
 ]
@@ -2005,6 +2007,7 @@ name = "resin"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "config",
  "log 0.1.0",
  "tokio",
 ]

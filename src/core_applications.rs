@@ -1,7 +1,5 @@
 use crate::application_definition::{ApplicationDefinition, MountFile, MountTemplate};
 use docker::{Capability, EnvironmentVariable, ImageName};
-use openbao::OpenBaoError;
-use std::path::PathBuf;
 
 pub struct OpenBao {}
 
