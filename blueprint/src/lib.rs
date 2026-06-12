@@ -136,7 +136,7 @@ impl<TContext> CommandExecutor<TContext> for JournalingExecutor<TContext> {
                 continue;
             }
 
-            span.message(Level::Info, &format!("{command} running"));
+            span.message(Level::Info, &format!("{command}…"));
 
             if let Err(err) = command.run(span, context) {
                 span.message(Level::Warn, &format!("[{step_name}] failed: {err:?}"));
@@ -149,7 +149,6 @@ impl<TContext> CommandExecutor<TContext> for JournalingExecutor<TContext> {
                 };
             }
 
-            span.message(Level::Info, &format!("{command} succeeded"));
             self.journal.push(command);
         }
         ExecutionResult::Success

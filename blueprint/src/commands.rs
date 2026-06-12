@@ -24,7 +24,7 @@ impl<C: HasCredentials> Command<C> for CreateUser {
     fn run(&mut self, span: &Span, context: &mut C) -> Result<(), Box<dyn std::error::Error>> {
         let guard = span
             .create_child(
-                &format!("Creating user '{}'…", self.user_name),
+                &format!("Created user '{}'!", self.user_name),
                 ScopeKind::Step,
             )
             .start_guard();
@@ -72,7 +72,7 @@ impl<C: HasCredentials> Command<C> for CreateGroup {
     fn run(&mut self, span: &Span, context: &mut C) -> Result<(), Box<dyn std::error::Error>> {
         let guard = span
             .create_child(
-                &format!("Creating group '{}'…", self.group_name),
+                &format!("Created group '{}'!", self.group_name),
                 ScopeKind::Step,
             )
             .start_guard();
@@ -115,7 +115,7 @@ impl<C: HasCredentials> Command<C> for AddUserToGroup {
         let guard = span
             .create_child(
                 &format!(
-                    "Adding user '{}' to group '{}'…",
+                    "Added user '{}' to group '{}'!",
                     self.user_name, self.group_name
                 ),
                 ScopeKind::Step,
@@ -153,7 +153,7 @@ impl<C: HasFolder> Command<C> for CreateFolder {
     fn run(&mut self, span: &Span, context: &mut C) -> Result<(), Box<dyn std::error::Error>> {
         let guard = span
             .create_child(
-                &format!("Creating folder '{}'…", self.folder.display()),
+                &format!("Created folder '{}'!", self.folder.display()),
                 ScopeKind::Step,
             )
             .start_guard();
@@ -200,7 +200,7 @@ impl<C: HasPermissions> Command<C> for SetOwnership {
         let guard = span
             .create_child(
                 &format!(
-                    "Setting ownership for '{}' to user '{}' group '{}'…",
+                    "Set ownership on '{}' to user '{}' group '{}'!",
                     self.path.display(),
                     self.user_name,
                     self.group_name,
@@ -249,7 +249,7 @@ impl<C: HasPermissions> Command<C> for SetMode {
         let guard = span
             .create_child(
                 &format!(
-                    "Setting mode on '{}' to '{}'…",
+                    "Set mode on '{}' to '{}'!",
                     self.path.display(),
                     self.mode
                 ),
