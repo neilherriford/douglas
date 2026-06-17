@@ -12,7 +12,9 @@ use std::fs::{
 use std::io::Write;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt, chown, symlink};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use thiserror::Error;
+use tokio::io::AsyncRead;
 use users::{get_group_by_name, get_user_by_name};
 use utils::ClientErrorDisplay;
 
@@ -177,15 +179,32 @@ impl Entry {
 }
 
 #[cfg_attr(feature = "mock", mockall::automock)]
+pub trait BufferedFileWiter {
+    fn write_all(&mut self, bytes: &[u8]) -> Result<(), FileSystemError>;
+    fn close(&mut self);
+}
+
+#[cfg_attr(feature = "mock", mockall::automock)]
 pub trait FileWriter: Send + Sync {
     fn write_all(&self, path: &Path, contents: &str) -> Result<(), FileSystemError>;
+    fn write_all_bytes(&self, path: &Path, bytes: &[u8]) -> Result<(), FileSystemError>;
+    fn create_buffered_file_writer(
+        &self,
+        path: &Path,
+        file_deleter: Arc<dyn FileDeleter>,
+    ) -> Result<Box<dyn BufferedFileWiter>, FileSystemError>;
     fn exists(&self, path: &Path) -> bool;
 }
 
 #[cfg_attr(feature = "mock", mockall::automock)]
+#[async_trait]
 pub trait FileReader: Send + Sync {
     fn read_all(&self, path: &Path) -> Result<String, FileSystemError>;
     fn exists(&self, path: &Path) -> bool;
+    async fn create_reader(
+        &self,
+        path: &Path,
+    ) -> Result<Box<dyn AsyncRead + Send + Unpin>, FileSystemError>;
 }
 
 #[cfg(feature = "mock")]
@@ -226,6 +245,50 @@ pub trait FileRenamer {
     fn rename(&self, from: &Path, to: &Path) -> Result<(), FileSystemError>;
 }
 
+struct UnixBufferedFileWriter {
+    file: File,
+    closed: bool,
+    path: PathBuf,
+    file_deleter: Arc<dyn FileDeleter>,
+}
+
+impl UnixBufferedFileWriter {
+    pub fn build(
+        path: PathBuf,
+        file_deleter: Arc<dyn FileDeleter>,
+    ) -> Result<Self, std::io::Error> {
+        let file = OpenOptions::new().create(true).append(true).open(&path)?;
+
+        Ok(Self {
+            file,
+            closed: false,
+            path,
+            file_deleter,
+        })
+    }
+}
+
+impl Drop for UnixBufferedFileWriter {
+    fn drop(&mut self) {
+        let _ = self.file.flush();
+        if !self.closed {
+            self.file_deleter.delete(&self.path.as_path());
+            self.closed = true;
+        }
+    }
+}
+
+impl BufferedFileWiter for UnixBufferedFileWriter {
+    fn write_all(&mut self, bytes: &[u8]) -> Result<(), FileSystemError> {
+        self.file.write_all(bytes)?;
+        Ok(())
+    }
+
+    fn close(&mut self) {
+        self.closed = true
+    }
+}
+
 #[derive(Default)]
 pub struct UnixFileWriter {}
 
@@ -237,14 +300,30 @@ impl UnixFileWriter {
 
 impl FileWriter for UnixFileWriter {
     fn write_all(&self, path: &Path, contents: &str) -> Result<(), FileSystemError> {
-        let mut file = File::create(path)?;
-        file.write_all(contents.as_bytes())?;
-
-        Ok(())
+        self.write_all_bytes(path, contents.as_bytes())
     }
 
     fn exists(&self, path: &Path) -> bool {
         path.exists()
+    }
+
+    fn write_all_bytes(&self, path: &Path, bytes: &[u8]) -> Result<(), FileSystemError> {
+        let mut file = File::create(path)?;
+        file.write_all(bytes.as_ref())?;
+
+        Ok(())
+    }
+
+    fn create_buffered_file_writer(
+        &self,
+        path: &Path,
+        file_deleter: Arc<dyn FileDeleter>,
+    ) -> Result<Box<dyn BufferedFileWiter>, FileSystemError> {
+        let result: Box<dyn BufferedFileWiter> = Box::new(UnixBufferedFileWriter::build(
+            path.to_path_buf(),
+            file_deleter,
+        )?);
+        Ok(result)
     }
 }
 
@@ -297,12 +376,25 @@ impl UnixFileReader {
     }
 }
 
+#[async_trait]
 impl FileReader for UnixFileReader {
     fn read_all(&self, path: &Path) -> Result<String, FileSystemError> {
         Ok(read_to_string(path)?)
     }
     fn exists(&self, path: &Path) -> bool {
         path.exists()
+    }
+
+    async fn create_reader(
+        &self,
+        path: &Path,
+    ) -> Result<Box<dyn AsyncRead + Send + Unpin>, FileSystemError> {
+        if !self.exists(path) {
+            return Err(FileSystemError::NotFoundError(path.to_path_buf()));
+        }
+
+        let file = tokio::fs::File::open(path).await?;
+        Ok(Box::new(file))
     }
 }
 
@@ -748,6 +840,18 @@ impl Folder for UnixFolder {
 
 #[cfg(feature = "mock")]
 impl MockFolder {
+    pub fn given_file(&mut self, path: &str, exists: bool) -> &mut Self {
+        self.given_folder(path, exists)
+    }
+
+    pub fn given_file_exists(&mut self, path: &str) -> &mut Self {
+        self.given_folder(path, true)
+    }
+
+    pub fn given_file_does_not_exist(&mut self, path: &str) -> &mut Self {
+        self.given_folder(path, false)
+    }
+
     pub fn given_folder(&mut self, path: &str, exists: bool) -> &mut Self {
         let path = path.to_string();
         let path = PathBuf::from(path);

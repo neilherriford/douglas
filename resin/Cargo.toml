@@ -5,6 +5,17 @@ edition = "2024"
 
 [dependencies]
 axum = "0.8.9"
-log = { workspace = true }
 config = { workspace = true }
+file_system = { workspace = true }
+hex = "0.4.3"
+log = { workspace = true }
+sha2 = "0.11.0"
+thiserror = { workspace = true }
 tokio = { workspace = true }
+
+[features]
+mock = ["file_system/mock"]
+
+[dev-dependencies]
+mockall = { workspace = true }
+file_system = { workspace = true, features = ["mock"] }
