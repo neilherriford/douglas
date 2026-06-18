@@ -44,8 +44,8 @@ pub enum CliBootstrapError {
     PipeError(#[from] std::io::Error),
     #[error("Spawn error: {0}")]
     SpawnError(#[from] FdMappingCollision),
-    #[error("Timed out waiting for bract to start (5 minutes exceeded)")]
-    BractStartTimeout,
+    #[error("Timed out waiting for {0} to start (5 minutes exceeded)")]
+    StartTimeout(String),
 }
 
 type Step = Box<dyn for<'a> Command<Context<'a>>>;
@@ -59,8 +59,10 @@ struct Context<'a> {
     credentials: &'a dyn Credentials,
     permissions: &'a dyn Permissions,
     folder: &'a dyn Folder,
-    pipe_reader: Option<PipeReader>,
-    pipe_writer: Option<PipeWriter>,
+    bract_pipe_reader: Option<PipeReader>,
+    bract_pipe_writer: Option<PipeWriter>,
+    resin_pipe_reader: Option<PipeReader>,
+    resin_pipe_writer: Option<PipeWriter>,
 }
 
 impl HasCredentials for Context<'_> {
@@ -172,10 +174,12 @@ impl<'a> StateObserver<'a> {
                         DOUGLAS_RESIN_GROUP,
                     ));
             }
-            if self.permissions.get_mode(&config.resin)? != Modes::OwnerReadWrite {
+            if self.permissions.get_mode(&config.resin)?
+                != Modes::InheritedOwnerReadWriteExecuteGroupReadWriteExecute
+            {
                 result.folders_missing_mode.push(FolderModeRequirement {
                     path: config.resin.clone(),
-                    mode: Modes::OwnerReadWrite,
+                    mode: Modes::InheritedOwnerReadWriteExecuteGroupReadWriteExecute,
                 });
             }
         } else {
@@ -189,7 +193,7 @@ impl<'a> StateObserver<'a> {
                 ));
             result.folders_missing_mode.push(FolderModeRequirement {
                 path: config.resin.clone(),
-                mode: Modes::OwnerReadWrite,
+                mode: Modes::InheritedOwnerReadWriteExecuteGroupReadWriteExecute,
             });
         }
 
@@ -333,29 +337,39 @@ fn create_plan(state: &State) -> Result<Vec<Step>, CliBootstrapError> {
         );
     }
 
+    let needs_pipe = state.resin_running_status != RunningStatus::Running
+        || state.bract_running_status != RunningStatus::Running;
+
+    if needs_pipe {
+        push_step(&mut result, CreatePipe::new("bootstrap"));
+    }
+
     if state.resin_running_status != RunningStatus::Running {
         push_step(&mut result, StartResin::new());
     }
 
     if state.bract_running_status != RunningStatus::Running {
-        push_step(&mut result, CreatePipe::new());
         push_step(&mut result, StartBract::new());
     }
 
     Ok(result)
 }
 
-struct CreatePipe {}
+struct CreatePipe {
+    description: String,
+}
 
 impl CreatePipe {
-    pub fn new() -> Self {
-        Self {}
+    pub fn new(description: &str) -> Self {
+        Self {
+            description: description.to_string(),
+        }
     }
 }
 
 impl std::fmt::Display for CreatePipe {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("Create pipe")
+        f.write_str(&format!("Create pipe for {}", self.description))
     }
 }
 
@@ -373,13 +387,76 @@ impl<'a> Command<Context<'a>> for CreatePipe {
             .create_child("Creating pipe…", ScopeKind::Step)
             .start_guard();
 
-        let (read_fd, write_fd) = os_pipe::pipe()?;
-        context.pipe_reader = Some(read_fd);
-        context.pipe_writer = Some(write_fd);
+        let (bract_read_fd, bract_write_fd) = os_pipe::pipe()?;
+        context.bract_pipe_reader = Some(bract_read_fd);
+        context.bract_pipe_writer = Some(bract_write_fd);
+
+        let (resin_read_fd, resin_write_fd) = os_pipe::pipe()?;
+        context.resin_pipe_reader = Some(resin_read_fd);
+        context.resin_pipe_writer = Some(resin_write_fd);
 
         guard.finish_with_outcome(Outcome::Ok);
         Ok(())
     }
+}
+
+fn spawn_service(
+    service: &str,
+    pipe_writer: PipeWriter,
+    pipe_reader: PipeReader,
+    os: &dyn Os,
+    span: &Span,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let fd = pipe_writer.as_raw_fd();
+    match std::process::Command::new(os.current_executable()?)
+        .args(["service", service, "--notify-fd", &fd.to_string()])
+        .fd_mappings(vec![FdMapping {
+            parent_fd: OwnedFd::from(pipe_writer),
+            child_fd: fd,
+        }]) {
+        Ok(cmd) => {
+            cmd.spawn()?;
+        }
+        Err(err) => return Err(Box::new(SpawnError(err))),
+    }
+
+    let (tx, rx) = mpsc::channel::<String>();
+    std::thread::spawn(move || {
+        use std::io::BufRead;
+        let reader = std::io::BufReader::new(pipe_reader);
+        for line in reader.lines() {
+            let Ok(line) = line else { break };
+            if tx.send(line).is_err() {
+                break;
+            }
+        }
+    });
+
+    let deadline = Instant::now() + Duration::from_secs(5 * 60);
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(Box::new(CliBootstrapError::StartTimeout(
+                service.to_string(),
+            )));
+        }
+        match rx.recv_timeout(remaining) {
+            Ok(line) => {
+                let Ok(event) = serde_json::from_str::<log::Event>(&line) else {
+                    continue;
+                };
+                span.reporter.emit(event);
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                return Err(Box::new(CliBootstrapError::StartTimeout(
+                    service.to_string(),
+                )));
+            }
+        }
+    }
+
+    Ok(())
 }
 
 struct StartResin {}
@@ -410,9 +487,14 @@ impl<'a> Command<Context<'a>> for StartResin {
             .create_child("Starting resin…", ScopeKind::Step)
             .start_guard();
 
-        std::process::Command::new(context.os.current_executable()?)
-            .args(["service", "resin"])
-            .spawn()?;
+        let Some(pipe_writer) = context.resin_pipe_writer.take() else {
+            return Err(Box::new(CliBootstrapError::PipeRequired));
+        };
+        let Some(pipe_reader) = context.resin_pipe_reader.take() else {
+            return Err(Box::new(CliBootstrapError::PipeRequired));
+        };
+
+        spawn_service("resin", pipe_writer, pipe_reader, context.os, guard.span())?;
 
         guard.finish_with_outcome(Outcome::Ok);
         Ok(())
@@ -447,63 +529,14 @@ impl<'a> Command<Context<'a>> for StartBract {
             .create_child("Starting bract…", ScopeKind::Step)
             .start_guard();
 
-        let Some(pipe_writer) = context.pipe_writer.take() else {
+        let Some(pipe_writer) = context.bract_pipe_writer.take() else {
             return Err(Box::new(CliBootstrapError::PipeRequired));
         };
-        let Some(pipe_reader) = context.pipe_reader.take() else {
+        let Some(pipe_reader) = context.bract_pipe_reader.take() else {
             return Err(Box::new(CliBootstrapError::PipeRequired));
         };
 
-        let fd = pipe_writer.as_raw_fd();
-        match std::process::Command::new(context.os.current_executable()?)
-            .args(["service", "bract", "--notify-fd", &fd.to_string()])
-            .fd_mappings(vec![FdMapping {
-                parent_fd: OwnedFd::from(pipe_writer),
-                child_fd: fd,
-            }]) {
-            Ok(cmd) => {
-                cmd.spawn()?;
-            }
-            Err(err) => return Err(Box::new(SpawnError(err))),
-        }
-
-        /*
-         * Read bract's event stream on a background thread,
-         * forward events to the reporter so they appear in the ui,
-         * bail with a five minute timeout.
-         */
-        let (tx, rx) = mpsc::channel::<String>();
-        std::thread::spawn(move || {
-            use std::io::BufRead;
-            let reader = std::io::BufReader::new(pipe_reader);
-            for line in reader.lines() {
-                let Ok(line) = line else { break };
-                if tx.send(line).is_err() {
-                    break;
-                }
-            }
-            // Sender drops here — receiver will see Disconnected when pipe closes.
-        });
-
-        let deadline = Instant::now() + Duration::from_secs(5 * 60);
-        loop {
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
-                return Err(Box::new(CliBootstrapError::BractStartTimeout));
-            }
-            match rx.recv_timeout(remaining) {
-                Ok(line) => {
-                    let Ok(event) = serde_json::from_str::<log::Event>(&line) else {
-                        continue;
-                    };
-                    span.reporter.emit(event);
-                }
-                Err(mpsc::RecvTimeoutError::Disconnected) => break, // pipe closed — bract ready
-                Err(mpsc::RecvTimeoutError::Timeout) => {
-                    return Err(Box::new(CliBootstrapError::BractStartTimeout));
-                }
-            }
-        }
+        spawn_service("bract", pipe_writer, pipe_reader, context.os, guard.span())?;
 
         guard.finish_with_outcome(Outcome::Ok);
         Ok(())
@@ -565,8 +598,10 @@ pub async fn cli_start(
         credentials: credentials.as_ref(),
         folder: folder.as_ref(),
         permissions: permissions.as_ref(),
-        pipe_reader: None,
-        pipe_writer: None,
+        bract_pipe_reader: None,
+        bract_pipe_writer: None,
+        resin_pipe_reader: None,
+        resin_pipe_writer: None,
     };
 
     match executor.run(

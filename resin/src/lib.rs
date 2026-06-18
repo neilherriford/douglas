@@ -1,15 +1,36 @@
 mod blob_store;
+mod bootstrap;
 
-use axum::{Router, extract::State, http::StatusCode, response::IntoResponse, routing::get};
+use axum::{
+    Router,
+    extract::{Request, State},
+    http::StatusCode,
+    middleware::{self, Next},
+    response::IntoResponse,
+    routing::get,
+};
 use config::DouglasFolders;
+use credentials::create_credentials;
+use file_system::{
+    FileDeleter, FileRenamer, FileSystemError, Folder, UnixFileDeleter, UnixFileRenamer, UnixFolder,
+};
 use log::{BufferedFileReporter, Outcome, Reporter, ScopeKind, Span};
+use os::{Os, Unix};
 use std::{path::PathBuf, sync::Arc};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum Error {
+    #[error("Cannot be root")]
+    CannotBeRoot,
+    #[error("Missing be root path")]
+    MissingRootPath,
     #[error("IO Error {0}")]
     IoError(#[from] std::io::Error),
+    #[error("File system error {0}")]
+    FileSystemError(#[from] FileSystemError),
+    #[error("Failed to bootstrap")]
+    FailedBoostrap(Vec<String>),
 }
 
 pub const DEFAULT_PORT: u16 = 7376;
@@ -17,26 +38,51 @@ pub const DEFAULT_PORT: u16 = 7376;
 pub struct Server {
     reporter: Arc<dyn Reporter>,
     port: u16,
-    root: PathBuf,
-}
-
-impl Default for Server {
-    fn default() -> Self {
-        let douglas_folders = DouglasFolders::new();
-        let reporter: Arc<dyn Reporter> =
-            Arc::new(BufferedFileReporter::new(douglas_folders.log_file("resin")));
-
-        Server::new(reporter, douglas_folders.resin, DEFAULT_PORT)
-    }
+    blob_root: PathBuf,
+    repositories_root: PathBuf,
+    file_renamer: Arc<dyn FileRenamer>,
+    file_deleter: Arc<dyn FileDeleter>,
+    folder: Arc<dyn Folder>,
 }
 
 impl Server {
-    pub fn new(reporter: Arc<dyn Reporter>, root: PathBuf, port: u16) -> Self {
-        Self {
+    pub async fn build(reporting_fd: i32, port: u16) -> Result<Self, Error> {
+        let os: Arc<dyn Os> = Arc::new(Unix::new());
+        let credentials = create_credentials(Arc::clone(&os));
+        let folder = Arc::new(UnixFolder::new());
+        let douglas_folders = DouglasFolders::new();
+        let file_renamer: Arc<dyn FileRenamer> = Arc::new(UnixFileRenamer::new());
+        let file_deleter: Arc<dyn FileDeleter> = Arc::new(UnixFileDeleter::new());
+
+        let log_path = douglas_folders.log_file("resin");
+        let root_path = douglas_folders.resin.clone();
+        let mut blob_root = root_path.clone();
+        blob_root.push("blobs");
+        let mut repositories_root = root_path.clone();
+        repositories_root.push("repositories");
+
+        bootstrap::bootstrap(
+            reporting_fd,
+            &*credentials,
+            &*folder,
+            log_path.clone(),
+            root_path.clone(),
+            blob_root.clone(),
+            repositories_root.clone(),
+        )
+        .await?;
+
+        let reporter: Arc<dyn Reporter> = Arc::new(BufferedFileReporter::new(log_path));
+
+        Ok(Self {
             reporter,
-            root,
             port,
-        }
+            blob_root,
+            repositories_root,
+            file_renamer,
+            file_deleter,
+            folder,
+        })
     }
 
     pub async fn start(&self) -> Result<(), Error> {
@@ -49,6 +95,10 @@ impl Server {
 
         let app = Router::new()
             .route("/v2/", get(v2))
+            .layer(middleware::from_fn_with_state(
+                Arc::clone(&self.reporter),
+                log_request,
+            ))
             .with_state(Arc::clone(&self.reporter));
 
         let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{}", self.port))
@@ -65,14 +115,32 @@ impl Server {
     }
 }
 
-async fn v2(State(reporter): State<Arc<dyn Reporter>>) -> impl IntoResponse {
+async fn log_request(
+    State(reporter): State<Arc<dyn Reporter>>,
+    req: Request,
+    next: Next,
+) -> impl IntoResponse {
+    let method = req.method().clone();
+    let uri = req.uri().clone();
+
+    let response = next.run(req).await;
+
+    let outcome = if response.status().is_success() {
+        Outcome::Ok
+    } else {
+        Outcome::Failed
+    };
     Span::record(
-        Arc::clone(&reporter),
-        "Received GET request for /v2/",
+        reporter,
+        &format!("{method} {uri} → {}", response.status()),
         ScopeKind::Task,
-        Outcome::Ok,
+        outcome,
     );
 
+    response
+}
+
+async fn v2() -> impl IntoResponse {
     (
         StatusCode::OK,
         [("Docker-Distribution-Api-Version", "registry/2.0")],

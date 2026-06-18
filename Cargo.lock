@@ -2061,11 +2061,14 @@ name = "resin"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "blueprint",
  "config",
+ "credentials",
  "file_system",
  "hex",
  "log 0.1.0",
  "mockall",
+ "os",
  "sha2 0.11.0",
  "thiserror 1.0.69",
  "tokio",

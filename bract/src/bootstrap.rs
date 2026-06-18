@@ -1,8 +1,8 @@
-use blueprint::commands::{AddUserToGroup, CreateFolder, CreateGroup, SetMode, SetOwnership};
 use blueprint::{
     Command, CommandExecutor, FolderModeRequirement, FolderOwnershipRequirement,
     GroupMembershipRequirement, HasCredentials, HasFolder, HasPermissions, JournalingExecutor,
     RunningStatus,
+    commands::{AddUserToGroup, CreateFolder, CreateGroup, SetMode, SetOwnership},
 };
 use config::DouglasFolders;
 use credentials::{Credentials, well_known::DOUGLAS_ADMIN_GROUP};
@@ -352,6 +352,7 @@ fn create_plan(state: State) -> Result<Vec<Step>, BootstrapError> {
     if state.bract_running_status == RunningStatus::Running {
         return Ok(result);
     }
+
     if state.docker_running_status != RunningStatus::Running {
         return Err(BootstrapError::MustHaveRunningDocker);
     }

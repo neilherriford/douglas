@@ -546,6 +546,13 @@ pub struct PipeReporter {
 }
 
 impl PipeReporter {
+    /// # Safety
+    ///
+    /// `fd` must be a valid, open, writable file descriptor that will
+    /// not be closed or duplicated by any other code for the lifetime
+    /// of this `PipeReporter`. Ownership of the descriptor transfers
+    /// to this type it will be closed when the `PipeReporter` is
+    /// dropped.
     pub unsafe fn from_raw_fd(fd: i32) -> Self {
         let file = unsafe { File::from_raw_fd(fd) };
         Self {

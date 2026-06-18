@@ -84,8 +84,8 @@ enum ServiceCommand {
         notify_fd: i32,
     },
     Resin {
-        #[arg(long, default_value_t = false, help = "Debug mode")]
-        dbg: bool,
+        #[arg(long, help = "File descriptor to stream boot information to")]
+        notify_fd: i32,
     },
 }
 
@@ -114,18 +114,8 @@ fn main() -> ExitCode {
             service: ServiceCommand::Bract { notify_fd },
         } => start_bract(notify_fd),
         Commands::Service {
-            service: ServiceCommand::Resin { dbg },
-        } => {
-            if dbg {
-                if let Err(err) = drop_to_resin_user() {
-                    eprintln!("Failed to drop to resin user: {err}");
-                    return ExitCode::from(1);
-                }
-                run_with_tokio(resin_debug_mode())
-            } else {
-                start_resin()
-            }
-        }
+            service: ServiceCommand::Resin { notify_fd },
+        } => start_resin(notify_fd),
     }
 }
 
@@ -171,13 +161,13 @@ async fn run_bract_server(reporting_fd: i32) -> ExitCode {
     ExitCode::from(0)
 }
 
-fn start_resin() -> ExitCode {
+fn start_resin(reporting_fd: i32) -> ExitCode {
     match Daemonize::new()
         .user(DOUGLAS_RESIN_USER)
         .group(DOUGLAS_RESIN_GROUP)
         .start()
     {
-        Ok(()) => run_with_tokio(run_resin_server()),
+        Ok(()) => run_with_tokio(run_resin_server(reporting_fd)),
         Err(err) => {
             eprintln!("Failed to daemonize bract server: {err:?}");
             ExitCode::from(1)
@@ -185,8 +175,11 @@ fn start_resin() -> ExitCode {
     }
 }
 
-async fn run_resin_server() -> ExitCode {
-    let server = resin::Server::default();
+async fn run_resin_server(reporting_fd: i32) -> ExitCode {
+    let Ok(server) = resin::Server::build(reporting_fd, resin::DEFAULT_PORT).await else {
+        return ExitCode::from(1);
+    };
+
     match server.start().await {
         Ok(()) => ExitCode::from(0),
         Err(_) => ExitCode::from(1),
@@ -229,28 +222,4 @@ async fn start(plan_only: bool) -> ExitCode {
     .await;
 
     ExitCode::from(0)
-}
-
-fn drop_to_resin_user() -> Result<(), Box<dyn std::error::Error>> {
-    use nix::unistd::{User, setgid, setuid};
-
-    let user = User::from_name(DOUGLAS_RESIN_USER)?
-        .ok_or_else(|| format!("user '{DOUGLAS_RESIN_USER}' not found",))?;
-
-    setgid(user.gid)?; // gid first — once you drop uid you can't change gid
-    setuid(user.uid)?;
-    Ok(())
-}
-
-async fn resin_debug_mode() -> ExitCode {
-    let Ok(cli_reporter) = CliReporter::start() else {
-        eprintln!("Failed to start TUI reporter");
-        return ExitCode::from(1);
-    };
-
-    let server = resin::Server::new(Arc::new(cli_reporter));
-    match server.start().await {
-        Ok(()) => ExitCode::from(0),
-        Err(_) => ExitCode::from(1),
-    }
 }

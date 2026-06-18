@@ -272,7 +272,7 @@ impl Drop for UnixBufferedFileWriter {
     fn drop(&mut self) {
         let _ = self.file.flush();
         if !self.closed {
-            self.file_deleter.delete(&self.path.as_path());
+            let _ = self.file_deleter.delete(self.path.as_path());
             self.closed = true;
         }
     }
@@ -840,18 +840,6 @@ impl Folder for UnixFolder {
 
 #[cfg(feature = "mock")]
 impl MockFolder {
-    pub fn given_file(&mut self, path: &str, exists: bool) -> &mut Self {
-        self.given_folder(path, exists)
-    }
-
-    pub fn given_file_exists(&mut self, path: &str) -> &mut Self {
-        self.given_folder(path, true)
-    }
-
-    pub fn given_file_does_not_exist(&mut self, path: &str) -> &mut Self {
-        self.given_folder(path, false)
-    }
-
     pub fn given_folder(&mut self, path: &str, exists: bool) -> &mut Self {
         let path = path.to_string();
         let path = PathBuf::from(path);
