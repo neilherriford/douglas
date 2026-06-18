@@ -1,14 +1,15 @@
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use std::io::Write;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicBool, Ordering},
+};
 use std::{
     cell::Cell,
     collections::VecDeque,
     fs::{File, OpenOptions},
-    io::BufWriter,
+    io::{BufWriter, Write},
+    os::fd::FromRawFd,
     path::PathBuf,
-    sync::Mutex,
     time::{Duration, Instant, SystemTime},
 };
 use uuid::Uuid;
@@ -536,6 +537,31 @@ impl Reporter for TeeReporter {
     fn emit(&self, event: Event) {
         for sink in &self.sinks {
             sink.emit(event.clone());
+        }
+    }
+}
+
+pub struct PipeReporter {
+    writer: Mutex<BufWriter<File>>,
+}
+
+impl PipeReporter {
+    pub unsafe fn from_raw_fd(fd: i32) -> Self {
+        let file = unsafe { File::from_raw_fd(fd) };
+        Self {
+            writer: Mutex::new(BufWriter::new(file)),
+        }
+    }
+}
+
+impl Reporter for PipeReporter {
+    fn emit(&self, event: Event) {
+        let Ok(mut w) = self.writer.lock() else {
+            return;
+        };
+        if let Ok(line) = serde_json::to_string(&event) {
+            let _ = writeln!(w, "{line}");
+            let _ = w.flush();
         }
     }
 }

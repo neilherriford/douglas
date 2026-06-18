@@ -11,4 +11,5 @@ mock = ["mockall"]
 humantime = { workspace = true }
 mockall = { workspace = true, optional = true }
 serde = { workspace = true }
+serde_json = { workspace = true }
 uuid = { workspace = true }

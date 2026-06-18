@@ -1,6 +1,3 @@
-mod pipe_reporter;
-
-use crate::{BootstrapError, bootstrap::pipe_reporter::PipeReporter};
 use blueprint::commands::{AddUserToGroup, CreateFolder, CreateGroup, SetMode, SetOwnership};
 use blueprint::{
     Command, CommandExecutor, FolderModeRequirement, FolderOwnershipRequirement,
@@ -10,12 +7,14 @@ use blueprint::{
 use config::DouglasFolders;
 use credentials::{Credentials, well_known::DOUGLAS_ADMIN_GROUP};
 use file_system::{Folder, Modes, Permissions};
-use log::{BufferedFileReporter, Level, Reporter, ScopeKind, Span, TeeReporter};
+use log::{BufferedFileReporter, Level, PipeReporter, Reporter, ScopeKind, Span, TeeReporter};
 use std::{
     os::unix::net::UnixStream,
     path::{Path, PathBuf},
     sync::Arc,
 };
+
+use crate::BootstrapError;
 
 pub async fn bootstrap(
     reporting_fd: i32,
