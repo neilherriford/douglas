@@ -1,17 +1,18 @@
+use crate::digest;
 use file_system::{FileDeleter, FileReader, FileRenamer, FileSystemError, FileWriter, Folder};
-use sha2::{Digest, Sha256};
-use std::{path::PathBuf, str::FromStr, sync::Arc};
+use sha2::Sha256;
+use std::{path::PathBuf, sync::Arc};
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt};
 
 #[derive(Debug, Error)]
 pub enum BlobError {
-    #[error("Invalid digest")]
-    InvalidDigest,
+    #[error("Digest error")]
+    DigestError(#[from] crate::digest::DigestError),
     #[error("Digest mismatch: claimed {claimed}, computed {computed}")]
     DigestMismatch {
-        claimed: DockerDigest,
-        computed: DockerDigest,
+        claimed: digest::Digest,
+        computed: digest::Digest,
     },
     #[error("IO Error")]
     IoError(#[from] std::io::Error),
@@ -19,69 +20,19 @@ pub enum BlobError {
     FileSystemError(#[from] FileSystemError),
 }
 
-#[derive(Debug, PartialEq, Eq, Clone)]
-pub struct DockerDigest(String);
-
-impl DockerDigest {
-    pub fn from_bytes<T: AsRef<[u8]>>(value: &T) -> Result<Self, BlobError> {
-        if value.as_ref().len() != 32 {
-            return Err(BlobError::InvalidDigest);
-        }
-        let hex = hex::encode(value);
-        Ok(DockerDigest(format!("sha256:{hex}")))
-    }
-
-    pub fn hex(&self) -> &str {
-        &self.0["sha256:".len()..]
-    }
-    pub fn as_bytes(&self) -> Vec<u8> {
-        let mut result = Vec::new();
-        let mut chars = self.hex().chars();
-        while let (Some(hi), Some(lo)) = (chars.next(), chars.next()) {
-            let hi = hi.to_digit(16).unwrap() as u8;
-            let lo = lo.to_digit(16).unwrap() as u8;
-            result.push((hi << 4) | lo);
-        }
-        result
-    }
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl std::fmt::Display for DockerDigest {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
-impl FromStr for DockerDigest {
-    type Err = BlobError;
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        let hex = value
-            .strip_prefix("sha256:")
-            .ok_or(BlobError::InvalidDigest)?;
-        if hex.len() == 64 && hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) {
-            Ok(DockerDigest(value.to_owned()))
-        } else {
-            Err(BlobError::InvalidDigest)
-        }
-    }
-}
-
 pub trait BlobStore {
     async fn save(
         &self,
-        claimed: &DockerDigest,
+        claimed: &digest::Digest,
         source: impl AsyncRead + Send + Unpin,
     ) -> Result<(), BlobError>;
 
     async fn get(
         &self,
-        digest: &DockerDigest,
+        digest: &digest::Digest,
     ) -> Result<Box<dyn AsyncRead + Send + Unpin>, BlobError>;
 
-    async fn exists(&self, digest: &DockerDigest) -> Result<bool, BlobError>;
+    async fn exists(&self, digest: &digest::Digest) -> Result<bool, BlobError>;
 }
 
 struct DigestPaths {
@@ -91,12 +42,11 @@ struct DigestPaths {
 }
 
 impl DigestPaths {
-    pub fn new(blob_root: &PathBuf, digest: &DockerDigest) -> Self {
+    pub fn new(blob_root: &PathBuf, digest: &digest::Digest) -> Self {
         let sha = digest.hex().to_string();
         let prefix = sha[0..2].to_string();
 
         let mut root = blob_root.clone();
-        root.push("blobs");
         root.push("sha256");
         root.push(prefix);
         root.push(&sha);
@@ -128,7 +78,7 @@ impl DigestStore {
         file_renamer: Arc<dyn FileRenamer>,
         file_deleter: Arc<dyn FileDeleter>,
         folder: Arc<dyn Folder>,
-        digest: &DockerDigest,
+        digest: &digest::Digest,
     ) -> Self {
         Self {
             folder,
@@ -213,7 +163,7 @@ impl FileBlobStore {
         mut source: impl AsyncRead + Send + Unpin,
         temp_file: &PathBuf,
     ) -> Result<sha2::digest::Output<Sha256>, BlobError> {
-        let mut hasher = Sha256::new();
+        let mut hasher = <Sha256 as sha2::Digest>::new();
         let mut buffer = [0; 1024 * 64];
         let mut writer = self
             .file_writer
@@ -239,12 +189,12 @@ impl FileBlobStore {
                 break;
             }
 
-            hasher.update(&buffer[0..bytes_read]);
+            sha2::digest::Update::update(&mut hasher, &buffer[0..bytes_read]);
             if let Err(err) = writer.write_all(&buffer[0..bytes_read]) {
                 return Err(BlobError::FileSystemError(err));
             }
         }
-        let computed = hasher.finalize();
+        let computed = sha2::Digest::finalize(hasher);
 
         Ok(computed)
     }
@@ -253,7 +203,7 @@ impl FileBlobStore {
 impl BlobStore for FileBlobStore {
     async fn save(
         &self,
-        claimed: &DockerDigest,
+        claimed: &digest::Digest,
         source: impl AsyncRead + Send + Unpin,
     ) -> Result<(), BlobError> {
         if self.exists(claimed).await? {
@@ -277,7 +227,7 @@ impl BlobStore for FileBlobStore {
 
             return Err(BlobError::DigestMismatch {
                 claimed: claimed.clone(),
-                computed: DockerDigest::from_bytes(&computed)?,
+                computed: digest::Digest::from_bytes(&computed)?,
             });
         }
 
@@ -285,14 +235,14 @@ impl BlobStore for FileBlobStore {
         Ok(())
     }
 
-    async fn exists(&self, digest: &DockerDigest) -> Result<bool, BlobError> {
+    async fn exists(&self, digest: &digest::Digest) -> Result<bool, BlobError> {
         let digest_paths = DigestPaths::new(&self.blob_root, digest);
         Ok(self.folder.exists(&digest_paths.final_file))
     }
 
     async fn get(
         &self,
-        digest: &DockerDigest,
+        digest: &digest::Digest,
     ) -> Result<Box<dyn AsyncRead + Send + Unpin>, BlobError> {
         let digest_paths = DigestPaths::new(&self.blob_root, digest);
         let result = self
@@ -306,44 +256,43 @@ impl BlobStore for FileBlobStore {
 #[cfg(test)]
 mod tests {
     mod docker_digest {
+        use crate::digest::{self, DigestError};
         use std::str::FromStr;
-
-        use crate::blob_store::{BlobError, DockerDigest};
 
         #[test]
         fn test_should_trim_non_hex() {
-            let digest = DockerDigest("sha256:baadf00d".to_string());
+            let digest = digest::Digest("sha256:baadf00d".to_string());
             let actual = digest.hex();
             assert_eq!("baadf00d".to_string(), actual);
         }
 
         #[test]
         fn test_should_create_byte_stream() {
-            let digest = DockerDigest("sha256:baadf00d".to_string());
+            let digest = digest::Digest("sha256:baadf00d".to_string());
             let actual = digest.as_bytes();
             assert_eq!(vec![0xba, 0xad, 0xf0, 0x0d], actual);
         }
 
         #[test]
         fn test_should_create_str() {
-            let digest = DockerDigest("sha256:baadf00d".to_string());
+            let digest = digest::Digest("sha256:baadf00d".to_string());
             let actual = digest.as_str();
             assert_eq!("sha256:baadf00d", actual);
         }
 
         #[test]
         fn test_should_err_if_byte_stream_too_short() {
-            let digest = DockerDigest::from_bytes(&vec![0xba, 0xad, 0xf0, 0x0d]);
+            let digest = digest::Digest::from_bytes(&vec![0xba, 0xad, 0xf0, 0x0d]);
 
-            assert!(matches!(digest, Err(BlobError::InvalidDigest)));
+            assert!(matches!(digest, Err(DigestError::InvalidDigest)));
         }
 
         #[test]
         fn test_should_err_if_byte_stream_too_long() {
             let data = [0xFF; 33];
-            let actual = DockerDigest::from_bytes(&data);
+            let actual = digest::Digest::from_bytes(&data);
 
-            assert!(matches!(actual, Err(BlobError::InvalidDigest)));
+            assert!(matches!(actual, Err(DigestError::InvalidDigest)));
         }
 
         #[test]
@@ -351,57 +300,58 @@ mod tests {
             let data = [0xFF; 32];
 
             let sha = "ff".repeat(32);
-            let expected = DockerDigest(format!("sha256:{sha}"));
-            let actual = DockerDigest::from_bytes(&data);
+            let expected = digest::Digest(format!("sha256:{sha}"));
+            let actual = digest::Digest::from_bytes(&data);
 
             assert!(matches!(actual, Ok(d) if d == expected));
         }
 
         #[test]
         fn test_should_reject_unprefixed_values() {
-            let result = DockerDigest::from_str("oops:baadf00d");
-            assert!(matches!(result, Err(BlobError::InvalidDigest)));
+            let result = digest::Digest::from_str("oops:baadf00d");
+            assert!(matches!(result, Err(DigestError::InvalidDigest)));
         }
 
         #[test]
         fn test_should_reject_short_values() {
-            let result = DockerDigest::from_str("sha256:baadf00d");
-            assert!(matches!(result, Err(BlobError::InvalidDigest)));
+            let result = digest::Digest::from_str("sha256:baadf00d");
+            assert!(matches!(result, Err(DigestError::InvalidDigest)));
         }
 
         #[test]
         fn test_should_reject_invalid_values() {
             let sha = "q".repeat(64);
-            let result = DockerDigest::from_str(&format!("sha256:{sha}"));
-            assert!(matches!(result, Err(BlobError::InvalidDigest)));
+            let result = digest::Digest::from_str(&format!("sha256:{sha}"));
+            assert!(matches!(result, Err(DigestError::InvalidDigest)));
         }
 
         #[test]
         fn test_should_reject_capital_values() {
             let sha = "F".repeat(64);
-            let result = DockerDigest::from_str(&format!("sha256:{sha}"));
-            assert!(matches!(result, Err(BlobError::InvalidDigest)));
+            let result = digest::Digest::from_str(&format!("sha256:{sha}"));
+            assert!(matches!(result, Err(DigestError::InvalidDigest)));
         }
 
         #[test]
         fn test_should_convert_from_str() {
             let sha = "f".repeat(64);
-            let result = DockerDigest::from_str(&format!("sha256:{sha}"));
-            assert!(matches!(result, Ok(d) if d == DockerDigest(format!("sha256:{sha}"))));
+            let result = digest::Digest::from_str(&format!("sha256:{sha}"));
+            assert!(matches!(result, Ok(d) if d == digest::Digest(format!("sha256:{sha}"))));
         }
 
         #[test]
         fn test_round_trips() {
             let sha = "f".repeat(64);
             let string = format!("sha256:{sha}");
-            let digest: DockerDigest = string.parse().unwrap();
+            let digest: digest::Digest = string.parse().unwrap();
             assert_eq!(digest.as_str(), string);
         }
     }
 
     mod blob_store {
         mod save {
-            use crate::blob_store::{BlobError, BlobStore, DockerDigest, FileBlobStore};
+            use crate::blob_store::{BlobError, BlobStore, FileBlobStore};
+            use crate::digest;
             use file_system::{
                 FileSystemError, MockBufferedFileWiter, MockFileDeleter, MockFileReader,
                 MockFileRenamer, MockFileWriter, MockFolder,
@@ -432,7 +382,7 @@ mod tests {
                 let file_reader = MockFileReader::new();
                 let file_renamer = MockFileRenamer::new();
                 let file_deleter = MockFileDeleter::new();
-                let blob_root = PathBuf::from("/tmp");
+                let blob_root = PathBuf::from("/tmp/blobs");
 
                 folder.given_does_not_exist("/tmp/blobs/sha256/f0/f00d/f00d");
                 folder
@@ -450,7 +400,7 @@ mod tests {
                 );
 
                 let source = std::io::Cursor::new(Vec::new());
-                let digest = DockerDigest("sha256:f00d".to_string());
+                let digest = digest::Digest("sha256:f00d".to_string());
                 let result = store.save(&digest, source).await;
                 assert!(matches!(
                     result,
@@ -467,7 +417,7 @@ mod tests {
                 let file_reader = MockFileReader::new();
                 let file_renamer = MockFileRenamer::new();
                 let mut file_deleter = MockFileDeleter::new();
-                let blob_root = PathBuf::from("/tmp");
+                let blob_root = PathBuf::from("/tmp/blobs");
 
                 folder.given_does_not_exist("/tmp/blobs/sha256/f0/f00d/f00d");
                 folder.expect_create_folder_recursively_with("/tmp/blobs/sha256/f0/f00d");
@@ -495,7 +445,7 @@ mod tests {
                 );
 
                 let source = std::io::Cursor::new(vec![0xBA, 0xAD, 0xF0, 0x0D]);
-                let digest = DockerDigest("sha256:f00d".to_string());
+                let digest = digest::Digest("sha256:f00d".to_string());
                 let result = store.save(&digest, source).await;
 
                 assert!(matches!(
@@ -513,7 +463,7 @@ mod tests {
                 let file_reader = MockFileReader::new();
                 let file_renamer = MockFileRenamer::new();
                 let mut file_deleter = MockFileDeleter::new();
-                let blob_root = PathBuf::from("/tmp");
+                let blob_root = PathBuf::from("/tmp/blobs");
 
                 folder.given_does_not_exist("/tmp/blobs/sha256/f0/f00d/f00d");
                 folder.expect_create_folder_recursively_with("/tmp/blobs/sha256/f0/f00d");
@@ -537,7 +487,7 @@ mod tests {
                 );
 
                 let source = FailingReader {};
-                let digest = DockerDigest("sha256:f00d".to_string());
+                let digest = digest::Digest("sha256:f00d".to_string());
                 let result = store.save(&digest, source).await;
 
                 assert!(matches!(
@@ -553,7 +503,7 @@ mod tests {
                 let file_reader = MockFileReader::new();
                 let file_renamer = MockFileRenamer::new();
                 let mut file_deleter = MockFileDeleter::new();
-                let blob_root = PathBuf::from("/tmp");
+                let blob_root = PathBuf::from("/tmp/blobs");
 
                 folder.given_does_not_exist("/tmp/blobs/sha256/f0/f00d/f00d");
                 folder.expect_create_folder_recursively_with("/tmp/blobs/sha256/f0/f00d");
@@ -578,7 +528,7 @@ mod tests {
                 );
 
                 let source = std::io::Cursor::new(vec![0xBA, 0xAD, 0xF0, 0x0D]);
-                let digest = DockerDigest("sha256:f00d".to_string());
+                let digest = digest::Digest("sha256:f00d".to_string());
                 let result = store.save(&digest, source).await;
 
                 assert!(matches!(result, Err(BlobError::DigestMismatch { .. })));
@@ -591,7 +541,7 @@ mod tests {
                 let file_reader = MockFileReader::new();
                 let mut file_renamer = MockFileRenamer::new();
                 let mut file_deleter = MockFileDeleter::new();
-                let blob_root = PathBuf::from("/tmp");
+                let blob_root = PathBuf::from("/tmp/blobs");
 
                 let actual_sha = "05174bbf0d407087e45b12baae17117426852ff3a9e58d12a0ebb9a10b409743";
                 folder.given_does_not_exist(&format!(
@@ -639,7 +589,7 @@ mod tests {
                 );
 
                 let source = std::io::Cursor::new(vec![0xBA, 0xAD, 0xF0, 0x0D]);
-                let digest = DockerDigest(format!("sha256:{actual_sha}"));
+                let digest = digest::Digest(format!("sha256:{actual_sha}"));
                 let result = store.save(&digest, source).await;
 
                 assert!(matches!(
@@ -657,7 +607,7 @@ mod tests {
                 let file_reader = MockFileReader::new();
                 let file_renamer = MockFileRenamer::new();
                 let file_deleter = MockFileDeleter::new();
-                let blob_root = PathBuf::from("/tmp");
+                let blob_root = PathBuf::from("/tmp/blobs");
 
                 let actual_sha = "05174bbf0d407087e45b12baae17117426852ff3a9e58d12a0ebb9a10b409743";
                 folder.given_exists(&format!("/tmp/blobs/sha256/05/{actual_sha}/{actual_sha}/"));
@@ -672,7 +622,7 @@ mod tests {
                 );
 
                 let source = std::io::Cursor::new(vec![0xBA, 0xAD, 0xF0, 0x0D]);
-                let digest = DockerDigest(format!("sha256:{actual_sha}"));
+                let digest = digest::Digest(format!("sha256:{actual_sha}"));
                 let result = store.save(&digest, source).await;
 
                 assert!(matches!(result, Ok(())))
@@ -685,7 +635,7 @@ mod tests {
                 let file_reader = MockFileReader::new();
                 let mut file_renamer = MockFileRenamer::new();
                 let file_deleter = MockFileDeleter::new();
-                let blob_root = PathBuf::from("/tmp");
+                let blob_root = PathBuf::from("/tmp/blobs");
 
                 let actual_sha = "05174bbf0d407087e45b12baae17117426852ff3a9e58d12a0ebb9a10b409743";
                 folder.given_does_not_exist(&format!(
@@ -727,7 +677,7 @@ mod tests {
                 );
 
                 let source = std::io::Cursor::new(vec![0xBA, 0xAD, 0xF0, 0x0D]);
-                let digest = DockerDigest(format!("sha256:{actual_sha}"));
+                let digest = digest::Digest(format!("sha256:{actual_sha}"));
                 let result = store.save(&digest, source).await;
 
                 assert!(matches!(result, Ok(())))
@@ -735,7 +685,8 @@ mod tests {
         }
 
         mod exists {
-            use crate::blob_store::{BlobStore, DockerDigest, FileBlobStore};
+            use crate::blob_store::{BlobStore, FileBlobStore};
+            use crate::digest;
             use file_system::{
                 MockFileDeleter, MockFileReader, MockFileRenamer, MockFileWriter, MockFolder,
             };
@@ -748,7 +699,7 @@ mod tests {
                 let file_reader = MockFileReader::new();
                 let file_renamer = MockFileRenamer::new();
                 let file_deleter = MockFileDeleter::new();
-                let blob_root = PathBuf::from("/tmp");
+                let blob_root = PathBuf::from("/tmp/blobs");
 
                 let sha = "ff".repeat(32);
                 folder.given_does_not_exist(&format!("/tmp/blobs/sha256/ff/{sha}/{sha}"));
@@ -761,7 +712,7 @@ mod tests {
                     Arc::new(file_deleter),
                     blob_root,
                 );
-                let actual = store.exists(&DockerDigest(format!("sha256:{sha}"))).await;
+                let actual = store.exists(&digest::Digest(format!("sha256:{sha}"))).await;
                 assert!(matches!(actual, Ok(false)));
             }
 
@@ -772,7 +723,7 @@ mod tests {
                 let file_reader = MockFileReader::new();
                 let file_renamer = MockFileRenamer::new();
                 let file_deleter = MockFileDeleter::new();
-                let blob_root = PathBuf::from("/tmp");
+                let blob_root = PathBuf::from("/tmp/blobs");
 
                 let sha = "ff".repeat(32);
                 folder.given_exists(&format!("/tmp/blobs/sha256/ff/{sha}/{sha}"));
@@ -785,13 +736,14 @@ mod tests {
                     Arc::new(file_deleter),
                     blob_root,
                 );
-                let actual = store.exists(&DockerDigest(format!("sha256:{sha}"))).await;
+                let actual = store.exists(&digest::Digest(format!("sha256:{sha}"))).await;
                 assert!(matches!(actual, Ok(true)));
             }
         }
 
         mod get {
-            use crate::blob_store::{BlobError, BlobStore, DockerDigest, FileBlobStore};
+            use crate::blob_store::{BlobError, BlobStore, FileBlobStore};
+            use crate::digest;
             use file_system::{
                 FileSystemError, MockFileDeleter, MockFileReader, MockFileRenamer, MockFileWriter,
                 MockFolder,
@@ -806,7 +758,7 @@ mod tests {
                 let mut file_reader = MockFileReader::new();
                 let file_renamer = MockFileRenamer::new();
                 let file_deleter = MockFileDeleter::new();
-                let blob_root = PathBuf::from("/tmp");
+                let blob_root = PathBuf::from("/tmp/blobs");
 
                 let sha = "ff".repeat(32);
 
@@ -829,7 +781,7 @@ mod tests {
                     Arc::new(file_deleter),
                     blob_root,
                 );
-                let actual = store.get(&DockerDigest(format!("sha256:{sha}"))).await;
+                let actual = store.get(&digest::Digest(format!("sha256:{sha}"))).await;
                 let expected_missing_file_path =
                     PathBuf::from(format!("/tmp/blobs/sha256/ff/{sha}/{sha}"));
                 assert!(matches!(
@@ -847,7 +799,7 @@ mod tests {
                 let mut file_reader = MockFileReader::new();
                 let file_renamer = MockFileRenamer::new();
                 let file_deleter = MockFileDeleter::new();
-                let blob_root = PathBuf::from("/tmp");
+                let blob_root = PathBuf::from("/tmp/blobs");
 
                 let sha = "ff".repeat(32);
 
@@ -865,13 +817,14 @@ mod tests {
                     Arc::new(file_deleter),
                     blob_root,
                 );
-                let actual = store.get(&DockerDigest(format!("sha256:{sha}"))).await;
+                let actual = store.get(&digest::Digest(format!("sha256:{sha}"))).await;
                 assert!(actual.is_ok());
             }
         }
 
         mod round_trip {
-            use crate::blob_store::{BlobStore, DockerDigest, FileBlobStore};
+            use crate::blob_store::{BlobStore, FileBlobStore};
+            use crate::digest;
             use file_system::{
                 MockBufferedFileWiter, MockFileDeleter, MockFileReader, MockFileRenamer,
                 MockFileWriter, MockFolder,
@@ -887,13 +840,13 @@ mod tests {
                 let mut file_reader = MockFileReader::new();
                 let mut file_renamer = MockFileRenamer::new();
                 let file_deleter = MockFileDeleter::new();
-                let blob_root = PathBuf::from("/tmp");
+                let blob_root = PathBuf::from("/tmp/blobs");
 
                 let sha = "a58dd8680234c1f8cc2ef2b325a43733605a7f16f288e072de8eae81fd8d6433";
                 let data = "Lorem ipsum dolor sit amet, consectetur adipiscing elit.".as_bytes();
 
                 let prefixed_sha = format!("sha256:{sha}");
-                let claim: DockerDigest = prefixed_sha
+                let claim: digest::Digest = prefixed_sha
                     .parse()
                     .expect("test fixture digest should be valid");
 

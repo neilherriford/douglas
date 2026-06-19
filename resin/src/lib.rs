@@ -1,5 +1,6 @@
 mod blob_store;
 mod bootstrap;
+mod digest;
 
 use axum::{
     Router,
