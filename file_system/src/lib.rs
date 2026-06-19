@@ -209,6 +209,25 @@ pub trait FileReader: Send + Sync {
 
 #[cfg(feature = "mock")]
 impl MockFileReader {
+    pub fn given_file(&mut self, path: &str, exists: bool) -> &mut Self {
+        let path = path.to_string();
+        let path = PathBuf::from(path);
+
+        self.expect_exists()
+            .with(predicate::eq(path.clone()))
+            .return_const(exists);
+
+        self
+    }
+
+    pub fn given_exists(&mut self, path: &str) -> &mut Self {
+        self.given_file(path, true)
+    }
+
+    pub fn given_does_not_exist(&mut self, path: &str) -> &mut Self {
+        self.given_file(path, false)
+    }
+
     pub fn given_can_read_all_with_contents(&mut self, path: &str, contents: &str) -> &mut Self {
         let path = path.to_string();
         let path = PathBuf::from(path);
@@ -925,12 +944,15 @@ impl Entry {
 
 #[cfg(feature = "mock")]
 impl MockFileWriter {
-    pub fn expect_write_to_file_with_something(&mut self, path: &str) -> &mut Self {
+    pub fn expect_write_to_file_with_contents(&mut self, path: &str, contents: &str) -> &mut Self {
         let path = Path::new(path);
         let path = path.to_path_buf();
 
         self.expect_write_all()
-            .with(predicate::eq(path.clone()), predicate::always())
+            .with(
+                predicate::eq(path.clone()),
+                predicate::eq(contents.to_string()),
+            )
             .returning(|_, _| Ok(()));
         self
     }
