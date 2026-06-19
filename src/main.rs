@@ -84,8 +84,10 @@ enum ServiceCommand {
         notify_fd: i32,
     },
     Resin {
-        #[arg(long, help = "File descriptor to stream boot information to")]
-        notify_fd: i32,
+        #[arg(long, default_value_t = false, help = "Debug mode — runs in foreground with TUI, no pipe required")]
+        dbg: bool,
+        #[arg(long, help = "File descriptor to stream boot information to", required_unless_present = "dbg")]
+        notify_fd: Option<i32>,
     },
 }
 
@@ -114,8 +116,14 @@ fn main() -> ExitCode {
             service: ServiceCommand::Bract { notify_fd },
         } => start_bract(notify_fd),
         Commands::Service {
-            service: ServiceCommand::Resin { notify_fd },
-        } => start_resin(notify_fd),
+            service: ServiceCommand::Resin { dbg, notify_fd },
+        } => {
+            if dbg {
+                run_with_tokio(resin_debug_mode())
+            } else {
+                start_resin(notify_fd.unwrap())
+            }
+        }
     }
 }
 
@@ -169,20 +177,38 @@ fn start_resin(reporting_fd: i32) -> ExitCode {
     {
         Ok(()) => run_with_tokio(run_resin_server(reporting_fd)),
         Err(err) => {
-            eprintln!("Failed to daemonize bract server: {err:?}");
+            eprintln!("Failed to daemonize resin server: {err:?}");
             ExitCode::from(1)
         }
     }
 }
 
 async fn run_resin_server(reporting_fd: i32) -> ExitCode {
-    let Ok(server) = resin::Server::build(reporting_fd, resin::DEFAULT_PORT).await else {
+    let Ok(server) = resin::Server::build(Some(reporting_fd), resin::DEFAULT_PORT).await else {
         return ExitCode::from(1);
     };
 
     match server.start().await {
         Ok(()) => ExitCode::from(0),
         Err(_) => ExitCode::from(1),
+    }
+}
+
+async fn resin_debug_mode() -> ExitCode {
+    let server = match resin::Server::build(None, resin::DEFAULT_PORT).await {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("resin: failed to start: {e}");
+            return ExitCode::from(1);
+        }
+    };
+
+    match server.start().await {
+        Ok(()) => ExitCode::from(0),
+        Err(e) => {
+            eprintln!("resin: {e}");
+            ExitCode::from(1)
+        }
     }
 }
 

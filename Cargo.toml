@@ -13,7 +13,7 @@ colored = { workspace = true }
 command-fds = "0.3.3"
 config = { workspace = true }
 credentials = { workspace = true }
-crossterm = "0.29.0"
+crossterm = { workspace = true }
 daemonize = "0.5.0"
 docker = { workspace = true }
 file_system = { workspace = true }
@@ -24,7 +24,7 @@ nix = { workspace = true }
 openbao = { workspace = true }
 os = { workspace = true }
 os_pipe = "1.2.3"
-ratatui = "0.30.0"
+ratatui = { workspace = true }
 resin = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -55,8 +55,10 @@ http-body-util = "0.1"
 humantime = "2.3.0"
 hyper = { version = "1.6.0", features = ["client"] }
 hyper-util = { version = "0.1.11", features = ["full"] }
+crossterm = "0.29.0"
 mockall = "0.13.1"
 nix = { version = "0.30.1", features = ["fs"] }
+ratatui = "0.30.0"
 serde = { version = "1.0.219", features = ["derive"] }
 serde_json = "1.0.140"
 thiserror = "1"

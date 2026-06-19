@@ -1,3 +1,8 @@
+#[cfg(feature = "tui")]
+mod tui_reporter;
+#[cfg(feature = "tui")]
+pub use tui_reporter::TuiReporter;
+
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::sync::{
     Arc, Mutex,

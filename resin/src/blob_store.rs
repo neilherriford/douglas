@@ -1,4 +1,5 @@
 use crate::digest;
+use async_trait::async_trait;
 use file_system::{FileDeleter, FileReader, FileRenamer, FileSystemError, FileWriter, Folder};
 use sha2::Sha256;
 use std::{path::PathBuf, sync::Arc};
@@ -20,11 +21,12 @@ pub enum BlobError {
     FileSystemError(#[from] FileSystemError),
 }
 
-pub trait BlobStore {
+#[async_trait]
+pub trait BlobStore: Send + Sync {
     async fn save(
         &self,
         claimed: &digest::Digest,
-        source: impl AsyncRead + Send + Unpin,
+        source: Box<dyn AsyncRead + Send + Unpin>,
     ) -> Result<(), BlobError>;
 
     async fn get(
@@ -200,11 +202,12 @@ impl FileBlobStore {
     }
 }
 
+#[async_trait]
 impl BlobStore for FileBlobStore {
     async fn save(
         &self,
         claimed: &digest::Digest,
-        source: impl AsyncRead + Send + Unpin,
+        source: Box<dyn AsyncRead + Send + Unpin>,
     ) -> Result<(), BlobError> {
         if self.exists(claimed).await? {
             return Ok(());
@@ -401,7 +404,7 @@ mod tests {
 
                 let source = std::io::Cursor::new(Vec::new());
                 let digest = digest::Digest("sha256:f00d".to_string());
-                let result = store.save(&digest, source).await;
+                let result = store.save(&digest, Box::new(source)).await;
                 assert!(matches!(
                     result,
                     Err(BlobError::FileSystemError(
@@ -446,7 +449,7 @@ mod tests {
 
                 let source = std::io::Cursor::new(vec![0xBA, 0xAD, 0xF0, 0x0D]);
                 let digest = digest::Digest("sha256:f00d".to_string());
-                let result = store.save(&digest, source).await;
+                let result = store.save(&digest, Box::new(source)).await;
 
                 assert!(matches!(
                     result,
@@ -488,7 +491,7 @@ mod tests {
 
                 let source = FailingReader {};
                 let digest = digest::Digest("sha256:f00d".to_string());
-                let result = store.save(&digest, source).await;
+                let result = store.save(&digest, Box::new(source)).await;
 
                 assert!(matches!(
                     result,
@@ -529,7 +532,7 @@ mod tests {
 
                 let source = std::io::Cursor::new(vec![0xBA, 0xAD, 0xF0, 0x0D]);
                 let digest = digest::Digest("sha256:f00d".to_string());
-                let result = store.save(&digest, source).await;
+                let result = store.save(&digest, Box::new(source)).await;
 
                 assert!(matches!(result, Err(BlobError::DigestMismatch { .. })));
             }
@@ -590,7 +593,7 @@ mod tests {
 
                 let source = std::io::Cursor::new(vec![0xBA, 0xAD, 0xF0, 0x0D]);
                 let digest = digest::Digest(format!("sha256:{actual_sha}"));
-                let result = store.save(&digest, source).await;
+                let result = store.save(&digest, Box::new(source)).await;
 
                 assert!(matches!(
                     result,
@@ -623,7 +626,7 @@ mod tests {
 
                 let source = std::io::Cursor::new(vec![0xBA, 0xAD, 0xF0, 0x0D]);
                 let digest = digest::Digest(format!("sha256:{actual_sha}"));
-                let result = store.save(&digest, source).await;
+                let result = store.save(&digest, Box::new(source)).await;
 
                 assert!(matches!(result, Ok(())))
             }
@@ -678,7 +681,7 @@ mod tests {
 
                 let source = std::io::Cursor::new(vec![0xBA, 0xAD, 0xF0, 0x0D]);
                 let digest = digest::Digest(format!("sha256:{actual_sha}"));
-                let result = store.save(&digest, source).await;
+                let result = store.save(&digest, Box::new(source)).await;
 
                 assert!(matches!(result, Ok(())))
             }
@@ -890,7 +893,10 @@ mod tests {
                     blob_root,
                 );
 
-                store.save(&claim, data).await.expect("should save");
+                store
+                    .save(&claim, Box::new(data))
+                    .await
+                    .expect("should save");
                 let mut reader = store.get(&claim).await.expect("should retrieve");
 
                 let mut actual = Vec::new();

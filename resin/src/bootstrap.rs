@@ -6,7 +6,7 @@ use log::{BufferedFileReporter, Level, PipeReporter, Reporter, ScopeKind, Span, 
 use std::{path::PathBuf, sync::Arc};
 
 pub async fn bootstrap(
-    reporting_fd: i32,
+    reporting_fd: Option<i32>,
     credentials: &dyn Credentials,
     folder: &dyn Folder,
     log_path: PathBuf,
@@ -17,7 +17,9 @@ pub async fn bootstrap(
     let boot_reporter: Arc<dyn Reporter> = {
         let mut sinks: Vec<Box<dyn Reporter>> = vec![Box::new(BufferedFileReporter::new(log_path))];
 
-        sinks.push(Box::new(unsafe { PipeReporter::from_raw_fd(reporting_fd) }));
+        if let Some(fd) = reporting_fd {
+            sinks.push(Box::new(unsafe { PipeReporter::from_raw_fd(fd) }));
+        }
         Arc::new(TeeReporter::new(sinks))
     };
 

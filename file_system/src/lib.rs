@@ -179,7 +179,7 @@ impl Entry {
 }
 
 #[cfg_attr(feature = "mock", mockall::automock)]
-pub trait BufferedFileWiter {
+pub trait BufferedFileWiter: Send {
     fn write_all(&mut self, bytes: &[u8]) -> Result<(), FileSystemError>;
     fn close(&mut self);
 }
@@ -260,7 +260,7 @@ impl MockFileDeleter {
 }
 
 #[cfg_attr(feature = "mock", mockall::automock)]
-pub trait FileRenamer {
+pub trait FileRenamer: Send + Sync {
     fn rename(&self, from: &Path, to: &Path) -> Result<(), FileSystemError>;
 }
 
