@@ -13,8 +13,8 @@ let
       (builtins.attrNames (builtins.readDir userKeysDir));
 
   # Version information for your dev image
-  devImageVersion = "0.0.2j";
-  devImageDate = "2026-01-19";
+  devImageVersion = "0.0.2k";
+  devImageDate = "2026-06-19";
   devImageName = "Douglas Development Environment";
 
   # Define our development packages explicitly
@@ -228,11 +228,9 @@ in
         # Setup rustup directories
         mkdir -p ~/.rustup ~/.cargo
 
-        # Install and set default Rust toolchain
-        ${pkgs.rustup}/bin/rustup default stable
-
-        # Add essential components
-        ${pkgs.rustup}/bin/rustup component add clippy rustfmt rust-src
+        # Install and set default Rust toolchain (pinned to match rust-toolchain.toml)
+        ${pkgs.rustup}/bin/rustup toolchain install 1.96.0 --component clippy rustfmt rust-src
+        ${pkgs.rustup}/bin/rustup default 1.96.0
 
         # Verify installation
         ${pkgs.rustup}/bin/rustc --version
@@ -253,11 +251,9 @@ in
           # Create directories
           mkdir -p "$HOME/.rustup" "$HOME/.cargo"
 
-          # Install stable toolchain quietly
-          rustup default stable 2>&1 | grep -v "info: " || true
-
-          # Add essential components
-          rustup component add clippy rustfmt rust-src 2>&1 | grep -v "info: " || true
+          # Install pinned toolchain quietly (matches rust-toolchain.toml)
+          rustup toolchain install 1.96.0 --component clippy rustfmt rust-src 2>&1 | grep -v "info: " || true
+          rustup default 1.96.0 2>&1 | grep -v "info: " || true
 
           echo "✅ Rust toolchain ready! Version: $(rustc --version 2>/dev/null || echo 'setup in progress')"
         fi
@@ -323,9 +319,9 @@ in
         echo "✅ Rust is already configured!"
         rustup show
       else
-        echo "Installing stable Rust toolchain..."
-        rustup default stable
-        rustup component add clippy rustfmt rust-src
+        echo "Installing Rust 1.96.0 toolchain..."
+        rustup toolchain install 1.96.0 --component clippy rustfmt rust-src
+        rustup default 1.96.0
         echo ""
         echo "✅ Rust setup complete!"
         rustc --version
@@ -388,8 +384,8 @@ in
     # Setup Rust if not already configured
     if command -v rustup >/dev/null 2>&1 && ! rustup show >/dev/null 2>&1; then
       echo "🦀 Configuring Rust toolchain..."
-      rustup default stable
-      rustup component add clippy rustfmt rust-src
+      rustup toolchain install 1.96.0 --component clippy rustfmt rust-src
+      rustup default 1.96.0
       echo "✅ Rust ready: $(rustc --version)"
     fi
 
