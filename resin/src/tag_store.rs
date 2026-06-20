@@ -217,11 +217,13 @@ mod tests {
                         name: "foo".to_string(),
                         kind: EntryKind::Directory,
                         is_link: false,
+                        size: 0,
                     },
                     Entry {
                         name: "bar".to_string(),
                         kind: EntryKind::File,
                         is_link: false,
+                        size: 123,
                     },
                 ],
             );

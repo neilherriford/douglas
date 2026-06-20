@@ -19,6 +19,11 @@ impl Digest {
         Ok(Digest(format!("sha256:{hex}")))
     }
 
+    pub fn from_hex(hex: &str) -> Result<Self, DigestError> {
+        let result: Digest = format!("sha256:{hex}").parse()?;
+        Ok(result)
+    }
+
     pub fn hex(&self) -> &str {
         &self.0["sha256:".len()..]
     }

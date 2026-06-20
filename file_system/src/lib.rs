@@ -141,6 +141,7 @@ pub struct Entry {
     pub name: String,
     pub kind: EntryKind,
     pub is_link: bool,
+    pub size: u64,
 }
 
 impl Entry {
@@ -157,6 +158,7 @@ impl Entry {
 
         let kind;
         let is_link;
+        let size;
 
         match metadata {
             Ok(metadata) => {
@@ -166,6 +168,7 @@ impl Entry {
                     kind = EntryKind::Directory;
                 }
                 is_link = metadata.is_symlink();
+                size = metadata.len();
             }
             Err(err) => return Err(FileSystemError::IoError(err)),
         }
@@ -174,6 +177,7 @@ impl Entry {
             name: entry_name,
             kind,
             is_link,
+            size,
         })
     }
 }
@@ -719,7 +723,7 @@ impl MockLinks {
 }
 
 #[cfg_attr(feature = "mock", mockall::automock)]
-pub trait Inspect {
+pub trait Inspect: Send + Sync {
     fn is_directory(&self, path: &Path) -> bool;
     fn read_metadata(&self, path: &Path) -> Result<Entry, FileSystemError>;
     fn exists(&self, path: &Path) -> bool;
@@ -930,6 +934,7 @@ impl Entry {
             is_link: false,
             kind: EntryKind::File,
             name: name.to_string(),
+            size: 123,
         }
     }
 
@@ -938,6 +943,7 @@ impl Entry {
             is_link: false,
             kind: EntryKind::Directory,
             name: name.to_string(),
+            size: 0,
         }
     }
 }
@@ -954,6 +960,38 @@ impl MockFileWriter {
                 predicate::eq(contents.to_string()),
             )
             .returning(|_, _| Ok(()));
+        self
+    }
+}
+
+#[cfg(feature = "mock")]
+impl MockInspect {
+    pub fn given_entry(&mut self, path: &str, exists: bool) -> &mut Self {
+        let path = path.to_string();
+        let path = PathBuf::from(path);
+
+        self.expect_exists()
+            .with(predicate::eq(path.clone()))
+            .return_const(exists);
+
+        self
+    }
+
+    pub fn given_exists(&mut self, path: &str) -> &mut Self {
+        self.given_entry(path, true)
+    }
+
+    pub fn given_does_not_exist(&mut self, path: &str) -> &mut Self {
+        self.given_entry(path, false)
+    }
+
+    pub fn expect_entry_with_metadata(&mut self, path: &str, entry: Entry) -> &mut Self {
+        let path = Path::new(path);
+        let path = path.to_path_buf();
+
+        self.expect_read_metadata()
+            .with(predicate::eq(path.clone()))
+            .returning(move |_| Ok(entry.clone()));
         self
     }
 }

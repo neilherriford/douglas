@@ -12,10 +12,13 @@ credentials = { workspace = true }
 file_system = { workspace = true }
 hex = "0.4.3"
 log = { workspace = true, features = ["tui"] }
+mime = "0.3.17"
 os = { workspace = true }
+serde_json = { workspace = true }
 sha2 = "0.11.0"
 thiserror = { workspace = true }
 tokio = { workspace = true }
+tokio-util = { workspace = true }
 
 [features]
 mock = ["file_system/mock"]

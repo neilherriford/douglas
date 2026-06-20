@@ -1,13 +1,18 @@
 use crate::digest;
-use async_trait::async_trait;
-use file_system::{FileDeleter, FileReader, FileRenamer, FileSystemError, FileWriter, Folder};
+use file_system::{
+    FileDeleter, FileReader, FileRenamer, FileSystemError, FileWriter, Folder, Inspect,
+};
 use sha2::Sha256;
-use std::{path::PathBuf, sync::Arc};
+use std::{future::Future, path::PathBuf, pin::Pin, sync::Arc};
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt};
 
+type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+
 #[derive(Debug, Error)]
 pub enum BlobError {
+    #[error("Digest not found {0}")]
+    DigestNotFound(String),
     #[error("Digest error")]
     DigestError(#[from] crate::digest::DigestError),
     #[error("Digest mismatch: claimed {claimed}, computed {computed}")]
@@ -21,20 +26,25 @@ pub enum BlobError {
     FileSystemError(#[from] FileSystemError),
 }
 
-#[async_trait]
+#[derive(Debug, PartialEq, Eq, Clone)]
+pub struct Stats {
+    pub size: u64,
+}
+
 pub trait BlobStore: Send + Sync {
-    async fn save(
-        &self,
-        claimed: &digest::Digest,
+    fn save<'a>(
+        &'a self,
+        claimed: &'a digest::Digest,
         source: Box<dyn AsyncRead + Send + Unpin>,
-    ) -> Result<(), BlobError>;
+    ) -> BoxFuture<'a, Result<(), BlobError>>;
 
-    async fn get(
-        &self,
-        digest: &digest::Digest,
-    ) -> Result<Box<dyn AsyncRead + Send + Unpin>, BlobError>;
+    fn get<'a>(
+        &'a self,
+        digest: &'a digest::Digest,
+    ) -> BoxFuture<'a, Result<Box<dyn AsyncRead + Send + Unpin>, BlobError>>;
 
-    async fn exists(&self, digest: &digest::Digest) -> Result<bool, BlobError>;
+    fn exists<'a>(&'a self, digest: &'a digest::Digest) -> BoxFuture<'a, Result<bool, BlobError>>;
+    fn stats<'a>(&'a self, digest: &'a digest::Digest) -> BoxFuture<'a, Result<Stats, BlobError>>;
 }
 
 struct DigestPaths {
@@ -138,6 +148,7 @@ pub struct FileBlobStore {
     file_reader: Arc<dyn FileReader>,
     file_renamer: Arc<dyn FileRenamer>,
     file_deleter: Arc<dyn FileDeleter>,
+    inspect: Arc<dyn Inspect>,
     blob_root: PathBuf,
 }
 
@@ -148,6 +159,7 @@ impl FileBlobStore {
         file_reader: Arc<dyn FileReader>,
         file_renamer: Arc<dyn FileRenamer>,
         file_deleter: Arc<dyn FileDeleter>,
+        inspect: Arc<dyn Inspect>,
         blob_root: PathBuf,
     ) -> Self {
         Self {
@@ -156,6 +168,7 @@ impl FileBlobStore {
             file_reader,
             file_renamer,
             file_deleter,
+            inspect,
             blob_root,
         }
     }
@@ -202,57 +215,74 @@ impl FileBlobStore {
     }
 }
 
-#[async_trait]
 impl BlobStore for FileBlobStore {
-    async fn save(
-        &self,
-        claimed: &digest::Digest,
+    fn save<'a>(
+        &'a self,
+        claimed: &'a digest::Digest,
         source: Box<dyn AsyncRead + Send + Unpin>,
-    ) -> Result<(), BlobError> {
-        if self.exists(claimed).await? {
-            return Ok(());
-        }
+    ) -> BoxFuture<'a, Result<(), BlobError>> {
+        Box::pin(async move {
+            if self.exists(claimed).await? {
+                return Ok(());
+            }
 
-        let mut digest_store = DigestStore::new(
-            self.blob_root.clone(),
-            Arc::clone(&self.file_renamer),
-            Arc::clone(&self.file_deleter),
-            Arc::clone(&self.folder),
-            claimed,
-        );
+            let mut digest_store = DigestStore::new(
+                self.blob_root.clone(),
+                Arc::clone(&self.file_renamer),
+                Arc::clone(&self.file_deleter),
+                Arc::clone(&self.folder),
+                claimed,
+            );
 
-        let temp_path = digest_store.initialize()?;
-        let hash = self.hashed_read_to_temp_file(source, &temp_path).await?;
-        let computed = hash.as_slice();
+            let temp_path = digest_store.initialize()?;
+            let hash = self.hashed_read_to_temp_file(source, &temp_path).await?;
+            let computed = hash.as_slice();
 
-        if claimed.as_bytes().as_slice() != computed {
-            digest_store.clean_up()?;
+            if claimed.as_bytes().as_slice() != computed {
+                digest_store.clean_up()?;
+                return Err(BlobError::DigestMismatch {
+                    claimed: claimed.clone(),
+                    computed: digest::Digest::from_bytes(&computed)?,
+                });
+            }
 
-            return Err(BlobError::DigestMismatch {
-                claimed: claimed.clone(),
-                computed: digest::Digest::from_bytes(&computed)?,
-            });
-        }
-
-        digest_store.complete()?;
-        Ok(())
+            digest_store.complete()?;
+            Ok(())
+        })
     }
 
-    async fn exists(&self, digest: &digest::Digest) -> Result<bool, BlobError> {
-        let digest_paths = DigestPaths::new(&self.blob_root, digest);
-        Ok(self.folder.exists(&digest_paths.final_file))
+    fn exists<'a>(&'a self, digest: &'a digest::Digest) -> BoxFuture<'a, Result<bool, BlobError>> {
+        Box::pin(async move {
+            let digest_paths = DigestPaths::new(&self.blob_root, digest);
+            Ok(self.inspect.exists(&digest_paths.final_file))
+        })
     }
 
-    async fn get(
-        &self,
-        digest: &digest::Digest,
-    ) -> Result<Box<dyn AsyncRead + Send + Unpin>, BlobError> {
-        let digest_paths = DigestPaths::new(&self.blob_root, digest);
-        let result = self
-            .file_reader
-            .create_reader(&digest_paths.final_file)
-            .await?;
-        Ok(result)
+    fn get<'a>(
+        &'a self,
+        digest: &'a digest::Digest,
+    ) -> BoxFuture<'a, Result<Box<dyn AsyncRead + Send + Unpin>, BlobError>> {
+        Box::pin(async move {
+            let digest_paths = DigestPaths::new(&self.blob_root, digest);
+            let result = self
+                .file_reader
+                .create_reader(&digest_paths.final_file)
+                .await?;
+            Ok(result)
+        })
+    }
+
+    fn stats<'a>(&'a self, digest: &'a digest::Digest) -> BoxFuture<'a, Result<Stats, BlobError>> {
+        Box::pin(async move {
+            let digest_paths = DigestPaths::new(&self.blob_root, digest);
+            if self.inspect.exists(&digest_paths.final_file) {
+                let entry = self.inspect.read_metadata(&digest_paths.final_file)?;
+
+                Ok(Stats { size: entry.size })
+            } else {
+                Err(BlobError::DigestNotFound(digest.to_string()))
+            }
+        })
     }
 }
 
@@ -357,7 +387,7 @@ mod tests {
             use crate::digest;
             use file_system::{
                 FileSystemError, MockBufferedFileWiter, MockFileDeleter, MockFileReader,
-                MockFileRenamer, MockFileWriter, MockFolder,
+                MockFileRenamer, MockFileWriter, MockFolder, MockInspect, UnixInspect,
             };
             use mockall::predicate;
             use std::{path::PathBuf, sync::Arc};
@@ -385,9 +415,10 @@ mod tests {
                 let file_reader = MockFileReader::new();
                 let file_renamer = MockFileRenamer::new();
                 let file_deleter = MockFileDeleter::new();
+                let mut inspect = MockInspect::new();
                 let blob_root = PathBuf::from("/tmp/blobs");
 
-                folder.given_does_not_exist("/tmp/blobs/sha256/f0/f00d/f00d");
+                inspect.given_does_not_exist("/tmp/blobs/sha256/f0/f00d/f00d");
                 folder
                     .expect_create_recursively()
                     .with(predicate::eq(PathBuf::from("/tmp/blobs/sha256/f0/f00d")))
@@ -399,6 +430,7 @@ mod tests {
                     Arc::new(file_reader),
                     Arc::new(file_renamer),
                     Arc::new(file_deleter),
+                    Arc::new(inspect),
                     blob_root,
                 );
 
@@ -420,9 +452,10 @@ mod tests {
                 let file_reader = MockFileReader::new();
                 let file_renamer = MockFileRenamer::new();
                 let mut file_deleter = MockFileDeleter::new();
+                let mut inspect = MockInspect::new();
                 let blob_root = PathBuf::from("/tmp/blobs");
 
-                folder.given_does_not_exist("/tmp/blobs/sha256/f0/f00d/f00d");
+                inspect.given_does_not_exist("/tmp/blobs/sha256/f0/f00d/f00d");
                 folder.expect_create_folder_recursively_with("/tmp/blobs/sha256/f0/f00d");
 
                 let mut buffered_writer = MockBufferedFileWiter::new();
@@ -444,6 +477,7 @@ mod tests {
                     Arc::new(file_reader),
                     Arc::new(file_renamer),
                     Arc::new(file_deleter),
+                    Arc::new(inspect),
                     blob_root,
                 );
 
@@ -466,9 +500,10 @@ mod tests {
                 let file_reader = MockFileReader::new();
                 let file_renamer = MockFileRenamer::new();
                 let mut file_deleter = MockFileDeleter::new();
+                let mut inspect = MockInspect::new();
                 let blob_root = PathBuf::from("/tmp/blobs");
 
-                folder.given_does_not_exist("/tmp/blobs/sha256/f0/f00d/f00d");
+                inspect.given_does_not_exist("/tmp/blobs/sha256/f0/f00d/f00d");
                 folder.expect_create_folder_recursively_with("/tmp/blobs/sha256/f0/f00d");
 
                 let buffered_writer = MockBufferedFileWiter::new();
@@ -486,6 +521,7 @@ mod tests {
                     Arc::new(file_reader),
                     Arc::new(file_renamer),
                     Arc::new(file_deleter),
+                    Arc::new(inspect),
                     blob_root,
                 );
 
@@ -506,9 +542,10 @@ mod tests {
                 let file_reader = MockFileReader::new();
                 let file_renamer = MockFileRenamer::new();
                 let mut file_deleter = MockFileDeleter::new();
+                let mut inspect = MockInspect::new();
                 let blob_root = PathBuf::from("/tmp/blobs");
 
-                folder.given_does_not_exist("/tmp/blobs/sha256/f0/f00d/f00d");
+                inspect.given_does_not_exist("/tmp/blobs/sha256/f0/f00d/f00d");
                 folder.expect_create_folder_recursively_with("/tmp/blobs/sha256/f0/f00d");
                 let mut buffered_writer = MockBufferedFileWiter::new();
 
@@ -527,6 +564,7 @@ mod tests {
                     Arc::new(file_reader),
                     Arc::new(file_renamer),
                     Arc::new(file_deleter),
+                    Arc::new(inspect),
                     blob_root,
                 );
 
@@ -544,10 +582,11 @@ mod tests {
                 let file_reader = MockFileReader::new();
                 let mut file_renamer = MockFileRenamer::new();
                 let mut file_deleter = MockFileDeleter::new();
+                let mut inspect = MockInspect::new();
                 let blob_root = PathBuf::from("/tmp/blobs");
 
                 let actual_sha = "05174bbf0d407087e45b12baae17117426852ff3a9e58d12a0ebb9a10b409743";
-                folder.given_does_not_exist(&format!(
+                inspect.given_does_not_exist(&format!(
                     "/tmp/blobs/sha256/05/{actual_sha}/{actual_sha}"
                 ));
                 folder.expect_create_folder_recursively_with(&format!(
@@ -588,6 +627,7 @@ mod tests {
                     Arc::new(file_reader),
                     Arc::new(file_renamer),
                     Arc::new(file_deleter),
+                    Arc::new(inspect),
                     blob_root,
                 );
 
@@ -605,15 +645,16 @@ mod tests {
 
             #[tokio::test]
             async fn test_should_not_overwrite_writ() {
-                let mut folder = MockFolder::new();
+                let folder = MockFolder::new();
                 let file_writer = MockFileWriter::new();
                 let file_reader = MockFileReader::new();
                 let file_renamer = MockFileRenamer::new();
                 let file_deleter = MockFileDeleter::new();
+                let mut inspect = MockInspect::new();
                 let blob_root = PathBuf::from("/tmp/blobs");
 
                 let actual_sha = "05174bbf0d407087e45b12baae17117426852ff3a9e58d12a0ebb9a10b409743";
-                folder.given_exists(&format!("/tmp/blobs/sha256/05/{actual_sha}/{actual_sha}/"));
+                inspect.given_exists(&format!("/tmp/blobs/sha256/05/{actual_sha}/{actual_sha}/"));
 
                 let store = FileBlobStore::new(
                     Arc::new(folder),
@@ -621,6 +662,7 @@ mod tests {
                     Arc::new(file_reader),
                     Arc::new(file_renamer),
                     Arc::new(file_deleter),
+                    Arc::new(inspect),
                     blob_root,
                 );
 
@@ -638,10 +680,11 @@ mod tests {
                 let file_reader = MockFileReader::new();
                 let mut file_renamer = MockFileRenamer::new();
                 let file_deleter = MockFileDeleter::new();
+                let mut inspect = MockInspect::new();
                 let blob_root = PathBuf::from("/tmp/blobs");
 
                 let actual_sha = "05174bbf0d407087e45b12baae17117426852ff3a9e58d12a0ebb9a10b409743";
-                folder.given_does_not_exist(&format!(
+                inspect.given_does_not_exist(&format!(
                     "/tmp/blobs/sha256/05/{actual_sha}/{actual_sha}"
                 ));
                 folder.expect_create_folder_recursively_with(&format!(
@@ -676,6 +719,7 @@ mod tests {
                     Arc::new(file_reader),
                     Arc::new(file_renamer),
                     Arc::new(file_deleter),
+                    Arc::new(inspect),
                     blob_root,
                 );
 
@@ -692,20 +736,22 @@ mod tests {
             use crate::digest;
             use file_system::{
                 MockFileDeleter, MockFileReader, MockFileRenamer, MockFileWriter, MockFolder,
+                MockInspect,
             };
             use std::{path::PathBuf, sync::Arc};
 
             #[tokio::test]
             async fn test_should_determine_if_blob_does_not_exist() {
-                let mut folder = MockFolder::new();
+                let folder = MockFolder::new();
                 let file_writer = MockFileWriter::new();
                 let file_reader = MockFileReader::new();
                 let file_renamer = MockFileRenamer::new();
                 let file_deleter = MockFileDeleter::new();
+                let mut inspect = MockInspect::new();
                 let blob_root = PathBuf::from("/tmp/blobs");
 
                 let sha = "ff".repeat(32);
-                folder.given_does_not_exist(&format!("/tmp/blobs/sha256/ff/{sha}/{sha}"));
+                inspect.given_does_not_exist(&format!("/tmp/blobs/sha256/ff/{sha}/{sha}"));
 
                 let store = FileBlobStore::new(
                     Arc::new(folder),
@@ -713,6 +759,7 @@ mod tests {
                     Arc::new(file_reader),
                     Arc::new(file_renamer),
                     Arc::new(file_deleter),
+                    Arc::new(inspect),
                     blob_root,
                 );
                 let actual = store.exists(&digest::Digest(format!("sha256:{sha}"))).await;
@@ -721,15 +768,16 @@ mod tests {
 
             #[tokio::test]
             async fn test_should_determine_if_blob_does_exist() {
-                let mut folder = MockFolder::new();
+                let folder = MockFolder::new();
                 let file_writer = MockFileWriter::new();
                 let file_reader = MockFileReader::new();
                 let file_renamer = MockFileRenamer::new();
                 let file_deleter = MockFileDeleter::new();
+                let mut inspect = MockInspect::new();
                 let blob_root = PathBuf::from("/tmp/blobs");
 
                 let sha = "ff".repeat(32);
-                folder.given_exists(&format!("/tmp/blobs/sha256/ff/{sha}/{sha}"));
+                inspect.given_exists(&format!("/tmp/blobs/sha256/ff/{sha}/{sha}"));
 
                 let store = FileBlobStore::new(
                     Arc::new(folder),
@@ -737,9 +785,11 @@ mod tests {
                     Arc::new(file_reader),
                     Arc::new(file_renamer),
                     Arc::new(file_deleter),
+                    Arc::new(inspect),
                     blob_root,
                 );
                 let actual = store.exists(&digest::Digest(format!("sha256:{sha}"))).await;
+
                 assert!(matches!(actual, Ok(true)));
             }
         }
@@ -749,7 +799,7 @@ mod tests {
             use crate::digest;
             use file_system::{
                 FileSystemError, MockFileDeleter, MockFileReader, MockFileRenamer, MockFileWriter,
-                MockFolder,
+                MockFolder, MockInspect,
             };
             use mockall::predicate;
             use std::{path::PathBuf, sync::Arc};
@@ -761,6 +811,7 @@ mod tests {
                 let mut file_reader = MockFileReader::new();
                 let file_renamer = MockFileRenamer::new();
                 let file_deleter = MockFileDeleter::new();
+                let inspect = MockInspect::new();
                 let blob_root = PathBuf::from("/tmp/blobs");
 
                 let sha = "ff".repeat(32);
@@ -782,6 +833,7 @@ mod tests {
                     Arc::new(file_reader),
                     Arc::new(file_renamer),
                     Arc::new(file_deleter),
+                    Arc::new(inspect),
                     blob_root,
                 );
                 let actual = store.get(&digest::Digest(format!("sha256:{sha}"))).await;
@@ -802,6 +854,7 @@ mod tests {
                 let mut file_reader = MockFileReader::new();
                 let file_renamer = MockFileRenamer::new();
                 let file_deleter = MockFileDeleter::new();
+                let inspect = MockInspect::new();
                 let blob_root = PathBuf::from("/tmp/blobs");
 
                 let sha = "ff".repeat(32);
@@ -818,6 +871,7 @@ mod tests {
                     Arc::new(file_reader),
                     Arc::new(file_renamer),
                     Arc::new(file_deleter),
+                    Arc::new(inspect),
                     blob_root,
                 );
                 let actual = store.get(&digest::Digest(format!("sha256:{sha}"))).await;
@@ -830,7 +884,7 @@ mod tests {
             use crate::digest;
             use file_system::{
                 MockBufferedFileWiter, MockFileDeleter, MockFileReader, MockFileRenamer,
-                MockFileWriter, MockFolder,
+                MockFileWriter, MockFolder, MockInspect,
             };
             use mockall::predicate;
             use std::{path::PathBuf, sync::Arc};
@@ -843,6 +897,7 @@ mod tests {
                 let mut file_reader = MockFileReader::new();
                 let mut file_renamer = MockFileRenamer::new();
                 let file_deleter = MockFileDeleter::new();
+                let mut inspect = MockInspect::new();
                 let blob_root = PathBuf::from("/tmp/blobs");
 
                 let sha = "a58dd8680234c1f8cc2ef2b325a43733605a7f16f288e072de8eae81fd8d6433";
@@ -859,7 +914,7 @@ mod tests {
                 let expected_temp_file =
                     PathBuf::from(format!("/tmp/blobs/sha256/{prefix}/{sha}/{sha}.tmp"));
 
-                folder.given_does_not_exist(&format!("/tmp/blobs/sha256/{prefix}/{sha}/{sha}"));
+                inspect.given_does_not_exist(&format!("/tmp/blobs/sha256/{prefix}/{sha}/{sha}"));
                 folder.expect_create_folder_recursively_with(&format!(
                     "/tmp/blobs/sha256/{prefix}/{sha}"
                 ));
@@ -890,6 +945,7 @@ mod tests {
                     Arc::new(file_reader),
                     Arc::new(file_renamer),
                     Arc::new(file_deleter),
+                    Arc::new(inspect),
                     blob_root,
                 );
 
@@ -903,6 +959,91 @@ mod tests {
                 reader.read_to_end(&mut actual).await.expect("should read");
                 assert_eq!(data, actual);
             }
+        }
+    }
+
+    mod stats {
+        use crate::blob_store::{BlobError, BlobStore, FileBlobStore};
+        use crate::digest;
+        use file_system::{
+            Entry, MockFileDeleter, MockFileReader, MockFileRenamer, MockFileWriter, MockFolder,
+            MockInspect,
+        };
+        use mockall::predicate;
+        use std::{path::PathBuf, sync::Arc};
+
+        #[tokio::test]
+        async fn test_should_fail_if_no_blob() {
+            let folder = MockFolder::new();
+            let file_writer = MockFileWriter::new();
+            let file_reader = MockFileReader::new();
+            let file_renamer = MockFileRenamer::new();
+            let file_deleter = MockFileDeleter::new();
+            let blob_root = PathBuf::from("/tmp/blobs");
+            let mut inspect = MockInspect::new();
+            let sha = "ff".repeat(32);
+
+            inspect.given_does_not_exist(&format!("/tmp/blobs/sha256/ff/{sha}/{sha}"));
+
+            let store = FileBlobStore::new(
+                Arc::new(folder),
+                Arc::new(file_writer),
+                Arc::new(file_reader),
+                Arc::new(file_renamer),
+                Arc::new(file_deleter),
+                Arc::new(inspect),
+                blob_root,
+            );
+
+            let request = digest::Digest(format!("sha256:{sha}"));
+            let actual = store.stats(&request).await;
+            assert!(matches!(
+                actual,
+                Err(BlobError::DigestNotFound(
+                    d
+                )) if d ==request.to_string()
+            ));
+        }
+
+        #[tokio::test]
+        async fn test_should_gather_stats() {
+            let folder = MockFolder::new();
+            let file_writer = MockFileWriter::new();
+            let file_reader = MockFileReader::new();
+            let file_renamer = MockFileRenamer::new();
+            let file_deleter = MockFileDeleter::new();
+            let blob_root = PathBuf::from("/tmp/blobs");
+            let mut inspect = MockInspect::new();
+            let sha = "ff".repeat(32);
+
+            let path = format!("/tmp/blobs/sha256/ff/{sha}/{sha}");
+            inspect.given_exists(&path);
+            inspect.expect_entry_with_metadata(
+                &path,
+                Entry {
+                    name: sha.clone(),
+                    kind: file_system::EntryKind::File,
+                    is_link: false,
+                    size: 123,
+                },
+            );
+
+            let store = FileBlobStore::new(
+                Arc::new(folder),
+                Arc::new(file_writer),
+                Arc::new(file_reader),
+                Arc::new(file_renamer),
+                Arc::new(file_deleter),
+                Arc::new(inspect),
+                blob_root,
+            );
+
+            let request = digest::Digest(format!("sha256:{sha}"));
+            let actual = store.stats(&request).await;
+            assert!(matches!(
+                actual,
+                Ok(s) if s.size == 123
+            ));
         }
     }
 }

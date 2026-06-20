@@ -116,14 +116,14 @@ fn main() -> ExitCode {
             service: ServiceCommand::Bract { notify_fd },
         } => start_bract(notify_fd),
         Commands::Service {
-            service: ServiceCommand::Resin { dbg, notify_fd },
-        } => {
-            if dbg {
-                run_with_tokio(resin_debug_mode())
-            } else {
-                start_resin(notify_fd.unwrap())
-            }
-        }
+            service: ServiceCommand::Resin { dbg: true, .. },
+        } => run_with_tokio(resin_debug_mode()),
+        Commands::Service {
+            service: ServiceCommand::Resin { notify_fd: Some(fd), .. },
+        } => start_resin(fd),
+        Commands::Service {
+            service: ServiceCommand::Resin { .. },
+        } => unreachable!("clap requires --notify-fd when --dbg is not set"),
     }
 }
 

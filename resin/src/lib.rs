@@ -3,10 +3,15 @@ mod bootstrap;
 mod digest;
 mod tag_store;
 
+use crate::{
+    blob_store::{BlobError, BlobStore, FileBlobStore},
+    digest::{Digest, DigestError},
+};
 use axum::{
-    Router,
-    extract::{Request, State},
-    http::StatusCode,
+    Json, Router,
+    body::Body,
+    extract::{Path, Request, State},
+    http::{Response, StatusCode},
     middleware::{self, Next},
     response::IntoResponse,
     routing::{get, head},
@@ -14,15 +19,15 @@ use axum::{
 use config::DouglasFolders;
 use credentials::create_credentials;
 use file_system::{
-    FileDeleter, FileReader, FileRenamer, FileSystemError, FileWriter, Folder, UnixFileDeleter,
-    UnixFileReader, UnixFileRenamer, UnixFileWriter, UnixFolder,
+    FileDeleter, FileReader, FileRenamer, FileSystemError, FileWriter, Folder, Inspect,
+    UnixFileDeleter, UnixFileReader, UnixFileRenamer, UnixFileWriter, UnixFolder, UnixInspect,
 };
 use log::{BufferedFileReporter, Outcome, Reporter, ScopeKind, Span, TuiReporter};
 use os::{Os, Unix};
+use serde_json::json;
 use std::{path::PathBuf, sync::Arc};
 use thiserror::Error;
-
-use crate::blob_store::{BlobStore, FileBlobStore};
+use tokio_util::io::ReaderStream;
 
 #[derive(Debug, Error)]
 pub enum Error {
@@ -39,6 +44,34 @@ pub enum Error {
 }
 
 pub const DEFAULT_PORT: u16 = 7376;
+
+#[derive(Clone)]
+struct ErrorDetail(String);
+
+enum ServerError {
+    BlobUnknown(String),
+    BadRequest(String),
+    Internal(String),
+}
+
+impl IntoResponse for ServerError {
+    fn into_response(self) -> axum::response::Response {
+        let (status, code, message) = match self {
+            ServerError::BlobUnknown(detail) => (StatusCode::NOT_FOUND, "BLOB_UNKNOWN", detail),
+            ServerError::BadRequest(detail) => (StatusCode::BAD_REQUEST, "BAD_REQUEST", detail),
+            ServerError::Internal(detail) => {
+                (StatusCode::INTERNAL_SERVER_ERROR, "INTERNAL_ERROR", detail)
+            }
+        };
+        let mut response = (
+            status,
+            Json(json!({ "errors": [{ "code": code, "message": message }] })),
+        )
+            .into_response();
+        response.extensions_mut().insert(ErrorDetail(message));
+        response
+    }
+}
 
 pub struct Server {
     reporter: Arc<dyn Reporter>,
@@ -106,12 +139,14 @@ impl Server {
             Arc::new(BufferedFileReporter::new(log_path))
         };
 
+        let inspect: Arc<dyn Inspect> = Arc::new(UnixInspect::default());
         let blob_store: Arc<dyn BlobStore> = Arc::new(FileBlobStore::new(
             Arc::clone(&folder),
             Arc::clone(&file_writer),
             Arc::clone(&file_reader),
             Arc::clone(&file_renamer),
             Arc::clone(&file_deleter),
+            inspect,
             blob_root.clone(),
         ));
 
@@ -142,7 +177,7 @@ impl Server {
 
         let app = Router::new();
         let app = app.route("/v2", get(v2));
-        let app = app.route("/v2/{name}/blobs/{digest}", head(head_blob));
+        let app = app.route("/v2/{name}/blobs/{digest}", head(head_blob).get(get_blob));
         let app = app.layer(middleware::from_fn_with_state(state.clone(), log_request));
         let app = app.with_state(state);
 
@@ -187,9 +222,16 @@ async fn log_request(State(state): State<AppState>, req: Request, next: Next) ->
     } else {
         Outcome::Failed
     };
+
+    let detail = response
+        .extensions()
+        .get::<ErrorDetail>()
+        .map(|e| format!(": {}", e.0))
+        .unwrap_or_default();
+
     Span::record(
         Arc::clone(&state.reporter),
-        &format!("{method} {uri} → {}", response.status()),
+        &format!("{method} {uri} → {}{detail}", response.status()),
         ScopeKind::Task,
         outcome,
     );
@@ -205,10 +247,64 @@ async fn v2() -> impl IntoResponse {
     )
 }
 
-async fn head_blob() -> impl IntoResponse {
-    (
+impl From<BlobError> for ServerError {
+    fn from(value: BlobError) -> Self {
+        match value {
+            BlobError::DigestNotFound(digest) => ServerError::BlobUnknown(digest.clone()),
+            err => ServerError::Internal(err.to_string()),
+        }
+    }
+}
+
+impl From<DigestError> for ServerError {
+    fn from(value: DigestError) -> Self {
+        ServerError::BadRequest(value.to_string())
+    }
+}
+
+async fn head_blob(
+    State(state): State<AppState>,
+    Path((_name, raw_digest)): Path<(String, String)>,
+) -> Result<impl IntoResponse, ServerError> {
+    let digest = Digest::from_hex(&raw_digest)?;
+    let stats = state.blob_store.stats(&digest).await?;
+
+    Ok((
         StatusCode::OK,
-        [("Docker-Distribution-Api-Version", "registry/2.0")],
-        "hello world",
+        [
+            (axum::http::header::CONTENT_LENGTH, stats.size.to_string()),
+            (
+                axum::http::HeaderName::from_static("docker-content-digest"),
+                digest.to_string(),
+            ),
+        ],
     )
+        .into_response())
+}
+
+async fn get_blob(
+    State(state): State<AppState>,
+    Path((_name, raw_digest)): Path<(String, String)>,
+) -> Result<impl IntoResponse, ServerError> {
+    let digest = Digest::from_hex(&raw_digest)?;
+    let stats = state.blob_store.stats(&digest).await?;
+    let reader = state.blob_store.get(&digest).await?;
+    let stream = ReaderStream::new(reader);
+
+    Ok((
+        StatusCode::OK,
+        [
+            (axum::http::header::CONTENT_LENGTH, stats.size.to_string()),
+            (
+                axum::http::header::CONTENT_TYPE,
+                mime::APPLICATION_OCTET_STREAM.to_string(),
+            ),
+            (
+                axum::http::HeaderName::from_static("docker-content-digest"),
+                digest.to_string(),
+            ),
+        ],
+        Body::from_stream(stream),
+    )
+        .into_response())
 }
