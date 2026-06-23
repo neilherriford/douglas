@@ -21,7 +21,7 @@ pub enum TagStoreError {
     UnknwonTag { repository: String, tag: String },
 }
 
-trait TagStore {
+pub trait TagStore: Send + Sync {
     fn list(&self, repository: &str) -> Result<Vec<String>, TagStoreError>;
     fn read(&self, repository: &str, tag: &str) -> Result<Digest, TagStoreError>;
     fn write(&self, repository: &str, tag: &str, digest: &Digest) -> Result<(), TagStoreError>;
@@ -102,7 +102,7 @@ impl TagStore for FileTagStore {
 
         if self.file_reader.exists(&tag_path) {
             let contents = self.file_reader.read_all(&tag_path)?;
-            let digest: Digest = contents.parse()?;
+            let digest: Digest = contents.trim().parse()?;
             Ok(digest)
         } else {
             Err(TagStoreError::UnknwonTag {
@@ -339,6 +339,36 @@ mod tests {
             file_reader.given_can_read_all_with_contents(
                 "/tmp/foo/_manifests/tags/bar",
                 &format!("sha256:{sha}"),
+            );
+            let store = FileTagStore::new(
+                root,
+                Arc::new(folder),
+                Arc::new(file_reader),
+                Arc::new(file_writer),
+                Arc::new(file_deleter),
+            );
+
+            let actual = store.read("foo", "bar");
+            assert!(matches!(
+                actual,
+                Ok(d) if d.hex() == sha
+            ));
+        }
+
+        #[test]
+        fn should_return_digest_when_file_has_trailing_newline() {
+            let root = PathBuf::from("/tmp");
+            let mut folder = MockFolder::new();
+            let mut file_reader = MockFileReader::new();
+            let file_writer = MockFileWriter::new();
+            let file_deleter = MockFileDeleter::new();
+
+            folder.given_exists("/tmp/foo/");
+            file_reader.given_exists("/tmp/foo/_manifests/tags/bar");
+            let sha = "ff".repeat(32);
+            file_reader.given_can_read_all_with_contents(
+                "/tmp/foo/_manifests/tags/bar",
+                &format!("sha256:{sha}\n"),
             );
             let store = FileTagStore::new(
                 root,

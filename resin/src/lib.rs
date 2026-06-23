@@ -1,17 +1,20 @@
 mod blob_store;
 mod bootstrap;
 mod digest;
+mod repository_initializer;
 mod tag_store;
 
 use crate::{
     blob_store::{BlobError, BlobStore, FileBlobStore},
     digest::{Digest, DigestError},
+    repository_initializer::{FileRepositoryInitializer, RepositoryInitializer},
+    tag_store::{FileTagStore, TagStore, TagStoreError},
 };
 use axum::{
     Json, Router,
     body::Body,
     extract::{Path, Request, State},
-    http::{Response, StatusCode},
+    http::StatusCode,
     middleware::{self, Next},
     response::IntoResponse,
     routing::{get, head},
@@ -25,7 +28,7 @@ use file_system::{
 use log::{BufferedFileReporter, Outcome, Reporter, ScopeKind, Span, TuiReporter};
 use os::{Os, Unix};
 use serde_json::json;
-use std::{path::PathBuf, sync::Arc};
+use std::{str::FromStr, sync::Arc};
 use thiserror::Error;
 use tokio_util::io::ReaderStream;
 
@@ -50,6 +53,7 @@ struct ErrorDetail(String);
 
 enum ServerError {
     BlobUnknown(String),
+    ManifestUnknown(String),
     BadRequest(String),
     Internal(String),
 }
@@ -58,6 +62,9 @@ impl IntoResponse for ServerError {
     fn into_response(self) -> axum::response::Response {
         let (status, code, message) = match self {
             ServerError::BlobUnknown(detail) => (StatusCode::NOT_FOUND, "BLOB_UNKNOWN", detail),
+            ServerError::ManifestUnknown(detail) => {
+                (StatusCode::NOT_FOUND, "MANIFEST_UNKNOWN", detail)
+            }
             ServerError::BadRequest(detail) => (StatusCode::BAD_REQUEST, "BAD_REQUEST", detail),
             ServerError::Internal(detail) => {
                 (StatusCode::INTERNAL_SERVER_ERROR, "INTERNAL_ERROR", detail)
@@ -76,18 +83,17 @@ impl IntoResponse for ServerError {
 pub struct Server {
     reporter: Arc<dyn Reporter>,
     port: u16,
-    blob_root: PathBuf,
-    repositories_root: PathBuf,
-    file_renamer: Arc<dyn FileRenamer>,
-    file_deleter: Arc<dyn FileDeleter>,
-    folder: Arc<dyn Folder>,
     blob_store: Arc<dyn BlobStore>,
+    tag_store: Arc<dyn TagStore>,
+    repository_initializer: Arc<dyn RepositoryInitializer>,
 }
 
 #[derive(Clone)]
 struct AppState {
     reporter: Arc<dyn Reporter>,
     blob_store: Arc<dyn BlobStore>,
+    tag_store: Arc<dyn TagStore>,
+    repository_initializer: Arc<dyn RepositoryInitializer>,
 }
 
 impl Server {
@@ -150,15 +156,24 @@ impl Server {
             blob_root.clone(),
         ));
 
+        let tag_store: Arc<dyn TagStore> = Arc::new(FileTagStore::new(
+            repositories_root.clone(),
+            Arc::clone(&folder),
+            Arc::clone(&file_reader),
+            Arc::clone(&file_writer),
+            Arc::clone(&file_deleter),
+        ));
+
+        let repository_initializer: Arc<dyn RepositoryInitializer> = Arc::new(
+            FileRepositoryInitializer::new(root_path.clone(), Arc::clone(&folder)),
+        );
+
         Ok(Self {
             reporter,
             port,
-            blob_root,
-            repositories_root,
-            file_renamer,
-            file_deleter,
-            folder,
             blob_store,
+            tag_store,
+            repository_initializer,
         })
     }
 
@@ -173,23 +188,26 @@ impl Server {
         let state = AppState {
             reporter: Arc::clone(&self.reporter),
             blob_store: Arc::clone(&self.blob_store),
+            tag_store: Arc::clone(&self.tag_store),
+            repository_initializer: Arc::clone(&self.repository_initializer),
         };
 
         let app = Router::new();
         let app = app.route("/v2", get(v2));
         let app = app.route("/v2/{name}/blobs/{digest}", head(head_blob).get(get_blob));
+        let app = app.route("/v2/{name}/manifests/{ref}", get(get_manifest));
         let app = app.layer(middleware::from_fn_with_state(state.clone(), log_request));
         let app = app.with_state(state);
 
         let listener = match tokio::net::TcpListener::bind(format!("127.0.0.1:{}", self.port)).await
         {
-            Ok(l) => l,
-            Err(e) => {
+            Ok(listener) => listener,
+            Err(err) => {
                 guard.span().message(
                     log::Level::Warn,
-                    &format!("Failed to bind port {}: {e}", self.port),
+                    &format!("Failed to bind port {}: {err}", self.port),
                 );
-                return Err(Error::IoError(e));
+                return Err(Error::IoError(err));
             }
         };
 
@@ -247,18 +265,22 @@ async fn v2() -> impl IntoResponse {
     )
 }
 
-impl From<BlobError> for ServerError {
-    fn from(value: BlobError) -> Self {
-        match value {
-            BlobError::DigestNotFound(digest) => ServerError::BlobUnknown(digest.clone()),
-            err => ServerError::Internal(err.to_string()),
-        }
-    }
-}
-
 impl From<DigestError> for ServerError {
     fn from(value: DigestError) -> Self {
         ServerError::BadRequest(value.to_string())
+    }
+}
+
+impl From<TagStoreError> for ServerError {
+    fn from(value: TagStoreError) -> Self {
+        ServerError::BadRequest(value.to_string())
+    }
+}
+
+fn to_blob_error(error: BlobError) -> ServerError {
+    match error {
+        BlobError::DigestNotFound(_) => ServerError::BlobUnknown(error.to_string()),
+        other => ServerError::Internal(other.to_string()),
     }
 }
 
@@ -267,8 +289,11 @@ async fn head_blob(
     Path((_name, raw_digest)): Path<(String, String)>,
 ) -> Result<impl IntoResponse, ServerError> {
     let digest = Digest::from_hex(&raw_digest)?;
-    let stats = state.blob_store.stats(&digest).await?;
-
+    let stats = state
+        .blob_store
+        .stats(&digest)
+        .await
+        .map_err(to_blob_error)?;
     Ok((
         StatusCode::OK,
         [
@@ -287,8 +312,12 @@ async fn get_blob(
     Path((_name, raw_digest)): Path<(String, String)>,
 ) -> Result<impl IntoResponse, ServerError> {
     let digest = Digest::from_hex(&raw_digest)?;
-    let stats = state.blob_store.stats(&digest).await?;
-    let reader = state.blob_store.get(&digest).await?;
+    let stats = state
+        .blob_store
+        .stats(&digest)
+        .await
+        .map_err(to_blob_error)?;
+    let reader = state.blob_store.get(&digest).await.map_err(to_blob_error)?;
     let stream = ReaderStream::new(reader);
 
     Ok((
@@ -299,6 +328,54 @@ async fn get_blob(
                 axum::http::header::CONTENT_TYPE,
                 mime::APPLICATION_OCTET_STREAM.to_string(),
             ),
+            (
+                axum::http::HeaderName::from_static("docker-content-digest"),
+                digest.to_string(),
+            ),
+        ],
+        Body::from_stream(stream),
+    )
+        .into_response())
+}
+
+fn to_manifest_error(error: BlobError) -> ServerError {
+    match error {
+        BlobError::DigestNotFound(digest) => ServerError::ManifestUnknown(digest),
+        other => ServerError::Internal(other.to_string()),
+    }
+}
+
+async fn get_manifest(
+    State(state): State<AppState>,
+    Path((name, reference)): Path<(String, String)>,
+) -> Result<impl IntoResponse, ServerError> {
+    let digest = match Digest::from_str(&reference) {
+        Ok(digest) => digest,
+        Err(_) => match state.tag_store.read(&name, &reference) {
+            Ok(digest) => digest,
+            Err(TagStoreError::UnknownRepository(_)) | Err(TagStoreError::UnknwonTag { .. }) => {
+                return Err(ServerError::ManifestUnknown(reference));
+            }
+            Err(err) => return Err(ServerError::BadRequest(err.to_string())),
+        },
+    };
+    let stats = state
+        .blob_store
+        .stats(&digest)
+        .await
+        .map_err(to_manifest_error)?;
+    let reader = state
+        .blob_store
+        .get(&digest)
+        .await
+        .map_err(to_manifest_error)?;
+    let stream = ReaderStream::new(reader);
+
+    Ok((
+        StatusCode::OK,
+        [
+            (axum::http::header::CONTENT_LENGTH, stats.size.to_string()),
+            (axum::http::header::CONTENT_TYPE, stats.mediatype),
             (
                 axum::http::HeaderName::from_static("docker-content-digest"),
                 digest.to_string(),

@@ -11,6 +11,10 @@ pub enum DigestError {
 pub struct Digest(pub String);
 
 impl Digest {
+    pub fn is_digest(test: &str) -> bool {
+        Digest::from_str(test).is_ok()
+    }
+
     pub fn from_bytes<T: AsRef<[u8]>>(value: &T) -> Result<Self, DigestError> {
         if value.as_ref().len() != 32 {
             return Err(DigestError::InvalidDigest);

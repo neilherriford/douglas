@@ -201,11 +201,10 @@ pub trait FileWriter: Send + Sync {
 }
 
 #[cfg_attr(feature = "mock", mockall::automock)]
-#[async_trait]
 pub trait FileReader: Send + Sync {
     fn read_all(&self, path: &Path) -> Result<String, FileSystemError>;
     fn exists(&self, path: &Path) -> bool;
-    async fn create_reader(
+    fn create_reader(
         &self,
         path: &Path,
     ) -> Result<Box<dyn AsyncRead + Send + Unpin>, FileSystemError>;
@@ -399,7 +398,6 @@ impl UnixFileReader {
     }
 }
 
-#[async_trait]
 impl FileReader for UnixFileReader {
     fn read_all(&self, path: &Path) -> Result<String, FileSystemError> {
         Ok(read_to_string(path)?)
@@ -408,7 +406,7 @@ impl FileReader for UnixFileReader {
         path.exists()
     }
 
-    async fn create_reader(
+    fn create_reader(
         &self,
         path: &Path,
     ) -> Result<Box<dyn AsyncRead + Send + Unpin>, FileSystemError> {
@@ -416,7 +414,7 @@ impl FileReader for UnixFileReader {
             return Err(FileSystemError::NotFoundError(path.to_path_buf()));
         }
 
-        let file = tokio::fs::File::open(path).await?;
+        let file = tokio::fs::File::from_std(std::fs::File::open(path)?);
         Ok(Box::new(file))
     }
 }
