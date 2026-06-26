@@ -70,6 +70,7 @@ pub trait BlobUploader {
         digest: &Digest,
         media_type: &str,
     ) -> Result<(), BlobUploaderError>;
+    fn status(&self, uuid: Uuid) -> Result<u64, BlobUploaderError>;
     fn abort(&self, uuid: Uuid) -> Result<(), BlobUploaderError>;
     fn purge(&self) -> Result<(), BlobUploaderError>;
 }
@@ -198,6 +199,15 @@ impl BlobUploader for FileBlobUploader {
         }
 
         Ok(())
+    }
+
+    fn status(&self, uuid: Uuid) -> Result<u64, BlobUploaderError> {
+        let mut state = self.state.lock().unwrap();
+
+        match state.get_mut(&uuid) {
+            Some(upload) => Ok(upload.offset),
+            None => Err(BlobUploaderError::UnknownUuid(uuid)),
+        }
     }
 }
 
@@ -1096,6 +1106,89 @@ mod tests {
             blob_uploader
                 .complete(Uuid::max(), &given_claimed, "mediatype")
                 .expect("should complete")
+        }
+    }
+
+    mod status {
+        use crate::blob_uploader::{
+            BlobUploader, BlobUploaderError, FileBlobUploader, PartialUpload,
+        };
+        use file_system::{
+            FileAppender, FileDeleter, FileRenamer, FileWriter, Folder, MockFileAppender,
+            MockFileDeleter, MockFileRenamer, MockFileWriter, MockFolder,
+        };
+        use std::{
+            collections::HashMap,
+            path::PathBuf,
+            sync::{Arc, Mutex},
+        };
+        use uuid::Uuid;
+
+        #[test]
+        fn test_should_return_error_if_unknown_uuid() {
+            let folder = MockFolder::new();
+            let file_writer = MockFileWriter::new();
+            let file_appender = MockFileAppender::new();
+            let file_renamer = MockFileRenamer::new();
+            let file_deleter = MockFileDeleter::new();
+            let temp_root = PathBuf::from("/tmp/tmp");
+            let blob_root = PathBuf::from("/tmp/blobs");
+
+            let state = Arc::new(Mutex::new(HashMap::<Uuid, PartialUpload>::new()));
+            let uuid_factory = Arc::new(Uuid::max);
+
+            let blob_uploader = FileBlobUploader {
+                temp_root,
+                blob_root,
+                folder: Arc::new(folder) as Arc<dyn Folder>,
+                file_writer: Arc::new(file_writer) as Arc<dyn FileWriter>,
+                file_appender: Arc::new(file_appender) as Arc<dyn FileAppender>,
+                file_renamer: Arc::new(file_renamer) as Arc<dyn FileRenamer>,
+                file_deleter: Arc::new(file_deleter) as Arc<dyn FileDeleter>,
+                uuid_factory,
+                state,
+            };
+
+            let actual = blob_uploader.status(Uuid::max());
+            assert!(matches!(actual, Err(BlobUploaderError::UnknownUuid(u)) if u == Uuid::max()));
+        }
+
+        #[test]
+        fn test_should_return_offset() {
+            let mut folder = MockFolder::new();
+            let file_writer = MockFileWriter::new();
+            let mut file_appender = MockFileAppender::new();
+            let file_renamer = MockFileRenamer::new();
+            let mut file_deleter = MockFileDeleter::new();
+            let temp_root = PathBuf::from("/tmp/tmp");
+            let blob_root = PathBuf::from("/tmp/blobs");
+
+            let state = Arc::new(Mutex::new(HashMap::<Uuid, PartialUpload>::new()));
+            let uuid_factory = Arc::new(Uuid::max);
+            let temp_file = &format!("/tmp/tmp/{}", Uuid::max());
+
+            folder.expect_create_folder_recursively_with("/tmp/tmp");
+            file_appender.expect_append_all_bytes_with(temp_file, vec![0xC0, 0xDE]);
+            file_deleter.expect_file_to_be_deleted(temp_file);
+
+            let blob_uploader = FileBlobUploader {
+                temp_root,
+                blob_root,
+                folder: Arc::new(folder) as Arc<dyn Folder>,
+                file_writer: Arc::new(file_writer) as Arc<dyn FileWriter>,
+                file_appender: Arc::new(file_appender) as Arc<dyn FileAppender>,
+                file_renamer: Arc::new(file_renamer) as Arc<dyn FileRenamer>,
+                file_deleter: Arc::new(file_deleter) as Arc<dyn FileDeleter>,
+                uuid_factory,
+                state,
+            };
+
+            let uuid = blob_uploader.start("foo").expect("should start");
+            blob_uploader
+                .write_chunk(uuid, vec![0xC0, 0xDE].as_slice())
+                .expect("should write");
+            let actual = blob_uploader.status(uuid);
+            assert!(matches!(actual, Ok(2)));
         }
     }
 }
