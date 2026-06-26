@@ -260,6 +260,20 @@ impl MockFileDeleter {
             .returning(|_| Ok(()));
         self
     }
+
+    pub fn given_delete_to_fail_once_with(
+        &mut self,
+        path: &str,
+        error: FileSystemError,
+    ) -> &mut Self {
+        let path = path.to_string();
+        let path = PathBuf::from(path);
+
+        self.expect_delete()
+            .with(predicate::eq(path.clone()))
+            .return_once(move |_| Err(error));
+        self
+    }
 }
 
 #[cfg_attr(feature = "mock", mockall::automock)]
@@ -352,6 +366,7 @@ impl FileWriter for UnixFileWriter {
 #[cfg_attr(feature = "mock", mockall::automock)]
 pub trait FileAppender: Send + Sync {
     fn append(&self, path: &Path, contents: String) -> Result<(), FileSystemError>;
+    fn append_all_bytes(&self, path: &Path, bytes: &[u8]) -> Result<(), FileSystemError>;
     fn exists(&self, path: &Path) -> bool;
 }
 
@@ -366,6 +381,14 @@ impl UnixFileAppender {
 
 impl FileAppender for UnixFileAppender {
     fn append(&self, path: &Path, contents: String) -> Result<(), FileSystemError> {
+        self.append_all_bytes(path, contents.as_bytes())
+    }
+
+    fn exists(&self, path: &Path) -> bool {
+        path.exists()
+    }
+
+    fn append_all_bytes(&self, path: &Path, bytes: &[u8]) -> Result<(), FileSystemError> {
         if let Some(parent) = path.parent()
             && !self.exists(parent)
         {
@@ -380,12 +403,8 @@ impl FileAppender for UnixFileAppender {
             .open(path);
         umask(previous_umask);
         let mut file = open_result?;
-        file.write_all(contents.as_bytes())?;
+        file.write_all(bytes)?;
         Ok(())
-    }
-
-    fn exists(&self, path: &Path) -> bool {
-        path.exists()
     }
 }
 
@@ -398,6 +417,7 @@ impl UnixFileReader {
     }
 }
 
+#[async_trait]
 impl FileReader for UnixFileReader {
     fn read_all(&self, path: &Path) -> Result<String, FileSystemError> {
         Ok(read_to_string(path)?)
@@ -960,6 +980,24 @@ impl MockFileWriter {
             .returning(|_, _| Ok(()));
         self
     }
+
+    pub fn given_write_to_file_fails_once_with(
+        &mut self,
+        path: &str,
+        contents: &str,
+        error: FileSystemError,
+    ) -> &mut Self {
+        let path = Path::new(path);
+        let path = path.to_path_buf();
+
+        self.expect_write_all()
+            .with(
+                predicate::eq(path.clone()),
+                predicate::eq(contents.to_string()),
+            )
+            .return_once(move |_, _| Err(error));
+        self
+    }
 }
 
 #[cfg(feature = "mock")]
@@ -990,6 +1028,74 @@ impl MockInspect {
         self.expect_read_metadata()
             .with(predicate::eq(path.clone()))
             .returning(move |_| Ok(entry.clone()));
+        self
+    }
+}
+
+#[cfg(feature = "mock")]
+impl MockFileAppender {
+    pub fn expect_append_all_bytes_with(&mut self, path: &str, bytes: Vec<u8>) -> &mut Self {
+        let path = Path::new(path);
+        let path = path.to_path_buf();
+
+        self.expect_append_all_bytes()
+            .with(
+                predicate::eq(path.clone()),
+                predicate::function(move |b: &[u8]| b == bytes.clone()),
+            )
+            .returning(|_, _| Ok(()));
+        self
+    }
+
+    pub fn given_append_all_bytes_fails_once_with(
+        &mut self,
+        path: &str,
+        bytes: Vec<u8>,
+        error: FileSystemError,
+    ) -> &mut Self {
+        let path = Path::new(path);
+        let path = path.to_path_buf();
+
+        self.expect_append_all_bytes()
+            .with(
+                predicate::eq(path.clone()),
+                predicate::function(move |b: &[u8]| b == bytes.clone()),
+            )
+            .return_once(move |_, _| Err(error));
+        self
+    }
+}
+
+#[cfg(feature = "mock")]
+impl MockFileRenamer {
+    pub fn expect_rename_with(&mut self, from: &str, to: &str) -> &mut Self {
+        let from = Path::new(from);
+        let from = from.to_path_buf();
+
+        let to = Path::new(to);
+        let to = to.to_path_buf();
+
+        self.expect_rename()
+            .with(predicate::eq(from.clone()), predicate::eq(to.clone()))
+            .returning(|_, _| Ok(()));
+        self
+    }
+
+    pub fn given_rename_fails_once_with(
+        &mut self,
+        from: &str,
+        to: &str,
+        error: FileSystemError,
+    ) -> &mut Self {
+        let from = Path::new(from);
+        let from = from.to_path_buf();
+
+        let to = Path::new(to);
+        let to = to.to_path_buf();
+
+        self.expect_rename()
+            .with(predicate::eq(from.clone()), predicate::eq(to.clone()))
+            .return_once(move |_, _| Err(error));
         self
     }
 }

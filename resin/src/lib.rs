@@ -1,4 +1,6 @@
+mod blob_paths;
 mod blob_store;
+mod blob_uploader;
 mod bootstrap;
 mod digest;
 mod repository_initializer;

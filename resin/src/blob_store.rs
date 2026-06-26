@@ -1,4 +1,4 @@
-use crate::digest;
+use crate::{blob_paths::BlobPaths, digest};
 use file_system::{
     FileDeleter, FileReader, FileRenamer, FileSystemError, FileWriter, Folder, Inspect,
 };
@@ -36,7 +36,7 @@ pub trait BlobStore: Send + Sync {
     fn save<'a>(
         &'a self,
         claimed: &'a digest::Digest,
-        rce: Box<dyn AsyncRead + Send + Unpin>,
+        reader: Box<dyn AsyncRead + Send + Unpin>,
         mediatype: &'a str,
     ) -> BoxFuture<'a, Result<(), BlobError>>;
 
@@ -49,41 +49,6 @@ pub trait BlobStore: Send + Sync {
     fn stats<'a>(&'a self, digest: &'a digest::Digest) -> BoxFuture<'a, Result<Stats, BlobError>>;
 }
 
-struct DigestPaths {
-    pub root: PathBuf,
-    pub temp_file: PathBuf,
-    pub final_file: PathBuf,
-    pub mediatype_file: PathBuf,
-}
-
-impl DigestPaths {
-    pub fn new(blob_root: &PathBuf, digest: &digest::Digest) -> Self {
-        let sha = digest.hex().to_string();
-        let prefix = sha[0..2].to_string();
-
-        let mut root = blob_root.clone();
-        root.push("sha256");
-        root.push(prefix);
-        root.push(&sha);
-
-        let mut temp_file = root.clone();
-        temp_file.push(format!("{sha}.tmp"));
-
-        let mut final_file = root.clone();
-        final_file.push(&sha);
-
-        let mut mediatype_file = root.clone();
-        mediatype_file.push(format!("{sha}.mediatype"));
-
-        Self {
-            root,
-            temp_file,
-            final_file,
-            mediatype_file,
-        }
-    }
-}
-
 struct DigestStore {
     folder: Arc<dyn Folder>,
     file_renamer: Arc<dyn FileRenamer>,
@@ -91,7 +56,7 @@ struct DigestStore {
     file_writer: Arc<dyn FileWriter>,
     initialized: bool,
     completed: bool,
-    digest_paths: DigestPaths,
+    digest_paths: BlobPaths,
 }
 
 impl DigestStore {
@@ -110,12 +75,13 @@ impl DigestStore {
             file_writer,
             initialized: false,
             completed: false,
-            digest_paths: DigestPaths::new(&blob_root, digest),
+            digest_paths: BlobPaths::new(&blob_root, digest),
         }
     }
 
     pub fn initialize(&mut self) -> Result<PathBuf, FileSystemError> {
-        self.folder.create_recursively(&self.digest_paths.root)?;
+        self.folder
+            .create_recursively(&self.digest_paths.final_root)?;
         self.initialized = true;
         Ok(self.digest_paths.temp_file.clone())
     }
@@ -141,7 +107,7 @@ impl DigestStore {
 
     pub fn clean_up(&mut self) -> Result<(), FileSystemError> {
         self.file_deleter.delete(&self.digest_paths.temp_file)?;
-        self.file_deleter.delete(&self.digest_paths.root)?;
+        self.file_deleter.delete(&self.digest_paths.final_root)?;
         self.completed = true;
         Ok(())
     }
@@ -271,7 +237,7 @@ impl BlobStore for FileBlobStore {
 
     fn exists<'a>(&'a self, digest: &'a digest::Digest) -> BoxFuture<'a, Result<bool, BlobError>> {
         Box::pin(async move {
-            let digest_paths = DigestPaths::new(&self.blob_root, digest);
+            let digest_paths = BlobPaths::new(&self.blob_root, digest);
             Ok(self.inspect.exists(&digest_paths.final_file))
         })
     }
@@ -281,7 +247,7 @@ impl BlobStore for FileBlobStore {
         digest: &'a digest::Digest,
     ) -> BoxFuture<'a, Result<Box<dyn AsyncRead + Send + Unpin>, BlobError>> {
         Box::pin(async move {
-            let digest_paths = DigestPaths::new(&self.blob_root, digest);
+            let digest_paths = BlobPaths::new(&self.blob_root, digest);
             let result = self.file_reader.create_reader(&digest_paths.final_file)?;
             Ok(result)
         })
@@ -289,7 +255,7 @@ impl BlobStore for FileBlobStore {
 
     fn stats<'a>(&'a self, digest: &'a digest::Digest) -> BoxFuture<'a, Result<Stats, BlobError>> {
         Box::pin(async move {
-            let digest_paths = DigestPaths::new(&self.blob_root, digest);
+            let digest_paths = BlobPaths::new(&self.blob_root, digest);
             if self.inspect.exists(&digest_paths.final_file) {
                 let entry = self.inspect.read_metadata(&digest_paths.final_file)?;
                 let mediatype = self
@@ -1019,6 +985,7 @@ mod tests {
                         .insert(path.to_path_buf(), contents.as_bytes().to_vec());
                     Ok(())
                 }
+
                 fn write_all_bytes(
                     &self,
                     path: &Path,
@@ -1030,6 +997,7 @@ mod tests {
                         .insert(path.to_path_buf(), bytes.to_vec());
                     Ok(())
                 }
+
                 fn create_buffered_file_writer(
                     &self,
                     path: &Path,
@@ -1040,6 +1008,7 @@ mod tests {
                         disk: Arc::clone(&self.0),
                     }))
                 }
+
                 fn exists(&self, path: &Path) -> bool {
                     self.0.lock().unwrap().contains_key(path)
                 }
@@ -1054,9 +1023,11 @@ mod tests {
                         .clone();
                     Ok(String::from_utf8_lossy(&bytes).into_owned())
                 }
+
                 fn exists(&self, path: &Path) -> bool {
                     self.0.lock().unwrap().contains_key(path)
                 }
+
                 fn create_reader(
                     &self,
                     path: &Path,
