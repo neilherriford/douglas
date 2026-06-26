@@ -1,4 +1,4 @@
-use crate::{blob_paths::BlobPaths, digest};
+use crate::digest;
 use file_system::{
     FileDeleter, FileReader, FileRenamer, FileSystemError, FileWriter, Folder, Inspect,
 };
@@ -135,13 +135,13 @@ pub struct FileBlobStore {
 
 impl FileBlobStore {
     pub fn new(
+        blob_root: PathBuf,
         folder: Arc<dyn Folder>,
         file_writer: Arc<dyn FileWriter>,
         file_reader: Arc<dyn FileReader>,
         file_renamer: Arc<dyn FileRenamer>,
         file_deleter: Arc<dyn FileDeleter>,
         inspect: Arc<dyn Inspect>,
-        blob_root: PathBuf,
     ) -> Self {
         Self {
             folder,
@@ -237,7 +237,7 @@ impl BlobStore for FileBlobStore {
 
     fn exists<'a>(&'a self, digest: &'a digest::Digest) -> BoxFuture<'a, Result<bool, BlobError>> {
         Box::pin(async move {
-            let digest_paths = BlobPaths::new(&self.blob_root, digest);
+            let digest_paths = DigestPaths::new(&self.blob_root, digest);
             Ok(self.inspect.exists(&digest_paths.final_file))
         })
     }
@@ -247,7 +247,7 @@ impl BlobStore for FileBlobStore {
         digest: &'a digest::Digest,
     ) -> BoxFuture<'a, Result<Box<dyn AsyncRead + Send + Unpin>, BlobError>> {
         Box::pin(async move {
-            let digest_paths = BlobPaths::new(&self.blob_root, digest);
+            let digest_paths = DigestPaths::new(&self.blob_root, digest);
             let result = self.file_reader.create_reader(&digest_paths.final_file)?;
             Ok(result)
         })
@@ -255,7 +255,7 @@ impl BlobStore for FileBlobStore {
 
     fn stats<'a>(&'a self, digest: &'a digest::Digest) -> BoxFuture<'a, Result<Stats, BlobError>> {
         Box::pin(async move {
-            let digest_paths = BlobPaths::new(&self.blob_root, digest);
+            let digest_paths = DigestPaths::new(&self.blob_root, digest);
             if self.inspect.exists(&digest_paths.final_file) {
                 let entry = self.inspect.read_metadata(&digest_paths.final_file)?;
                 let mediatype = self
@@ -414,13 +414,13 @@ mod tests {
                     .returning(|_| Err(FileSystemError::ExpectedFileError));
 
                 let store = FileBlobStore::new(
+                    blob_root,
                     Arc::new(folder),
                     Arc::new(file_writer),
                     Arc::new(file_reader),
                     Arc::new(file_renamer),
                     Arc::new(file_deleter),
                     Arc::new(inspect),
-                    blob_root,
                 );
 
                 let source = std::io::Cursor::new(Vec::new());
@@ -461,13 +461,13 @@ mod tests {
                 file_deleter.expect_file_to_be_deleted("/tmp/blobs/sha256/f0/f00d");
 
                 let store = FileBlobStore::new(
+                    blob_root,
                     Arc::new(folder),
                     Arc::new(file_writer),
                     Arc::new(file_reader),
                     Arc::new(file_renamer),
                     Arc::new(file_deleter),
                     Arc::new(inspect),
-                    blob_root,
                 );
 
                 let source = std::io::Cursor::new(vec![0xBA, 0xAD, 0xF0, 0x0D]);
@@ -505,13 +505,13 @@ mod tests {
                 file_deleter.expect_file_to_be_deleted("/tmp/blobs/sha256/f0/f00d");
 
                 let store = FileBlobStore::new(
+                    blob_root,
                     Arc::new(folder),
                     Arc::new(file_writer),
                     Arc::new(file_reader),
                     Arc::new(file_renamer),
                     Arc::new(file_deleter),
                     Arc::new(inspect),
-                    blob_root,
                 );
 
                 let source = FailingReader {};
@@ -548,13 +548,13 @@ mod tests {
                 file_deleter.expect_file_to_be_deleted("/tmp/blobs/sha256/f0/f00d");
 
                 let store = FileBlobStore::new(
+                    blob_root,
                     Arc::new(folder),
                     Arc::new(file_writer),
                     Arc::new(file_reader),
                     Arc::new(file_renamer),
                     Arc::new(file_deleter),
                     Arc::new(inspect),
-                    blob_root,
                 );
 
                 let source = std::io::Cursor::new(vec![0xBA, 0xAD, 0xF0, 0x0D]);
@@ -611,13 +611,13 @@ mod tests {
                     .expect_file_to_be_deleted(&format!("/tmp/blobs/sha256/05/{actual_sha}"));
 
                 let store = FileBlobStore::new(
+                    blob_root,
                     Arc::new(folder),
                     Arc::new(file_writer),
                     Arc::new(file_reader),
                     Arc::new(file_renamer),
                     Arc::new(file_deleter),
                     Arc::new(inspect),
-                    blob_root,
                 );
 
                 let source = std::io::Cursor::new(vec![0xBA, 0xAD, 0xF0, 0x0D]);
@@ -646,13 +646,13 @@ mod tests {
                 inspect.given_exists(&format!("/tmp/blobs/sha256/05/{actual_sha}/{actual_sha}/"));
 
                 let store = FileBlobStore::new(
+                    blob_root,
                     Arc::new(folder),
                     Arc::new(file_writer),
                     Arc::new(file_reader),
                     Arc::new(file_renamer),
                     Arc::new(file_deleter),
                     Arc::new(inspect),
-                    blob_root,
                 );
 
                 let source = std::io::Cursor::new(vec![0xBA, 0xAD, 0xF0, 0x0D]);
@@ -708,13 +708,13 @@ mod tests {
                     .returning(|_, _| Ok(()));
 
                 let store = FileBlobStore::new(
+                    blob_root,
                     Arc::new(folder),
                     Arc::new(file_writer),
                     Arc::new(file_reader),
                     Arc::new(file_renamer),
                     Arc::new(file_deleter),
                     Arc::new(inspect),
-                    blob_root,
                 );
 
                 let source = std::io::Cursor::new(vec![0xBA, 0xAD, 0xF0, 0x0D]);
@@ -748,13 +748,13 @@ mod tests {
                 inspect.given_does_not_exist(&format!("/tmp/blobs/sha256/ff/{sha}/{sha}"));
 
                 let store = FileBlobStore::new(
+                    blob_root,
                     Arc::new(folder),
                     Arc::new(file_writer),
                     Arc::new(file_reader),
                     Arc::new(file_renamer),
                     Arc::new(file_deleter),
                     Arc::new(inspect),
-                    blob_root,
                 );
                 let actual = store.exists(&digest::Digest(format!("sha256:{sha}"))).await;
                 assert!(matches!(actual, Ok(false)));
@@ -774,13 +774,13 @@ mod tests {
                 inspect.given_exists(&format!("/tmp/blobs/sha256/ff/{sha}/{sha}"));
 
                 let store = FileBlobStore::new(
+                    blob_root,
                     Arc::new(folder),
                     Arc::new(file_writer),
                     Arc::new(file_reader),
                     Arc::new(file_renamer),
                     Arc::new(file_deleter),
                     Arc::new(inspect),
-                    blob_root,
                 );
                 let actual = store.exists(&digest::Digest(format!("sha256:{sha}"))).await;
 
@@ -822,13 +822,13 @@ mod tests {
                     });
 
                 let store = FileBlobStore::new(
+                    blob_root,
                     Arc::new(folder),
                     Arc::new(file_writer),
                     Arc::new(file_reader),
                     Arc::new(file_renamer),
                     Arc::new(file_deleter),
                     Arc::new(inspect),
-                    blob_root,
                 );
                 let actual = store.get(&digest::Digest(format!("sha256:{sha}"))).await;
                 let expected_missing_file_path =
@@ -860,13 +860,13 @@ mod tests {
                     .returning(move |_| Ok(Box::new(std::io::Cursor::new(Vec::new()))));
 
                 let store = FileBlobStore::new(
+                    blob_root,
                     Arc::new(folder),
                     Arc::new(file_writer),
                     Arc::new(file_reader),
                     Arc::new(file_renamer),
                     Arc::new(file_deleter),
                     Arc::new(inspect),
-                    blob_root,
                 );
                 let actual = store.get(&digest::Digest(format!("sha256:{sha}"))).await;
                 assert!(actual.is_ok());
@@ -985,7 +985,6 @@ mod tests {
                         .insert(path.to_path_buf(), contents.as_bytes().to_vec());
                     Ok(())
                 }
-
                 fn write_all_bytes(
                     &self,
                     path: &Path,
@@ -997,7 +996,6 @@ mod tests {
                         .insert(path.to_path_buf(), bytes.to_vec());
                     Ok(())
                 }
-
                 fn create_buffered_file_writer(
                     &self,
                     path: &Path,
@@ -1008,7 +1006,6 @@ mod tests {
                         disk: Arc::clone(&self.0),
                     }))
                 }
-
                 fn exists(&self, path: &Path) -> bool {
                     self.0.lock().unwrap().contains_key(path)
                 }
@@ -1023,11 +1020,9 @@ mod tests {
                         .clone();
                     Ok(String::from_utf8_lossy(&bytes).into_owned())
                 }
-
                 fn exists(&self, path: &Path) -> bool {
                     self.0.lock().unwrap().contains_key(path)
                 }
-
                 fn create_reader(
                     &self,
                     path: &Path,
@@ -1064,13 +1059,13 @@ mod tests {
             fn make_store(disk: FakeDisk, blob_root: PathBuf) -> FileBlobStore {
                 let d = Arc::new(disk);
                 FileBlobStore::new(
+                    blob_root,
                     Arc::clone(&d) as Arc<dyn Folder>,
                     Arc::clone(&d) as Arc<dyn FileWriter>,
                     Arc::clone(&d) as Arc<dyn FileReader>,
                     Arc::clone(&d) as Arc<dyn FileRenamer>,
                     Arc::clone(&d) as Arc<dyn FileDeleter>,
                     Arc::clone(&d) as Arc<dyn Inspect>,
-                    blob_root,
                 )
             }
 
@@ -1126,13 +1121,13 @@ mod tests {
             inspect.given_does_not_exist(&format!("/tmp/blobs/sha256/ff/{sha}/{sha}"));
 
             let store = FileBlobStore::new(
+                blob_root,
                 Arc::new(folder),
                 Arc::new(file_writer),
                 Arc::new(file_reader),
                 Arc::new(file_renamer),
                 Arc::new(file_deleter),
                 Arc::new(inspect),
-                blob_root,
             );
 
             let request = digest::Digest(format!("sha256:{sha}"));
@@ -1173,13 +1168,13 @@ mod tests {
             );
 
             let store = FileBlobStore::new(
+                blob_root,
                 Arc::new(folder),
                 Arc::new(file_writer),
                 Arc::new(file_reader),
                 Arc::new(file_renamer),
                 Arc::new(file_deleter),
                 Arc::new(inspect),
-                blob_root,
             );
 
             let request = digest::Digest(format!("sha256:{sha}"));
@@ -1218,13 +1213,13 @@ mod tests {
             );
 
             let store = FileBlobStore::new(
+                blob_root,
                 Arc::new(folder),
                 Arc::new(file_writer),
                 Arc::new(file_reader),
                 Arc::new(file_renamer),
                 Arc::new(file_deleter),
                 Arc::new(inspect),
-                blob_root,
             );
 
             let request = digest::Digest(format!("sha256:{sha}"));
@@ -1270,13 +1265,13 @@ mod tests {
                 });
 
             let store = FileBlobStore::new(
+                blob_root,
                 Arc::new(folder),
                 Arc::new(file_writer),
                 Arc::new(file_reader),
                 Arc::new(file_renamer),
                 Arc::new(file_deleter),
                 Arc::new(inspect),
-                blob_root,
             );
 
             let request = digest::Digest(format!("sha256:{sha}"));
