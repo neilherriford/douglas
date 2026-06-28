@@ -433,6 +433,11 @@ impl IntoResponse for BlobUploaderError {
                     claimed, computed
                 ),
             ),
+            BlobUploaderError::RangeMismatch { expected, received } => (
+                StatusCode::BAD_REQUEST,
+                error_code::BLOB_UPLOAD_INVALID,
+                format!("range mismatch: expected offset {expected}, got {received}"),
+            ),
             BlobUploaderError::FileSystemError(_)
             | BlobUploaderError::HashFailure
             | BlobUploaderError::DigestError(_)
@@ -808,7 +813,7 @@ mod read {
 
 mod upload {
     use crate::blob_uploader::BlobUploaderError;
-    use crate::{blob_uploader::BlobUploader, digest::Digest};
+    use crate::{ServerError, blob_uploader::BlobUploader, digest::Digest};
     use axum::extract::Query;
     use axum::http::HeaderMap;
     use axum::{
@@ -837,11 +842,7 @@ mod upload {
         State(uploader): State<Arc<dyn BlobUploader>>,
         Path(name): Path<String>,
     ) -> Result<impl IntoResponse, BlobUploaderError> {
-        let uuid = uploader.start(&name)?;
-        Ok((
-            StatusCode::ACCEPTED,
-            [("Location", format!("/v2/{name}/blobs/uploads/{uuid}"))],
-        ))
+        start_upload(uploader, name)
     }
 
     pub(crate) async fn namespaced_start(
@@ -849,6 +850,13 @@ mod upload {
         Path((namespace, name)): Path<(String, String)>,
     ) -> Result<impl IntoResponse, BlobUploaderError> {
         let name = format!("{namespace}/{name}");
+        start_upload(uploader, name)
+    }
+
+    fn start_upload(
+        uploader: Arc<dyn BlobUploader>,
+        name: String,
+    ) -> Result<impl IntoResponse, BlobUploaderError> {
         let uuid = uploader.start(&name)?;
         Ok((
             StatusCode::ACCEPTED,
@@ -860,15 +868,7 @@ mod upload {
         State(uploader): State<Arc<dyn BlobUploader>>,
         Path((name, uuid)): Path<(String, Uuid)>,
     ) -> Result<impl IntoResponse, BlobUploaderError> {
-        let offset = uploader.status(uuid)?;
-        Ok((
-            StatusCode::NO_CONTENT,
-            [
-                ("Location", format!("/v2/{name}/blobs/uploads/{uuid}")),
-                ("Range", format!("0-{offset}")),
-                ("Docker-Upload-UUID", uuid.to_string()),
-            ],
-        ))
+        get_status(uploader, uuid, name)
     }
 
     pub(crate) async fn namespaced_status(
@@ -876,6 +876,14 @@ mod upload {
         Path((namespace, name, uuid)): Path<(String, String, Uuid)>,
     ) -> Result<impl IntoResponse, BlobUploaderError> {
         let name = format!("{namespace}/{name}");
+        get_status(uploader, uuid, name)
+    }
+
+    fn get_status(
+        uploader: Arc<dyn BlobUploader>,
+        uuid: Uuid,
+        name: String,
+    ) -> Result<impl IntoResponse, BlobUploaderError> {
         let offset = uploader.status(uuid)?;
         Ok((
             StatusCode::NO_CONTENT,
@@ -890,10 +898,35 @@ mod upload {
     pub(crate) async fn write_chunk(
         State(uploader): State<Arc<dyn BlobUploader>>,
         Path((name, uuid)): Path<(String, Uuid)>,
+        headers: HeaderMap,
         body: axum::body::Body,
-    ) -> Result<impl IntoResponse, BlobUploaderError> {
-        let reader = body_to_reader(body);
-        let offset = uploader.write_chunk(uuid, reader).await?;
+    ) -> Result<impl IntoResponse, axum::response::Response> {
+        let range_start = parse_range_start(&headers).map_err(IntoResponse::into_response)?;
+        write(uploader, name, uuid, range_start, body).await
+    }
+
+    pub(crate) async fn namespaced_write_chunk(
+        State(uploader): State<Arc<dyn BlobUploader>>,
+        Path((namespace, name, uuid)): Path<(String, String, Uuid)>,
+        headers: HeaderMap,
+        body: axum::body::Body,
+    ) -> Result<impl IntoResponse, axum::response::Response> {
+        let range_start = parse_range_start(&headers).map_err(IntoResponse::into_response)?;
+        let name = format!("{namespace}/{name}");
+        write(uploader, name, uuid, range_start, body).await
+    }
+
+    async fn write(
+        uploader: Arc<dyn BlobUploader>,
+        name: String,
+        uuid: Uuid,
+        range_start: u64,
+        body: axum::body::Body,
+    ) -> Result<impl IntoResponse, axum::response::Response> {
+        let offset = uploader
+            .write_chunk(uuid, range_start, body_to_reader(body))
+            .await
+            .map_err(IntoResponse::into_response)?;
         Ok((
             StatusCode::ACCEPTED,
             [
@@ -904,22 +937,18 @@ mod upload {
         ))
     }
 
-    pub(crate) async fn namespaced_write_chunk(
-        State(uploader): State<Arc<dyn BlobUploader>>,
-        Path((namespace, name, uuid)): Path<(String, String, Uuid)>,
-        body: axum::body::Body,
-    ) -> Result<impl IntoResponse, BlobUploaderError> {
-        let name = format!("{namespace}/{name}");
-        let reader = body_to_reader(body);
-        let offset = uploader.write_chunk(uuid, reader).await?;
-        Ok((
-            StatusCode::ACCEPTED,
-            [
-                ("Location", format!("/v2/{name}/blobs/uploads/{uuid}")),
-                ("Range", format!("0-{offset}")),
-                ("Docker-Upload-UUID", uuid.to_string()),
-            ],
-        ))
+    fn parse_range_start(headers: &HeaderMap) -> Result<u64, ServerError> {
+        let value = headers
+            .get("content-range")
+            .and_then(|header| header.to_str().ok())
+            .ok_or_else(|| {
+                ServerError::BadRequest("malformed or missing Content-Range header".to_string())
+            })?;
+        value
+            .split('-')
+            .next()
+            .and_then(|start| start.parse().ok())
+            .ok_or_else(|| ServerError::BadRequest("malformed Content-Range header".to_string()))
     }
 
     fn body_to_reader(body: axum::body::Body) -> Box<dyn AsyncRead + Send + Unpin> {
@@ -970,17 +999,7 @@ mod upload {
         Query(params): Query<CompleteParams>,
         headers: HeaderMap,
     ) -> Result<impl IntoResponse, BlobUploaderError> {
-        let digest = Digest::from_str(&params.digest)?;
-        let media_type = headers
-            .get("Content-Type")
-            .and_then(|value| value.to_str().ok())
-            .unwrap_or("application/octet-stream");
-
-        uploader.complete(uuid, &digest, media_type)?;
-        Ok((
-            StatusCode::CREATED,
-            [("Location", format!("/v2/{name}/blobs/{}", params.digest))],
-        ))
+        complete_upload(uploader, uuid, params, name, headers)
     }
 
     pub(crate) async fn namespaced_complete(
@@ -990,6 +1009,16 @@ mod upload {
         headers: HeaderMap,
     ) -> Result<impl IntoResponse, BlobUploaderError> {
         let name = format!("{namespace}/{name}");
+        complete_upload(uploader, uuid, params, name, headers)
+    }
+
+    fn complete_upload(
+        uploader: Arc<dyn BlobUploader>,
+        uuid: Uuid,
+        params: CompleteParams,
+        name: String,
+        headers: HeaderMap,
+    ) -> Result<impl IntoResponse, BlobUploaderError> {
         let digest = Digest::from_str(&params.digest)?;
         let media_type = headers
             .get("Content-Type")
@@ -1007,13 +1036,19 @@ mod upload {
         State(uploader): State<Arc<dyn BlobUploader>>,
         Path((_name, uuid)): Path<(String, Uuid)>,
     ) -> Result<impl IntoResponse, BlobUploaderError> {
-        uploader.abort(uuid)?;
-        Ok(StatusCode::NO_CONTENT)
+        abort_upload(uploader, uuid)
     }
 
     pub(crate) async fn namespaced_ns(
         State(uploader): State<Arc<dyn BlobUploader>>,
         Path((_namespace, _name, uuid)): Path<(String, String, Uuid)>,
+    ) -> Result<impl IntoResponse, BlobUploaderError> {
+        abort_upload(uploader, uuid)
+    }
+
+    fn abort_upload(
+        uploader: Arc<dyn BlobUploader>,
+        uuid: Uuid,
     ) -> Result<impl IntoResponse, BlobUploaderError> {
         uploader.abort(uuid)?;
         Ok(StatusCode::NO_CONTENT)

@@ -37,6 +37,8 @@ pub enum BlobUploaderError {
     NetworkError(String),
     #[error("Hash failure")]
     HashFailure,
+    #[error("Range mismatch: expected offset {expected}, got {received}")]
+    RangeMismatch { expected: u64, received: u64 },
 }
 
 struct PartialUpload {
@@ -77,6 +79,7 @@ pub trait BlobUploader: Send + Sync {
     fn write_chunk<'a>(
         &'a self,
         uuid: Uuid,
+        expected_offset: u64,
         reader: Box<dyn AsyncRead + Send + Unpin>,
     ) -> BoxFuture<'a, Result<u64, BlobUploaderError>>;
     fn complete(
@@ -146,6 +149,7 @@ impl BlobUploader for FileBlobUploader {
     fn write_chunk<'a>(
         &'a self,
         uuid: Uuid,
+        expected_offset: u64,
         reader: Box<dyn AsyncRead + Send + Unpin>,
     ) -> BoxFuture<'a, Result<u64, BlobUploaderError>> {
         Box::pin(async move {
@@ -154,6 +158,12 @@ impl BlobUploader for FileBlobUploader {
                 let upload = state
                     .get_mut(&uuid)
                     .ok_or(BlobUploaderError::UnknownUuid(uuid))?;
+                if expected_offset != upload.offset {
+                    return Err(BlobUploaderError::RangeMismatch {
+                        expected: upload.offset,
+                        received: expected_offset,
+                    });
+                }
                 let hasher = upload.hasher.take().ok_or(BlobUploaderError::HashFailure)?;
                 (upload.path.clone(), hasher, upload.offset)
             };
@@ -421,7 +431,7 @@ mod tests {
             };
 
             let actual = blob_uploader
-                .write_chunk(Uuid::max(), Box::new(Cursor::new(Vec::new())))
+                .write_chunk(Uuid::max(), 0, Box::new(Cursor::new(Vec::new())))
                 .await;
             assert!(matches!(
                 actual,
@@ -471,6 +481,7 @@ mod tests {
             let actual = blob_uploader
                 .write_chunk(
                     Uuid::max(),
+                    0,
                     Box::new(Cursor::new(vec![0xDE, 0xAD, 0xBE, 0xEF])),
                 )
                 .await;
@@ -479,6 +490,45 @@ mod tests {
                 Err(BlobUploaderError::FileSystemError(
                     FileSystemError::ExpectedFileError
                 ))
+            ));
+        }
+
+        #[tokio::test]
+        async fn test_should_fail_with_range_mismatch_when_offset_is_wrong() {
+            let mut folder = MockFolder::new();
+            let file_writer = MockFileWriter::new();
+            let file_appender = MockFileAppender::new();
+            let file_renamer = MockFileRenamer::new();
+            let mut file_deleter = MockFileDeleter::new();
+            let temp_root = PathBuf::from("/tmp/tmp");
+            let blob_root = PathBuf::from("/tmp/blobs");
+
+            folder.expect_create_folder_recursively_with("/tmp/tmp");
+            let temp_file = &format!("/tmp/tmp/{}", Uuid::max());
+            file_deleter.expect_file_to_be_deleted(temp_file);
+
+            let state = Arc::new(Mutex::new(HashMap::<Uuid, PartialUpload>::new()));
+            let uuid_factory = Arc::new(Uuid::max);
+
+            let blob_uploader = FileBlobUploader {
+                temp_root,
+                blob_root,
+                folder: Arc::new(folder) as Arc<dyn Folder>,
+                file_writer: Arc::new(file_writer) as Arc<dyn FileWriter>,
+                file_appender: Arc::new(file_appender) as Arc<dyn FileAppender>,
+                file_renamer: Arc::new(file_renamer) as Arc<dyn FileRenamer>,
+                file_deleter: Arc::new(file_deleter) as Arc<dyn FileDeleter>,
+                uuid_factory,
+                state,
+            };
+
+            blob_uploader.start("foo").unwrap();
+            let actual = blob_uploader
+                .write_chunk(Uuid::max(), 42, Box::new(Cursor::new(vec![0xDE, 0xAD])))
+                .await;
+            assert!(matches!(
+                actual,
+                Err(BlobUploaderError::RangeMismatch { expected: 0, received: 42 })
             ));
         }
 
@@ -520,6 +570,7 @@ mod tests {
             let actual = blob_uploader
                 .write_chunk(
                     Uuid::max(),
+                    0,
                     Box::new(Cursor::new(vec![0xDE, 0xAD, 0xBE, 0xEF])),
                 )
                 .await;
@@ -611,7 +662,7 @@ mod tests {
             );
             let uuid = blob_uploader.start("foo").expect("should start");
             blob_uploader
-                .write_chunk(uuid, Box::new(Cursor::new(vec![0xC0, 0xDE])))
+                .write_chunk(uuid, 0, Box::new(Cursor::new(vec![0xC0, 0xDE])))
                 .await
                 .expect("should write");
 
@@ -667,7 +718,7 @@ mod tests {
             let given_claimed = Digest(format!("sha256:{actual_sha}").to_string());
             let uuid = blob_uploader.start("foo").expect("should start");
             blob_uploader
-                .write_chunk(uuid, Box::new(Cursor::new(vec![0xC0, 0xDE])))
+                .write_chunk(uuid, 0, Box::new(Cursor::new(vec![0xC0, 0xDE])))
                 .await
                 .expect("should write");
 
@@ -729,7 +780,7 @@ mod tests {
             let given_claimed = Digest(format!("sha256:{actual_sha}").to_string());
             let uuid = blob_uploader.start("foo").expect("should start");
             blob_uploader
-                .write_chunk(uuid, Box::new(Cursor::new(vec![0xC0, 0xDE])))
+                .write_chunk(uuid, 0, Box::new(Cursor::new(vec![0xC0, 0xDE])))
                 .await
                 .expect("should write");
 
@@ -789,7 +840,7 @@ mod tests {
             let given_claimed = Digest(format!("sha256:{actual_sha}").to_string());
             let uuid = blob_uploader.start("foo").expect("should start");
             blob_uploader
-                .write_chunk(uuid, Box::new(Cursor::new(vec![0xC0, 0xDE])))
+                .write_chunk(uuid, 0, Box::new(Cursor::new(vec![0xC0, 0xDE])))
                 .await
                 .expect("should write");
 
@@ -844,7 +895,7 @@ mod tests {
             let given_claimed = Digest(format!("sha256:{actual_sha}").to_string());
             let uuid = blob_uploader.start("foo").expect("should start");
             blob_uploader
-                .write_chunk(uuid, Box::new(Cursor::new(vec![0xC0, 0xDE])))
+                .write_chunk(uuid, 0, Box::new(Cursor::new(vec![0xC0, 0xDE])))
                 .await
                 .expect("should write");
 
@@ -852,7 +903,7 @@ mod tests {
                 .complete(Uuid::max(), &given_claimed, "mediatype")
                 .expect("should complete");
             let actual = blob_uploader
-                .write_chunk(uuid, Box::new(Cursor::new(vec![0xC0, 0xDE])))
+                .write_chunk(uuid, 0, Box::new(Cursor::new(vec![0xC0, 0xDE])))
                 .await;
             assert!(matches!(actual, Err(BlobUploaderError::UnknownUuid(u)) if u == Uuid::max()));
         }
@@ -1162,7 +1213,7 @@ mod tests {
             let given_claimed = Digest(format!("sha256:{actual_sha}").to_string());
             let uuid = blob_uploader.start("foo").expect("should start");
             blob_uploader
-                .write_chunk(uuid, Box::new(Cursor::new(vec![0xC0, 0xDE])))
+                .write_chunk(uuid, 0, Box::new(Cursor::new(vec![0xC0, 0xDE])))
                 .await
                 .expect("should write");
             let actual = blob_uploader.purge();
@@ -1250,7 +1301,7 @@ mod tests {
 
             let uuid = blob_uploader.start("foo").expect("should start");
             blob_uploader
-                .write_chunk(uuid, Box::new(Cursor::new(vec![0xC0, 0xDE])))
+                .write_chunk(uuid, 0, Box::new(Cursor::new(vec![0xC0, 0xDE])))
                 .await
                 .expect("should write");
             let actual = blob_uploader.status(uuid);
