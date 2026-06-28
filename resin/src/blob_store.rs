@@ -1,6 +1,6 @@
 use crate::{blob_paths::BlobPaths, digest};
 use file_system::{
-    FileDeleter, FileReader, FileRenamer, FileSystemError, FileWriter, Folder, Inspect,
+    EntryKind, FileDeleter, FileReader, FileRenamer, FileSystemError, FileWriter, Folder, Inspect,
 };
 use sha2::Sha256;
 use std::{
@@ -57,11 +57,18 @@ pub trait BlobStore: Send + Sync {
         blob_root: &'a Path,
         digest: &'a digest::Digest,
     ) -> BoxFuture<'a, Result<bool, BlobError>>;
+
     fn stats<'a>(
         &'a self,
         blob_root: &'a Path,
         digest: &'a digest::Digest,
     ) -> BoxFuture<'a, Result<Stats, BlobError>>;
+
+    fn delete<'a>(
+        &'a self,
+        blob_root: &'a Path,
+        digest: &'a digest::Digest,
+    ) -> BoxFuture<'a, Result<(), BlobError>>;
 }
 
 struct DigestStore {
@@ -291,6 +298,32 @@ impl BlobStore for FileBlobStore {
                     size: entry.size,
                     mediatype,
                 })
+            } else {
+                Err(BlobError::DigestNotFound(digest.to_string()))
+            }
+        })
+    }
+
+    fn delete<'a>(
+        &'a self,
+        blob_root: &'a Path,
+        digest: &'a digest::Digest,
+    ) -> BoxFuture<'a, Result<(), BlobError>> {
+        Box::pin(async move {
+            let digest_paths = BlobPaths::new(&blob_root.to_path_buf(), digest);
+            if self.inspect.exists(&digest_paths.final_file) {
+                for entry in self
+                    .folder
+                    .entries(&digest_paths.final_root)?
+                    .iter()
+                    .filter(|entry| entry.kind == EntryKind::File)
+                {
+                    let mut to_delete = digest_paths.final_root.clone();
+                    to_delete.push(&entry.name);
+                    self.file_deleter.delete(&to_delete)?;
+                }
+
+                Ok(())
             } else {
                 Err(BlobError::DigestNotFound(digest.to_string()))
             }
@@ -907,6 +940,187 @@ mod tests {
                     .get(&blob_root, &digest::Digest(format!("sha256:{sha}")))
                     .await;
                 assert!(actual.is_ok());
+            }
+        }
+
+        mod delete {
+            use crate::blob_store::{BlobError, BlobStore, FileBlobStore};
+            use crate::digest;
+            use file_system::{
+                Entry, EntryKind, FileSystemError, MockFileDeleter, MockFileReader,
+                MockFileRenamer, MockFileWriter, MockFolder, MockInspect,
+            };
+            use mockall::predicate;
+            use std::{path::PathBuf, sync::Arc};
+
+            #[tokio::test]
+            async fn test_should_fail_if_blob_does_not_exist() {
+                let folder = MockFolder::new();
+                let file_writer = MockFileWriter::new();
+                let file_reader = MockFileReader::new();
+                let file_renamer = MockFileRenamer::new();
+                let file_deleter = MockFileDeleter::new();
+                let mut inspect = MockInspect::new();
+                let blob_root = PathBuf::from("/tmp/blobs");
+                let sha = "ff".repeat(32);
+
+                inspect.given_does_not_exist(&format!("/tmp/blobs/sha256/ff/{sha}/{sha}"));
+
+                let store = FileBlobStore::new(
+                    Arc::new(folder),
+                    Arc::new(file_writer),
+                    Arc::new(file_reader),
+                    Arc::new(file_renamer),
+                    Arc::new(file_deleter),
+                    Arc::new(inspect),
+                );
+
+                let request = digest::Digest(format!("sha256:{sha}"));
+                let actual = store.delete(&blob_root, &request).await;
+                assert!(matches!(
+                    actual,
+                    Err(BlobError::DigestNotFound(digest)) if digest == request.to_string()
+                ));
+            }
+
+            #[tokio::test]
+            async fn test_should_fail_if_entries_cannot_be_listed() {
+                let mut folder = MockFolder::new();
+                let file_writer = MockFileWriter::new();
+                let file_reader = MockFileReader::new();
+                let file_renamer = MockFileRenamer::new();
+                let file_deleter = MockFileDeleter::new();
+                let mut inspect = MockInspect::new();
+                let blob_root = PathBuf::from("/tmp/blobs");
+                let sha = "ff".repeat(32);
+
+                inspect.given_exists(&format!("/tmp/blobs/sha256/ff/{sha}/{sha}"));
+                folder
+                    .expect_entries()
+                    .with(predicate::eq(PathBuf::from(format!(
+                        "/tmp/blobs/sha256/ff/{sha}"
+                    ))))
+                    .returning(|_| Err(FileSystemError::ExpectedFileError));
+
+                let store = FileBlobStore::new(
+                    Arc::new(folder),
+                    Arc::new(file_writer),
+                    Arc::new(file_reader),
+                    Arc::new(file_renamer),
+                    Arc::new(file_deleter),
+                    Arc::new(inspect),
+                );
+
+                let request = digest::Digest(format!("sha256:{sha}"));
+                let actual = store.delete(&blob_root, &request).await;
+                assert!(matches!(
+                    actual,
+                    Err(BlobError::FileSystemError(
+                        FileSystemError::ExpectedFileError
+                    ))
+                ));
+            }
+
+            #[tokio::test]
+            async fn test_should_fail_if_file_deletion_fails() {
+                let mut folder = MockFolder::new();
+                let file_writer = MockFileWriter::new();
+                let file_reader = MockFileReader::new();
+                let file_renamer = MockFileRenamer::new();
+                let mut file_deleter = MockFileDeleter::new();
+                let mut inspect = MockInspect::new();
+                let blob_root = PathBuf::from("/tmp/blobs");
+                let sha = "ff".repeat(32);
+
+                inspect.given_exists(&format!("/tmp/blobs/sha256/ff/{sha}/{sha}"));
+                folder.given_folder_entries(
+                    &format!("/tmp/blobs/sha256/ff/{sha}"),
+                    vec![Entry {
+                        name: sha.clone(),
+                        kind: EntryKind::File,
+                        is_link: false,
+                        size: 0,
+                    }],
+                );
+
+                file_deleter.given_delete_to_fail_once_with(
+                    &format!("/tmp/blobs/sha256/ff/{sha}/{sha}"),
+                    FileSystemError::ExpectedFileError,
+                );
+
+                let store = FileBlobStore::new(
+                    Arc::new(folder),
+                    Arc::new(file_writer),
+                    Arc::new(file_reader),
+                    Arc::new(file_renamer),
+                    Arc::new(file_deleter),
+                    Arc::new(inspect),
+                );
+
+                let request = digest::Digest(format!("sha256:{sha}"));
+                let actual = store.delete(&blob_root, &request).await;
+                assert!(matches!(
+                    actual,
+                    Err(BlobError::FileSystemError(
+                        FileSystemError::ExpectedFileError
+                    ))
+                ));
+            }
+
+            #[tokio::test]
+            async fn test_should_delete_blob() {
+                let mut folder = MockFolder::new();
+                let file_writer = MockFileWriter::new();
+                let file_reader = MockFileReader::new();
+                let file_renamer = MockFileRenamer::new();
+                let mut file_deleter = MockFileDeleter::new();
+                let mut inspect = MockInspect::new();
+                let blob_root = PathBuf::from("/tmp/blobs");
+                let sha = "ff".repeat(32);
+
+                inspect.given_exists(&format!("/tmp/blobs/sha256/ff/{sha}/{sha}"));
+                folder.given_folder_entries(
+                    &format!("/tmp/blobs/sha256/ff/{sha}"),
+                    vec![
+                        Entry {
+                            name: sha.clone(),
+                            kind: EntryKind::File,
+                            is_link: false,
+                            size: 0,
+                        },
+                        Entry {
+                            name: format!("{sha}.mediatype"),
+                            kind: EntryKind::File,
+                            is_link: false,
+                            size: 0,
+                        },
+                        Entry {
+                            name: "whoops".to_string(),
+                            kind: EntryKind::Directory,
+                            is_link: false,
+                            size: 0,
+                        },
+                    ],
+                );
+
+                file_deleter
+                    .expect_file_to_be_deleted(&format!("/tmp/blobs/sha256/ff/{sha}/{sha}"));
+                file_deleter.expect_file_to_be_deleted(&format!(
+                    "/tmp/blobs/sha256/ff/{sha}/{sha}.mediatype"
+                ));
+
+                let store = FileBlobStore::new(
+                    Arc::new(folder),
+                    Arc::new(file_writer),
+                    Arc::new(file_reader),
+                    Arc::new(file_renamer),
+                    Arc::new(file_deleter),
+                    Arc::new(inspect),
+                );
+
+                let request = digest::Digest(format!("sha256:{sha}"));
+                let actual = store.delete(&blob_root, &request).await;
+                assert!(matches!(actual, Ok(())));
             }
         }
 

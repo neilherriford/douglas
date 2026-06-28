@@ -55,6 +55,7 @@ enum ServerError {
     BlobUnknown(String),
     ManifestUnknown(String),
     BadRequest(String),
+    MethodNotAllowed(String),
     Internal(Box<dyn std::error::Error + Send + Sync>),
 }
 
@@ -69,6 +70,9 @@ impl IntoResponse for ServerError {
             }
             ServerError::BadRequest(detail) => {
                 (StatusCode::BAD_REQUEST, error_code::BAD_REQUEST, detail)
+            }
+            ServerError::MethodNotAllowed(detail) => {
+                (StatusCode::METHOD_NOT_ALLOWED, error_code::UNSUPPORTED, detail)
             }
             ServerError::Internal(error) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -281,7 +285,9 @@ impl Server {
                 "/v2/{name}/manifests/{ref}",
                 head(manifest::info)
                     .get(manifest::read)
-                    .put(manifest::write),
+                    .put(manifest::write)
+                .delete(manifest::delete),
+
             )
             .route(
                 "/v2/{namespace}/{name}/blobs/{digest}",
@@ -291,7 +297,8 @@ impl Server {
                 "/v2/{namespace}/{name}/manifests/{ref}",
                 head(manifest::namespaced_info)
                     .get(manifest::namespaced_read)
-                    .put(manifest::namespaced_write),
+                    .put(manifest::namespaced_write)
+                    .delete(manifest::namespaced_delete),
             )
             .with_state(read_state);
 
@@ -703,6 +710,46 @@ mod manifest {
         let computed = sha2::Digest::finalize(hasher);
         let claimed = Digest::from_bytes(&computed)?;
         Ok(claimed)
+    }
+
+    pub(crate) async fn delete(
+        State(state): State<ManifestState>,
+        Path((name, reference)): Path<(String, String)>,
+    ) -> Result<impl IntoResponse, ServerError> {
+        delete_manifest(state, name, reference).await
+    }
+
+    pub(crate) async fn namespaced_delete(
+        State(state): State<ManifestState>,
+        Path((namespace, name, reference)): Path<(String, String, String)>,
+    ) -> Result<impl IntoResponse, ServerError> {
+        delete_manifest(state, format!("{namespace}/{name}"), reference).await
+    }
+
+    async fn delete_manifest(
+        state: ManifestState,
+        name: String,
+        reference: String,
+    ) -> Result<impl IntoResponse, ServerError> {
+        let manifest_blob_root = state.paths.manifest_blob_root(&name)?;
+        let digest = Digest::from_str(&reference).map_err(|_| {
+            ServerError::MethodNotAllowed(
+                "manifest delete requires a digest reference, not a tag".to_string(),
+            )
+        })?;
+
+        state
+            .blob_store
+            .delete(&manifest_blob_root, &digest)
+            .await
+            .map_err(|err| match err {
+                crate::blob_store::BlobError::DigestNotFound(_) => {
+                    ServerError::ManifestUnknown(digest.to_string())
+                }
+                other => ServerError::Internal(Box::new(other)),
+            })?;
+
+        Ok(StatusCode::ACCEPTED)
     }
 }
 
