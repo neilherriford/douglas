@@ -279,7 +279,9 @@ impl Server {
             )
             .route(
                 "/v2/{name}/manifests/{ref}",
-                get(manifest::read).put(manifest::write),
+                head(manifest::info)
+                    .get(manifest::read)
+                    .put(manifest::write),
             )
             .route(
                 "/v2/{namespace}/{name}/blobs/{digest}",
@@ -287,7 +289,9 @@ impl Server {
             )
             .route(
                 "/v2/{namespace}/{name}/manifests/{ref}",
-                get(manifest::namespaced_read).put(manifest::namespaced_write),
+                head(manifest::namespaced_info)
+                    .get(manifest::namespaced_read)
+                    .put(manifest::namespaced_write),
             )
             .with_state(read_state);
 
@@ -468,7 +472,10 @@ async fn v2() -> impl IntoResponse {
 
 mod manifest {
     use crate::{
-        ManifestState, ServerError, blob_store::BlobError, digest::Digest, tag_store::TagStoreError,
+        ManifestState, ServerError,
+        blob_store::BlobError,
+        digest::Digest,
+        tag_store::{self, TagStore, TagStoreError},
     };
     use axum::{
         body::{Body, Bytes},
@@ -477,13 +484,72 @@ mod manifest {
         response::IntoResponse,
     };
     use sha2::Sha256;
-    use std::str::FromStr;
+    use std::{str::FromStr, sync::Arc};
     use tokio_util::io::ReaderStream;
 
     fn to_manifest_error(error: BlobError) -> ServerError {
         match error {
             BlobError::DigestNotFound(digest) => ServerError::ManifestUnknown(digest),
             other => ServerError::Internal(Box::new(other)),
+        }
+    }
+
+    pub(crate) async fn info(
+        State(state): State<ManifestState>,
+        Path((name, reference)): Path<(String, String)>,
+    ) -> Result<impl IntoResponse, ServerError> {
+        manifest_info(state, name, reference).await
+    }
+
+    pub(crate) async fn namespaced_info(
+        State(state): State<ManifestState>,
+        Path((namespace, name, reference)): Path<(String, String, String)>,
+    ) -> Result<impl IntoResponse, ServerError> {
+        manifest_info(state, format!("{namespace}/{name}"), reference).await
+    }
+
+    async fn manifest_info(
+        state: ManifestState,
+        name: String,
+        reference: String,
+    ) -> Result<impl IntoResponse, ServerError> {
+        let manifest_blob_root = state.paths.manifest_blob_root(&name)?;
+
+        let digest = get_digest_from_reference(&name, &reference, Arc::clone(&state.tag_store))?;
+        let stats = state
+            .blob_store
+            .stats(&manifest_blob_root, &digest)
+            .await
+            .map_err(to_manifest_error)?;
+        Ok((
+            StatusCode::OK,
+            [
+                (axum::http::header::CONTENT_LENGTH, stats.size.to_string()),
+                (axum::http::header::CONTENT_TYPE, stats.mediatype),
+                (
+                    axum::http::HeaderName::from_static("docker-content-digest"),
+                    digest.to_string(),
+                ),
+            ],
+        )
+            .into_response())
+    }
+
+    fn get_digest_from_reference(
+        name: &str,
+        reference: &str,
+        tag_store: Arc<dyn TagStore>,
+    ) -> Result<Digest, ServerError> {
+        match Digest::from_str(reference) {
+            Ok(digest) => Ok(digest),
+            Err(_) => match tag_store.read(name, reference) {
+                Ok(digest) => Ok(digest),
+                Err(TagStoreError::UnknownRepository(_))
+                | Err(TagStoreError::UnknwonTag { .. }) => {
+                    Err(ServerError::ManifestUnknown(reference.to_string()))
+                }
+                Err(err) => Err(ServerError::BadRequest(err.to_string())),
+            },
         }
     }
 
