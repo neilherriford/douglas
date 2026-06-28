@@ -3,12 +3,14 @@ mod blob_store;
 mod blob_uploader;
 mod bootstrap;
 mod digest;
+mod name;
 mod tag_store;
 
 use crate::{
     blob_store::{BlobError, BlobStore, FileBlobStore},
     blob_uploader::{BlobUploader, BlobUploaderError, FileBlobUploader},
     digest::DigestError,
+    name::Name,
     tag_store::{FileTagStore, TagStore, TagStoreError},
 };
 use axum::{
@@ -22,14 +24,14 @@ use axum::{
 use config::DouglasFolders;
 use credentials::create_credentials;
 use file_system::{
-    FileAppender, FileDeleter, FileReader, FileRenamer, FileSystemError, FileWriter, Folder,
-    Inspect, UnixFileAppender, UnixFileDeleter, UnixFileReader, UnixFileRenamer, UnixFileWriter,
-    UnixFolder, UnixInspect,
+    EntryKind, FileAppender, FileDeleter, FileReader, FileRenamer, FileSystemError, FileWriter,
+    Folder, Inspect, UnixFileAppender, UnixFileDeleter, UnixFileReader, UnixFileRenamer,
+    UnixFileWriter, UnixFolder, UnixInspect,
 };
 use log::{BufferedFileReporter, Outcome, Reporter, ScopeKind, Span, TuiReporter};
 use os::{Os, Unix};
 use serde_json::json;
-use std::{path::PathBuf, sync::Arc};
+use std::{path::PathBuf, str::FromStr, sync::Arc};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -122,11 +124,43 @@ impl IntoResponse for ServerError {
     }
 }
 
+struct RepositoryStore {
+    folder: Arc<dyn Folder>,
+    repository_root: PathBuf,
+}
+
+impl RepositoryStore {
+    pub fn new(folder: Arc<dyn Folder>, repository_root: PathBuf) -> Self {
+        Self {
+            folder,
+            repository_root,
+        }
+    }
+
+    pub fn list(&self) -> Result<Vec<Name>, Error> {
+        Ok(self
+            .folder
+            .entries(&self.repository_root)?
+            .iter()
+            .filter_map(|entry| {
+                if entry.kind != EntryKind::Directory {
+                    return None;
+                }
+                match Name::from_str(&entry.name) {
+                    Ok(name) => Some(name),
+                    Err(_) => None,
+                }
+            })
+            .collect())
+    }
+}
+
 #[derive(Clone)]
 struct ManifestState {
     blob_store: Arc<dyn BlobStore>,
     tag_store: Arc<dyn TagStore>,
     paths: Arc<BlobPaths>,
+    repository_store: Arc<RepositoryStore>,
 }
 
 #[derive(Clone)]
@@ -167,6 +201,7 @@ pub struct Server {
     blob_uploader: Arc<dyn BlobUploader>,
     tag_store: Arc<dyn TagStore>,
     manifest_paths: Arc<BlobPaths>,
+    repository_store: Arc<RepositoryStore>,
 }
 
 impl Server {
@@ -251,17 +286,24 @@ impl Server {
             Arc::clone(&file_deleter),
         ));
 
+        let manifest_paths = Arc::new(BlobPaths::new(
+            blob_root.clone(),
+            repositories_root.clone(),
+            Arc::clone(&folder),
+        ));
+        let repository_store = Arc::new(RepositoryStore::new(
+            Arc::clone(&folder),
+            manifest_paths.repositories_root.clone(),
+        ));
+
         Ok(Self {
             reporter,
             port,
             blob_store,
             blob_uploader,
             tag_store,
-            manifest_paths: Arc::new(BlobPaths::new(
-                blob_root.clone(),
-                repositories_root.clone(),
-                Arc::clone(&folder),
-            )),
+            manifest_paths,
+            repository_store,
         })
     }
 
@@ -279,6 +321,7 @@ impl Server {
             blob_store: Arc::clone(&self.blob_store),
             tag_store: Arc::clone(&self.tag_store),
             paths: Arc::clone(&self.manifest_paths),
+            repository_store: Arc::clone(&self.repository_store),
         };
 
         let upload_routes = Router::new()
@@ -336,6 +379,7 @@ impl Server {
                 "/v2/{namespace}/{name}/tags/list",
                 get(manifest::namespaced_list_tags),
             )
+            .route("/v2/_catalog", get(read::catalog))
             .with_state(read_state);
 
         let app = Router::new()
@@ -523,6 +567,7 @@ mod manifest {
         ManifestState, ServerError,
         blob_store::BlobError,
         digest::Digest,
+        name::Name,
         tag_store::{TagStore, TagStoreError},
     };
     use axum::{
@@ -556,22 +601,22 @@ mod manifest {
         State(state): State<ManifestState>,
         Path((name, reference)): Path<(String, String)>,
     ) -> Result<impl IntoResponse, ServerError> {
-        manifest_info(state, name, reference).await
+        manifest_info(state, Name::Simple(name), reference).await
     }
 
     pub(crate) async fn namespaced_info(
         State(state): State<ManifestState>,
         Path((namespace, name, reference)): Path<(String, String, String)>,
     ) -> Result<impl IntoResponse, ServerError> {
-        manifest_info(state, format!("{namespace}/{name}"), reference).await
+        manifest_info(state, Name::Namespaced(namespace, name), reference).await
     }
 
     async fn manifest_info(
         state: ManifestState,
-        name: String,
+        name: Name,
         reference: String,
     ) -> Result<impl IntoResponse, ServerError> {
-        let manifest_blob_root = state.paths.manifest_blob_root(&name)?;
+        let manifest_blob_root = state.paths.manifest_blob_root(&name.fs_safe())?;
 
         let digest = get_digest_from_reference(&name, &reference, Arc::clone(&state.tag_store))?;
         let stats = state
@@ -594,7 +639,7 @@ mod manifest {
     }
 
     fn get_digest_from_reference(
-        name: &str,
+        name: &Name,
         reference: &str,
         tag_store: Arc<dyn TagStore>,
     ) -> Result<Digest, ServerError> {
@@ -615,19 +660,19 @@ mod manifest {
         State(state): State<ManifestState>,
         Path((name, reference)): Path<(String, String)>,
     ) -> Result<impl IntoResponse, ServerError> {
-        read_manifest(state, name, reference).await
+        read_manifest(state, Name::Simple(name), reference).await
     }
 
     pub(crate) async fn namespaced_read(
         State(state): State<ManifestState>,
         Path((namespace, name, reference)): Path<(String, String, String)>,
     ) -> Result<impl IntoResponse, ServerError> {
-        read_manifest(state, format!("{namespace}/{name}"), reference).await
+        read_manifest(state, Name::Namespaced(namespace, name), reference).await
     }
 
     async fn read_manifest(
         state: ManifestState,
-        name: String,
+        name: Name,
         reference: String,
     ) -> Result<impl IntoResponse, ServerError> {
         let digest = match Digest::from_str(&reference) {
@@ -641,7 +686,7 @@ mod manifest {
                 Err(err) => return Err(ServerError::BadRequest(err.to_string())),
             },
         };
-        let manifest_blob_root = state.paths.manifest_blob_root(&name)?;
+        let manifest_blob_root = state.paths.manifest_blob_root(&name.fs_safe())?;
         let stats = state
             .blob_store
             .stats(&manifest_blob_root, &digest)
@@ -675,7 +720,7 @@ mod manifest {
         headers: HeaderMap,
         body: Bytes,
     ) -> Result<impl IntoResponse, ServerError> {
-        write_manifest(state, name, reference, headers, body).await
+        write_manifest(state, Name::Simple(name), reference, headers, body).await
     }
 
     pub(crate) async fn namespaced_write(
@@ -686,7 +731,7 @@ mod manifest {
     ) -> Result<impl IntoResponse, ServerError> {
         write_manifest(
             state,
-            format!("{namespace}/{name}"),
+            Name::Namespaced(namespace, name),
             reference,
             headers,
             body,
@@ -696,12 +741,12 @@ mod manifest {
 
     async fn write_manifest(
         state: ManifestState,
-        name: String,
+        name: Name,
         reference: String,
         headers: HeaderMap,
         body: Bytes,
     ) -> Result<impl IntoResponse, ServerError> {
-        let manifest_blob_root = state.paths.manifest_blob_root(&name)?;
+        let manifest_blob_root = state.paths.manifest_blob_root(&name.fs_safe())?;
         let media_type = headers
             .get("Content-Type")
             .and_then(|value| value.to_str().ok())
@@ -762,22 +807,22 @@ mod manifest {
         State(state): State<ManifestState>,
         Path((name, reference)): Path<(String, String)>,
     ) -> Result<impl IntoResponse, ServerError> {
-        delete_manifest(state, name, reference).await
+        delete_manifest(state, Name::Simple(name), reference).await
     }
 
     pub(crate) async fn namespaced_delete(
         State(state): State<ManifestState>,
         Path((namespace, name, reference)): Path<(String, String, String)>,
     ) -> Result<impl IntoResponse, ServerError> {
-        delete_manifest(state, format!("{namespace}/{name}"), reference).await
+        delete_manifest(state, Name::Namespaced(namespace, name), reference).await
     }
 
     async fn delete_manifest(
         state: ManifestState,
-        name: String,
+        name: Name,
         reference: String,
     ) -> Result<impl IntoResponse, ServerError> {
-        let manifest_blob_root = state.paths.manifest_blob_root(&name)?;
+        let manifest_blob_root = state.paths.manifest_blob_root(&name.fs_safe())?;
         let digest = Digest::from_str(&reference).map_err(|_| {
             ServerError::MethodNotAllowed(
                 "manifest delete requires a digest reference, not a tag".to_string(),
@@ -798,26 +843,26 @@ mod manifest {
 
     pub(crate) async fn list_tags(
         State(state): State<ManifestState>,
-        Path((name)): Path<(String)>,
+        Path(name): Path<String>,
     ) -> Result<impl IntoResponse, ServerError> {
-        get_tag_list(state, name).await
+        get_tag_list(state, Name::Simple(name)).await
     }
 
     pub(crate) async fn namespaced_list_tags(
         State(state): State<ManifestState>,
         Path((namespace, name)): Path<(String, String)>,
     ) -> Result<impl IntoResponse, ServerError> {
-        get_tag_list(state, format!("{namespace}/{name}")).await
+        get_tag_list(state, Name::Namespaced(namespace, name)).await
     }
 
     async fn get_tag_list(
         state: ManifestState,
-        name: String,
+        name: Name,
     ) -> Result<impl IntoResponse, ServerError> {
         let tags = state.tag_store.list(&name).map_err(to_tag_error)?;
         let mut map = Map::new();
 
-        map.insert("name".to_string(), Value::String(name));
+        map.insert("name".to_string(), Value::String(name.to_string()));
         map.insert(
             "tags".to_string(),
             Value::Array(tags.iter().map(|tag| Value::String(tag.clone())).collect()),
@@ -848,6 +893,7 @@ mod read {
         http::StatusCode,
         response::IntoResponse,
     };
+    use serde_json::{Map, Value};
     use std::str::FromStr;
     use tokio_util::io::ReaderStream;
 
@@ -943,11 +989,42 @@ mod read {
         )
             .into_response())
     }
+
+    pub(crate) async fn catalog(
+        State(state): State<ManifestState>,
+    ) -> Result<impl IntoResponse, ServerError> {
+        let names = Value::Array(
+            state
+                .repository_store
+                .list()?
+                .iter()
+                .map(|name| Value::String(name.to_string()))
+                .collect(),
+        );
+
+        let mut map = Map::new();
+        map.insert("repositories".to_string(), names);
+
+        let result = serde_json::to_string(&map)?;
+
+        Ok((
+            StatusCode::OK,
+            [
+                (axum::http::header::CONTENT_LENGTH, result.len().to_string()),
+                (
+                    axum::http::header::CONTENT_TYPE,
+                    mime::APPLICATION_JSON.to_string(),
+                ),
+            ],
+            result,
+        )
+            .into_response())
+    }
 }
 
 mod upload {
     use crate::blob_uploader::BlobUploaderError;
-    use crate::{ServerError, blob_uploader::BlobUploader, digest::Digest};
+    use crate::{ServerError, blob_uploader::BlobUploader, digest::Digest, name::Name};
     use axum::extract::Query;
     use axum::http::HeaderMap;
     use axum::{
@@ -976,22 +1053,21 @@ mod upload {
         State(uploader): State<Arc<dyn BlobUploader>>,
         Path(name): Path<String>,
     ) -> Result<impl IntoResponse, BlobUploaderError> {
-        start_upload(uploader, name)
+        start_upload(uploader, Name::Simple(name))
     }
 
     pub(crate) async fn namespaced_start(
         State(uploader): State<Arc<dyn BlobUploader>>,
         Path((namespace, name)): Path<(String, String)>,
     ) -> Result<impl IntoResponse, BlobUploaderError> {
-        let name = format!("{namespace}/{name}");
-        start_upload(uploader, name)
+        start_upload(uploader, Name::Namespaced(namespace, name))
     }
 
     fn start_upload(
         uploader: Arc<dyn BlobUploader>,
-        name: String,
+        name: Name,
     ) -> Result<impl IntoResponse, BlobUploaderError> {
-        let uuid = uploader.start(&name)?;
+        let uuid = uploader.start(&name.fs_safe())?;
         Ok((
             StatusCode::ACCEPTED,
             [("Location", format!("/v2/{name}/blobs/uploads/{uuid}"))],
@@ -1002,21 +1078,20 @@ mod upload {
         State(uploader): State<Arc<dyn BlobUploader>>,
         Path((name, uuid)): Path<(String, Uuid)>,
     ) -> Result<impl IntoResponse, BlobUploaderError> {
-        get_status(uploader, uuid, name)
+        get_status(uploader, uuid, Name::Simple(name))
     }
 
     pub(crate) async fn namespaced_status(
         State(uploader): State<Arc<dyn BlobUploader>>,
         Path((namespace, name, uuid)): Path<(String, String, Uuid)>,
     ) -> Result<impl IntoResponse, BlobUploaderError> {
-        let name = format!("{namespace}/{name}");
-        get_status(uploader, uuid, name)
+        get_status(uploader, uuid, Name::Namespaced(namespace, name))
     }
 
     fn get_status(
         uploader: Arc<dyn BlobUploader>,
         uuid: Uuid,
-        name: String,
+        name: Name,
     ) -> Result<impl IntoResponse, BlobUploaderError> {
         let offset = uploader.status(uuid)?;
         Ok((
@@ -1036,7 +1111,7 @@ mod upload {
         body: axum::body::Body,
     ) -> Result<impl IntoResponse, axum::response::Response> {
         let range_start = parse_range_start(&headers).map_err(IntoResponse::into_response)?;
-        write(uploader, name, uuid, range_start, body).await
+        write(uploader, Name::Simple(name), uuid, range_start, body).await
     }
 
     pub(crate) async fn namespaced_write_chunk(
@@ -1046,13 +1121,19 @@ mod upload {
         body: axum::body::Body,
     ) -> Result<impl IntoResponse, axum::response::Response> {
         let range_start = parse_range_start(&headers).map_err(IntoResponse::into_response)?;
-        let name = format!("{namespace}/{name}");
-        write(uploader, name, uuid, range_start, body).await
+        write(
+            uploader,
+            Name::Namespaced(namespace, name),
+            uuid,
+            range_start,
+            body,
+        )
+        .await
     }
 
     async fn write(
         uploader: Arc<dyn BlobUploader>,
-        name: String,
+        name: Name,
         uuid: Uuid,
         range_start: u64,
         body: axum::body::Body,
@@ -1133,7 +1214,7 @@ mod upload {
         Query(params): Query<CompleteParams>,
         headers: HeaderMap,
     ) -> Result<impl IntoResponse, BlobUploaderError> {
-        complete_upload(uploader, uuid, params, name, headers)
+        complete_upload(uploader, uuid, params, Name::Simple(name), headers)
     }
 
     pub(crate) async fn namespaced_complete(
@@ -1142,15 +1223,20 @@ mod upload {
         Query(params): Query<CompleteParams>,
         headers: HeaderMap,
     ) -> Result<impl IntoResponse, BlobUploaderError> {
-        let name = format!("{namespace}/{name}");
-        complete_upload(uploader, uuid, params, name, headers)
+        complete_upload(
+            uploader,
+            uuid,
+            params,
+            Name::Namespaced(namespace, name),
+            headers,
+        )
     }
 
     fn complete_upload(
         uploader: Arc<dyn BlobUploader>,
         uuid: Uuid,
         params: CompleteParams,
-        name: String,
+        name: Name,
         headers: HeaderMap,
     ) -> Result<impl IntoResponse, BlobUploaderError> {
         let digest = Digest::from_str(&params.digest)?;

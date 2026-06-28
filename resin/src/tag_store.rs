@@ -1,5 +1,6 @@
 use crate::{
     digest::{Digest, DigestError},
+    name::Name,
     tag_store::TagStoreError::UnknownRepository,
 };
 use file_system::{EntryKind, FileDeleter, FileReader, FileSystemError, FileWriter, Folder};
@@ -22,10 +23,10 @@ pub enum TagStoreError {
 }
 
 pub trait TagStore: Send + Sync {
-    fn list(&self, repository: &str) -> Result<Vec<String>, TagStoreError>;
-    fn read(&self, repository: &str, tag: &str) -> Result<Digest, TagStoreError>;
-    fn write(&self, repository: &str, tag: &str, digest: &Digest) -> Result<(), TagStoreError>;
-    fn delete(&self, repository: &str, tag: &str) -> Result<bool, TagStoreError>;
+    fn list(&self, name: &Name) -> Result<Vec<String>, TagStoreError>;
+    fn read(&self, name: &Name, tag: &str) -> Result<Digest, TagStoreError>;
+    fn write(&self, name: &Name, tag: &str, digest: &Digest) -> Result<(), TagStoreError>;
+    fn delete(&self, name: &Name, tag: &str) -> Result<bool, TagStoreError>;
 }
 
 pub struct FileTagStore {
@@ -53,34 +54,34 @@ impl FileTagStore {
         }
     }
 
-    fn get_repository_path(&self, repository: &str) -> PathBuf {
+    fn get_repository_path(&self, name: &Name) -> PathBuf {
         let mut result = self.root.clone();
-        result.push(repository);
+        result.push(name.fs_safe());
         result
     }
 
-    fn get_tags_path(&self, repository: &str) -> PathBuf {
-        let mut result = self.get_repository_path(repository);
+    fn get_tags_path(&self, name: &Name) -> PathBuf {
+        let mut result = self.get_repository_path(name);
         result.push("_manifests");
         result.push("tags");
         result
     }
 
-    fn assert_repository_exists(&self, repository: &str) -> Result<(), TagStoreError> {
-        let repository_path = self.get_repository_path(repository);
+    fn assert_repository_exists(&self, name: &Name) -> Result<(), TagStoreError> {
+        let repository_path = self.get_repository_path(name);
         if self.folder.exists(&repository_path) {
             Ok(())
         } else {
-            Err(UnknownRepository(repository.to_string()))
+            Err(UnknownRepository(name.to_string()))
         }
     }
 }
 
 impl TagStore for FileTagStore {
-    fn list(&self, repository: &str) -> Result<Vec<String>, TagStoreError> {
-        self.assert_repository_exists(repository)?;
+    fn list(&self, name: &Name) -> Result<Vec<String>, TagStoreError> {
+        self.assert_repository_exists(name)?;
 
-        let tag_path = self.get_tags_path(repository);
+        let tag_path = self.get_tags_path(name);
         if !self.folder.exists(&tag_path) {
             return Ok(Vec::new());
         }
@@ -89,15 +90,15 @@ impl TagStore for FileTagStore {
             .folder
             .entries(&tag_path)?
             .iter()
-            .filter(|e| e.kind == EntryKind::File)
+            .filter(|entry| entry.kind == EntryKind::File)
             .map(|file| file.name.clone())
             .collect())
     }
 
-    fn read(&self, repository: &str, tag: &str) -> Result<Digest, TagStoreError> {
-        self.assert_repository_exists(repository)?;
+    fn read(&self, name: &Name, tag: &str) -> Result<Digest, TagStoreError> {
+        self.assert_repository_exists(name)?;
 
-        let mut tag_path = self.get_tags_path(repository);
+        let mut tag_path = self.get_tags_path(name);
         tag_path.push(tag);
 
         if self.file_reader.exists(&tag_path) {
@@ -106,16 +107,16 @@ impl TagStore for FileTagStore {
             Ok(digest)
         } else {
             Err(TagStoreError::UnknwonTag {
-                repository: repository.to_string(),
+                repository: name.to_string(),
                 tag: tag.to_string(),
             })
         }
     }
 
-    fn write(&self, repository: &str, tag: &str, digest: &Digest) -> Result<(), TagStoreError> {
-        self.assert_repository_exists(repository)?;
+    fn write(&self, name: &Name, tag: &str, digest: &Digest) -> Result<(), TagStoreError> {
+        self.assert_repository_exists(name)?;
 
-        let mut tags_path = self.get_tags_path(repository);
+        let mut tags_path = self.get_tags_path(name);
         if !self.folder.exists(&tags_path) {
             self.folder.create_recursively(&tags_path)?;
         }
@@ -127,10 +128,10 @@ impl TagStore for FileTagStore {
         Ok(())
     }
 
-    fn delete(&self, repository: &str, tag: &str) -> Result<bool, TagStoreError> {
-        self.assert_repository_exists(repository)?;
+    fn delete(&self, name: &Name, tag: &str) -> Result<bool, TagStoreError> {
+        self.assert_repository_exists(name)?;
 
-        let mut tag_path = self.get_tags_path(repository);
+        let mut tag_path = self.get_tags_path(name);
         tag_path.push(tag);
 
         if self.file_reader.exists(&tag_path) {
@@ -145,7 +146,10 @@ impl TagStore for FileTagStore {
 #[cfg(test)]
 mod tests {
     mod list {
-        use crate::tag_store::{FileTagStore, TagStore, TagStoreError};
+        use crate::{
+            name::Name,
+            tag_store::{FileTagStore, TagStore, TagStoreError},
+        };
         use file_system::{
             Entry, EntryKind, MockFileDeleter, MockFileReader, MockFileWriter, MockFolder,
         };
@@ -170,8 +174,8 @@ mod tests {
             );
 
             assert!(matches!(
-                    store.list("oops"),
-                    Err(TagStoreError::UnknownRepository(r)) if r == "oops"
+                store.list(&Name::Simple("oops".to_string())),
+                Err(TagStoreError::UnknownRepository(r)) if r == "oops"
             ))
         }
 
@@ -195,8 +199,8 @@ mod tests {
             );
 
             assert!(matches!(
-                    store.list("foo"),
-                    Ok(t) if t.is_empty()
+                store.list(&Name::Simple("foo".to_string())),
+                Ok(tags) if tags.is_empty()
             ))
         }
 
@@ -236,13 +240,41 @@ mod tests {
                 Arc::new(file_deleter),
             );
 
-            assert!(matches!(store.list("oops"), Ok(items) if items == vec!["bar".to_string()]));
+            assert!(matches!(
+                store.list(&Name::Simple("oops".to_string())),
+                Ok(items) if items == vec!["bar".to_string()]
+            ));
+        }
+
+        #[test]
+        fn should_return_error_if_namespaced_repository_does_not_exist() {
+            let root = PathBuf::from("/tmp");
+            let mut folder = MockFolder::new();
+            let file_reader = MockFileReader::new();
+            let file_writer = MockFileWriter::new();
+            let file_deleter = MockFileDeleter::new();
+
+            folder.given_does_not_exist("/tmp/myns%2Foops/");
+
+            let store = FileTagStore::new(
+                root,
+                Arc::new(folder),
+                Arc::new(file_reader),
+                Arc::new(file_writer),
+                Arc::new(file_deleter),
+            );
+
+            assert!(matches!(
+                store.list(&Name::Namespaced("myns".to_string(), "oops".to_string())),
+                Err(TagStoreError::UnknownRepository(r)) if r == "myns/oops"
+            ))
         }
     }
 
     mod read {
         use crate::{
             digest::DigestError,
+            name::Name,
             tag_store::{FileTagStore, TagStore, TagStoreError},
         };
         use file_system::{MockFileDeleter, MockFileReader, MockFileWriter, MockFolder};
@@ -267,7 +299,7 @@ mod tests {
             );
 
             assert!(matches!(
-                store.read("oops", "foo"),
+                store.read(&Name::Simple("oops".to_string()), "foo"),
                 Err(TagStoreError::UnknownRepository(r)) if r == "oops"
             ))
         }
@@ -292,11 +324,8 @@ mod tests {
             );
 
             assert!(matches!(
-                store.read("foo", "bar"),
-                Err(TagStoreError::UnknwonTag {
-                    repository: r,
-                    tag: t
-                }) if r == "foo" && t == "bar"
+                store.read(&Name::Simple("foo".to_string()), "bar"),
+                Err(TagStoreError::UnknwonTag { repository: r, tag: t }) if r == "foo" && t == "bar"
             ));
         }
 
@@ -311,6 +340,7 @@ mod tests {
             folder.given_exists("/tmp/foo/");
             file_reader.given_exists("/tmp/foo/_manifests/tags/bar");
             file_reader.given_can_read_all_with_contents("/tmp/foo/_manifests/tags/bar", "whoops");
+
             let store = FileTagStore::new(
                 root,
                 Arc::new(folder),
@@ -320,7 +350,7 @@ mod tests {
             );
 
             assert!(matches!(
-                store.read("foo", "bar"),
+                store.read(&Name::Simple("foo".to_string()), "bar"),
                 Err(TagStoreError::DigestError(DigestError::InvalidDigest))
             ));
         }
@@ -340,6 +370,7 @@ mod tests {
                 "/tmp/foo/_manifests/tags/bar",
                 &format!("sha256:{sha}"),
             );
+
             let store = FileTagStore::new(
                 root,
                 Arc::new(folder),
@@ -348,10 +379,9 @@ mod tests {
                 Arc::new(file_deleter),
             );
 
-            let actual = store.read("foo", "bar");
             assert!(matches!(
-                actual,
-                Ok(d) if d.hex() == sha
+                store.read(&Name::Simple("foo".to_string()), "bar"),
+                Ok(digest) if digest.hex() == sha
             ));
         }
 
@@ -370,6 +400,7 @@ mod tests {
                 "/tmp/foo/_manifests/tags/bar",
                 &format!("sha256:{sha}\n"),
             );
+
             let store = FileTagStore::new(
                 root,
                 Arc::new(folder),
@@ -378,10 +409,39 @@ mod tests {
                 Arc::new(file_deleter),
             );
 
-            let actual = store.read("foo", "bar");
             assert!(matches!(
-                actual,
-                Ok(d) if d.hex() == sha
+                store.read(&Name::Simple("foo".to_string()), "bar"),
+                Ok(digest) if digest.hex() == sha
+            ));
+        }
+
+        #[test]
+        fn should_use_escaped_path_for_namespaced_name() {
+            let root = PathBuf::from("/tmp");
+            let mut folder = MockFolder::new();
+            let mut file_reader = MockFileReader::new();
+            let file_writer = MockFileWriter::new();
+            let file_deleter = MockFileDeleter::new();
+
+            folder.given_exists("/tmp/myns%2Ffoo/");
+            file_reader.given_exists("/tmp/myns%2Ffoo/_manifests/tags/bar");
+            let sha = "ff".repeat(32);
+            file_reader.given_can_read_all_with_contents(
+                "/tmp/myns%2Ffoo/_manifests/tags/bar",
+                &format!("sha256:{sha}"),
+            );
+
+            let store = FileTagStore::new(
+                root,
+                Arc::new(folder),
+                Arc::new(file_reader),
+                Arc::new(file_writer),
+                Arc::new(file_deleter),
+            );
+
+            assert!(matches!(
+                store.read(&Name::Namespaced("myns".to_string(), "foo".to_string()), "bar"),
+                Ok(digest) if digest.hex() == sha
             ));
         }
     }
@@ -389,6 +449,7 @@ mod tests {
     mod write {
         use crate::{
             digest::Digest,
+            name::Name,
             tag_store::{FileTagStore, TagStore, TagStoreError},
         };
         use file_system::{MockFileDeleter, MockFileReader, MockFileWriter, MockFolder};
@@ -416,7 +477,7 @@ mod tests {
             let digest = Digest(format!("sha256:{sha}"));
 
             assert!(matches!(
-                store.write("oops", "foo", &digest),
+                store.write(&Name::Simple("oops".to_string()), "foo", &digest),
                 Err(TagStoreError::UnknownRepository(r)) if r == "oops"
             ))
         }
@@ -447,7 +508,10 @@ mod tests {
                 Arc::new(file_deleter),
             );
 
-            assert!(matches!(store.write("foo", "bar", &digest), Ok(())))
+            assert!(matches!(
+                store.write(&Name::Simple("foo".to_string()), "bar", &digest),
+                Ok(())
+            ))
         }
 
         #[test]
@@ -477,12 +541,54 @@ mod tests {
                 Arc::new(file_deleter),
             );
 
-            assert!(matches!(store.write("foo", "bar", &digest), Ok(())))
+            assert!(matches!(
+                store.write(&Name::Simple("foo".to_string()), "bar", &digest),
+                Ok(())
+            ))
+        }
+
+        #[test]
+        fn should_write_tags_using_escaped_path_for_namespaced_name() {
+            let root = PathBuf::from("/tmp");
+            let mut folder = MockFolder::new();
+            let file_reader = MockFileReader::new();
+            let mut file_writer = MockFileWriter::new();
+            let file_deleter = MockFileDeleter::new();
+
+            let sha = "ff".repeat(32);
+            let digest = Digest(format!("sha256:{sha}"));
+
+            folder.given_exists("/tmp/myns%2Ffoo/");
+            folder.given_exists("/tmp/myns%2Ffoo/_manifests/tags");
+            file_writer.expect_write_to_file_with_contents(
+                "/tmp/myns%2Ffoo/_manifests/tags/bar",
+                &digest.to_string(),
+            );
+
+            let store = FileTagStore::new(
+                root,
+                Arc::new(folder),
+                Arc::new(file_reader),
+                Arc::new(file_writer),
+                Arc::new(file_deleter),
+            );
+
+            assert!(matches!(
+                store.write(
+                    &Name::Namespaced("myns".to_string(), "foo".to_string()),
+                    "bar",
+                    &digest
+                ),
+                Ok(())
+            ))
         }
     }
 
     mod delete {
-        use crate::tag_store::{FileTagStore, TagStore, TagStoreError};
+        use crate::{
+            name::Name,
+            tag_store::{FileTagStore, TagStore, TagStoreError},
+        };
         use file_system::{MockFileDeleter, MockFileReader, MockFileWriter, MockFolder};
         use std::{path::PathBuf, sync::Arc};
 
@@ -505,7 +611,7 @@ mod tests {
             );
 
             assert!(matches!(
-                store.delete("oops", "foo"),
+                store.delete(&Name::Simple("oops".to_string()), "foo"),
                 Err(TagStoreError::UnknownRepository(r)) if r == "oops"
             ))
         }
@@ -529,7 +635,10 @@ mod tests {
                 Arc::new(file_deleter),
             );
 
-            assert!(matches!(store.delete("foo", "bar"), Ok(false)))
+            assert!(matches!(
+                store.delete(&Name::Simple("foo".to_string()), "bar"),
+                Ok(false)
+            ))
         }
 
         #[test]
@@ -552,7 +661,10 @@ mod tests {
                 Arc::new(file_deleter),
             );
 
-            assert!(matches!(store.delete("foo", "bar"), Ok(true)))
+            assert!(matches!(
+                store.delete(&Name::Simple("foo".to_string()), "bar"),
+                Ok(true)
+            ))
         }
     }
 }

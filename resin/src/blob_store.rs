@@ -176,7 +176,7 @@ impl FileBlobStore {
     async fn hashed_read_to_temp_file(
         &self,
         mut source: impl AsyncRead + Send + Unpin,
-        temp_file: &PathBuf,
+        temp_file: &Path,
     ) -> Result<sha2::digest::Output<Sha256>, BlobError> {
         let mut hasher = <Sha256 as sha2::Digest>::new();
         let mut buffer = [0; 1024 * 64];

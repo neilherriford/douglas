@@ -528,7 +528,10 @@ mod tests {
                 .await;
             assert!(matches!(
                 actual,
-                Err(BlobUploaderError::RangeMismatch { expected: 0, received: 42 })
+                Err(BlobUploaderError::RangeMismatch {
+                    expected: 0,
+                    received: 42
+                })
             ));
         }
 
