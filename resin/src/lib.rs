@@ -339,6 +339,21 @@ async fn log_request(
     let method = req.method().clone();
     let uri = req.uri().clone();
 
+    let guard = Span::new(
+        Arc::clone(&reporter),
+        &format!("{method} {uri}"),
+        ScopeKind::Task,
+    )
+    .start_guard();
+
+    let mut text = format!("{method} {uri} HTTP/1.1");
+    for (name, value) in req.headers() {
+        if let Ok(val) = value.to_str() {
+            text.push_str(&format!("\n{name}: {val}"));
+        }
+    }
+    guard.span().message(log::Level::Info, &text);
+
     let response = next.run(req).await;
 
     let outcome = if response.status().is_success() {
@@ -347,18 +362,14 @@ async fn log_request(
         Outcome::Failed
     };
 
-    let detail = response
-        .extensions()
-        .get::<ErrorDetail>()
-        .map(|detail| format!(": {}", detail.0))
-        .unwrap_or_default();
-
-    Span::record(
-        Arc::clone(&reporter),
-        &format!("{method} {uri} → {}{detail}", response.status()),
-        ScopeKind::Task,
-        outcome,
-    );
+    let mut text = format!("HTTP/1.1 {}", response.status());
+    for (name, value) in response.headers() {
+        if let Ok(val) = value.to_str() {
+            text.push_str(&format!("\n{name}: {val}"));
+        }
+    }
+    guard.span().message(log::Level::Info, &text);
+    guard.finish_with_outcome(outcome);
 
     response
 }
