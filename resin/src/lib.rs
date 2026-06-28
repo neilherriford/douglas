@@ -57,6 +57,22 @@ enum ServerError {
     BadRequest(String),
     MethodNotAllowed(String),
     Internal(Box<dyn std::error::Error + Send + Sync>),
+    ParseError {
+        line: usize,
+        column: usize,
+        message: String,
+    },
+    RepositoryUnknown(String),
+}
+
+impl From<serde_json::Error> for ServerError {
+    fn from(err: serde_json::Error) -> ServerError {
+        ServerError::ParseError {
+            line: err.line(),
+            column: err.column(),
+            message: err.to_string(),
+        }
+    }
 }
 
 impl IntoResponse for ServerError {
@@ -71,13 +87,29 @@ impl IntoResponse for ServerError {
             ServerError::BadRequest(detail) => {
                 (StatusCode::BAD_REQUEST, error_code::BAD_REQUEST, detail)
             }
-            ServerError::MethodNotAllowed(detail) => {
-                (StatusCode::METHOD_NOT_ALLOWED, error_code::UNSUPPORTED, detail)
-            }
+            ServerError::MethodNotAllowed(detail) => (
+                StatusCode::METHOD_NOT_ALLOWED,
+                error_code::UNSUPPORTED,
+                detail,
+            ),
             ServerError::Internal(error) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 error_code::INTERNAL_ERROR,
                 error_chain(error.as_ref()),
+            ),
+            ServerError::ParseError {
+                line,
+                column,
+                message,
+            } => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                error_code::INTERNAL_ERROR,
+                format!("error parsing JSON on line {line}:{column}: '{message}'"),
+            ),
+            ServerError::RepositoryUnknown(repository) => (
+                StatusCode::NOT_FOUND,
+                error_code::NAME_UNKNOWN,
+                format!("unknown repository {repository}"),
             ),
         };
         let mut response = (
@@ -286,9 +318,9 @@ impl Server {
                 head(manifest::info)
                     .get(manifest::read)
                     .put(manifest::write)
-                .delete(manifest::delete),
-
+                    .delete(manifest::delete),
             )
+            .route("/v2/{name}/tags/list", get(manifest::list_tags))
             .route(
                 "/v2/{namespace}/{name}/blobs/{digest}",
                 head(read::blob_info_ns).get(read::namespaced_blob),
@@ -299,6 +331,10 @@ impl Server {
                     .get(manifest::namespaced_read)
                     .put(manifest::namespaced_write)
                     .delete(manifest::namespaced_delete),
+            )
+            .route(
+                "/v2/{namespace}/{name}/tags/list",
+                get(manifest::namespaced_list_tags),
             )
             .with_state(read_state);
 
@@ -487,7 +523,7 @@ mod manifest {
         ManifestState, ServerError,
         blob_store::BlobError,
         digest::Digest,
-        tag_store::{self, TagStore, TagStoreError},
+        tag_store::{TagStore, TagStoreError},
     };
     use axum::{
         body::{Body, Bytes},
@@ -495,6 +531,7 @@ mod manifest {
         http::{HeaderMap, StatusCode},
         response::IntoResponse,
     };
+    use serde_json::{Map, Value};
     use sha2::Sha256;
     use std::{str::FromStr, sync::Arc};
     use tokio_util::io::ReaderStream;
@@ -502,6 +539,15 @@ mod manifest {
     fn to_manifest_error(error: BlobError) -> ServerError {
         match error {
             BlobError::DigestNotFound(digest) => ServerError::ManifestUnknown(digest),
+            other => ServerError::Internal(Box::new(other)),
+        }
+    }
+
+    fn to_tag_error(error: TagStoreError) -> ServerError {
+        match error {
+            TagStoreError::UnknownRepository(repository) => {
+                ServerError::RepositoryUnknown(repository)
+            }
             other => ServerError::Internal(Box::new(other)),
         }
     }
@@ -743,13 +789,54 @@ mod manifest {
             .delete(&manifest_blob_root, &digest)
             .await
             .map_err(|err| match err {
-                crate::blob_store::BlobError::DigestNotFound(_) => {
-                    ServerError::ManifestUnknown(digest.to_string())
-                }
+                BlobError::DigestNotFound(_) => ServerError::ManifestUnknown(digest.to_string()),
                 other => ServerError::Internal(Box::new(other)),
             })?;
 
         Ok(StatusCode::ACCEPTED)
+    }
+
+    pub(crate) async fn list_tags(
+        State(state): State<ManifestState>,
+        Path((name)): Path<(String)>,
+    ) -> Result<impl IntoResponse, ServerError> {
+        get_tag_list(state, name).await
+    }
+
+    pub(crate) async fn namespaced_list_tags(
+        State(state): State<ManifestState>,
+        Path((namespace, name)): Path<(String, String)>,
+    ) -> Result<impl IntoResponse, ServerError> {
+        get_tag_list(state, format!("{namespace}/{name}")).await
+    }
+
+    async fn get_tag_list(
+        state: ManifestState,
+        name: String,
+    ) -> Result<impl IntoResponse, ServerError> {
+        let tags = state.tag_store.list(&name).map_err(to_tag_error)?;
+        let mut map = Map::new();
+
+        map.insert("name".to_string(), Value::String(name));
+        map.insert(
+            "tags".to_string(),
+            Value::Array(tags.iter().map(|tag| Value::String(tag.clone())).collect()),
+        );
+
+        let result = serde_json::to_string(&map)?;
+
+        Ok((
+            StatusCode::OK,
+            [
+                (axum::http::header::CONTENT_LENGTH, result.len().to_string()),
+                (
+                    axum::http::header::CONTENT_TYPE,
+                    mime::APPLICATION_JSON.to_string(),
+                ),
+            ],
+            result,
+        )
+            .into_response())
     }
 }
 
