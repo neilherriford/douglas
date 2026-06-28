@@ -5,15 +5,18 @@ edition = "2024"
 
 [dependencies]
 async-trait = { workspace = true }
-axum = "0.8.9"
+axum = { version = "0.8.9", features = ["macros"] }
 blueprint = { workspace = true }
 config = { workspace = true }
 credentials = { workspace = true }
 file_system = { workspace = true }
+bytes = "1"
 hex = "0.4.3"
+http-body = "1"
 log = { workspace = true, features = ["tui"] }
 mime = "0.3.17"
 os = { workspace = true }
+serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = "0.11.0"
 thiserror = { workspace = true }
@@ -27,3 +30,4 @@ mock = ["file_system/mock"]
 [dev-dependencies]
 mockall = { workspace = true }
 file_system = { workspace = true, features = ["mock"] }
+tower = "0.5"

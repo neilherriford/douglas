@@ -1,9 +1,14 @@
-use crate::digest;
+use crate::{blob_paths::BlobPaths, digest};
 use file_system::{
     FileDeleter, FileReader, FileRenamer, FileSystemError, FileWriter, Folder, Inspect,
 };
 use sha2::Sha256;
-use std::{future::Future, path::PathBuf, pin::Pin, sync::Arc};
+use std::{
+    future::Future,
+    path::{Path, PathBuf},
+    pin::Pin,
+    sync::Arc,
+};
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt};
 
@@ -35,6 +40,7 @@ pub struct Stats {
 pub trait BlobStore: Send + Sync {
     fn save<'a>(
         &'a self,
+        blob_root: &'a Path,
         claimed: &'a digest::Digest,
         reader: Box<dyn AsyncRead + Send + Unpin>,
         mediatype: &'a str,
@@ -42,11 +48,20 @@ pub trait BlobStore: Send + Sync {
 
     fn get<'a>(
         &'a self,
+        blob_root: &'a Path,
         digest: &'a digest::Digest,
     ) -> BoxFuture<'a, Result<Box<dyn AsyncRead + Send + Unpin>, BlobError>>;
 
-    fn exists<'a>(&'a self, digest: &'a digest::Digest) -> BoxFuture<'a, Result<bool, BlobError>>;
-    fn stats<'a>(&'a self, digest: &'a digest::Digest) -> BoxFuture<'a, Result<Stats, BlobError>>;
+    fn exists<'a>(
+        &'a self,
+        blob_root: &'a Path,
+        digest: &'a digest::Digest,
+    ) -> BoxFuture<'a, Result<bool, BlobError>>;
+    fn stats<'a>(
+        &'a self,
+        blob_root: &'a Path,
+        digest: &'a digest::Digest,
+    ) -> BoxFuture<'a, Result<Stats, BlobError>>;
 }
 
 struct DigestStore {
@@ -130,12 +145,10 @@ pub struct FileBlobStore {
     file_renamer: Arc<dyn FileRenamer>,
     file_deleter: Arc<dyn FileDeleter>,
     inspect: Arc<dyn Inspect>,
-    blob_root: PathBuf,
 }
 
 impl FileBlobStore {
     pub fn new(
-        blob_root: PathBuf,
         folder: Arc<dyn Folder>,
         file_writer: Arc<dyn FileWriter>,
         file_reader: Arc<dyn FileReader>,
@@ -150,7 +163,6 @@ impl FileBlobStore {
             file_renamer,
             file_deleter,
             inspect,
-            blob_root,
         }
     }
 
@@ -190,6 +202,7 @@ impl FileBlobStore {
                 return Err(BlobError::FileSystemError(err));
             }
         }
+        writer.close();
         let computed = sha2::Digest::finalize(hasher);
 
         Ok(computed)
@@ -199,17 +212,18 @@ impl FileBlobStore {
 impl BlobStore for FileBlobStore {
     fn save<'a>(
         &'a self,
+        blob_root: &'a Path,
         claimed: &'a digest::Digest,
         source: Box<dyn AsyncRead + Send + Unpin>,
         mediatype: &'a str,
     ) -> BoxFuture<'a, Result<(), BlobError>> {
         Box::pin(async move {
-            if self.exists(claimed).await? {
+            if self.exists(blob_root, claimed).await? {
                 return Ok(());
             }
 
             let mut digest_store = DigestStore::new(
-                self.blob_root.clone(),
+                blob_root.to_path_buf(),
                 Arc::clone(&self.file_renamer),
                 Arc::clone(&self.file_deleter),
                 Arc::clone(&self.file_writer),
@@ -235,27 +249,36 @@ impl BlobStore for FileBlobStore {
         })
     }
 
-    fn exists<'a>(&'a self, digest: &'a digest::Digest) -> BoxFuture<'a, Result<bool, BlobError>> {
+    fn exists<'a>(
+        &'a self,
+        blob_root: &'a Path,
+        digest: &'a digest::Digest,
+    ) -> BoxFuture<'a, Result<bool, BlobError>> {
         Box::pin(async move {
-            let digest_paths = DigestPaths::new(&self.blob_root, digest);
+            let digest_paths = BlobPaths::new(&blob_root.to_path_buf(), digest);
             Ok(self.inspect.exists(&digest_paths.final_file))
         })
     }
 
     fn get<'a>(
         &'a self,
+        blob_root: &'a Path,
         digest: &'a digest::Digest,
     ) -> BoxFuture<'a, Result<Box<dyn AsyncRead + Send + Unpin>, BlobError>> {
         Box::pin(async move {
-            let digest_paths = DigestPaths::new(&self.blob_root, digest);
+            let digest_paths = BlobPaths::new(&blob_root.to_path_buf(), digest);
             let result = self.file_reader.create_reader(&digest_paths.final_file)?;
             Ok(result)
         })
     }
 
-    fn stats<'a>(&'a self, digest: &'a digest::Digest) -> BoxFuture<'a, Result<Stats, BlobError>> {
+    fn stats<'a>(
+        &'a self,
+        blob_root: &'a Path,
+        digest: &'a digest::Digest,
+    ) -> BoxFuture<'a, Result<Stats, BlobError>> {
         Box::pin(async move {
-            let digest_paths = DigestPaths::new(&self.blob_root, digest);
+            let digest_paths = BlobPaths::new(&blob_root.to_path_buf(), digest);
             if self.inspect.exists(&digest_paths.final_file) {
                 let entry = self.inspect.read_metadata(&digest_paths.final_file)?;
                 let mediatype = self
@@ -376,7 +399,7 @@ mod tests {
             use crate::digest;
             use file_system::{
                 FileSystemError, MockBufferedFileWiter, MockFileDeleter, MockFileReader,
-                MockFileRenamer, MockFileWriter, MockFolder, MockInspect, UnixInspect,
+                MockFileRenamer, MockFileWriter, MockFolder, MockInspect,
             };
             use mockall::predicate;
             use std::{path::PathBuf, sync::Arc};
@@ -414,7 +437,6 @@ mod tests {
                     .returning(|_| Err(FileSystemError::ExpectedFileError));
 
                 let store = FileBlobStore::new(
-                    blob_root,
                     Arc::new(folder),
                     Arc::new(file_writer),
                     Arc::new(file_reader),
@@ -425,7 +447,9 @@ mod tests {
 
                 let source = std::io::Cursor::new(Vec::new());
                 let digest = digest::Digest("sha256:f00d".to_string());
-                let result = store.save(&digest, Box::new(source), "mediatype").await;
+                let result = store
+                    .save(&blob_root, &digest, Box::new(source), "mediatype")
+                    .await;
                 assert!(matches!(
                     result,
                     Err(BlobError::FileSystemError(
@@ -461,7 +485,6 @@ mod tests {
                 file_deleter.expect_file_to_be_deleted("/tmp/blobs/sha256/f0/f00d");
 
                 let store = FileBlobStore::new(
-                    blob_root,
                     Arc::new(folder),
                     Arc::new(file_writer),
                     Arc::new(file_reader),
@@ -472,7 +495,9 @@ mod tests {
 
                 let source = std::io::Cursor::new(vec![0xBA, 0xAD, 0xF0, 0x0D]);
                 let digest = digest::Digest("sha256:f00d".to_string());
-                let result = store.save(&digest, Box::new(source), "mediatype").await;
+                let result = store
+                    .save(&blob_root, &digest, Box::new(source), "mediatype")
+                    .await;
 
                 assert!(matches!(
                     result,
@@ -505,7 +530,6 @@ mod tests {
                 file_deleter.expect_file_to_be_deleted("/tmp/blobs/sha256/f0/f00d");
 
                 let store = FileBlobStore::new(
-                    blob_root,
                     Arc::new(folder),
                     Arc::new(file_writer),
                     Arc::new(file_reader),
@@ -516,7 +540,9 @@ mod tests {
 
                 let source = FailingReader {};
                 let digest = digest::Digest("sha256:f00d".to_string());
-                let result = store.save(&digest, Box::new(source), "mediatype").await;
+                let result = store
+                    .save(&blob_root, &digest, Box::new(source), "mediatype")
+                    .await;
 
                 assert!(matches!(
                     result,
@@ -539,6 +565,7 @@ mod tests {
                 let mut buffered_writer = MockBufferedFileWiter::new();
 
                 buffered_writer.expect_write_all().returning(|_| Ok(()));
+                buffered_writer.expect_close().once().return_const(());
 
                 file_writer
                     .expect_create_buffered_file_writer()
@@ -548,7 +575,6 @@ mod tests {
                 file_deleter.expect_file_to_be_deleted("/tmp/blobs/sha256/f0/f00d");
 
                 let store = FileBlobStore::new(
-                    blob_root,
                     Arc::new(folder),
                     Arc::new(file_writer),
                     Arc::new(file_reader),
@@ -559,7 +585,9 @@ mod tests {
 
                 let source = std::io::Cursor::new(vec![0xBA, 0xAD, 0xF0, 0x0D]);
                 let digest = digest::Digest("sha256:f00d".to_string());
-                let result = store.save(&digest, Box::new(source), "mediatype").await;
+                let result = store
+                    .save(&blob_root, &digest, Box::new(source), "mediatype")
+                    .await;
 
                 assert!(matches!(result, Err(BlobError::DigestMismatch { .. })));
             }
@@ -585,6 +613,7 @@ mod tests {
                 let mut buffered_writer = MockBufferedFileWiter::new();
 
                 buffered_writer.expect_write_all().returning(|_| Ok(()));
+                buffered_writer.expect_close().once().return_const(());
 
                 file_writer
                     .expect_create_buffered_file_writer()
@@ -611,7 +640,6 @@ mod tests {
                     .expect_file_to_be_deleted(&format!("/tmp/blobs/sha256/05/{actual_sha}"));
 
                 let store = FileBlobStore::new(
-                    blob_root,
                     Arc::new(folder),
                     Arc::new(file_writer),
                     Arc::new(file_reader),
@@ -622,7 +650,9 @@ mod tests {
 
                 let source = std::io::Cursor::new(vec![0xBA, 0xAD, 0xF0, 0x0D]);
                 let digest = digest::Digest(format!("sha256:{actual_sha}"));
-                let result = store.save(&digest, Box::new(source), "mediatype").await;
+                let result = store
+                    .save(&blob_root, &digest, Box::new(source), "mediatype")
+                    .await;
 
                 assert!(matches!(
                     result,
@@ -646,7 +676,6 @@ mod tests {
                 inspect.given_exists(&format!("/tmp/blobs/sha256/05/{actual_sha}/{actual_sha}/"));
 
                 let store = FileBlobStore::new(
-                    blob_root,
                     Arc::new(folder),
                     Arc::new(file_writer),
                     Arc::new(file_reader),
@@ -657,7 +686,9 @@ mod tests {
 
                 let source = std::io::Cursor::new(vec![0xBA, 0xAD, 0xF0, 0x0D]);
                 let digest = digest::Digest(format!("sha256:{actual_sha}"));
-                let result = store.save(&digest, Box::new(source), "mediatype").await;
+                let result = store
+                    .save(&blob_root, &digest, Box::new(source), "mediatype")
+                    .await;
 
                 assert!(matches!(result, Ok(())))
             }
@@ -688,6 +719,7 @@ mod tests {
                 let mut buffered_writer = MockBufferedFileWiter::new();
 
                 buffered_writer.expect_write_all().returning(|_| Ok(()));
+                buffered_writer.expect_close().once().return_const(());
 
                 file_writer
                     .expect_create_buffered_file_writer()
@@ -708,7 +740,6 @@ mod tests {
                     .returning(|_, _| Ok(()));
 
                 let store = FileBlobStore::new(
-                    blob_root,
                     Arc::new(folder),
                     Arc::new(file_writer),
                     Arc::new(file_reader),
@@ -719,7 +750,9 @@ mod tests {
 
                 let source = std::io::Cursor::new(vec![0xBA, 0xAD, 0xF0, 0x0D]);
                 let digest = digest::Digest(format!("sha256:{actual_sha}"));
-                let result = store.save(&digest, Box::new(source), "mediatype").await;
+                let result = store
+                    .save(&blob_root, &digest, Box::new(source), "mediatype")
+                    .await;
 
                 assert!(matches!(result, Ok(())))
             }
@@ -748,7 +781,6 @@ mod tests {
                 inspect.given_does_not_exist(&format!("/tmp/blobs/sha256/ff/{sha}/{sha}"));
 
                 let store = FileBlobStore::new(
-                    blob_root,
                     Arc::new(folder),
                     Arc::new(file_writer),
                     Arc::new(file_reader),
@@ -756,7 +788,9 @@ mod tests {
                     Arc::new(file_deleter),
                     Arc::new(inspect),
                 );
-                let actual = store.exists(&digest::Digest(format!("sha256:{sha}"))).await;
+                let actual = store
+                    .exists(&blob_root, &digest::Digest(format!("sha256:{sha}")))
+                    .await;
                 assert!(matches!(actual, Ok(false)));
             }
 
@@ -774,7 +808,6 @@ mod tests {
                 inspect.given_exists(&format!("/tmp/blobs/sha256/ff/{sha}/{sha}"));
 
                 let store = FileBlobStore::new(
-                    blob_root,
                     Arc::new(folder),
                     Arc::new(file_writer),
                     Arc::new(file_reader),
@@ -782,7 +815,9 @@ mod tests {
                     Arc::new(file_deleter),
                     Arc::new(inspect),
                 );
-                let actual = store.exists(&digest::Digest(format!("sha256:{sha}"))).await;
+                let actual = store
+                    .exists(&blob_root, &digest::Digest(format!("sha256:{sha}")))
+                    .await;
 
                 assert!(matches!(actual, Ok(true)));
             }
@@ -822,7 +857,6 @@ mod tests {
                     });
 
                 let store = FileBlobStore::new(
-                    blob_root,
                     Arc::new(folder),
                     Arc::new(file_writer),
                     Arc::new(file_reader),
@@ -830,7 +864,9 @@ mod tests {
                     Arc::new(file_deleter),
                     Arc::new(inspect),
                 );
-                let actual = store.get(&digest::Digest(format!("sha256:{sha}"))).await;
+                let actual = store
+                    .get(&blob_root, &digest::Digest(format!("sha256:{sha}")))
+                    .await;
                 let expected_missing_file_path =
                     PathBuf::from(format!("/tmp/blobs/sha256/ff/{sha}/{sha}"));
                 assert!(matches!(
@@ -860,7 +896,6 @@ mod tests {
                     .returning(move |_| Ok(Box::new(std::io::Cursor::new(Vec::new()))));
 
                 let store = FileBlobStore::new(
-                    blob_root,
                     Arc::new(folder),
                     Arc::new(file_writer),
                     Arc::new(file_reader),
@@ -868,7 +903,9 @@ mod tests {
                     Arc::new(file_deleter),
                     Arc::new(inspect),
                 );
-                let actual = store.get(&digest::Digest(format!("sha256:{sha}"))).await;
+                let actual = store
+                    .get(&blob_root, &digest::Digest(format!("sha256:{sha}")))
+                    .await;
                 assert!(actual.is_ok());
             }
         }
@@ -1056,10 +1093,9 @@ mod tests {
                 }
             }
 
-            fn make_store(disk: FakeDisk, blob_root: PathBuf) -> FileBlobStore {
+            fn make_store(disk: FakeDisk) -> FileBlobStore {
                 let d = Arc::new(disk);
                 FileBlobStore::new(
-                    blob_root,
                     Arc::clone(&d) as Arc<dyn Folder>,
                     Arc::clone(&d) as Arc<dyn FileWriter>,
                     Arc::clone(&d) as Arc<dyn FileReader>,
@@ -1075,18 +1111,24 @@ mod tests {
                 let data = b"Lorem ipsum dolor sit amet, consectetur adipiscing elit.";
                 let claim: digest::Digest =
                     format!("sha256:{sha}").parse().expect("valid test digest");
-
-                let store = make_store(FakeDisk::new(), PathBuf::from("/blobs"));
+                let blob_root = PathBuf::from("/blobs");
+                let store = make_store(FakeDisk::new());
                 store
-                    .save(&claim, Box::new(data.as_ref()), "mediatype")
+                    .save(&blob_root, &claim, Box::new(data.as_ref()), "mediatype")
                     .await
                     .expect("save should succeed");
 
-                let stats = store.stats(&claim).await.expect("stats should succeed");
+                let stats = store
+                    .stats(&blob_root, &claim)
+                    .await
+                    .expect("stats should succeed");
                 assert_eq!(stats.mediatype, "mediatype");
                 assert_eq!(stats.size, data.len() as u64);
 
-                let mut reader = store.get(&claim).await.expect("get should succeed");
+                let mut reader = store
+                    .get(&blob_root, &claim)
+                    .await
+                    .expect("get should succeed");
                 let mut actual = Vec::new();
                 reader
                     .read_to_end(&mut actual)
@@ -1121,7 +1163,6 @@ mod tests {
             inspect.given_does_not_exist(&format!("/tmp/blobs/sha256/ff/{sha}/{sha}"));
 
             let store = FileBlobStore::new(
-                blob_root,
                 Arc::new(folder),
                 Arc::new(file_writer),
                 Arc::new(file_reader),
@@ -1131,7 +1172,7 @@ mod tests {
             );
 
             let request = digest::Digest(format!("sha256:{sha}"));
-            let actual = store.stats(&request).await;
+            let actual = store.stats(&blob_root, &request).await;
             assert!(matches!(
                 actual,
                 Err(BlobError::DigestNotFound(
@@ -1168,7 +1209,6 @@ mod tests {
             );
 
             let store = FileBlobStore::new(
-                blob_root,
                 Arc::new(folder),
                 Arc::new(file_writer),
                 Arc::new(file_reader),
@@ -1178,7 +1218,7 @@ mod tests {
             );
 
             let request = digest::Digest(format!("sha256:{sha}"));
-            let actual = store.stats(&request).await;
+            let actual = store.stats(&blob_root, &request).await;
             assert!(matches!(
                 actual,
                 Ok(ref s) if s.size == 123 && s.mediatype == "application/vnd.oci.image.manifest.v1+json"
@@ -1213,7 +1253,6 @@ mod tests {
             );
 
             let store = FileBlobStore::new(
-                blob_root,
                 Arc::new(folder),
                 Arc::new(file_writer),
                 Arc::new(file_reader),
@@ -1223,7 +1262,7 @@ mod tests {
             );
 
             let request = digest::Digest(format!("sha256:{sha}"));
-            let actual = store.stats(&request).await;
+            let actual = store.stats(&blob_root, &request).await;
             assert!(matches!(
                 actual,
                 Ok(ref s) if s.mediatype == "application/vnd.oci.image.manifest.v1+json"
@@ -1265,7 +1304,6 @@ mod tests {
                 });
 
             let store = FileBlobStore::new(
-                blob_root,
                 Arc::new(folder),
                 Arc::new(file_writer),
                 Arc::new(file_reader),
@@ -1275,7 +1313,7 @@ mod tests {
             );
 
             let request = digest::Digest(format!("sha256:{sha}"));
-            let actual = store.stats(&request).await;
+            let actual = store.stats(&blob_root, &request).await;
             assert!(matches!(actual, Err(BlobError::FileSystemError(_))));
         }
     }

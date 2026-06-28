@@ -24,6 +24,12 @@ pub enum FileSystemError {
     ParentNotFoundError(PathBuf),
     #[error("IO error: {0}")]
     IoError(#[from] std::io::Error),
+    #[error("IO error at '{path}'")]
+    IoErrorAtPath {
+        path: PathBuf,
+        #[source]
+        error: std::io::Error,
+    },
     #[error("Not found {0}")]
     NotFoundError(PathBuf),
     #[error("Group not found {0}")]
@@ -344,8 +350,10 @@ impl FileWriter for UnixFileWriter {
     }
 
     fn write_all_bytes(&self, path: &Path, bytes: &[u8]) -> Result<(), FileSystemError> {
-        let mut file = File::create(path)?;
-        file.write_all(bytes.as_ref())?;
+        let mut file = File::create(path)
+            .map_err(|error| FileSystemError::IoErrorAtPath { path: path.to_path_buf(), error })?;
+        file.write_all(bytes.as_ref())
+            .map_err(|error| FileSystemError::IoErrorAtPath { path: path.to_path_buf(), error })?;
 
         Ok(())
     }
@@ -402,8 +410,10 @@ impl FileAppender for UnixFileAppender {
             .mode(Modes::OwnerReadWriteGroupReadWrite.into())
             .open(path);
         umask(previous_umask);
-        let mut file = open_result?;
-        file.write_all(bytes)?;
+        let mut file = open_result
+            .map_err(|error| FileSystemError::IoErrorAtPath { path: path.to_path_buf(), error })?;
+        file.write_all(bytes)
+            .map_err(|error| FileSystemError::IoErrorAtPath { path: path.to_path_buf(), error })?;
         Ok(())
     }
 }
@@ -420,7 +430,8 @@ impl UnixFileReader {
 #[async_trait]
 impl FileReader for UnixFileReader {
     fn read_all(&self, path: &Path) -> Result<String, FileSystemError> {
-        Ok(read_to_string(path)?)
+        read_to_string(path)
+            .map_err(|error| FileSystemError::IoErrorAtPath { path: path.to_path_buf(), error })
     }
     fn exists(&self, path: &Path) -> bool {
         path.exists()
@@ -434,7 +445,10 @@ impl FileReader for UnixFileReader {
             return Err(FileSystemError::NotFoundError(path.to_path_buf()));
         }
 
-        let file = tokio::fs::File::from_std(std::fs::File::open(path)?);
+        let file = tokio::fs::File::from_std(
+            std::fs::File::open(path)
+                .map_err(|error| FileSystemError::IoErrorAtPath { path: path.to_path_buf(), error })?,
+        );
         Ok(Box::new(file))
     }
 }
@@ -451,7 +465,8 @@ impl UnixFileDeleter {
 impl FileDeleter for UnixFileDeleter {
     fn delete(&self, path: &Path) -> Result<(), FileSystemError> {
         if path.exists() {
-            remove_file(path)?;
+            remove_file(path)
+                .map_err(|error| FileSystemError::IoErrorAtPath { path: path.to_path_buf(), error })?;
         }
         Ok(())
     }
@@ -467,7 +482,8 @@ impl UnixFileRenamer {
 }
 impl FileRenamer for UnixFileRenamer {
     fn rename(&self, from: &Path, to: &Path) -> Result<(), FileSystemError> {
-        Ok(rename(from, to)?)
+        rename(from, to)
+            .map_err(|error| FileSystemError::IoErrorAtPath { path: from.to_path_buf(), error })
     }
 }
 

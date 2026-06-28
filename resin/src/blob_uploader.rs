@@ -2,17 +2,24 @@ use crate::{
     blob_paths::BlobPaths,
     digest::{Digest, DigestError},
 };
+use axum::{Json, http::StatusCode, response::IntoResponse};
 use file_system::{
     EntryKind, FileAppender, FileDeleter, FileRenamer, FileSystemError, FileWriter, Folder,
 };
+use serde_json::json;
 use sha2::Sha256;
 use std::{
     collections::HashMap,
+    future::Future,
     path::PathBuf,
+    pin::Pin,
     sync::{Arc, Mutex},
 };
 use thiserror::Error;
+use tokio::io::{AsyncRead, AsyncReadExt};
 use uuid::Uuid;
+
+type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 #[derive(Debug, Error)]
 pub enum BlobUploaderError {
@@ -26,6 +33,10 @@ pub enum BlobUploaderError {
     FileSystemError(#[from] FileSystemError),
     #[error("Digest error ")]
     DigestError(#[from] DigestError),
+    #[error("Network error reading upload body: {0}")]
+    NetworkError(String),
+    #[error("Hash failure")]
+    HashFailure,
 }
 
 struct PartialUpload {
@@ -61,9 +72,13 @@ impl Drop for PartialUpload {
     }
 }
 
-pub trait BlobUploader {
+pub trait BlobUploader: Send + Sync {
     fn start(&self, registry: &str) -> Result<Uuid, BlobUploaderError>;
-    fn write_chunk(&self, uuid: Uuid, chunk: &[u8]) -> Result<u64, BlobUploaderError>;
+    fn write_chunk<'a>(
+        &'a self,
+        uuid: Uuid,
+        reader: Box<dyn AsyncRead + Send + Unpin>,
+    ) -> BoxFuture<'a, Result<u64, BlobUploaderError>>;
     fn complete(
         &self,
         uuid: Uuid,
@@ -128,20 +143,48 @@ impl BlobUploader for FileBlobUploader {
         Ok(uuid)
     }
 
-    fn write_chunk(&self, uuid: Uuid, chunk: &[u8]) -> Result<u64, BlobUploaderError> {
-        let mut state = self.state.lock().unwrap();
+    fn write_chunk<'a>(
+        &'a self,
+        uuid: Uuid,
+        reader: Box<dyn AsyncRead + Send + Unpin>,
+    ) -> BoxFuture<'a, Result<u64, BlobUploaderError>> {
+        Box::pin(async move {
+            let (path, mut hasher, start_offset) = {
+                let mut state = self.state.lock().unwrap();
+                let upload = state
+                    .get_mut(&uuid)
+                    .ok_or(BlobUploaderError::UnknownUuid(uuid))?;
+                let hasher = upload.hasher.take().ok_or(BlobUploaderError::HashFailure)?;
+                (upload.path.clone(), hasher, upload.offset)
+            };
 
-        let Some(upload) = state.get_mut(&uuid) else {
-            return Err(BlobUploaderError::UnknownUuid(uuid));
-        };
+            let mut reader = reader;
+            let mut buffer = vec![0u8; 65536];
+            let mut written = 0u64;
+            loop {
+                let bytes_read = reader
+                    .read(&mut buffer)
+                    .await
+                    .map_err(|err| BlobUploaderError::NetworkError(err.to_string()))?;
+                if bytes_read == 0 {
+                    break;
+                }
+                let chunk = &buffer[..bytes_read];
+                self.file_appender.append_all_bytes(&path, chunk)?;
+                sha2::digest::Update::update(&mut hasher, chunk);
+                written += bytes_read as u64;
+            }
 
-        self.file_appender.append_all_bytes(&upload.path, chunk)?;
-        if let Some(hasher) = &mut upload.hasher {
-            sha2::digest::Update::update(hasher, chunk);
-        }
-        upload.offset += chunk.len() as u64;
-
-        Ok(upload.offset)
+            let mut state = self.state.lock().unwrap();
+            match state.get_mut(&uuid) {
+                Some(upload) => {
+                    upload.hasher = Some(hasher);
+                    upload.offset = start_offset + written;
+                    Ok(start_offset + written)
+                }
+                None => Err(BlobUploaderError::HashFailure),
+            }
+        })
     }
 
     fn complete(
@@ -346,13 +389,14 @@ mod tests {
         };
         use std::{
             collections::HashMap,
+            io::Cursor,
             path::PathBuf,
             sync::{Arc, Mutex},
         };
         use uuid::Uuid;
 
-        #[test]
-        fn test_write_chunk_should_fail_for_uuids_not_started() {
+        #[tokio::test]
+        async fn test_write_chunk_should_fail_for_uuids_not_started() {
             let folder = MockFolder::new();
             let file_writer = MockFileWriter::new();
             let file_appender = MockFileAppender::new();
@@ -376,15 +420,17 @@ mod tests {
                 state,
             };
 
-            let actual = blob_uploader.write_chunk(Uuid::max(), Vec::new().as_slice());
+            let actual = blob_uploader
+                .write_chunk(Uuid::max(), Box::new(Cursor::new(Vec::new())))
+                .await;
             assert!(matches!(
                 actual,
                 Err(BlobUploaderError::UnknownUuid(u)) if u == Uuid::max()
             ));
         }
 
-        #[test]
-        fn test_should_fail_if_cannot_append_when_write_chunk() {
+        #[tokio::test]
+        async fn test_should_fail_if_cannot_append_when_write_chunk() {
             let mut folder = MockFolder::new();
             let file_writer = MockFileWriter::new();
             let mut file_appender = MockFileAppender::new();
@@ -422,8 +468,12 @@ mod tests {
             assert!(matches!(
                 actual,
                 Ok(u) if u == Uuid::max()));
-            let actual =
-                blob_uploader.write_chunk(Uuid::max(), vec![0xDE, 0xAD, 0xBE, 0xEF].as_slice());
+            let actual = blob_uploader
+                .write_chunk(
+                    Uuid::max(),
+                    Box::new(Cursor::new(vec![0xDE, 0xAD, 0xBE, 0xEF])),
+                )
+                .await;
             assert!(matches!(
                 actual,
                 Err(BlobUploaderError::FileSystemError(
@@ -432,8 +482,8 @@ mod tests {
             ));
         }
 
-        #[test]
-        fn test_should_write_chunk() {
+        #[tokio::test]
+        async fn test_should_write_chunk() {
             let mut folder = MockFolder::new();
             let file_writer = MockFileWriter::new();
             let mut file_appender = MockFileAppender::new();
@@ -467,8 +517,12 @@ mod tests {
             assert!(matches!(
                 actual,
                 Ok(u) if u == Uuid::max()));
-            let actual =
-                blob_uploader.write_chunk(Uuid::max(), vec![0xDE, 0xAD, 0xBE, 0xEF].as_slice());
+            let actual = blob_uploader
+                .write_chunk(
+                    Uuid::max(),
+                    Box::new(Cursor::new(vec![0xDE, 0xAD, 0xBE, 0xEF])),
+                )
+                .await;
             assert!(matches!(actual, Ok(4)));
         }
     }
@@ -484,6 +538,7 @@ mod tests {
         };
         use std::{
             collections::HashMap,
+            io::Cursor,
             path::PathBuf,
             sync::{Arc, Mutex},
         };
@@ -519,8 +574,8 @@ mod tests {
             assert!(matches!(actual, Err(BlobUploaderError::UnknownUuid(u)) if u == Uuid::max()));
         }
 
-        #[test]
-        fn test_should_return_error_if_digest_does_not_match() {
+        #[tokio::test]
+        async fn test_should_return_error_if_digest_does_not_match() {
             let mut folder = MockFolder::new();
             let file_writer = MockFileWriter::new();
             let mut file_appender = MockFileAppender::new();
@@ -556,7 +611,8 @@ mod tests {
             );
             let uuid = blob_uploader.start("foo").expect("should start");
             blob_uploader
-                .write_chunk(uuid, vec![0xC0, 0xDE].as_slice())
+                .write_chunk(uuid, Box::new(Cursor::new(vec![0xC0, 0xDE])))
+                .await
                 .expect("should write");
 
             let actual = blob_uploader.complete(Uuid::max(), &given_claimed, "mediatype");
@@ -566,8 +622,8 @@ mod tests {
                     if claimed ==given_claimed && computed == expected_computed));
         }
 
-        #[test]
-        fn test_should_return_error_and_clean_up_if_rename_fails() {
+        #[tokio::test]
+        async fn test_should_return_error_and_clean_up_if_rename_fails() {
             let mut folder = MockFolder::new();
             let file_writer = MockFileWriter::new();
             let mut file_appender = MockFileAppender::new();
@@ -611,7 +667,8 @@ mod tests {
             let given_claimed = Digest(format!("sha256:{actual_sha}").to_string());
             let uuid = blob_uploader.start("foo").expect("should start");
             blob_uploader
-                .write_chunk(uuid, vec![0xC0, 0xDE].as_slice())
+                .write_chunk(uuid, Box::new(Cursor::new(vec![0xC0, 0xDE])))
+                .await
                 .expect("should write");
 
             let actual = blob_uploader.complete(Uuid::max(), &given_claimed, "mediatype");
@@ -623,8 +680,8 @@ mod tests {
             ));
         }
 
-        #[test]
-        fn test_should_return_error_and_clean_up_if_sidecar_fails() {
+        #[tokio::test]
+        async fn test_should_return_error_and_clean_up_if_sidecar_fails() {
             let mut folder = MockFolder::new();
             let mut file_writer = MockFileWriter::new();
             let mut file_appender = MockFileAppender::new();
@@ -672,7 +729,8 @@ mod tests {
             let given_claimed = Digest(format!("sha256:{actual_sha}").to_string());
             let uuid = blob_uploader.start("foo").expect("should start");
             blob_uploader
-                .write_chunk(uuid, vec![0xC0, 0xDE].as_slice())
+                .write_chunk(uuid, Box::new(Cursor::new(vec![0xC0, 0xDE])))
+                .await
                 .expect("should write");
 
             let actual = blob_uploader.complete(Uuid::max(), &given_claimed, "mediatype");
@@ -684,8 +742,8 @@ mod tests {
             ));
         }
 
-        #[test]
-        fn test_should_complete() {
+        #[tokio::test]
+        async fn test_should_complete() {
             let mut folder = MockFolder::new();
             let mut file_writer = MockFileWriter::new();
             let mut file_appender = MockFileAppender::new();
@@ -731,15 +789,16 @@ mod tests {
             let given_claimed = Digest(format!("sha256:{actual_sha}").to_string());
             let uuid = blob_uploader.start("foo").expect("should start");
             blob_uploader
-                .write_chunk(uuid, vec![0xC0, 0xDE].as_slice())
+                .write_chunk(uuid, Box::new(Cursor::new(vec![0xC0, 0xDE])))
+                .await
                 .expect("should write");
 
             let actual = blob_uploader.complete(Uuid::max(), &given_claimed, "mediatype");
             assert!(matches!(actual, Ok(())));
         }
 
-        #[test]
-        fn test_should_error_with_additional_writes_after_complete() {
+        #[tokio::test]
+        async fn test_should_error_with_additional_writes_after_complete() {
             let mut folder = MockFolder::new();
             let mut file_writer = MockFileWriter::new();
             let mut file_appender = MockFileAppender::new();
@@ -785,13 +844,16 @@ mod tests {
             let given_claimed = Digest(format!("sha256:{actual_sha}").to_string());
             let uuid = blob_uploader.start("foo").expect("should start");
             blob_uploader
-                .write_chunk(uuid, vec![0xC0, 0xDE].as_slice())
+                .write_chunk(uuid, Box::new(Cursor::new(vec![0xC0, 0xDE])))
+                .await
                 .expect("should write");
 
             blob_uploader
                 .complete(Uuid::max(), &given_claimed, "mediatype")
                 .expect("should complete");
-            let actual = blob_uploader.write_chunk(uuid, vec![0xC0, 0xDE].as_slice());
+            let actual = blob_uploader
+                .write_chunk(uuid, Box::new(Cursor::new(vec![0xC0, 0xDE])))
+                .await;
             assert!(matches!(actual, Err(BlobUploaderError::UnknownUuid(u)) if u == Uuid::max()));
         }
     }
@@ -923,6 +985,7 @@ mod tests {
         };
         use std::{
             collections::HashMap,
+            io::Cursor,
             path::PathBuf,
             sync::{Arc, Mutex},
         };
@@ -1033,8 +1096,8 @@ mod tests {
             assert!(matches!(actual, Ok(())));
         }
 
-        #[test]
-        fn test_should_not_purge_active_files() {
+        #[tokio::test]
+        async fn test_should_not_purge_active_files() {
             let mut folder = MockFolder::new();
             let mut file_writer = MockFileWriter::new();
             let mut file_appender = MockFileAppender::new();
@@ -1099,7 +1162,8 @@ mod tests {
             let given_claimed = Digest(format!("sha256:{actual_sha}").to_string());
             let uuid = blob_uploader.start("foo").expect("should start");
             blob_uploader
-                .write_chunk(uuid, vec![0xC0, 0xDE].as_slice())
+                .write_chunk(uuid, Box::new(Cursor::new(vec![0xC0, 0xDE])))
+                .await
                 .expect("should write");
             let actual = blob_uploader.purge();
             assert!(matches!(actual, Ok(())));
@@ -1119,6 +1183,7 @@ mod tests {
         };
         use std::{
             collections::HashMap,
+            io::Cursor,
             path::PathBuf,
             sync::{Arc, Mutex},
         };
@@ -1153,8 +1218,8 @@ mod tests {
             assert!(matches!(actual, Err(BlobUploaderError::UnknownUuid(u)) if u == Uuid::max()));
         }
 
-        #[test]
-        fn test_should_return_offset() {
+        #[tokio::test]
+        async fn test_should_return_offset() {
             let mut folder = MockFolder::new();
             let file_writer = MockFileWriter::new();
             let mut file_appender = MockFileAppender::new();
@@ -1185,7 +1250,8 @@ mod tests {
 
             let uuid = blob_uploader.start("foo").expect("should start");
             blob_uploader
-                .write_chunk(uuid, vec![0xC0, 0xDE].as_slice())
+                .write_chunk(uuid, Box::new(Cursor::new(vec![0xC0, 0xDE])))
+                .await
                 .expect("should write");
             let actual = blob_uploader.status(uuid);
             assert!(matches!(actual, Ok(2)));
