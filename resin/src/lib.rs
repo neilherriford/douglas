@@ -1195,12 +1195,13 @@ mod upload {
     }
 
     fn parse_range_start(headers: &HeaderMap) -> Result<u64, ServerError> {
-        let value = headers
+        let value = match headers
             .get("content-range")
             .and_then(|header| header.to_str().ok())
-            .ok_or_else(|| {
-                ServerError::BadRequest("malformed or missing Content-Range header".to_string())
-            })?;
+        {
+            Some(value) => value.to_string(),
+            None => return Ok(0),
+        };
         value
             .split('-')
             .next()
