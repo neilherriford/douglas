@@ -10,7 +10,7 @@ use crate::{
     blob_store::{BlobError, BlobStore, FileBlobStore},
     blob_uploader::{BlobUploader, BlobUploaderError, FileBlobUploader},
     digest::DigestError,
-    name::Name,
+    name::{Name, NameParseError},
     tag_store::{FileTagStore, TagStore, TagStoreError},
 };
 use axum::{
@@ -65,6 +65,7 @@ enum ServerError {
         message: String,
     },
     RepositoryUnknown(String),
+    InvalidName(String),
 }
 
 impl From<serde_json::Error> for ServerError {
@@ -73,6 +74,20 @@ impl From<serde_json::Error> for ServerError {
             line: err.line(),
             column: err.column(),
             message: err.to_string(),
+        }
+    }
+}
+
+impl From<NameParseError> for ServerError {
+    fn from(value: NameParseError) -> Self {
+        match value {
+            NameParseError::CannotBeEmpty => {
+                ServerError::InvalidName("Invalid name: cannot be empty".to_string())
+            }
+            NameParseError::TooLong => {
+                ServerError::InvalidName("Invalid name: too long".to_string())
+            }
+            NameParseError::InvalidName => ServerError::InvalidName("Invalid name".to_string()),
         }
     }
 }
@@ -113,6 +128,11 @@ impl IntoResponse for ServerError {
                 error_code::NAME_UNKNOWN,
                 format!("unknown repository {repository}"),
             ),
+            ServerError::InvalidName(description) => (
+                StatusCode::BAD_REQUEST,
+                error_code::NAME_INVALID,
+                description,
+            ),
         };
         let mut response = (
             status,
@@ -146,10 +166,7 @@ impl RepositoryStore {
                 if entry.kind != EntryKind::Directory {
                     return None;
                 }
-                match Name::from_str(&entry.name) {
-                    Ok(name) => Some(name),
-                    Err(_) => None,
-                }
+                Name::from_str(&entry.name).ok()
             })
             .collect())
     }
@@ -499,6 +516,27 @@ impl From<BlobError> for ServerError {
     }
 }
 
+impl From<BlobUploaderError> for ServerError {
+    fn from(err: BlobUploaderError) -> Self {
+        match err {
+            BlobUploaderError::InvalidRespository(repository) => {
+                ServerError::RepositoryUnknown(repository)
+            }
+            BlobUploaderError::UnknownUuid(uuid) => {
+                ServerError::BlobUnknown(format!("upload session '{uuid}' not found"))
+            }
+            BlobUploaderError::DigestMismatch { claimed, computed } => ServerError::BadRequest(
+                format!("digest mismatch: claimed {claimed}, computed {computed}"),
+            ),
+            BlobUploaderError::RangeMismatch { expected, received } => ServerError::BadRequest(
+                format!("range mismatch: expected offset {expected}, got {received}"),
+            ),
+            BlobUploaderError::NameParseError(name_error) => ServerError::from(name_error),
+            other => ServerError::Internal(Box::new(other)),
+        }
+    }
+}
+
 impl IntoResponse for BlobUploaderError {
     fn into_response(self) -> axum::response::Response {
         let (status, code, message) = match &self {
@@ -525,6 +563,11 @@ impl IntoResponse for BlobUploaderError {
                 error_code::BLOB_UPLOAD_INVALID,
                 format!("range mismatch: expected offset {expected}, got {received}"),
             ),
+            BlobUploaderError::NameParseError(name_error) => (
+                StatusCode::BAD_REQUEST,
+                error_code::NAME_INVALID,
+                name_error.to_string(),
+            ),
             BlobUploaderError::FileSystemError(_)
             | BlobUploaderError::HashFailure
             | BlobUploaderError::DigestError(_)
@@ -546,6 +589,7 @@ mod error_code {
     pub(crate) const BAD_REQUEST: &str = "BAD_REQUEST";
     pub(crate) const INTERNAL_ERROR: &str = "INTERNAL_ERROR";
 
+    pub(crate) const NAME_INVALID: &str = "NAME_INVALID";
     pub(crate) const NAME_UNKNOWN: &str = "NAME_UNKNOWN";
     pub(crate) const BLOB_UNKNOWN: &str = "BLOB_UNKNOWN";
     pub(crate) const BLOB_UPLOAD_INVALID: &str = "BLOB_UPLOAD_INVALID";
@@ -601,14 +645,14 @@ mod manifest {
         State(state): State<ManifestState>,
         Path((name, reference)): Path<(String, String)>,
     ) -> Result<impl IntoResponse, ServerError> {
-        manifest_info(state, Name::Simple(name), reference).await
+        manifest_info(state, Name::from_str(&name)?, reference).await
     }
 
     pub(crate) async fn namespaced_info(
         State(state): State<ManifestState>,
         Path((namespace, name, reference)): Path<(String, String, String)>,
     ) -> Result<impl IntoResponse, ServerError> {
-        manifest_info(state, Name::Namespaced(namespace, name), reference).await
+        manifest_info(state, Name::from_namespaced(&namespace, &name)?, reference).await
     }
 
     async fn manifest_info(
@@ -660,14 +704,14 @@ mod manifest {
         State(state): State<ManifestState>,
         Path((name, reference)): Path<(String, String)>,
     ) -> Result<impl IntoResponse, ServerError> {
-        read_manifest(state, Name::Simple(name), reference).await
+        read_manifest(state, Name::from_str(&name)?, reference).await
     }
 
     pub(crate) async fn namespaced_read(
         State(state): State<ManifestState>,
         Path((namespace, name, reference)): Path<(String, String, String)>,
     ) -> Result<impl IntoResponse, ServerError> {
-        read_manifest(state, Name::Namespaced(namespace, name), reference).await
+        read_manifest(state, Name::from_namespaced(&namespace, &name)?, reference).await
     }
 
     async fn read_manifest(
@@ -720,7 +764,7 @@ mod manifest {
         headers: HeaderMap,
         body: Bytes,
     ) -> Result<impl IntoResponse, ServerError> {
-        write_manifest(state, Name::Simple(name), reference, headers, body).await
+        write_manifest(state, Name::from_str(&name)?, reference, headers, body).await
     }
 
     pub(crate) async fn namespaced_write(
@@ -731,7 +775,7 @@ mod manifest {
     ) -> Result<impl IntoResponse, ServerError> {
         write_manifest(
             state,
-            Name::Namespaced(namespace, name),
+            Name::from_namespaced(&namespace, &name)?,
             reference,
             headers,
             body,
@@ -807,14 +851,14 @@ mod manifest {
         State(state): State<ManifestState>,
         Path((name, reference)): Path<(String, String)>,
     ) -> Result<impl IntoResponse, ServerError> {
-        delete_manifest(state, Name::Simple(name), reference).await
+        delete_manifest(state, Name::from_str(&name)?, reference).await
     }
 
     pub(crate) async fn namespaced_delete(
         State(state): State<ManifestState>,
         Path((namespace, name, reference)): Path<(String, String, String)>,
     ) -> Result<impl IntoResponse, ServerError> {
-        delete_manifest(state, Name::Namespaced(namespace, name), reference).await
+        delete_manifest(state, Name::from_namespaced(&namespace, &name)?, reference).await
     }
 
     async fn delete_manifest(
@@ -845,14 +889,14 @@ mod manifest {
         State(state): State<ManifestState>,
         Path(name): Path<String>,
     ) -> Result<impl IntoResponse, ServerError> {
-        get_tag_list(state, Name::Simple(name)).await
+        get_tag_list(state, Name::from_str(&name)?).await
     }
 
     pub(crate) async fn namespaced_list_tags(
         State(state): State<ManifestState>,
         Path((namespace, name)): Path<(String, String)>,
     ) -> Result<impl IntoResponse, ServerError> {
-        get_tag_list(state, Name::Namespaced(namespace, name)).await
+        get_tag_list(state, Name::from_namespaced(&namespace, &name)?).await
     }
 
     async fn get_tag_list(
@@ -1023,7 +1067,6 @@ mod read {
 }
 
 mod upload {
-    use crate::blob_uploader::BlobUploaderError;
     use crate::{ServerError, blob_uploader::BlobUploader, digest::Digest, name::Name};
     use axum::extract::Query;
     use axum::http::HeaderMap;
@@ -1052,21 +1095,21 @@ mod upload {
     pub(crate) async fn start(
         State(uploader): State<Arc<dyn BlobUploader>>,
         Path(name): Path<String>,
-    ) -> Result<impl IntoResponse, BlobUploaderError> {
-        start_upload(uploader, Name::Simple(name))
+    ) -> Result<impl IntoResponse, ServerError> {
+        start_upload(uploader, Name::from_str(&name)?)
     }
 
     pub(crate) async fn namespaced_start(
         State(uploader): State<Arc<dyn BlobUploader>>,
         Path((namespace, name)): Path<(String, String)>,
-    ) -> Result<impl IntoResponse, BlobUploaderError> {
-        start_upload(uploader, Name::Namespaced(namespace, name))
+    ) -> Result<impl IntoResponse, ServerError> {
+        start_upload(uploader, Name::from_namespaced(&namespace, &name)?)
     }
 
     fn start_upload(
         uploader: Arc<dyn BlobUploader>,
         name: Name,
-    ) -> Result<impl IntoResponse, BlobUploaderError> {
+    ) -> Result<impl IntoResponse, ServerError> {
         let uuid = uploader.start(&name.fs_safe())?;
         Ok((
             StatusCode::ACCEPTED,
@@ -1077,22 +1120,22 @@ mod upload {
     pub(crate) async fn status(
         State(uploader): State<Arc<dyn BlobUploader>>,
         Path((name, uuid)): Path<(String, Uuid)>,
-    ) -> Result<impl IntoResponse, BlobUploaderError> {
-        get_status(uploader, uuid, Name::Simple(name))
+    ) -> Result<impl IntoResponse, ServerError> {
+        get_status(uploader, uuid, Name::from_str(&name)?)
     }
 
     pub(crate) async fn namespaced_status(
         State(uploader): State<Arc<dyn BlobUploader>>,
         Path((namespace, name, uuid)): Path<(String, String, Uuid)>,
-    ) -> Result<impl IntoResponse, BlobUploaderError> {
-        get_status(uploader, uuid, Name::Namespaced(namespace, name))
+    ) -> Result<impl IntoResponse, ServerError> {
+        get_status(uploader, uuid, Name::from_namespaced(&namespace, &name)?)
     }
 
     fn get_status(
         uploader: Arc<dyn BlobUploader>,
         uuid: Uuid,
         name: Name,
-    ) -> Result<impl IntoResponse, BlobUploaderError> {
+    ) -> Result<impl IntoResponse, ServerError> {
         let offset = uploader.status(uuid)?;
         Ok((
             StatusCode::NO_CONTENT,
@@ -1109,9 +1152,9 @@ mod upload {
         Path((name, uuid)): Path<(String, Uuid)>,
         headers: HeaderMap,
         body: axum::body::Body,
-    ) -> Result<impl IntoResponse, axum::response::Response> {
-        let range_start = parse_range_start(&headers).map_err(IntoResponse::into_response)?;
-        write(uploader, Name::Simple(name), uuid, range_start, body).await
+    ) -> Result<impl IntoResponse, ServerError> {
+        let range_start = parse_range_start(&headers)?;
+        write(uploader, Name::from_str(&name)?, uuid, range_start, body).await
     }
 
     pub(crate) async fn namespaced_write_chunk(
@@ -1119,11 +1162,11 @@ mod upload {
         Path((namespace, name, uuid)): Path<(String, String, Uuid)>,
         headers: HeaderMap,
         body: axum::body::Body,
-    ) -> Result<impl IntoResponse, axum::response::Response> {
-        let range_start = parse_range_start(&headers).map_err(IntoResponse::into_response)?;
+    ) -> Result<impl IntoResponse, ServerError> {
+        let range_start = parse_range_start(&headers)?;
         write(
             uploader,
-            Name::Namespaced(namespace, name),
+            Name::from_namespaced(&namespace, &name)?,
             uuid,
             range_start,
             body,
@@ -1137,11 +1180,10 @@ mod upload {
         uuid: Uuid,
         range_start: u64,
         body: axum::body::Body,
-    ) -> Result<impl IntoResponse, axum::response::Response> {
+    ) -> Result<impl IntoResponse, ServerError> {
         let offset = uploader
             .write_chunk(uuid, range_start, body_to_reader(body))
-            .await
-            .map_err(IntoResponse::into_response)?;
+            .await?;
         Ok((
             StatusCode::ACCEPTED,
             [
@@ -1213,8 +1255,8 @@ mod upload {
         Path((name, uuid)): Path<(String, Uuid)>,
         Query(params): Query<CompleteParams>,
         headers: HeaderMap,
-    ) -> Result<impl IntoResponse, BlobUploaderError> {
-        complete_upload(uploader, uuid, params, Name::Simple(name), headers)
+    ) -> Result<impl IntoResponse, ServerError> {
+        complete_upload(uploader, uuid, params, Name::from_str(&name)?, headers)
     }
 
     pub(crate) async fn namespaced_complete(
@@ -1222,12 +1264,12 @@ mod upload {
         Path((namespace, name, uuid)): Path<(String, String, Uuid)>,
         Query(params): Query<CompleteParams>,
         headers: HeaderMap,
-    ) -> Result<impl IntoResponse, BlobUploaderError> {
+    ) -> Result<impl IntoResponse, ServerError> {
         complete_upload(
             uploader,
             uuid,
             params,
-            Name::Namespaced(namespace, name),
+            Name::from_namespaced(&namespace, &name)?,
             headers,
         )
     }
@@ -1238,7 +1280,7 @@ mod upload {
         params: CompleteParams,
         name: Name,
         headers: HeaderMap,
-    ) -> Result<impl IntoResponse, BlobUploaderError> {
+    ) -> Result<impl IntoResponse, ServerError> {
         let digest = Digest::from_str(&params.digest)?;
         let media_type = headers
             .get("Content-Type")
@@ -1255,21 +1297,21 @@ mod upload {
     pub(crate) async fn abort(
         State(uploader): State<Arc<dyn BlobUploader>>,
         Path((_name, uuid)): Path<(String, Uuid)>,
-    ) -> Result<impl IntoResponse, BlobUploaderError> {
+    ) -> Result<impl IntoResponse, ServerError> {
         abort_upload(uploader, uuid)
     }
 
     pub(crate) async fn namespaced_ns(
         State(uploader): State<Arc<dyn BlobUploader>>,
         Path((_namespace, _name, uuid)): Path<(String, String, Uuid)>,
-    ) -> Result<impl IntoResponse, BlobUploaderError> {
+    ) -> Result<impl IntoResponse, ServerError> {
         abort_upload(uploader, uuid)
     }
 
     fn abort_upload(
         uploader: Arc<dyn BlobUploader>,
         uuid: Uuid,
-    ) -> Result<impl IntoResponse, BlobUploaderError> {
+    ) -> Result<impl IntoResponse, ServerError> {
         uploader.abort(uuid)?;
         Ok(StatusCode::NO_CONTENT)
     }

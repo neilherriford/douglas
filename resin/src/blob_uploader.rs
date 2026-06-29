@@ -1,12 +1,11 @@
 use crate::{
     blob_paths::BlobPaths,
     digest::{Digest, DigestError},
+    name::NameParseError,
 };
-use axum::{Json, http::StatusCode, response::IntoResponse};
 use file_system::{
     EntryKind, FileAppender, FileDeleter, FileRenamer, FileSystemError, FileWriter, Folder,
 };
-use serde_json::json;
 use sha2::Sha256;
 use std::{
     collections::HashMap,
@@ -39,6 +38,8 @@ pub enum BlobUploaderError {
     HashFailure,
     #[error("Range mismatch: expected offset {expected}, got {received}")]
     RangeMismatch { expected: u64, received: u64 },
+    #[error("Name parse error: {0}")]
+    NameParseError(#[from] NameParseError),
 }
 
 struct PartialUpload {

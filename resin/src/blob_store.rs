@@ -262,7 +262,7 @@ impl BlobStore for FileBlobStore {
         digest: &'a digest::Digest,
     ) -> BoxFuture<'a, Result<bool, BlobError>> {
         Box::pin(async move {
-            let digest_paths = BlobPaths::new(&blob_root.to_path_buf(), digest);
+            let digest_paths = BlobPaths::new(blob_root, digest);
             Ok(self.inspect.exists(&digest_paths.final_file))
         })
     }
@@ -273,7 +273,7 @@ impl BlobStore for FileBlobStore {
         digest: &'a digest::Digest,
     ) -> BoxFuture<'a, Result<Box<dyn AsyncRead + Send + Unpin>, BlobError>> {
         Box::pin(async move {
-            let digest_paths = BlobPaths::new(&blob_root.to_path_buf(), digest);
+            let digest_paths = BlobPaths::new(blob_root, digest);
             let result = self.file_reader.create_reader(&digest_paths.final_file)?;
             Ok(result)
         })
@@ -285,7 +285,7 @@ impl BlobStore for FileBlobStore {
         digest: &'a digest::Digest,
     ) -> BoxFuture<'a, Result<Stats, BlobError>> {
         Box::pin(async move {
-            let digest_paths = BlobPaths::new(&blob_root.to_path_buf(), digest);
+            let digest_paths = BlobPaths::new(blob_root, digest);
             if self.inspect.exists(&digest_paths.final_file) {
                 let entry = self.inspect.read_metadata(&digest_paths.final_file)?;
                 let mediatype = self
@@ -310,7 +310,7 @@ impl BlobStore for FileBlobStore {
         digest: &'a digest::Digest,
     ) -> BoxFuture<'a, Result<(), BlobError>> {
         Box::pin(async move {
-            let digest_paths = BlobPaths::new(&blob_root.to_path_buf(), digest);
+            let digest_paths = BlobPaths::new(blob_root, digest);
             if self.inspect.exists(&digest_paths.final_file) {
                 for entry in self
                     .folder

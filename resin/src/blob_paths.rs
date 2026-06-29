@@ -1,5 +1,5 @@
 use crate::digest::Digest;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 pub struct BlobPaths {
     pub final_root: PathBuf,
@@ -9,11 +9,11 @@ pub struct BlobPaths {
 }
 
 impl BlobPaths {
-    pub fn new(blob_root: &PathBuf, digest: &Digest) -> Self {
+    pub fn new(blob_root: &Path, digest: &Digest) -> Self {
         let sha = digest.hex().to_string();
         let prefix = sha[0..2].to_string();
 
-        let mut final_root = blob_root.clone();
+        let mut final_root = blob_root.to_path_buf();
         final_root.push("sha256");
         final_root.push(prefix);
         final_root.push(&sha);

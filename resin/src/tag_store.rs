@@ -153,7 +153,7 @@ mod tests {
         use file_system::{
             Entry, EntryKind, MockFileDeleter, MockFileReader, MockFileWriter, MockFolder,
         };
-        use std::{path::PathBuf, sync::Arc};
+        use std::{path::PathBuf, str::FromStr, sync::Arc};
 
         #[test]
         fn should_return_error_if_repository_does_not_exist() {
@@ -174,7 +174,7 @@ mod tests {
             );
 
             assert!(matches!(
-                store.list(&Name::Simple("oops".to_string())),
+                store.list(&Name::from_str("oops").expect("parsable")),
                 Err(TagStoreError::UnknownRepository(r)) if r == "oops"
             ))
         }
@@ -199,7 +199,7 @@ mod tests {
             );
 
             assert!(matches!(
-                store.list(&Name::Simple("foo".to_string())),
+                store.list(&Name::from_str("foo").expect("parsable")),
                 Ok(tags) if tags.is_empty()
             ))
         }
@@ -241,7 +241,7 @@ mod tests {
             );
 
             assert!(matches!(
-                store.list(&Name::Simple("oops".to_string())),
+                store.list(&Name::from_str("oops").expect("parsable")),
                 Ok(items) if items == vec!["bar".to_string()]
             ));
         }
@@ -265,7 +265,7 @@ mod tests {
             );
 
             assert!(matches!(
-                store.list(&Name::Namespaced("myns".to_string(), "oops".to_string())),
+                store.list(&Name::from_namespaced("myns", "oops").expect("parsable")),
                 Err(TagStoreError::UnknownRepository(r)) if r == "myns/oops"
             ))
         }
@@ -278,7 +278,7 @@ mod tests {
             tag_store::{FileTagStore, TagStore, TagStoreError},
         };
         use file_system::{MockFileDeleter, MockFileReader, MockFileWriter, MockFolder};
-        use std::{path::PathBuf, sync::Arc};
+        use std::{path::PathBuf, str::FromStr, sync::Arc};
 
         #[test]
         fn should_return_error_if_repository_does_not_exist() {
@@ -299,7 +299,7 @@ mod tests {
             );
 
             assert!(matches!(
-                store.read(&Name::Simple("oops".to_string()), "foo"),
+                store.read(&Name::from_str("oops").expect("parsable"), "foo"),
                 Err(TagStoreError::UnknownRepository(r)) if r == "oops"
             ))
         }
@@ -324,7 +324,7 @@ mod tests {
             );
 
             assert!(matches!(
-                store.read(&Name::Simple("foo".to_string()), "bar"),
+                store.read(&Name::from_str("foo").expect("parsable"), "bar"),
                 Err(TagStoreError::UnknwonTag { repository: r, tag: t }) if r == "foo" && t == "bar"
             ));
         }
@@ -350,7 +350,7 @@ mod tests {
             );
 
             assert!(matches!(
-                store.read(&Name::Simple("foo".to_string()), "bar"),
+                store.read(&Name::from_str("foo").expect("parsable"), "bar"),
                 Err(TagStoreError::DigestError(DigestError::InvalidDigest))
             ));
         }
@@ -380,7 +380,7 @@ mod tests {
             );
 
             assert!(matches!(
-                store.read(&Name::Simple("foo".to_string()), "bar"),
+                store.read(&Name::from_str("foo").expect("parsable"), "bar"),
                 Ok(digest) if digest.hex() == sha
             ));
         }
@@ -410,7 +410,7 @@ mod tests {
             );
 
             assert!(matches!(
-                store.read(&Name::Simple("foo".to_string()), "bar"),
+                store.read(&Name::from_str("foo").expect("parsable"), "bar"),
                 Ok(digest) if digest.hex() == sha
             ));
         }
@@ -440,7 +440,7 @@ mod tests {
             );
 
             assert!(matches!(
-                store.read(&Name::Namespaced("myns".to_string(), "foo".to_string()), "bar"),
+                store.read(&Name::from_namespaced("myns", "foo").expect("parsable"), "bar"),
                 Ok(digest) if digest.hex() == sha
             ));
         }
@@ -453,7 +453,7 @@ mod tests {
             tag_store::{FileTagStore, TagStore, TagStoreError},
         };
         use file_system::{MockFileDeleter, MockFileReader, MockFileWriter, MockFolder};
-        use std::{path::PathBuf, sync::Arc};
+        use std::{path::PathBuf, str::FromStr, sync::Arc};
 
         #[test]
         fn should_return_error_if_repository_does_not_exist() {
@@ -477,7 +477,7 @@ mod tests {
             let digest = Digest(format!("sha256:{sha}"));
 
             assert!(matches!(
-                store.write(&Name::Simple("oops".to_string()), "foo", &digest),
+                store.write(&Name::from_str("oops").expect("parsable"), "foo", &digest),
                 Err(TagStoreError::UnknownRepository(r)) if r == "oops"
             ))
         }
@@ -509,7 +509,7 @@ mod tests {
             );
 
             assert!(matches!(
-                store.write(&Name::Simple("foo".to_string()), "bar", &digest),
+                store.write(&Name::from_str("foo").expect("parsable"), "bar", &digest),
                 Ok(())
             ))
         }
@@ -542,7 +542,7 @@ mod tests {
             );
 
             assert!(matches!(
-                store.write(&Name::Simple("foo".to_string()), "bar", &digest),
+                store.write(&Name::from_str("foo").expect("parsable"), "bar", &digest),
                 Ok(())
             ))
         }
@@ -575,7 +575,7 @@ mod tests {
 
             assert!(matches!(
                 store.write(
-                    &Name::Namespaced("myns".to_string(), "foo".to_string()),
+                    &Name::from_namespaced("myns", "foo").expect("parsable"),
                     "bar",
                     &digest
                 ),
@@ -590,7 +590,7 @@ mod tests {
             tag_store::{FileTagStore, TagStore, TagStoreError},
         };
         use file_system::{MockFileDeleter, MockFileReader, MockFileWriter, MockFolder};
-        use std::{path::PathBuf, sync::Arc};
+        use std::{path::PathBuf, str::FromStr, sync::Arc};
 
         #[test]
         fn should_return_error_if_repository_does_not_exist() {
@@ -611,7 +611,7 @@ mod tests {
             );
 
             assert!(matches!(
-                store.delete(&Name::Simple("oops".to_string()), "foo"),
+                store.delete(&Name::from_str("oops").expect("parsable"), "foo"),
                 Err(TagStoreError::UnknownRepository(r)) if r == "oops"
             ))
         }
@@ -636,7 +636,7 @@ mod tests {
             );
 
             assert!(matches!(
-                store.delete(&Name::Simple("foo".to_string()), "bar"),
+                store.delete(&Name::from_str("foo").expect("parsable"), "bar"),
                 Ok(false)
             ))
         }
@@ -662,7 +662,7 @@ mod tests {
             );
 
             assert!(matches!(
-                store.delete(&Name::Simple("foo".to_string()), "bar"),
+                store.delete(&Name::from_str("foo").expect("parsable"), "bar"),
                 Ok(true)
             ))
         }
