@@ -476,6 +476,9 @@ async fn log_request(
             text.push_str(&format!("\n{name}: {val}"));
         }
     }
+    if let Some(ErrorDetail(detail)) = response.extensions().get::<ErrorDetail>() {
+        text.push_str(&format!("\n\n{detail}"));
+    }
     guard.span().message(log::Level::Info, &text);
     guard.finish_with_outcome(outcome);
 
