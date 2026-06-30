@@ -173,11 +173,16 @@ impl RepositoryStore {
 }
 
 #[derive(Clone)]
+struct BlobState {
+    blob_store: Arc<dyn BlobStore>,
+    paths: Arc<BlobPaths>,
+}
+
+#[derive(Clone)]
 struct ManifestState {
     blob_store: Arc<dyn BlobStore>,
     tag_store: Arc<dyn TagStore>,
     paths: Arc<BlobPaths>,
-    repository_store: Arc<RepositoryStore>,
 }
 
 #[derive(Clone)]
@@ -331,26 +336,9 @@ impl Server {
             log::ScopeKind::Group,
         )
         .start_guard();
-
-        let general = Router::new().route("/v2/", get(v2));
-
-        let read_state = ManifestState {
-            blob_store: Arc::clone(&self.blob_store),
-            tag_store: Arc::clone(&self.tag_store),
-            paths: Arc::clone(&self.manifest_paths),
-            repository_store: Arc::clone(&self.repository_store),
-        };
-
         let upload_routes = Router::new()
             .route("/v2/{name}/blobs/uploads", post(upload::start))
             .route("/v2/{name}/blobs/uploads/", post(upload::start)) // Docker sends trailing slash
-            .route(
-                "/v2/{name}/blobs/uploads/{uuid}",
-                get(upload::status)
-                    .patch(upload::write_chunk)
-                    .put(upload::complete)
-                    .delete(upload::abort),
-            )
             .route(
                 "/v2/{namespace}/{name}/blobs/uploads",
                 post(upload::namespaced_start),
@@ -360,30 +348,50 @@ impl Server {
                 post(upload::namespaced_start),
             )
             .route(
+                "/v2/{name}/blobs/uploads/{uuid}",
+                get(upload::status)
+                    .patch(upload::write_chunk)
+                    .put(upload::complete)
+                    .delete(upload::abort),
+            )
+            .route(
                 "/v2/{namespace}/{name}/blobs/uploads/{uuid}",
                 get(upload::namespaced_status)
                     .patch(upload::namespaced_write_chunk)
                     .put(upload::namespaced_complete)
-                    .delete(upload::namespaced_ns),
+                    .delete(upload::namespaced_abort),
             )
             .with_state(Arc::clone(&self.blob_uploader));
 
-        let read_routes = Router::new()
+        let blob_state = BlobState {
+            blob_store: Arc::clone(&self.blob_store),
+            paths: Arc::clone(&self.manifest_paths),
+        };
+
+        let blob_routes = Router::new()
             .route(
                 "/v2/{name}/blobs/{digest}",
-                head(read::blob_info).get(read::blob),
+                head(blobs::info).get(blobs::blob),
             )
+            .route(
+                "/v2/{namespace}/{name}/blobs/{digest}",
+                head(blobs::namespaced_info).get(blobs::namespaced_blob),
+            )
+            .with_state(blob_state);
+
+        let manifest_state = ManifestState {
+            blob_store: Arc::clone(&self.blob_store),
+            tag_store: Arc::clone(&self.tag_store),
+            paths: Arc::clone(&self.manifest_paths),
+        };
+
+        let manifest_routes = Router::new()
             .route(
                 "/v2/{name}/manifests/{ref}",
                 head(manifest::info)
                     .get(manifest::read)
                     .put(manifest::write)
                     .delete(manifest::delete),
-            )
-            .route("/v2/{name}/tags/list", get(manifest::list_tags))
-            .route(
-                "/v2/{namespace}/{name}/blobs/{digest}",
-                head(read::blob_info_ns).get(read::namespaced_blob),
             )
             .route(
                 "/v2/{namespace}/{name}/manifests/{ref}",
@@ -392,17 +400,27 @@ impl Server {
                     .put(manifest::namespaced_write)
                     .delete(manifest::namespaced_delete),
             )
+            .with_state(manifest_state);
+
+        let tags_routes = Router::new()
+            .route("/v2/{name}/tags/list", get(tags::list))
             .route(
                 "/v2/{namespace}/{name}/tags/list",
-                get(manifest::namespaced_list_tags),
+                get(tags::namespaced_list),
             )
-            .route("/v2/_catalog", get(read::catalog))
-            .with_state(read_state);
+            .with_state(Arc::clone(&self.tag_store));
+
+        let system_routes = Router::new()
+            .route("/v2/_catalog", get(system::catalog))
+            .route("/v2/", get(system::v2))
+            .with_state(Arc::clone(&self.repository_store));
 
         let app = Router::new()
-            .merge(general)
             .merge(upload_routes)
-            .merge(read_routes)
+            .merge(blob_routes)
+            .merge(manifest_routes)
+            .merge(tags_routes)
+            .merge(system_routes)
             .layer(middleware::from_fn_with_state(
                 Arc::clone(&self.reporter),
                 log_request,
@@ -475,9 +493,6 @@ async fn log_request(
         if let Ok(val) = value.to_str() {
             text.push_str(&format!("\n{name}: {val}"));
         }
-    }
-    if let Some(ErrorDetail(detail)) = response.extensions().get::<ErrorDetail>() {
-        text.push_str(&format!("\n\n{detail}"));
     }
     guard.span().message(log::Level::Info, &text);
     guard.finish_with_outcome(outcome);
@@ -602,11 +617,71 @@ mod error_code {
     pub(crate) const UNSUPPORTED: &str = "UNSUPPORTED";
 }
 
-async fn v2() -> impl IntoResponse {
-    (
-        StatusCode::OK,
-        [("Docker-Distribution-Api-Version", "registry/2.0")],
-    )
+mod tags {
+    use crate::{
+        ServerError,
+        name::Name,
+        tag_store::{TagStore, TagStoreError},
+    };
+    use axum::{
+        extract::{Path, State},
+        http::StatusCode,
+        response::IntoResponse,
+    };
+    use serde_json::{Map, Value};
+    use std::{str::FromStr, sync::Arc};
+
+    fn to_tag_error(error: TagStoreError) -> ServerError {
+        match error {
+            TagStoreError::UnknownRepository(repository) => {
+                ServerError::RepositoryUnknown(repository)
+            }
+            other => ServerError::Internal(Box::new(other)),
+        }
+    }
+
+    pub(crate) async fn list(
+        State(tag_store): State<Arc<dyn TagStore>>,
+        Path(name): Path<String>,
+    ) -> Result<impl IntoResponse, ServerError> {
+        get_tag_list(tag_store, Name::from_str(&name)?).await
+    }
+
+    pub(crate) async fn namespaced_list(
+        State(tag_store): State<Arc<dyn TagStore>>,
+        Path((namespace, name)): Path<(String, String)>,
+    ) -> Result<impl IntoResponse, ServerError> {
+        get_tag_list(tag_store, Name::from_namespaced(&namespace, &name)?).await
+    }
+
+    async fn get_tag_list(
+        tag_store: Arc<dyn TagStore>,
+        name: Name,
+    ) -> Result<impl IntoResponse, ServerError> {
+        let tags = tag_store.list(&name).map_err(to_tag_error)?;
+        let mut map = Map::new();
+
+        map.insert("name".to_string(), Value::String(name.to_string()));
+        map.insert(
+            "tags".to_string(),
+            Value::Array(tags.iter().map(|tag| Value::String(tag.clone())).collect()),
+        );
+
+        let result = serde_json::to_string(&map)?;
+
+        Ok((
+            StatusCode::OK,
+            [
+                (axum::http::header::CONTENT_LENGTH, result.len().to_string()),
+                (
+                    axum::http::header::CONTENT_TYPE,
+                    mime::APPLICATION_JSON.to_string(),
+                ),
+            ],
+            result,
+        )
+            .into_response())
+    }
 }
 
 mod manifest {
@@ -623,7 +698,6 @@ mod manifest {
         http::{HeaderMap, StatusCode},
         response::IntoResponse,
     };
-    use serde_json::{Map, Value};
     use sha2::Sha256;
     use std::{str::FromStr, sync::Arc};
     use tokio_util::io::ReaderStream;
@@ -631,15 +705,6 @@ mod manifest {
     fn to_manifest_error(error: BlobError) -> ServerError {
         match error {
             BlobError::DigestNotFound(digest) => ServerError::ManifestUnknown(digest),
-            other => ServerError::Internal(Box::new(other)),
-        }
-    }
-
-    fn to_tag_error(error: TagStoreError) -> ServerError {
-        match error {
-            TagStoreError::UnknownRepository(repository) => {
-                ServerError::RepositoryUnknown(repository)
-            }
             other => ServerError::Internal(Box::new(other)),
         }
     }
@@ -887,162 +952,19 @@ mod manifest {
 
         Ok(StatusCode::ACCEPTED)
     }
-
-    pub(crate) async fn list_tags(
-        State(state): State<ManifestState>,
-        Path(name): Path<String>,
-    ) -> Result<impl IntoResponse, ServerError> {
-        get_tag_list(state, Name::from_str(&name)?).await
-    }
-
-    pub(crate) async fn namespaced_list_tags(
-        State(state): State<ManifestState>,
-        Path((namespace, name)): Path<(String, String)>,
-    ) -> Result<impl IntoResponse, ServerError> {
-        get_tag_list(state, Name::from_namespaced(&namespace, &name)?).await
-    }
-
-    async fn get_tag_list(
-        state: ManifestState,
-        name: Name,
-    ) -> Result<impl IntoResponse, ServerError> {
-        let tags = state.tag_store.list(&name).map_err(to_tag_error)?;
-        let mut map = Map::new();
-
-        map.insert("name".to_string(), Value::String(name.to_string()));
-        map.insert(
-            "tags".to_string(),
-            Value::Array(tags.iter().map(|tag| Value::String(tag.clone())).collect()),
-        );
-
-        let result = serde_json::to_string(&map)?;
-
-        Ok((
-            StatusCode::OK,
-            [
-                (axum::http::header::CONTENT_LENGTH, result.len().to_string()),
-                (
-                    axum::http::header::CONTENT_TYPE,
-                    mime::APPLICATION_JSON.to_string(),
-                ),
-            ],
-            result,
-        )
-            .into_response())
-    }
 }
 
-mod read {
-    use crate::{ManifestState, ServerError, blob_store::BlobError, digest::Digest};
-    use axum::{
-        body::Body,
-        extract::{Path, State},
-        http::StatusCode,
-        response::IntoResponse,
-    };
+mod system {
+    use crate::{RepositoryStore, ServerError};
+    use axum::{extract::State, http::StatusCode, response::IntoResponse};
     use serde_json::{Map, Value};
-    use std::str::FromStr;
-    use tokio_util::io::ReaderStream;
-
-    fn to_blob_error(error: BlobError) -> ServerError {
-        match error {
-            BlobError::DigestNotFound(_) => ServerError::BlobUnknown(error.to_string()),
-            other => ServerError::Internal(Box::new(other)),
-        }
-    }
-
-    pub(crate) async fn blob_info(
-        State(state): State<ManifestState>,
-        Path((_name, raw_digest)): Path<(String, String)>,
-    ) -> Result<impl IntoResponse, ServerError> {
-        read_blob_info(state, raw_digest).await
-    }
-
-    pub(crate) async fn blob_info_ns(
-        State(state): State<ManifestState>,
-        Path((_namespace, _name, raw_digest)): Path<(String, String, String)>,
-    ) -> Result<impl IntoResponse, ServerError> {
-        read_blob_info(state, raw_digest).await
-    }
-
-    async fn read_blob_info(
-        state: ManifestState,
-        raw_digest: String,
-    ) -> Result<impl IntoResponse, ServerError> {
-        let digest = Digest::from_str(&raw_digest)?;
-        let stats = state
-            .blob_store
-            .stats(&state.paths.blob_root(), &digest)
-            .await
-            .map_err(to_blob_error)?;
-        Ok((
-            StatusCode::OK,
-            [
-                (axum::http::header::CONTENT_LENGTH, stats.size.to_string()),
-                (
-                    axum::http::HeaderName::from_static("docker-content-digest"),
-                    digest.to_string(),
-                ),
-            ],
-        )
-            .into_response())
-    }
-
-    pub(crate) async fn blob(
-        State(state): State<ManifestState>,
-        Path((_name, raw_digest)): Path<(String, String)>,
-    ) -> Result<impl IntoResponse, ServerError> {
-        read_blob(state, raw_digest).await
-    }
-
-    pub(crate) async fn namespaced_blob(
-        State(state): State<ManifestState>,
-        Path((_namespace, _name, raw_digest)): Path<(String, String, String)>,
-    ) -> Result<impl IntoResponse, ServerError> {
-        read_blob(state, raw_digest).await
-    }
-
-    async fn read_blob(
-        state: ManifestState,
-        raw_digest: String,
-    ) -> Result<impl IntoResponse, ServerError> {
-        let digest = Digest::from_str(&raw_digest)?;
-        let stats = state
-            .blob_store
-            .stats(&state.paths.blob_root(), &digest)
-            .await
-            .map_err(to_blob_error)?;
-        let reader = state
-            .blob_store
-            .get(&state.paths.blob_root(), &digest)
-            .await
-            .map_err(to_blob_error)?;
-        let stream = ReaderStream::new(reader);
-
-        Ok((
-            StatusCode::OK,
-            [
-                (axum::http::header::CONTENT_LENGTH, stats.size.to_string()),
-                (
-                    axum::http::header::CONTENT_TYPE,
-                    mime::APPLICATION_OCTET_STREAM.to_string(),
-                ),
-                (
-                    axum::http::HeaderName::from_static("docker-content-digest"),
-                    digest.to_string(),
-                ),
-            ],
-            Body::from_stream(stream),
-        )
-            .into_response())
-    }
+    use std::sync::Arc;
 
     pub(crate) async fn catalog(
-        State(state): State<ManifestState>,
+        State(repository_store): State<Arc<RepositoryStore>>,
     ) -> Result<impl IntoResponse, ServerError> {
         let names = Value::Array(
-            state
-                .repository_store
+            repository_store
                 .list()?
                 .iter()
                 .map(|name| Value::String(name.to_string()))
@@ -1067,6 +989,13 @@ mod read {
         )
             .into_response())
     }
+
+    pub(crate) async fn v2() -> impl IntoResponse {
+        (
+            StatusCode::OK,
+            [("Docker-Distribution-Api-Version", "registry/2.0")],
+        )
+    }
 }
 
 mod upload {
@@ -1087,13 +1016,9 @@ mod upload {
         sync::Arc,
         task::{Context, Poll},
     };
-    use tokio::io::{AsyncRead, ReadBuf};
+    use tokio::io::AsyncRead;
+    use tokio::io::ReadBuf;
     use uuid::Uuid;
-
-    #[derive(Deserialize)]
-    pub(crate) struct CompleteParams {
-        digest: String,
-    }
 
     pub(crate) async fn start(
         State(uploader): State<Arc<dyn BlobUploader>>,
@@ -1254,6 +1179,11 @@ mod upload {
         }
     }
 
+    #[derive(Deserialize)]
+    pub(crate) struct CompleteParams {
+        digest: String,
+    }
+
     pub(crate) async fn complete(
         State(uploader): State<Arc<dyn BlobUploader>>,
         Path((name, uuid)): Path<(String, Uuid)>,
@@ -1305,7 +1235,7 @@ mod upload {
         abort_upload(uploader, uuid)
     }
 
-    pub(crate) async fn namespaced_ns(
+    pub(crate) async fn namespaced_abort(
         State(uploader): State<Arc<dyn BlobUploader>>,
         Path((_namespace, _name, uuid)): Path<(String, String, Uuid)>,
     ) -> Result<impl IntoResponse, ServerError> {
@@ -1318,5 +1248,110 @@ mod upload {
     ) -> Result<impl IntoResponse, ServerError> {
         uploader.abort(uuid)?;
         Ok(StatusCode::NO_CONTENT)
+    }
+}
+
+mod blobs {
+    use crate::{BlobState, ServerError, blob_store::BlobError, digest::Digest};
+    use axum::{
+        body::Body,
+        extract::{Path, State},
+        http::StatusCode,
+        response::IntoResponse,
+    };
+    use std::str::FromStr;
+    use tokio_util::io::ReaderStream;
+
+    fn to_blob_error(error: BlobError) -> ServerError {
+        match error {
+            BlobError::DigestNotFound(_) => ServerError::BlobUnknown(error.to_string()),
+            other => ServerError::Internal(Box::new(other)),
+        }
+    }
+
+    pub(crate) async fn info(
+        State(state): State<BlobState>,
+        Path((_name, raw_digest)): Path<(String, String)>,
+    ) -> Result<impl IntoResponse, ServerError> {
+        read_blob_info(state, raw_digest).await
+    }
+
+    pub(crate) async fn namespaced_info(
+        State(state): State<BlobState>,
+        Path((_namespace, _name, raw_digest)): Path<(String, String, String)>,
+    ) -> Result<impl IntoResponse, ServerError> {
+        read_blob_info(state, raw_digest).await
+    }
+
+    async fn read_blob_info(
+        state: BlobState,
+        raw_digest: String,
+    ) -> Result<impl IntoResponse, ServerError> {
+        let digest = Digest::from_str(&raw_digest)?;
+        let stats = state
+            .blob_store
+            .stats(&state.paths.blob_root(), &digest)
+            .await
+            .map_err(to_blob_error)?;
+        Ok((
+            StatusCode::OK,
+            [
+                (axum::http::header::CONTENT_LENGTH, stats.size.to_string()),
+                (
+                    axum::http::HeaderName::from_static("docker-content-digest"),
+                    digest.to_string(),
+                ),
+            ],
+        )
+            .into_response())
+    }
+
+    pub(crate) async fn blob(
+        State(state): State<BlobState>,
+        Path((_name, raw_digest)): Path<(String, String)>,
+    ) -> Result<impl IntoResponse, ServerError> {
+        read_blob(state, raw_digest).await
+    }
+
+    pub(crate) async fn namespaced_blob(
+        State(state): State<BlobState>,
+        Path((_namespace, _name, raw_digest)): Path<(String, String, String)>,
+    ) -> Result<impl IntoResponse, ServerError> {
+        read_blob(state, raw_digest).await
+    }
+
+    async fn read_blob(
+        state: BlobState,
+        raw_digest: String,
+    ) -> Result<impl IntoResponse, ServerError> {
+        let digest = Digest::from_str(&raw_digest)?;
+        let stats = state
+            .blob_store
+            .stats(&state.paths.blob_root(), &digest)
+            .await
+            .map_err(to_blob_error)?;
+        let reader = state
+            .blob_store
+            .get(&state.paths.blob_root(), &digest)
+            .await
+            .map_err(to_blob_error)?;
+        let stream = ReaderStream::new(reader);
+
+        Ok((
+            StatusCode::OK,
+            [
+                (axum::http::header::CONTENT_LENGTH, stats.size.to_string()),
+                (
+                    axum::http::header::CONTENT_TYPE,
+                    mime::APPLICATION_OCTET_STREAM.to_string(),
+                ),
+                (
+                    axum::http::HeaderName::from_static("docker-content-digest"),
+                    digest.to_string(),
+                ),
+            ],
+            Body::from_stream(stream),
+        )
+            .into_response())
     }
 }
