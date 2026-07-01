@@ -13,6 +13,7 @@ pub enum NameParseError {
     InvalidName,
 }
 
+#[derive(Debug, PartialEq, Eq, Clone, Hash)]
 pub struct Name {
     name: String,
     namespace: Option<String>,

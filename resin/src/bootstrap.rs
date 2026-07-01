@@ -11,7 +11,6 @@ pub async fn bootstrap(
     folder: &dyn Folder,
     log_path: PathBuf,
     root_path: PathBuf,
-    blobs_path: PathBuf,
     repositories_path: PathBuf,
 ) -> Result<(), Error> {
     let boot_reporter: Arc<dyn Reporter> = {
@@ -33,7 +32,7 @@ pub async fn bootstrap(
     let state = {
         let mut state_observer = StateObserver::new(credentials, folder);
         state_observer
-            .discover(guard.span(), root_path, blobs_path, repositories_path)
+            .discover(guard.span(), root_path, repositories_path)
             .await?
     };
 
@@ -113,7 +112,6 @@ impl<'a> StateObserver<'a> {
         &mut self,
         span: &Span,
         root_path: PathBuf,
-        blobs_path: PathBuf,
         repositories_path: PathBuf,
     ) -> Result<State, Error> {
         let guard = span
@@ -133,7 +131,6 @@ impl<'a> StateObserver<'a> {
             return guard.finish(Ok(result));
         }
 
-        self.check_folder_presence(&mut result, blobs_path);
         self.check_folder_presence(&mut result, repositories_path);
 
         guard.finish(Ok(result))

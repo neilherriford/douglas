@@ -1,4 +1,4 @@
-use crate::{blob_paths::BlobPaths, digest};
+use crate::{blob_paths::create_sharded_blob_path, digest};
 use file_system::{
     EntryKind, FileDeleter, FileReader, FileRenamer, FileSystemError, FileWriter, Folder, Inspect,
 };
@@ -71,51 +71,41 @@ pub trait BlobStore: Send + Sync {
     ) -> BoxFuture<'a, Result<(), BlobError>>;
 }
 
-struct DigestStore {
-    folder: Arc<dyn Folder>,
+struct UnverifiedFile {
     file_renamer: Arc<dyn FileRenamer>,
     file_deleter: Arc<dyn FileDeleter>,
     file_writer: Arc<dyn FileWriter>,
-    initialized: bool,
     completed: bool,
-    digest_paths: BlobPaths,
+    pub temp_file: PathBuf,
+    pub final_file: PathBuf,
+    pub mediatype_file: PathBuf,
 }
 
-impl DigestStore {
+impl UnverifiedFile {
     pub fn new(
-        blob_root: PathBuf,
+        temp_file: &Path,
+        final_file: &Path,
+        mediatype_file: &Path,
         file_renamer: Arc<dyn FileRenamer>,
         file_deleter: Arc<dyn FileDeleter>,
         file_writer: Arc<dyn FileWriter>,
-        folder: Arc<dyn Folder>,
-        digest: &digest::Digest,
     ) -> Self {
         Self {
-            folder,
             file_renamer,
             file_deleter,
             file_writer,
-            initialized: false,
             completed: false,
-            digest_paths: BlobPaths::new(&blob_root, digest),
+            temp_file: temp_file.to_path_buf(),
+            final_file: final_file.to_path_buf(),
+            mediatype_file: mediatype_file.to_path_buf(),
         }
-    }
-
-    pub fn initialize(&mut self) -> Result<PathBuf, FileSystemError> {
-        self.folder
-            .create_recursively(&self.digest_paths.final_root)?;
-        self.initialized = true;
-        Ok(self.digest_paths.temp_file.clone())
     }
 
     pub fn complete(&mut self, mediatype: &str) -> Result<(), FileSystemError> {
         self.file_renamer
-            .rename(&self.digest_paths.temp_file, &self.digest_paths.final_file)?;
+            .rename(&self.temp_file, &self.final_file)?;
 
-        match self
-            .file_writer
-            .write_all(&self.digest_paths.mediatype_file, mediatype)
-        {
+        match self.file_writer.write_all(&self.mediatype_file, mediatype) {
             Ok(()) => {
                 self.completed = true;
                 Ok(())
@@ -127,17 +117,17 @@ impl DigestStore {
         }
     }
 
-    pub fn clean_up(&mut self) -> Result<(), FileSystemError> {
-        self.file_deleter.delete(&self.digest_paths.temp_file)?;
-        self.file_deleter.delete(&self.digest_paths.final_root)?;
+    fn clean_up(&mut self) -> Result<(), FileSystemError> {
+        self.file_deleter.delete(&self.temp_file)?;
+        self.file_deleter.delete(&self.mediatype_file)?;
         self.completed = true;
         Ok(())
     }
 }
 
-impl Drop for DigestStore {
+impl Drop for UnverifiedFile {
     fn drop(&mut self) {
-        if !self.initialized || self.completed {
+        if self.completed {
             return;
         }
 
@@ -214,6 +204,53 @@ impl FileBlobStore {
 
         Ok(computed)
     }
+
+    fn create_unverified_file<'a>(
+        &self,
+        blob_root: &'a Path,
+        claimed: &'a digest::Digest,
+    ) -> Result<UnverifiedFile, FileSystemError> {
+        let paths = Paths::new(blob_root, claimed);
+        self.folder.create_recursively(&paths.final_root)?;
+
+        Ok(UnverifiedFile::new(
+            &paths.temp_file,
+            &paths.final_file,
+            &paths.mediatype_file,
+            Arc::clone(&self.file_renamer),
+            Arc::clone(&self.file_deleter),
+            Arc::clone(&self.file_writer),
+        ))
+    }
+}
+
+struct Paths {
+    pub final_root: PathBuf,
+    pub temp_file: PathBuf,
+    pub final_file: PathBuf,
+    pub mediatype_file: PathBuf,
+}
+
+impl Paths {
+    pub fn new(root: &Path, claimed: &digest::Digest) -> Self {
+        let final_root = create_sharded_blob_path(root, claimed);
+
+        let mut temp_file = final_root.clone();
+        temp_file.push(format!("{}.tmp", claimed.hex()));
+
+        let mut final_file = final_root.clone();
+        final_file.push(claimed.hex());
+
+        let mut mediatype_file = final_root.clone();
+        mediatype_file.push(format!("{}.mediatype", claimed.hex()));
+
+        Self {
+            final_root,
+            temp_file,
+            final_file,
+            mediatype_file,
+        }
+    }
 }
 
 impl BlobStore for FileBlobStore {
@@ -229,28 +266,22 @@ impl BlobStore for FileBlobStore {
                 return Ok(());
             }
 
-            let mut digest_store = DigestStore::new(
-                blob_root.to_path_buf(),
-                Arc::clone(&self.file_renamer),
-                Arc::clone(&self.file_deleter),
-                Arc::clone(&self.file_writer),
-                Arc::clone(&self.folder),
-                claimed,
-            );
+            let mut unverified_file = self.create_unverified_file(blob_root, claimed)?;
 
-            let temp_path = digest_store.initialize()?;
-            let hash = self.hashed_read_to_temp_file(source, &temp_path).await?;
+            let hash = self
+                .hashed_read_to_temp_file(source, &unverified_file.temp_file)
+                .await?;
             let computed = hash.as_slice();
 
             if claimed.as_bytes().as_slice() != computed {
-                digest_store.clean_up()?;
+                unverified_file.clean_up()?;
                 return Err(BlobError::DigestMismatch {
                     claimed: claimed.clone(),
                     computed: digest::Digest::from_bytes(&computed)?,
                 });
             }
 
-            digest_store.complete(mediatype)?;
+            unverified_file.complete(mediatype)?;
 
             Ok(())
         })
@@ -262,8 +293,8 @@ impl BlobStore for FileBlobStore {
         digest: &'a digest::Digest,
     ) -> BoxFuture<'a, Result<bool, BlobError>> {
         Box::pin(async move {
-            let digest_paths = BlobPaths::new(blob_root, digest);
-            Ok(self.inspect.exists(&digest_paths.final_file))
+            let paths = Paths::new(blob_root, digest);
+            Ok(self.inspect.exists(&paths.final_file))
         })
     }
 
@@ -273,8 +304,8 @@ impl BlobStore for FileBlobStore {
         digest: &'a digest::Digest,
     ) -> BoxFuture<'a, Result<Box<dyn AsyncRead + Send + Unpin>, BlobError>> {
         Box::pin(async move {
-            let digest_paths = BlobPaths::new(blob_root, digest);
-            let result = self.file_reader.create_reader(&digest_paths.final_file)?;
+            let paths = Paths::new(blob_root, digest);
+            let result = self.file_reader.create_reader(&paths.final_file)?;
             Ok(result)
         })
     }
@@ -285,12 +316,12 @@ impl BlobStore for FileBlobStore {
         digest: &'a digest::Digest,
     ) -> BoxFuture<'a, Result<Stats, BlobError>> {
         Box::pin(async move {
-            let digest_paths = BlobPaths::new(blob_root, digest);
-            if self.inspect.exists(&digest_paths.final_file) {
-                let entry = self.inspect.read_metadata(&digest_paths.final_file)?;
+            let paths = Paths::new(blob_root, digest);
+            if self.inspect.exists(&paths.final_file) {
+                let entry = self.inspect.read_metadata(&paths.final_file)?;
                 let mediatype = self
                     .file_reader
-                    .read_all(&digest_paths.mediatype_file)?
+                    .read_all(&paths.mediatype_file)?
                     .trim()
                     .to_string();
 
@@ -310,15 +341,15 @@ impl BlobStore for FileBlobStore {
         digest: &'a digest::Digest,
     ) -> BoxFuture<'a, Result<(), BlobError>> {
         Box::pin(async move {
-            let digest_paths = BlobPaths::new(blob_root, digest);
-            if self.inspect.exists(&digest_paths.final_file) {
+            let paths = Paths::new(blob_root, digest);
+            if self.inspect.exists(&paths.final_file) {
                 for entry in self
                     .folder
-                    .entries(&digest_paths.final_root)?
+                    .entries(&paths.final_root)?
                     .iter()
                     .filter(|entry| entry.kind == EntryKind::File)
                 {
-                    let mut to_delete = digest_paths.final_root.clone();
+                    let mut to_delete = paths.final_root.clone();
                     to_delete.push(&entry.name);
                     self.file_deleter.delete(&to_delete)?;
                 }
@@ -461,7 +492,7 @@ mod tests {
                 let file_renamer = MockFileRenamer::new();
                 let file_deleter = MockFileDeleter::new();
                 let mut inspect = MockInspect::new();
-                let blob_root = PathBuf::from("/tmp/blobs");
+                let blob_root = PathBuf::from("/tmp");
 
                 inspect.given_does_not_exist("/tmp/blobs/sha256/f0/f00d/f00d");
                 folder
@@ -499,7 +530,7 @@ mod tests {
                 let file_renamer = MockFileRenamer::new();
                 let mut file_deleter = MockFileDeleter::new();
                 let mut inspect = MockInspect::new();
-                let blob_root = PathBuf::from("/tmp/blobs");
+                let blob_root = PathBuf::from("/tmp");
 
                 inspect.given_does_not_exist("/tmp/blobs/sha256/f0/f00d/f00d");
                 folder.expect_create_folder_recursively_with("/tmp/blobs/sha256/f0/f00d");
@@ -515,7 +546,7 @@ mod tests {
                     .return_once(move |_, _| Ok(Box::new(buffered_writer)));
 
                 file_deleter.expect_file_to_be_deleted("/tmp/blobs/sha256/f0/f00d/f00d.tmp");
-                file_deleter.expect_file_to_be_deleted("/tmp/blobs/sha256/f0/f00d");
+                file_deleter.expect_file_to_be_deleted("/tmp/blobs/sha256/f0/f00d/f00d.mediatype");
 
                 let store = FileBlobStore::new(
                     Arc::new(folder),
@@ -548,7 +579,7 @@ mod tests {
                 let file_renamer = MockFileRenamer::new();
                 let mut file_deleter = MockFileDeleter::new();
                 let mut inspect = MockInspect::new();
-                let blob_root = PathBuf::from("/tmp/blobs");
+                let blob_root = PathBuf::from("/tmp");
 
                 inspect.given_does_not_exist("/tmp/blobs/sha256/f0/f00d/f00d");
                 folder.expect_create_folder_recursively_with("/tmp/blobs/sha256/f0/f00d");
@@ -560,7 +591,7 @@ mod tests {
                     .return_once(move |_, _| Ok(Box::new(buffered_writer)));
 
                 file_deleter.expect_file_to_be_deleted("/tmp/blobs/sha256/f0/f00d/f00d.tmp");
-                file_deleter.expect_file_to_be_deleted("/tmp/blobs/sha256/f0/f00d");
+                file_deleter.expect_file_to_be_deleted("/tmp/blobs/sha256/f0/f00d/f00d.mediatype");
 
                 let store = FileBlobStore::new(
                     Arc::new(folder),
@@ -591,7 +622,7 @@ mod tests {
                 let file_renamer = MockFileRenamer::new();
                 let mut file_deleter = MockFileDeleter::new();
                 let mut inspect = MockInspect::new();
-                let blob_root = PathBuf::from("/tmp/blobs");
+                let blob_root = PathBuf::from("/tmp");
 
                 inspect.given_does_not_exist("/tmp/blobs/sha256/f0/f00d/f00d");
                 folder.expect_create_folder_recursively_with("/tmp/blobs/sha256/f0/f00d");
@@ -605,7 +636,7 @@ mod tests {
                     .return_once(move |_, _| Ok(Box::new(buffered_writer)));
 
                 file_deleter.expect_file_to_be_deleted("/tmp/blobs/sha256/f0/f00d/f00d.tmp");
-                file_deleter.expect_file_to_be_deleted("/tmp/blobs/sha256/f0/f00d");
+                file_deleter.expect_file_to_be_deleted("/tmp/blobs/sha256/f0/f00d/f00d.mediatype");
 
                 let store = FileBlobStore::new(
                     Arc::new(folder),
@@ -633,7 +664,7 @@ mod tests {
                 let mut file_renamer = MockFileRenamer::new();
                 let mut file_deleter = MockFileDeleter::new();
                 let mut inspect = MockInspect::new();
-                let blob_root = PathBuf::from("/tmp/blobs");
+                let blob_root = PathBuf::from("/tmp");
 
                 let actual_sha = "05174bbf0d407087e45b12baae17117426852ff3a9e58d12a0ebb9a10b409743";
                 inspect.given_does_not_exist(&format!(
@@ -669,8 +700,9 @@ mod tests {
                 file_deleter.expect_file_to_be_deleted(&format!(
                     "/tmp/blobs/sha256/05/{actual_sha}/{actual_sha}.tmp"
                 ));
-                file_deleter
-                    .expect_file_to_be_deleted(&format!("/tmp/blobs/sha256/05/{actual_sha}"));
+                file_deleter.expect_file_to_be_deleted(&format!(
+                    "/tmp/blobs/sha256/05/{actual_sha}/{actual_sha}.mediatype"
+                ));
 
                 let store = FileBlobStore::new(
                     Arc::new(folder),
@@ -703,7 +735,7 @@ mod tests {
                 let file_renamer = MockFileRenamer::new();
                 let file_deleter = MockFileDeleter::new();
                 let mut inspect = MockInspect::new();
-                let blob_root = PathBuf::from("/tmp/blobs");
+                let blob_root = PathBuf::from("/tmp");
 
                 let actual_sha = "05174bbf0d407087e45b12baae17117426852ff3a9e58d12a0ebb9a10b409743";
                 inspect.given_exists(&format!("/tmp/blobs/sha256/05/{actual_sha}/{actual_sha}/"));
@@ -734,7 +766,7 @@ mod tests {
                 let mut file_renamer = MockFileRenamer::new();
                 let file_deleter = MockFileDeleter::new();
                 let mut inspect = MockInspect::new();
-                let blob_root = PathBuf::from("/tmp/blobs");
+                let blob_root = PathBuf::from("/tmp");
 
                 let actual_sha = "05174bbf0d407087e45b12baae17117426852ff3a9e58d12a0ebb9a10b409743";
                 inspect.given_does_not_exist(&format!(
@@ -808,7 +840,7 @@ mod tests {
                 let file_renamer = MockFileRenamer::new();
                 let file_deleter = MockFileDeleter::new();
                 let mut inspect = MockInspect::new();
-                let blob_root = PathBuf::from("/tmp/blobs");
+                let blob_root = PathBuf::from("/tmp");
 
                 let sha = "ff".repeat(32);
                 inspect.given_does_not_exist(&format!("/tmp/blobs/sha256/ff/{sha}/{sha}"));
@@ -835,7 +867,7 @@ mod tests {
                 let file_renamer = MockFileRenamer::new();
                 let file_deleter = MockFileDeleter::new();
                 let mut inspect = MockInspect::new();
-                let blob_root = PathBuf::from("/tmp/blobs");
+                let blob_root = PathBuf::from("/tmp");
 
                 let sha = "ff".repeat(32);
                 inspect.given_exists(&format!("/tmp/blobs/sha256/ff/{sha}/{sha}"));
@@ -874,7 +906,7 @@ mod tests {
                 let file_renamer = MockFileRenamer::new();
                 let file_deleter = MockFileDeleter::new();
                 let inspect = MockInspect::new();
-                let blob_root = PathBuf::from("/tmp/blobs");
+                let blob_root = PathBuf::from("/tmp");
 
                 let sha = "ff".repeat(32);
 
@@ -918,7 +950,7 @@ mod tests {
                 let file_renamer = MockFileRenamer::new();
                 let file_deleter = MockFileDeleter::new();
                 let inspect = MockInspect::new();
-                let blob_root = PathBuf::from("/tmp/blobs");
+                let blob_root = PathBuf::from("/tmp");
 
                 let sha = "ff".repeat(32);
 
@@ -961,7 +993,7 @@ mod tests {
                 let file_renamer = MockFileRenamer::new();
                 let file_deleter = MockFileDeleter::new();
                 let mut inspect = MockInspect::new();
-                let blob_root = PathBuf::from("/tmp/blobs");
+                let blob_root = PathBuf::from("/tmp");
                 let sha = "ff".repeat(32);
 
                 inspect.given_does_not_exist(&format!("/tmp/blobs/sha256/ff/{sha}/{sha}"));
@@ -991,7 +1023,7 @@ mod tests {
                 let file_renamer = MockFileRenamer::new();
                 let file_deleter = MockFileDeleter::new();
                 let mut inspect = MockInspect::new();
-                let blob_root = PathBuf::from("/tmp/blobs");
+                let blob_root = PathBuf::from("/tmp");
                 let sha = "ff".repeat(32);
 
                 inspect.given_exists(&format!("/tmp/blobs/sha256/ff/{sha}/{sha}"));
@@ -1029,7 +1061,7 @@ mod tests {
                 let file_renamer = MockFileRenamer::new();
                 let mut file_deleter = MockFileDeleter::new();
                 let mut inspect = MockInspect::new();
-                let blob_root = PathBuf::from("/tmp/blobs");
+                let blob_root = PathBuf::from("/tmp");
                 let sha = "ff".repeat(32);
 
                 inspect.given_exists(&format!("/tmp/blobs/sha256/ff/{sha}/{sha}"));
@@ -1075,7 +1107,7 @@ mod tests {
                 let file_renamer = MockFileRenamer::new();
                 let mut file_deleter = MockFileDeleter::new();
                 let mut inspect = MockInspect::new();
-                let blob_root = PathBuf::from("/tmp/blobs");
+                let blob_root = PathBuf::from("/tmp");
                 let sha = "ff".repeat(32);
 
                 inspect.given_exists(&format!("/tmp/blobs/sha256/ff/{sha}/{sha}"));
@@ -1370,7 +1402,7 @@ mod tests {
             let file_reader = MockFileReader::new();
             let file_renamer = MockFileRenamer::new();
             let file_deleter = MockFileDeleter::new();
-            let blob_root = PathBuf::from("/tmp/blobs");
+            let blob_root = PathBuf::from("/tmp");
             let mut inspect = MockInspect::new();
             let sha = "ff".repeat(32);
 
@@ -1402,7 +1434,7 @@ mod tests {
             let mut file_reader = MockFileReader::new();
             let file_renamer = MockFileRenamer::new();
             let file_deleter = MockFileDeleter::new();
-            let blob_root = PathBuf::from("/tmp/blobs");
+            let blob_root = PathBuf::from("/tmp");
             let mut inspect = MockInspect::new();
             let sha = "ff".repeat(32);
 
@@ -1446,7 +1478,7 @@ mod tests {
             let mut file_reader = MockFileReader::new();
             let file_renamer = MockFileRenamer::new();
             let file_deleter = MockFileDeleter::new();
-            let blob_root = PathBuf::from("/tmp/blobs");
+            let blob_root = PathBuf::from("/tmp");
             let mut inspect = MockInspect::new();
             let sha = "ff".repeat(32);
 
@@ -1490,7 +1522,7 @@ mod tests {
             let mut file_reader = MockFileReader::new();
             let file_renamer = MockFileRenamer::new();
             let file_deleter = MockFileDeleter::new();
-            let blob_root = PathBuf::from("/tmp/blobs");
+            let blob_root = PathBuf::from("/tmp");
             let mut inspect = MockInspect::new();
             let sha = "ff".repeat(32);
 
