@@ -1,5 +1,5 @@
 use crate::{
-    blob_paths::create_sharded_blob_path,
+    blob_paths::{BlobCommit, BlobFilePaths},
     digest::{Digest, DigestError},
     name::{Name, NameParseError},
 };
@@ -65,24 +65,6 @@ impl Paths {
     pub fn upload_temp_file(&self, uuid: Uuid) -> PathBuf {
         let mut result = self.temp_root.clone();
         result.push(uuid.to_string());
-
-        result
-    }
-
-    pub fn blob_path_for_digest(&self, digest: &Digest) -> PathBuf {
-        create_sharded_blob_path(&self.registry_root, digest)
-    }
-
-    pub fn final_file_path(&self, digest: &Digest) -> PathBuf {
-        let mut result = self.blob_path_for_digest(digest);
-        result.push(digest.hex());
-
-        result
-    }
-
-    pub fn mediatype_file_path(&self, digest: &Digest) -> PathBuf {
-        let mut result = self.blob_path_for_digest(digest);
-        result.push(format!("{}.mediatype", digest.hex()));
 
         result
     }
@@ -162,7 +144,9 @@ impl FileBlobUploader {
         file_renamer: Arc<dyn FileRenamer>,
         file_deleter: Arc<dyn FileDeleter>,
     ) -> Self {
-        let state = Arc::new(Mutex::new(HashMap::<Name, HashMap<Uuid, PartialUpload>>::new()));
+        let state = Arc::new(Mutex::new(
+            HashMap::<Name, HashMap<Uuid, PartialUpload>>::new(),
+        ));
 
         Self {
             repositories_root,
@@ -270,7 +254,10 @@ impl BlobUploader for FileBlobUploader {
             }
 
             let mut state = self.state.lock().unwrap();
-            match state.get_mut(&name).and_then(|uploads| uploads.get_mut(&uuid)) {
+            match state
+                .get_mut(&name)
+                .and_then(|uploads| uploads.get_mut(&uuid))
+            {
                 Some(upload) => {
                     upload.hasher = Some(hasher);
                     upload.offset = start_offset + written;
@@ -317,15 +304,19 @@ impl BlobUploader for FileBlobUploader {
             });
         }
 
-        self.folder
-            .create_recursively(&paths.blob_path_for_digest(claimed))?;
+        let blob_paths = BlobFilePaths::new(&paths.registry_root, claimed);
+        self.folder.create_recursively(&blob_paths.final_root)?;
 
-        self.file_renamer
-            .rename(&upload.temp_file, &paths.final_file_path(claimed))?;
-        self.file_writer
-            .write_all(&paths.mediatype_file_path(claimed), media_type)?;
-
+        let mut commit = BlobCommit::new(
+            &upload.temp_file,
+            &blob_paths,
+            Arc::clone(&self.file_renamer),
+            Arc::clone(&self.file_deleter),
+            Arc::clone(&self.file_writer),
+        );
         upload.mark_complete();
+        commit.complete(media_type)?;
+
         Ok(())
     }
 
@@ -457,7 +448,9 @@ mod tests {
                 .with(predicate::eq(PathBuf::from("/tmp/foo/tmp")))
                 .returning(|_| Err(FileSystemError::ExpectedFileError));
 
-            let state = Arc::new(Mutex::new(HashMap::<Name, HashMap<Uuid, PartialUpload>>::new()));
+            let state = Arc::new(Mutex::new(
+                HashMap::<Name, HashMap<Uuid, PartialUpload>>::new(),
+            ));
             let uuid_factory = Arc::new(Uuid::max);
 
             let blob_uploader = FileBlobUploader {
@@ -492,7 +485,9 @@ mod tests {
 
             folder.expect_create_folder_recursively_with("/tmp/foo/tmp");
             file_deleter.expect_file_to_be_deleted(&format!("/tmp/foo/tmp/{}", Uuid::max()));
-            let state = Arc::new(Mutex::new(HashMap::<Name, HashMap<Uuid, PartialUpload>>::new()));
+            let state = Arc::new(Mutex::new(
+                HashMap::<Name, HashMap<Uuid, PartialUpload>>::new(),
+            ));
             let uuid_factory = Arc::new(Uuid::max);
 
             let blob_uploader = FileBlobUploader {
@@ -541,7 +536,9 @@ mod tests {
             let repositories_root = PathBuf::from("/tmp");
             let registry = Name::from_str("foo").unwrap();
 
-            let state = Arc::new(Mutex::new(HashMap::<Name, HashMap<Uuid, PartialUpload>>::new()));
+            let state = Arc::new(Mutex::new(
+                HashMap::<Name, HashMap<Uuid, PartialUpload>>::new(),
+            ));
             let uuid_factory = Arc::new(Uuid::max);
 
             let blob_uploader = FileBlobUploader {
@@ -585,7 +582,9 @@ mod tests {
             );
             file_deleter.expect_file_to_be_deleted(temp_file);
 
-            let state = Arc::new(Mutex::new(HashMap::<Name, HashMap<Uuid, PartialUpload>>::new()));
+            let state = Arc::new(Mutex::new(
+                HashMap::<Name, HashMap<Uuid, PartialUpload>>::new(),
+            ));
             let uuid_factory = Arc::new(Uuid::max);
 
             let blob_uploader = FileBlobUploader {
@@ -633,7 +632,9 @@ mod tests {
             let temp_file = &format!("/tmp/foo/tmp/{}", Uuid::max());
             file_deleter.expect_file_to_be_deleted(temp_file);
 
-            let state = Arc::new(Mutex::new(HashMap::<Name, HashMap<Uuid, PartialUpload>>::new()));
+            let state = Arc::new(Mutex::new(
+                HashMap::<Name, HashMap<Uuid, PartialUpload>>::new(),
+            ));
             let uuid_factory = Arc::new(Uuid::max);
 
             let blob_uploader = FileBlobUploader {
@@ -681,7 +682,9 @@ mod tests {
             file_appender.expect_append_all_bytes_with(temp_file, vec![0xDE, 0xAD, 0xBE, 0xEF]);
             file_deleter.expect_file_to_be_deleted(temp_file);
 
-            let state = Arc::new(Mutex::new(HashMap::<Name, HashMap<Uuid, PartialUpload>>::new()));
+            let state = Arc::new(Mutex::new(
+                HashMap::<Name, HashMap<Uuid, PartialUpload>>::new(),
+            ));
             let uuid_factory = Arc::new(Uuid::max);
 
             let blob_uploader = FileBlobUploader {
@@ -740,7 +743,9 @@ mod tests {
             let repositories_root = PathBuf::from("/tmp");
             let registry = Name::from_str("foo").unwrap();
 
-            let state = Arc::new(Mutex::new(HashMap::<Name, HashMap<Uuid, PartialUpload>>::new()));
+            let state = Arc::new(Mutex::new(
+                HashMap::<Name, HashMap<Uuid, PartialUpload>>::new(),
+            ));
             let uuid_factory = Arc::new(Uuid::max);
 
             let blob_uploader = FileBlobUploader {
@@ -774,7 +779,9 @@ mod tests {
             let repositories_root = PathBuf::from("/tmp");
             let registry = Name::from_str("foo").unwrap();
 
-            let state = Arc::new(Mutex::new(HashMap::<Name, HashMap<Uuid, PartialUpload>>::new()));
+            let state = Arc::new(Mutex::new(
+                HashMap::<Name, HashMap<Uuid, PartialUpload>>::new(),
+            ));
             let uuid_factory = Arc::new(Uuid::max);
             let temp_file = &format!("/tmp/foo/tmp/{}", Uuid::max());
 
@@ -822,7 +829,9 @@ mod tests {
             let repositories_root = PathBuf::from("/tmp");
             let registry = Name::from_str("foo").unwrap();
 
-            let state = Arc::new(Mutex::new(HashMap::<Name, HashMap<Uuid, PartialUpload>>::new()));
+            let state = Arc::new(Mutex::new(
+                HashMap::<Name, HashMap<Uuid, PartialUpload>>::new(),
+            ));
             let uuid_factory = Arc::new(Uuid::max);
             let temp_file = &format!("/tmp/foo/tmp/{}", Uuid::max());
             let actual_sha = "1b96011418a3675a82b529695daac30914827d65d2ff3e0bc6873526a1beefcf";
@@ -834,6 +843,12 @@ mod tests {
                     "/tmp/foo/blobs/sha256/{prefix}/{actual_sha}"
                 ));
             file_deleter.expect_file_to_be_deleted(temp_file);
+            file_deleter.expect_file_to_be_deleted(&format!(
+                "/tmp/foo/blobs/sha256/{prefix}/{actual_sha}/{actual_sha}"
+            ));
+            file_deleter.expect_file_to_be_deleted(&format!(
+                "/tmp/foo/blobs/sha256/{prefix}/{actual_sha}/{actual_sha}.mediatype"
+            ));
             file_appender.expect_append_all_bytes_with(temp_file, vec![0xC0, 0xDE]);
 
             file_renamer.given_rename_fails_once_with(
@@ -880,7 +895,9 @@ mod tests {
             let repositories_root = PathBuf::from("/tmp");
             let registry = Name::from_str("foo").unwrap();
 
-            let state = Arc::new(Mutex::new(HashMap::<Name, HashMap<Uuid, PartialUpload>>::new()));
+            let state = Arc::new(Mutex::new(
+                HashMap::<Name, HashMap<Uuid, PartialUpload>>::new(),
+            ));
             let uuid_factory = Arc::new(Uuid::max);
             let temp_file = &format!("/tmp/foo/tmp/{}", Uuid::max());
             let actual_sha = "1b96011418a3675a82b529695daac30914827d65d2ff3e0bc6873526a1beefcf";
@@ -892,6 +909,12 @@ mod tests {
                     "/tmp/foo/blobs/sha256/{prefix}/{actual_sha}"
                 ));
             file_deleter.expect_file_to_be_deleted(temp_file);
+            file_deleter.expect_file_to_be_deleted(&format!(
+                "/tmp/foo/blobs/sha256/{prefix}/{actual_sha}/{actual_sha}"
+            ));
+            file_deleter.expect_file_to_be_deleted(&format!(
+                "/tmp/foo/blobs/sha256/{prefix}/{actual_sha}/{actual_sha}.mediatype"
+            ));
             file_appender.expect_append_all_bytes_with(temp_file, vec![0xC0, 0xDE]);
 
             file_renamer.expect_rename_with(
@@ -942,7 +965,9 @@ mod tests {
             let repositories_root = PathBuf::from("/tmp");
             let registry = Name::from_str("foo").unwrap();
 
-            let state = Arc::new(Mutex::new(HashMap::<Name, HashMap<Uuid, PartialUpload>>::new()));
+            let state = Arc::new(Mutex::new(
+                HashMap::<Name, HashMap<Uuid, PartialUpload>>::new(),
+            ));
             let uuid_factory = Arc::new(Uuid::max);
             let temp_file = &format!("/tmp/foo/tmp/{}", Uuid::max());
             let actual_sha = "1b96011418a3675a82b529695daac30914827d65d2ff3e0bc6873526a1beefcf";
@@ -997,7 +1022,9 @@ mod tests {
             let repositories_root = PathBuf::from("/tmp");
             let registry = Name::from_str("foo").unwrap();
 
-            let state = Arc::new(Mutex::new(HashMap::<Name, HashMap<Uuid, PartialUpload>>::new()));
+            let state = Arc::new(Mutex::new(
+                HashMap::<Name, HashMap<Uuid, PartialUpload>>::new(),
+            ));
             let uuid_factory = Arc::new(Uuid::max);
             let temp_file = &format!("/tmp/foo/tmp/{}", Uuid::max());
             let actual_sha = "1b96011418a3675a82b529695daac30914827d65d2ff3e0bc6873526a1beefcf";
@@ -1040,13 +1067,7 @@ mod tests {
                 .complete(&registry, Uuid::max(), &given_claimed, "mediatype")
                 .expect("should complete");
 
-            assert!(
-                !blob_uploader
-                    .state
-                    .lock()
-                    .unwrap()
-                    .contains_key(&registry)
-            );
+            assert!(!blob_uploader.state.lock().unwrap().contains_key(&registry));
         }
 
         #[tokio::test]
@@ -1059,14 +1080,15 @@ mod tests {
             let repositories_root = PathBuf::from("/tmp");
             let registry = Name::from_str("foo").unwrap();
 
-            let state = Arc::new(Mutex::new(HashMap::<Name, HashMap<Uuid, PartialUpload>>::new()));
+            let state = Arc::new(Mutex::new(
+                HashMap::<Name, HashMap<Uuid, PartialUpload>>::new(),
+            ));
             let actual_sha = "1b96011418a3675a82b529695daac30914827d65d2ff3e0bc6873526a1beefcf";
             let prefix = actual_sha[0..2].to_string();
 
             let first_uuid = Uuid::nil();
             let second_uuid = Uuid::max();
-            let remaining =
-                Mutex::new(std::collections::VecDeque::from([first_uuid, second_uuid]));
+            let remaining = Mutex::new(std::collections::VecDeque::from([first_uuid, second_uuid]));
             let uuid_factory = Arc::new(move || remaining.lock().unwrap().pop_front().unwrap());
 
             folder
@@ -1128,7 +1150,9 @@ mod tests {
             let repositories_root = PathBuf::from("/tmp");
             let registry = Name::from_str("foo").unwrap();
 
-            let state = Arc::new(Mutex::new(HashMap::<Name, HashMap<Uuid, PartialUpload>>::new()));
+            let state = Arc::new(Mutex::new(
+                HashMap::<Name, HashMap<Uuid, PartialUpload>>::new(),
+            ));
             let uuid_factory = Arc::new(Uuid::max);
             let temp_file = &format!("/tmp/foo/tmp/{}", Uuid::max());
             let actual_sha = "1b96011418a3675a82b529695daac30914827d65d2ff3e0bc6873526a1beefcf";
@@ -1209,7 +1233,9 @@ mod tests {
             let repositories_root = PathBuf::from("/tmp");
             let registry = Name::from_str("foo").unwrap();
 
-            let state = Arc::new(Mutex::new(HashMap::<Name, HashMap<Uuid, PartialUpload>>::new()));
+            let state = Arc::new(Mutex::new(
+                HashMap::<Name, HashMap<Uuid, PartialUpload>>::new(),
+            ));
             let uuid_factory = Arc::new(Uuid::max);
 
             let blob_uploader = FileBlobUploader {
@@ -1241,7 +1267,9 @@ mod tests {
             let repositories_root = PathBuf::from("/tmp");
             let registry = Name::from_str("foo").unwrap();
 
-            let state = Arc::new(Mutex::new(HashMap::<Name, HashMap<Uuid, PartialUpload>>::new()));
+            let state = Arc::new(Mutex::new(
+                HashMap::<Name, HashMap<Uuid, PartialUpload>>::new(),
+            ));
             let uuid_factory = Arc::new(Uuid::max);
             let temp_file = &format!("/tmp/foo/tmp/{}", Uuid::max());
 
@@ -1274,7 +1302,9 @@ mod tests {
             let repositories_root = PathBuf::from("/tmp");
             let registry = Name::from_str("foo").unwrap();
 
-            let state = Arc::new(Mutex::new(HashMap::<Name, HashMap<Uuid, PartialUpload>>::new()));
+            let state = Arc::new(Mutex::new(
+                HashMap::<Name, HashMap<Uuid, PartialUpload>>::new(),
+            ));
             let uuid_factory = Arc::new(Uuid::max);
             let temp_file = &format!("/tmp/foo/tmp/{}", Uuid::max());
 
@@ -1293,17 +1323,9 @@ mod tests {
             };
 
             let uuid = blob_uploader.start(&registry).expect("should start");
-            blob_uploader
-                .abort(&registry, uuid)
-                .expect("should abort");
+            blob_uploader.abort(&registry, uuid).expect("should abort");
 
-            assert!(
-                !blob_uploader
-                    .state
-                    .lock()
-                    .unwrap()
-                    .contains_key(&registry)
-            );
+            assert!(!blob_uploader.state.lock().unwrap().contains_key(&registry));
         }
 
         #[test]
@@ -1316,11 +1338,12 @@ mod tests {
             let repositories_root = PathBuf::from("/tmp");
             let registry = Name::from_str("foo").unwrap();
 
-            let state = Arc::new(Mutex::new(HashMap::<Name, HashMap<Uuid, PartialUpload>>::new()));
+            let state = Arc::new(Mutex::new(
+                HashMap::<Name, HashMap<Uuid, PartialUpload>>::new(),
+            ));
             let first_uuid = Uuid::nil();
             let second_uuid = Uuid::max();
-            let remaining =
-                Mutex::new(std::collections::VecDeque::from([first_uuid, second_uuid]));
+            let remaining = Mutex::new(std::collections::VecDeque::from([first_uuid, second_uuid]));
             let uuid_factory = Arc::new(move || remaining.lock().unwrap().pop_front().unwrap());
 
             folder.expect_create_folder_recursively_with("/tmp/foo/tmp");
@@ -1362,7 +1385,9 @@ mod tests {
             let repositories_root = PathBuf::from("/tmp");
             let registry = Name::from_str("foo").unwrap();
 
-            let state = Arc::new(Mutex::new(HashMap::<Name, HashMap<Uuid, PartialUpload>>::new()));
+            let state = Arc::new(Mutex::new(
+                HashMap::<Name, HashMap<Uuid, PartialUpload>>::new(),
+            ));
             let uuid_factory = Arc::new(Uuid::max);
             let temp_file = &format!("/tmp/foo/tmp/{}", Uuid::max());
 
@@ -1421,7 +1446,9 @@ mod tests {
             let mut file_deleter = MockFileDeleter::new();
             let repositories_root = PathBuf::from("/tmp");
 
-            let state = Arc::new(Mutex::new(HashMap::<Name, HashMap<Uuid, PartialUpload>>::new()));
+            let state = Arc::new(Mutex::new(
+                HashMap::<Name, HashMap<Uuid, PartialUpload>>::new(),
+            ));
             let uuid_factory = Arc::new(Uuid::max);
             let expected_filename_to_delete = Uuid::max().to_string();
             folder.given_folder_entries(
@@ -1484,7 +1511,9 @@ mod tests {
             let mut file_deleter = MockFileDeleter::new();
             let repositories_root = PathBuf::from("/tmp");
 
-            let state = Arc::new(Mutex::new(HashMap::<Name, HashMap<Uuid, PartialUpload>>::new()));
+            let state = Arc::new(Mutex::new(
+                HashMap::<Name, HashMap<Uuid, PartialUpload>>::new(),
+            ));
             let uuid_factory = Arc::new(Uuid::max);
             let expected_filename_to_delete = Uuid::max().to_string();
             folder.given_folder_entries(
@@ -1541,7 +1570,9 @@ mod tests {
             let repositories_root = PathBuf::from("/tmp");
             let registry = Name::from_str("foo").unwrap();
 
-            let state = Arc::new(Mutex::new(HashMap::<Name, HashMap<Uuid, PartialUpload>>::new()));
+            let state = Arc::new(Mutex::new(
+                HashMap::<Name, HashMap<Uuid, PartialUpload>>::new(),
+            ));
             let uuid_factory = Arc::new(Uuid::max);
             let temp_file = &format!("/tmp/foo/tmp/{}", Uuid::max());
             let actual_sha = "1b96011418a3675a82b529695daac30914827d65d2ff3e0bc6873526a1beefcf";
@@ -1644,7 +1675,9 @@ mod tests {
             let repositories_root = PathBuf::from("/tmp");
             let registry = Name::from_str("foo").unwrap();
 
-            let state = Arc::new(Mutex::new(HashMap::<Name, HashMap<Uuid, PartialUpload>>::new()));
+            let state = Arc::new(Mutex::new(
+                HashMap::<Name, HashMap<Uuid, PartialUpload>>::new(),
+            ));
             let uuid_factory = Arc::new(Uuid::max);
 
             let blob_uploader = FileBlobUploader {
@@ -1676,7 +1709,9 @@ mod tests {
             let repositories_root = PathBuf::from("/tmp");
             let registry = Name::from_str("foo").unwrap();
 
-            let state = Arc::new(Mutex::new(HashMap::<Name, HashMap<Uuid, PartialUpload>>::new()));
+            let state = Arc::new(Mutex::new(
+                HashMap::<Name, HashMap<Uuid, PartialUpload>>::new(),
+            ));
             let uuid_factory = Arc::new(Uuid::max);
             let temp_file = &format!("/tmp/foo/tmp/{}", Uuid::max());
 

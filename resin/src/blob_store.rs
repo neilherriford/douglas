@@ -1,14 +1,12 @@
-use crate::{blob_paths::create_sharded_blob_path, digest};
+use crate::{
+    blob_paths::{BlobCommit, BlobFilePaths},
+    digest,
+};
 use file_system::{
     EntryKind, FileDeleter, FileReader, FileRenamer, FileSystemError, FileWriter, Folder, Inspect,
 };
 use sha2::Sha256;
-use std::{
-    future::Future,
-    path::{Path, PathBuf},
-    pin::Pin,
-    sync::Arc,
-};
+use std::{future::Future, path::Path, pin::Pin, sync::Arc};
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt};
 
@@ -69,70 +67,6 @@ pub trait BlobStore: Send + Sync {
         blob_root: &'a Path,
         digest: &'a digest::Digest,
     ) -> BoxFuture<'a, Result<(), BlobError>>;
-}
-
-struct UnverifiedFile {
-    file_renamer: Arc<dyn FileRenamer>,
-    file_deleter: Arc<dyn FileDeleter>,
-    file_writer: Arc<dyn FileWriter>,
-    completed: bool,
-    pub temp_file: PathBuf,
-    pub final_file: PathBuf,
-    pub mediatype_file: PathBuf,
-}
-
-impl UnverifiedFile {
-    pub fn new(
-        temp_file: &Path,
-        final_file: &Path,
-        mediatype_file: &Path,
-        file_renamer: Arc<dyn FileRenamer>,
-        file_deleter: Arc<dyn FileDeleter>,
-        file_writer: Arc<dyn FileWriter>,
-    ) -> Self {
-        Self {
-            file_renamer,
-            file_deleter,
-            file_writer,
-            completed: false,
-            temp_file: temp_file.to_path_buf(),
-            final_file: final_file.to_path_buf(),
-            mediatype_file: mediatype_file.to_path_buf(),
-        }
-    }
-
-    pub fn complete(&mut self, mediatype: &str) -> Result<(), FileSystemError> {
-        self.file_renamer
-            .rename(&self.temp_file, &self.final_file)?;
-
-        match self.file_writer.write_all(&self.mediatype_file, mediatype) {
-            Ok(()) => {
-                self.completed = true;
-                Ok(())
-            }
-            Err(err) => {
-                self.clean_up()?;
-                Err(err)
-            }
-        }
-    }
-
-    fn clean_up(&mut self) -> Result<(), FileSystemError> {
-        self.file_deleter.delete(&self.temp_file)?;
-        self.file_deleter.delete(&self.mediatype_file)?;
-        self.completed = true;
-        Ok(())
-    }
-}
-
-impl Drop for UnverifiedFile {
-    fn drop(&mut self) {
-        if self.completed {
-            return;
-        }
-
-        let _ = self.clean_up();
-    }
 }
 
 pub struct FileBlobStore {
@@ -209,47 +143,20 @@ impl FileBlobStore {
         &self,
         blob_root: &'a Path,
         claimed: &'a digest::Digest,
-    ) -> Result<UnverifiedFile, FileSystemError> {
-        let paths = Paths::new(blob_root, claimed);
+    ) -> Result<BlobCommit, FileSystemError> {
+        let paths = BlobFilePaths::new(blob_root, claimed);
         self.folder.create_recursively(&paths.final_root)?;
 
-        Ok(UnverifiedFile::new(
-            &paths.temp_file,
-            &paths.final_file,
-            &paths.mediatype_file,
+        let mut temp_file = paths.final_root.clone();
+        temp_file.push(format!("{}.tmp", claimed.hex()));
+
+        Ok(BlobCommit::new(
+            &temp_file,
+            &paths,
             Arc::clone(&self.file_renamer),
             Arc::clone(&self.file_deleter),
             Arc::clone(&self.file_writer),
         ))
-    }
-}
-
-struct Paths {
-    pub final_root: PathBuf,
-    pub temp_file: PathBuf,
-    pub final_file: PathBuf,
-    pub mediatype_file: PathBuf,
-}
-
-impl Paths {
-    pub fn new(root: &Path, claimed: &digest::Digest) -> Self {
-        let final_root = create_sharded_blob_path(root, claimed);
-
-        let mut temp_file = final_root.clone();
-        temp_file.push(format!("{}.tmp", claimed.hex()));
-
-        let mut final_file = final_root.clone();
-        final_file.push(claimed.hex());
-
-        let mut mediatype_file = final_root.clone();
-        mediatype_file.push(format!("{}.mediatype", claimed.hex()));
-
-        Self {
-            final_root,
-            temp_file,
-            final_file,
-            mediatype_file,
-        }
     }
 }
 
@@ -269,7 +176,7 @@ impl BlobStore for FileBlobStore {
             let mut unverified_file = self.create_unverified_file(blob_root, claimed)?;
 
             let hash = self
-                .hashed_read_to_temp_file(source, &unverified_file.temp_file)
+                .hashed_read_to_temp_file(source, unverified_file.temp_file())
                 .await?;
             let computed = hash.as_slice();
 
@@ -293,7 +200,7 @@ impl BlobStore for FileBlobStore {
         digest: &'a digest::Digest,
     ) -> BoxFuture<'a, Result<bool, BlobError>> {
         Box::pin(async move {
-            let paths = Paths::new(blob_root, digest);
+            let paths = BlobFilePaths::new(blob_root, digest);
             Ok(self.inspect.exists(&paths.final_file))
         })
     }
@@ -304,7 +211,7 @@ impl BlobStore for FileBlobStore {
         digest: &'a digest::Digest,
     ) -> BoxFuture<'a, Result<Box<dyn AsyncRead + Send + Unpin>, BlobError>> {
         Box::pin(async move {
-            let paths = Paths::new(blob_root, digest);
+            let paths = BlobFilePaths::new(blob_root, digest);
             let result = self.file_reader.create_reader(&paths.final_file)?;
             Ok(result)
         })
@@ -316,7 +223,7 @@ impl BlobStore for FileBlobStore {
         digest: &'a digest::Digest,
     ) -> BoxFuture<'a, Result<Stats, BlobError>> {
         Box::pin(async move {
-            let paths = Paths::new(blob_root, digest);
+            let paths = BlobFilePaths::new(blob_root, digest);
             if self.inspect.exists(&paths.final_file) {
                 let entry = self.inspect.read_metadata(&paths.final_file)?;
                 let mediatype = self
@@ -341,7 +248,7 @@ impl BlobStore for FileBlobStore {
         digest: &'a digest::Digest,
     ) -> BoxFuture<'a, Result<(), BlobError>> {
         Box::pin(async move {
-            let paths = Paths::new(blob_root, digest);
+            let paths = BlobFilePaths::new(blob_root, digest);
             if self.inspect.exists(&paths.final_file) {
                 for entry in self
                     .folder
@@ -546,6 +453,7 @@ mod tests {
                     .return_once(move |_, _| Ok(Box::new(buffered_writer)));
 
                 file_deleter.expect_file_to_be_deleted("/tmp/blobs/sha256/f0/f00d/f00d.tmp");
+                file_deleter.expect_file_to_be_deleted("/tmp/blobs/sha256/f0/f00d/f00d");
                 file_deleter.expect_file_to_be_deleted("/tmp/blobs/sha256/f0/f00d/f00d.mediatype");
 
                 let store = FileBlobStore::new(
@@ -591,6 +499,7 @@ mod tests {
                     .return_once(move |_, _| Ok(Box::new(buffered_writer)));
 
                 file_deleter.expect_file_to_be_deleted("/tmp/blobs/sha256/f0/f00d/f00d.tmp");
+                file_deleter.expect_file_to_be_deleted("/tmp/blobs/sha256/f0/f00d/f00d");
                 file_deleter.expect_file_to_be_deleted("/tmp/blobs/sha256/f0/f00d/f00d.mediatype");
 
                 let store = FileBlobStore::new(
@@ -636,6 +545,7 @@ mod tests {
                     .return_once(move |_, _| Ok(Box::new(buffered_writer)));
 
                 file_deleter.expect_file_to_be_deleted("/tmp/blobs/sha256/f0/f00d/f00d.tmp");
+                file_deleter.expect_file_to_be_deleted("/tmp/blobs/sha256/f0/f00d/f00d");
                 file_deleter.expect_file_to_be_deleted("/tmp/blobs/sha256/f0/f00d/f00d.mediatype");
 
                 let store = FileBlobStore::new(
@@ -699,6 +609,9 @@ mod tests {
 
                 file_deleter.expect_file_to_be_deleted(&format!(
                     "/tmp/blobs/sha256/05/{actual_sha}/{actual_sha}.tmp"
+                ));
+                file_deleter.expect_file_to_be_deleted(&format!(
+                    "/tmp/blobs/sha256/05/{actual_sha}/{actual_sha}"
                 ));
                 file_deleter.expect_file_to_be_deleted(&format!(
                     "/tmp/blobs/sha256/05/{actual_sha}/{actual_sha}.mediatype"
