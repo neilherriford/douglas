@@ -87,13 +87,16 @@ impl TagStore for FileTagStore {
             return Ok(Vec::new());
         }
 
-        Ok(self
+        let mut tags: Vec<String> = self
             .folder
             .entries(&tag_path)?
             .iter()
             .filter(|entry| entry.kind == EntryKind::File)
             .map(|file| file.name.clone())
-            .collect())
+            .collect();
+        tags.sort();
+
+        Ok(tags)
     }
 
     fn read(&self, name: &Name, tag: &str) -> Result<Digest, TagStoreError> {
@@ -244,6 +247,54 @@ mod tests {
             assert!(matches!(
                 store.list(&Name::from_str("oops").expect("parsable")),
                 Ok(items) if items == vec!["bar".to_string()]
+            ));
+        }
+
+        #[test]
+        fn should_return_tags_sorted_lexicographically() {
+            let root = PathBuf::from("/tmp");
+            let mut folder = MockFolder::new();
+            let file_reader = MockFileReader::new();
+            let file_writer = MockFileWriter::new();
+            let file_deleter = MockFileDeleter::new();
+
+            folder.given_exists("/tmp/oops/");
+            folder.given_exists("/tmp/oops/_manifests/tags");
+            folder.given_folder_entries(
+                "/tmp/oops/_manifests/tags",
+                vec![
+                    Entry {
+                        name: "v2".to_string(),
+                        kind: EntryKind::File,
+                        is_link: false,
+                        size: 0,
+                    },
+                    Entry {
+                        name: "latest".to_string(),
+                        kind: EntryKind::File,
+                        is_link: false,
+                        size: 0,
+                    },
+                    Entry {
+                        name: "v1".to_string(),
+                        kind: EntryKind::File,
+                        is_link: false,
+                        size: 0,
+                    },
+                ],
+            );
+
+            let store = FileTagStore::new(
+                root,
+                Arc::new(folder),
+                Arc::new(file_reader),
+                Arc::new(file_writer),
+                Arc::new(file_deleter),
+            );
+
+            assert!(matches!(
+                store.list(&Name::from_str("oops").expect("parsable")),
+                Ok(items) if items == vec!["latest".to_string(), "v1".to_string(), "v2".to_string()]
             ));
         }
 
