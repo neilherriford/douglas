@@ -22,6 +22,7 @@ pub enum TagStoreError {
     UnknwonTag { repository: String, tag: String },
 }
 
+#[cfg_attr(test, mockall::automock)]
 pub trait TagStore: Send + Sync {
     fn list(&self, name: &Name) -> Result<Vec<String>, TagStoreError>;
     fn read(&self, name: &Name, tag: &str) -> Result<Digest, TagStoreError>;

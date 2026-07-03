@@ -778,17 +778,7 @@ mod manifest {
         name: Name,
         reference: String,
     ) -> Result<impl IntoResponse, ServerError> {
-        let digest = match Digest::from_str(&reference) {
-            Ok(digest) => digest,
-            Err(_) => match state.tag_store.read(&name, &reference) {
-                Ok(digest) => digest,
-                Err(TagStoreError::UnknownRepository(_))
-                | Err(TagStoreError::UnknwonTag { .. }) => {
-                    return Err(ServerError::ManifestUnknown(reference));
-                }
-                Err(err) => return Err(ServerError::BadRequest(err.to_string())),
-            },
-        };
+        let digest = get_digest_from_reference(&name, &reference, Arc::clone(&state.tag_store))?;
         let manifest_blob_root = state.paths.manifest_blob_root(&name)?;
         let stats = state
             .blob_store
@@ -942,6 +932,144 @@ mod manifest {
             })?;
 
         Ok(StatusCode::ACCEPTED)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        mod get_digest_from_reference {
+            use crate::{
+                ServerError,
+                digest::Digest,
+                manifest::get_digest_from_reference,
+                name::Name,
+                tag_store::{MockTagStore, TagStoreError},
+            };
+            use std::{str::FromStr, sync::Arc};
+
+            #[test]
+            fn test_should_return_digest_directly_when_reference_is_a_digest() {
+                let name = Name::from_str("foo").unwrap();
+                let tag_store = MockTagStore::new();
+                let sha = "ff".repeat(32);
+
+                let actual =
+                    get_digest_from_reference(&name, &format!("sha256:{sha}"), Arc::new(tag_store));
+
+                assert!(matches!(actual, Ok(digest) if digest.hex() == sha));
+            }
+
+            #[test]
+            fn test_should_resolve_tag_via_tag_store_when_reference_is_not_a_digest() {
+                let name = Name::from_str("foo").unwrap();
+                let mut tag_store = MockTagStore::new();
+                let sha = "ff".repeat(32);
+                let expected = Digest(format!("sha256:{sha}"));
+
+                tag_store
+                    .expect_read()
+                    .withf(|_, tag| tag == "latest")
+                    .returning(move |_, _| Ok(Digest(format!("sha256:{sha}"))));
+
+                let actual = get_digest_from_reference(&name, "latest", Arc::new(tag_store));
+
+                assert!(matches!(actual, Ok(digest) if digest == expected));
+            }
+
+            #[test]
+            fn test_should_return_manifest_unknown_when_repository_is_unknown() {
+                let name = Name::from_str("foo").unwrap();
+                let mut tag_store = MockTagStore::new();
+
+                tag_store
+                    .expect_read()
+                    .returning(|_, _| Err(TagStoreError::UnknownRepository("foo".to_string())));
+
+                let actual = get_digest_from_reference(&name, "latest", Arc::new(tag_store));
+
+                assert!(matches!(actual, Err(ServerError::ManifestUnknown(_))));
+            }
+
+            #[test]
+            fn test_should_return_manifest_unknown_when_tag_is_unknown() {
+                let name = Name::from_str("foo").unwrap();
+                let mut tag_store = MockTagStore::new();
+
+                tag_store.expect_read().returning(|_, _| {
+                    Err(TagStoreError::UnknwonTag {
+                        repository: "foo".to_string(),
+                        tag: "latest".to_string(),
+                    })
+                });
+
+                let actual = get_digest_from_reference(&name, "latest", Arc::new(tag_store));
+
+                assert!(matches!(actual, Err(ServerError::ManifestUnknown(_))));
+            }
+
+            #[test]
+            fn test_should_return_bad_request_for_other_tag_store_errors() {
+                let name = Name::from_str("foo").unwrap();
+                let mut tag_store = MockTagStore::new();
+
+                tag_store.expect_read().returning(|_, _| {
+                    Err(TagStoreError::DigestError(
+                        crate::digest::DigestError::InvalidDigest,
+                    ))
+                });
+
+                let actual = get_digest_from_reference(&name, "latest", Arc::new(tag_store));
+
+                assert!(matches!(actual, Err(ServerError::BadRequest(_))));
+            }
+        }
+
+        mod compute_hash {
+            use crate::manifest::compute_hash;
+            use axum::body::Bytes;
+
+            #[test]
+            fn test_should_compute_sha256_of_body() {
+                let body = Bytes::from_static(b"Lorem ipsum dolor sit amet");
+                let expected = "16aba5393ad72c0041f5600ad3c2c52ec437a2f0c7fc08fadfc3c0fe9641d7a3";
+
+                let actual = compute_hash(&body);
+
+                assert!(matches!(actual, Ok(digest) if digest.hex() == expected));
+            }
+
+            #[test]
+            fn test_should_compute_different_hashes_for_different_bodies() {
+                let (Ok(first), Ok(second)) = (
+                    compute_hash(&Bytes::from_static(b"foo")),
+                    compute_hash(&Bytes::from_static(b"bar")),
+                ) else {
+                    panic!("expected both hashes to compute successfully");
+                };
+
+                assert_ne!(first, second);
+            }
+        }
+
+        mod assert_hashes_equal {
+            use crate::{digest::Digest, manifest::assert_hashes_equal};
+
+            #[test]
+            fn test_should_succeed_when_hashes_match() {
+                let sha = "ff".repeat(32);
+                let computed = Digest(format!("sha256:{sha}"));
+                let claimed = Digest(format!("sha256:{sha}"));
+
+                assert!(assert_hashes_equal(&computed, &claimed).is_ok());
+            }
+
+            #[test]
+            fn test_should_fail_when_hashes_differ() {
+                let computed = Digest(format!("sha256:{}", "ff".repeat(32)));
+                let claimed = Digest(format!("sha256:{}", "00".repeat(32)));
+
+                assert!(assert_hashes_equal(&computed, &claimed).is_err());
+            }
+        }
     }
 }
 
@@ -1276,6 +1404,53 @@ mod upload {
     ) -> Result<impl IntoResponse, ServerError> {
         state.blob_uploader.abort(&registry, uuid)?;
         Ok(StatusCode::NO_CONTENT)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        mod parse_range_start {
+            use crate::{ServerError, upload::parse_range_start};
+            use axum::http::HeaderMap;
+
+            #[test]
+            fn test_should_return_zero_when_header_is_absent() {
+                let headers = HeaderMap::new();
+
+                let actual = parse_range_start(&headers);
+
+                assert!(matches!(actual, Ok(0)));
+            }
+
+            #[test]
+            fn test_should_parse_start_of_well_formed_range() {
+                let mut headers = HeaderMap::new();
+                headers.insert("content-range", "42-99".parse().unwrap());
+
+                let actual = parse_range_start(&headers);
+
+                assert!(matches!(actual, Ok(42)));
+            }
+
+            #[test]
+            fn test_should_parse_start_when_range_has_no_end() {
+                let mut headers = HeaderMap::new();
+                headers.insert("content-range", "0-".parse().unwrap());
+
+                let actual = parse_range_start(&headers);
+
+                assert!(matches!(actual, Ok(0)));
+            }
+
+            #[test]
+            fn test_should_fail_when_start_is_not_numeric() {
+                let mut headers = HeaderMap::new();
+                headers.insert("content-range", "oops-99".parse().unwrap());
+
+                let actual = parse_range_start(&headers);
+
+                assert!(matches!(actual, Err(ServerError::BadRequest(_))));
+            }
+        }
     }
 }
 
