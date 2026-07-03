@@ -365,11 +365,13 @@ impl Server {
         let blob_routes = Router::new()
             .route(
                 "/v2/{name}/blobs/{digest}",
-                head(blobs::info).get(blobs::blob),
+                head(blobs::info).get(blobs::blob).delete(blobs::delete),
             )
             .route(
                 "/v2/{namespace}/{name}/blobs/{digest}",
-                head(blobs::namespaced_info).get(blobs::namespaced_blob),
+                head(blobs::namespaced_info)
+                    .get(blobs::namespaced_blob)
+                    .delete(blobs::namespaced_delete),
             )
             .with_state(blob_state);
 
@@ -931,7 +933,24 @@ mod manifest {
                 other => ServerError::Internal(Box::new(other)),
             })?;
 
+        remove_tags_pointing_to(state.tag_store.as_ref(), &name, &digest);
+
         Ok(StatusCode::ACCEPTED)
+    }
+
+    fn remove_tags_pointing_to(tag_store: &dyn TagStore, name: &Name, digest: &Digest) {
+        let Ok(tags) = tag_store.list(name) else {
+            return;
+        };
+
+        for tag in tags {
+            if tag_store
+                .read(name, &tag)
+                .is_ok_and(|resolved| resolved == *digest)
+            {
+                let _ = tag_store.delete(name, &tag);
+            }
+        }
     }
 
     #[cfg(test)]
@@ -1068,6 +1087,72 @@ mod manifest {
                 let claimed = Digest(format!("sha256:{}", "00".repeat(32)));
 
                 assert!(assert_hashes_equal(&computed, &claimed).is_err());
+            }
+        }
+
+        mod remove_tags_pointing_to {
+            use crate::{
+                digest::Digest, manifest::remove_tags_pointing_to, name::Name,
+                tag_store::MockTagStore,
+            };
+            use std::str::FromStr;
+
+            #[test]
+            fn test_should_delete_only_tags_that_resolve_to_the_digest() {
+                let name = Name::from_str("foo").unwrap();
+                let deleted = Digest(format!("sha256:{}", "ff".repeat(32)));
+                let other = Digest(format!("sha256:{}", "00".repeat(32)));
+                let mut tag_store = MockTagStore::new();
+
+                tag_store
+                    .expect_list()
+                    .returning(|_| Ok(vec!["latest".to_string(), "stable".to_string()]));
+                tag_store
+                    .expect_read()
+                    .withf(|_, tag| tag == "latest")
+                    .returning({
+                        let deleted = deleted.clone();
+                        move |_, _| Ok(deleted.clone())
+                    });
+                tag_store
+                    .expect_read()
+                    .withf(|_, tag| tag == "stable")
+                    .returning({
+                        let other = other.clone();
+                        move |_, _| Ok(other.clone())
+                    });
+                tag_store
+                    .expect_delete()
+                    .withf(|_, tag| tag == "latest")
+                    .returning(|_, _| Ok(true));
+
+                remove_tags_pointing_to(&tag_store, &name, &deleted);
+            }
+
+            #[test]
+            fn test_should_do_nothing_when_repository_has_no_tags() {
+                let name = Name::from_str("foo").unwrap();
+                let digest = Digest(format!("sha256:{}", "ff".repeat(32)));
+                let mut tag_store = MockTagStore::new();
+
+                tag_store.expect_list().returning(|_| Ok(Vec::new()));
+
+                remove_tags_pointing_to(&tag_store, &name, &digest);
+            }
+
+            #[test]
+            fn test_should_do_nothing_when_listing_tags_fails() {
+                let name = Name::from_str("foo").unwrap();
+                let digest = Digest(format!("sha256:{}", "ff".repeat(32)));
+                let mut tag_store = MockTagStore::new();
+
+                tag_store.expect_list().returning(|_| {
+                    Err(crate::tag_store::TagStoreError::UnknownRepository(
+                        "foo".to_string(),
+                    ))
+                });
+
+                remove_tags_pointing_to(&tag_store, &name, &digest);
             }
         }
     }
@@ -1702,5 +1787,35 @@ mod blobs {
             Body::from_stream(stream),
         )
             .into_response())
+    }
+
+    pub(crate) async fn delete(
+        State(state): State<BlobState>,
+        Path((name, raw_digest)): Path<(String, String)>,
+    ) -> Result<impl IntoResponse, ServerError> {
+        delete_blob(state, Name::from_str(&name)?, raw_digest).await
+    }
+
+    pub(crate) async fn namespaced_delete(
+        State(state): State<BlobState>,
+        Path((namespace, name, raw_digest)): Path<(String, String, String)>,
+    ) -> Result<impl IntoResponse, ServerError> {
+        delete_blob(state, Name::from_namespaced(&namespace, &name)?, raw_digest).await
+    }
+
+    async fn delete_blob(
+        state: BlobState,
+        name: Name,
+        raw_digest: String,
+    ) -> Result<impl IntoResponse, ServerError> {
+        let digest = Digest::from_str(&raw_digest)?;
+        let blob_root = state.paths.repository_root(&name);
+        state
+            .blob_store
+            .delete(&blob_root, &digest)
+            .await
+            .map_err(to_blob_error)?;
+
+        Ok(StatusCode::ACCEPTED)
     }
 }
