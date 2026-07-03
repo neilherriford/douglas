@@ -5,7 +5,7 @@ use std::{
     sync::Arc,
 };
 
-pub fn create_sharded_blob_path(root: &Path, digest: &Digest) -> PathBuf {
+pub fn create_sharded_blob_root(root: &Path, digest: &Digest) -> PathBuf {
     let mut result = root.to_path_buf();
     result.push("blobs");
     result.push("sha256");
@@ -26,7 +26,7 @@ pub struct BlobFilePaths {
 
 impl BlobFilePaths {
     pub fn new(root: &Path, digest: &Digest) -> Self {
-        let final_root = create_sharded_blob_path(root, digest);
+        let final_root = create_sharded_blob_root(root, digest);
 
         let mut final_file = final_root.clone();
         final_file.push(digest.hex());

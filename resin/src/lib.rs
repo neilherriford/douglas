@@ -1,16 +1,20 @@
+mod blob_mounter;
 mod blob_paths;
 mod blob_store;
 mod blob_uploader;
 mod bootstrap;
 mod digest;
 mod name;
+mod repository_store;
 mod tag_store;
 
 use crate::{
+    blob_mounter::{BlobMounter, FileBlobMounter},
     blob_store::{BlobError, BlobStore, FileBlobStore},
     blob_uploader::{BlobUploader, BlobUploaderError, FileBlobUploader},
     digest::DigestError,
     name::{Name, NameParseError},
+    repository_store::{FileRepositoryStore, RepositoryStore},
     tag_store::{FileTagStore, TagStore, TagStoreError},
 };
 use axum::{
@@ -24,14 +28,14 @@ use axum::{
 use config::DouglasFolders;
 use credentials::create_credentials;
 use file_system::{
-    EntryKind, FileAppender, FileDeleter, FileReader, FileRenamer, FileSystemError, FileWriter,
-    Folder, Inspect, UnixFileAppender, UnixFileDeleter, UnixFileReader, UnixFileRenamer,
-    UnixFileWriter, UnixFolder, UnixInspect,
+    FileAppender, FileDeleter, FileReader, FileRenamer, FileSystemError, FileWriter, Folder,
+    Inspect, Links, UnixFileAppender, UnixFileDeleter, UnixFileReader, UnixFileRenamer,
+    UnixFileWriter, UnixFolder, UnixInspect, UnixLinks,
 };
 use log::{BufferedFileReporter, Outcome, Reporter, ScopeKind, Span, TuiReporter};
 use os::{Os, Unix};
 use serde_json::json;
-use std::{path::PathBuf, str::FromStr, sync::Arc};
+use std::{path::PathBuf, sync::Arc};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -92,6 +96,12 @@ impl From<NameParseError> for ServerError {
     }
 }
 
+impl From<FileSystemError> for ServerError {
+    fn from(err: FileSystemError) -> ServerError {
+        ServerError::Internal(Box::new(err))
+    }
+}
+
 impl IntoResponse for ServerError {
     fn into_response(self) -> axum::response::Response {
         let (status, code, message) = match self {
@@ -144,32 +154,10 @@ impl IntoResponse for ServerError {
     }
 }
 
-struct RepositoryStore {
-    folder: Arc<dyn Folder>,
-    repository_root: PathBuf,
-}
-
-impl RepositoryStore {
-    pub fn new(folder: Arc<dyn Folder>, repository_root: PathBuf) -> Self {
-        Self {
-            folder,
-            repository_root,
-        }
-    }
-
-    pub fn list(&self) -> Result<Vec<Name>, Error> {
-        Ok(self
-            .folder
-            .entries(&self.repository_root)?
-            .iter()
-            .filter_map(|entry| {
-                if entry.kind != EntryKind::Directory {
-                    return None;
-                }
-                Name::from_str(&entry.name).ok()
-            })
-            .collect())
-    }
+#[derive(Clone)]
+struct UploadState {
+    blob_uploader: Arc<dyn BlobUploader>,
+    blob_mounter: Arc<dyn BlobMounter>,
 }
 
 #[derive(Clone)]
@@ -220,9 +208,10 @@ pub struct Server {
     port: u16,
     blob_store: Arc<dyn BlobStore>,
     blob_uploader: Arc<dyn BlobUploader>,
+    blob_mounter: Arc<dyn BlobMounter>,
     tag_store: Arc<dyn TagStore>,
     manifest_paths: Arc<BlobPaths>,
-    repository_store: Arc<RepositoryStore>,
+    repository_store: Arc<dyn RepositoryStore>,
 }
 
 impl Server {
@@ -236,6 +225,7 @@ impl Server {
         let file_reader: Arc<dyn FileReader> = Arc::new(UnixFileReader::new());
         let file_writer: Arc<dyn FileWriter> = Arc::new(UnixFileWriter::new());
         let file_appender: Arc<dyn FileAppender> = Arc::new(UnixFileAppender::new());
+        let links: Arc<dyn Links> = Arc::new(UnixLinks::new());
 
         let (root_path, log_path) = if reporting_fd.is_none() {
             let mut root = std::env::temp_dir();
@@ -303,9 +293,16 @@ impl Server {
             repositories_root.clone(),
             Arc::clone(&folder),
         ));
-        let repository_store = Arc::new(RepositoryStore::new(
+        let repository_store: Arc<dyn RepositoryStore> = Arc::new(FileRepositoryStore::new(
+            repositories_root.clone(),
             Arc::clone(&folder),
-            manifest_paths.repositories_root.clone(),
+        ));
+        let blob_mounter = Arc::new(FileBlobMounter::new(
+            Arc::clone(&repository_store),
+            Arc::clone(&folder),
+            Arc::clone(&file_deleter),
+            Arc::clone(&links),
+            repositories_root.clone(),
         ));
 
         Ok(Self {
@@ -313,6 +310,7 @@ impl Server {
             port,
             blob_store,
             blob_uploader,
+            blob_mounter,
             tag_store,
             manifest_paths,
             repository_store,
@@ -326,6 +324,12 @@ impl Server {
             log::ScopeKind::Group,
         )
         .start_guard();
+
+        let upload_state = UploadState {
+            blob_uploader: Arc::clone(&self.blob_uploader),
+            blob_mounter: Arc::clone(&self.blob_mounter),
+        };
+
         let upload_routes = Router::new()
             .route("/v2/{name}/blobs/uploads", post(upload::start))
             .route("/v2/{name}/blobs/uploads/", post(upload::start)) // Docker sends trailing slash
@@ -351,7 +355,7 @@ impl Server {
                     .put(upload::namespaced_complete)
                     .delete(upload::namespaced_abort),
             )
-            .with_state(Arc::clone(&self.blob_uploader));
+            .with_state(upload_state);
 
         let blob_state = BlobState {
             blob_store: Arc::clone(&self.blob_store),
@@ -948,7 +952,7 @@ mod system {
     use std::sync::Arc;
 
     pub(crate) async fn catalog(
-        State(repository_store): State<Arc<RepositoryStore>>,
+        State(repository_store): State<Arc<dyn RepositoryStore>>,
     ) -> Result<impl IntoResponse, ServerError> {
         let names = Value::Array(
             repository_store
@@ -986,7 +990,8 @@ mod system {
 }
 
 mod upload {
-    use crate::{ServerError, blob_uploader::BlobUploader, digest::Digest, name::Name};
+    use crate::UploadState;
+    use crate::{ServerError, digest::Digest, name::Name};
     use axum::extract::Query;
     use axum::http::HeaderMap;
     use axum::{
@@ -1000,58 +1005,87 @@ mod upload {
         io,
         pin::Pin,
         str::FromStr,
-        sync::Arc,
         task::{Context, Poll},
     };
     use tokio::io::AsyncRead;
     use tokio::io::ReadBuf;
     use uuid::Uuid;
 
+    #[derive(Deserialize)]
+    pub(crate) struct StartParams {
+        mount: Option<String>,
+        from: Option<String>,
+    }
+
     pub(crate) async fn start(
-        State(uploader): State<Arc<dyn BlobUploader>>,
+        State(state): State<UploadState>,
         Path(name): Path<String>,
+        Query(params): Query<StartParams>,
     ) -> Result<impl IntoResponse, ServerError> {
-        start_upload(uploader, Name::from_str(&name)?)
+        start_upload(state, Name::from_str(&name)?, params)
     }
 
     pub(crate) async fn namespaced_start(
-        State(uploader): State<Arc<dyn BlobUploader>>,
+        State(state): State<UploadState>,
         Path((namespace, name)): Path<(String, String)>,
+        Query(params): Query<StartParams>,
     ) -> Result<impl IntoResponse, ServerError> {
-        start_upload(uploader, Name::from_namespaced(&namespace, &name)?)
+        start_upload(state, Name::from_namespaced(&namespace, &name)?, params)
     }
 
     fn start_upload(
-        uploader: Arc<dyn BlobUploader>,
+        state: UploadState,
         name: Name,
+        params: StartParams,
     ) -> Result<impl IntoResponse, ServerError> {
-        let uuid = uploader.start(&name)?;
+        let digest = params.mount.map(|raw| Digest::from_str(&raw)).transpose()?;
+        let source_registry = params.from.and_then(|raw| Name::from_str(&raw).ok());
+
+        if let Some(digest) = digest {
+            let mounted =
+                state
+                    .blob_mounter
+                    .mount_blob(source_registry.as_ref(), &digest, &name)?;
+            if mounted {
+                return Ok((
+                    StatusCode::CREATED,
+                    [
+                        ("Location", format!("/v2/{name}/blobs/{digest}")),
+                        ("docker-content-digest", digest.to_string()),
+                    ],
+                )
+                    .into_response());
+            }
+        }
+
+        let uuid = state.blob_uploader.start(&name)?;
         Ok((
             StatusCode::ACCEPTED,
             [("Location", format!("/v2/{name}/blobs/uploads/{uuid}"))],
-        ))
+        )
+            .into_response())
     }
 
     pub(crate) async fn status(
-        State(uploader): State<Arc<dyn BlobUploader>>,
+        State(state): State<UploadState>,
         Path((name, uuid)): Path<(String, Uuid)>,
     ) -> Result<impl IntoResponse, ServerError> {
-        get_status(uploader, uuid, Name::from_str(&name)?)
+        get_status(state, uuid, Name::from_str(&name)?)
     }
 
     pub(crate) async fn namespaced_status(
-        State(uploader): State<Arc<dyn BlobUploader>>,
+        State(state): State<UploadState>,
         Path((namespace, name, uuid)): Path<(String, String, Uuid)>,
     ) -> Result<impl IntoResponse, ServerError> {
-        get_status(uploader, uuid, Name::from_namespaced(&namespace, &name)?)
+        get_status(state, uuid, Name::from_namespaced(&namespace, &name)?)
     }
 
     fn get_status(
-        uploader: Arc<dyn BlobUploader>,
+        state: UploadState,
         uuid: Uuid,
         registry: Name,
     ) -> Result<impl IntoResponse, ServerError> {
-        let offset = uploader.status(&registry, uuid)?;
+        let offset = state.blob_uploader.status(&registry, uuid)?;
         Ok((
             StatusCode::NO_CONTENT,
             [
@@ -1063,24 +1097,24 @@ mod upload {
     }
 
     pub(crate) async fn write_chunk(
-        State(uploader): State<Arc<dyn BlobUploader>>,
+        State(state): State<UploadState>,
         Path((name, uuid)): Path<(String, Uuid)>,
         headers: HeaderMap,
         body: axum::body::Body,
     ) -> Result<impl IntoResponse, ServerError> {
         let range_start = parse_range_start(&headers)?;
-        write(uploader, Name::from_str(&name)?, uuid, range_start, body).await
+        write(state, Name::from_str(&name)?, uuid, range_start, body).await
     }
 
     pub(crate) async fn namespaced_write_chunk(
-        State(uploader): State<Arc<dyn BlobUploader>>,
+        State(state): State<UploadState>,
         Path((namespace, name, uuid)): Path<(String, String, Uuid)>,
         headers: HeaderMap,
         body: axum::body::Body,
     ) -> Result<impl IntoResponse, ServerError> {
         let range_start = parse_range_start(&headers)?;
         write(
-            uploader,
+            state,
             Name::from_namespaced(&namespace, &name)?,
             uuid,
             range_start,
@@ -1090,13 +1124,14 @@ mod upload {
     }
 
     async fn write(
-        uploader: Arc<dyn BlobUploader>,
+        state: UploadState,
         registry: Name,
         uuid: Uuid,
         range_start: u64,
         body: axum::body::Body,
     ) -> Result<impl IntoResponse, ServerError> {
-        let offset = uploader
+        let offset = state
+            .blob_uploader
             .write_chunk(&registry, uuid, range_start, body_to_reader(body))
             .await?;
         Ok((
@@ -1172,22 +1207,22 @@ mod upload {
     }
 
     pub(crate) async fn complete(
-        State(uploader): State<Arc<dyn BlobUploader>>,
+        State(state): State<UploadState>,
         Path((name, uuid)): Path<(String, Uuid)>,
         Query(params): Query<CompleteParams>,
         headers: HeaderMap,
     ) -> Result<impl IntoResponse, ServerError> {
-        complete_upload(uploader, uuid, params, Name::from_str(&name)?, headers)
+        complete_upload(state, uuid, params, Name::from_str(&name)?, headers)
     }
 
     pub(crate) async fn namespaced_complete(
-        State(uploader): State<Arc<dyn BlobUploader>>,
+        State(state): State<UploadState>,
         Path((namespace, name, uuid)): Path<(String, String, Uuid)>,
         Query(params): Query<CompleteParams>,
         headers: HeaderMap,
     ) -> Result<impl IntoResponse, ServerError> {
         complete_upload(
-            uploader,
+            state,
             uuid,
             params,
             Name::from_namespaced(&namespace, &name)?,
@@ -1196,7 +1231,7 @@ mod upload {
     }
 
     fn complete_upload(
-        uploader: Arc<dyn BlobUploader>,
+        state: UploadState,
         uuid: Uuid,
         params: CompleteParams,
         registry: Name,
@@ -1208,7 +1243,9 @@ mod upload {
             .and_then(|value| value.to_str().ok())
             .unwrap_or("application/octet-stream");
 
-        uploader.complete(&registry, uuid, &digest, media_type)?;
+        state
+            .blob_uploader
+            .complete(&registry, uuid, &digest, media_type)?;
         Ok((
             StatusCode::CREATED,
             [(
@@ -1219,25 +1256,25 @@ mod upload {
     }
 
     pub(crate) async fn abort(
-        State(uploader): State<Arc<dyn BlobUploader>>,
+        State(state): State<UploadState>,
         Path((name, uuid)): Path<(String, Uuid)>,
     ) -> Result<impl IntoResponse, ServerError> {
-        abort_upload(uploader, Name::from_str(&name)?, uuid)
+        abort_upload(state, Name::from_str(&name)?, uuid)
     }
 
     pub(crate) async fn namespaced_abort(
-        State(uploader): State<Arc<dyn BlobUploader>>,
+        State(state): State<UploadState>,
         Path((namespace, name, uuid)): Path<(String, String, Uuid)>,
     ) -> Result<impl IntoResponse, ServerError> {
-        abort_upload(uploader, Name::from_namespaced(&namespace, &name)?, uuid)
+        abort_upload(state, Name::from_namespaced(&namespace, &name)?, uuid)
     }
 
     fn abort_upload(
-        uploader: Arc<dyn BlobUploader>,
+        state: UploadState,
         registry: Name,
         uuid: Uuid,
     ) -> Result<impl IntoResponse, ServerError> {
-        uploader.abort(&registry, uuid)?;
+        state.blob_uploader.abort(&registry, uuid)?;
         Ok(StatusCode::NO_CONTENT)
     }
 }

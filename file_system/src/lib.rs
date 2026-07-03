@@ -4,11 +4,11 @@ use async_trait::async_trait;
 use mockall::predicate;
 use nix::sys::stat::{Mode, stat, umask};
 use std::ffi::OsString;
-use std::fs::OpenOptions;
 use std::fs::{
     File, Metadata, Permissions as Perms, create_dir_all, metadata, read_dir, read_link,
     read_to_string, remove_file, rename, set_permissions,
 };
+use std::fs::{OpenOptions, hard_link};
 use std::io::Write;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt, chown, symlink};
 use std::path::{Path, PathBuf};
@@ -163,7 +163,7 @@ impl Entry {
         };
 
         let kind;
-        let is_link;
+        let is_symlink;
         let size;
 
         match metadata {
@@ -173,7 +173,7 @@ impl Entry {
                 } else {
                     kind = EntryKind::Directory;
                 }
-                is_link = metadata.is_symlink();
+                is_symlink = metadata.is_symlink();
                 size = metadata.len();
             }
             Err(err) => return Err(FileSystemError::IoError(err)),
@@ -182,7 +182,7 @@ impl Entry {
         Ok(Entry {
             name: entry_name,
             kind,
-            is_link,
+            is_link: is_symlink,
             size,
         })
     }
@@ -350,10 +350,15 @@ impl FileWriter for UnixFileWriter {
     }
 
     fn write_all_bytes(&self, path: &Path, bytes: &[u8]) -> Result<(), FileSystemError> {
-        let mut file = File::create(path)
-            .map_err(|error| FileSystemError::IoErrorAtPath { path: path.to_path_buf(), error })?;
+        let mut file = File::create(path).map_err(|error| FileSystemError::IoErrorAtPath {
+            path: path.to_path_buf(),
+            error,
+        })?;
         file.write_all(bytes.as_ref())
-            .map_err(|error| FileSystemError::IoErrorAtPath { path: path.to_path_buf(), error })?;
+            .map_err(|error| FileSystemError::IoErrorAtPath {
+                path: path.to_path_buf(),
+                error,
+            })?;
 
         Ok(())
     }
@@ -410,10 +415,15 @@ impl FileAppender for UnixFileAppender {
             .mode(Modes::OwnerReadWriteGroupReadWrite.into())
             .open(path);
         umask(previous_umask);
-        let mut file = open_result
-            .map_err(|error| FileSystemError::IoErrorAtPath { path: path.to_path_buf(), error })?;
+        let mut file = open_result.map_err(|error| FileSystemError::IoErrorAtPath {
+            path: path.to_path_buf(),
+            error,
+        })?;
         file.write_all(bytes)
-            .map_err(|error| FileSystemError::IoErrorAtPath { path: path.to_path_buf(), error })?;
+            .map_err(|error| FileSystemError::IoErrorAtPath {
+                path: path.to_path_buf(),
+                error,
+            })?;
         Ok(())
     }
 }
@@ -430,8 +440,10 @@ impl UnixFileReader {
 #[async_trait]
 impl FileReader for UnixFileReader {
     fn read_all(&self, path: &Path) -> Result<String, FileSystemError> {
-        read_to_string(path)
-            .map_err(|error| FileSystemError::IoErrorAtPath { path: path.to_path_buf(), error })
+        read_to_string(path).map_err(|error| FileSystemError::IoErrorAtPath {
+            path: path.to_path_buf(),
+            error,
+        })
     }
     fn exists(&self, path: &Path) -> bool {
         path.exists()
@@ -445,10 +457,12 @@ impl FileReader for UnixFileReader {
             return Err(FileSystemError::NotFoundError(path.to_path_buf()));
         }
 
-        let file = tokio::fs::File::from_std(
-            std::fs::File::open(path)
-                .map_err(|error| FileSystemError::IoErrorAtPath { path: path.to_path_buf(), error })?,
-        );
+        let file = tokio::fs::File::from_std(std::fs::File::open(path).map_err(|error| {
+            FileSystemError::IoErrorAtPath {
+                path: path.to_path_buf(),
+                error,
+            }
+        })?);
         Ok(Box::new(file))
     }
 }
@@ -465,8 +479,10 @@ impl UnixFileDeleter {
 impl FileDeleter for UnixFileDeleter {
     fn delete(&self, path: &Path) -> Result<(), FileSystemError> {
         if path.exists() {
-            remove_file(path)
-                .map_err(|error| FileSystemError::IoErrorAtPath { path: path.to_path_buf(), error })?;
+            remove_file(path).map_err(|error| FileSystemError::IoErrorAtPath {
+                path: path.to_path_buf(),
+                error,
+            })?;
         }
         Ok(())
     }
@@ -482,8 +498,10 @@ impl UnixFileRenamer {
 }
 impl FileRenamer for UnixFileRenamer {
     fn rename(&self, from: &Path, to: &Path) -> Result<(), FileSystemError> {
-        rename(from, to)
-            .map_err(|error| FileSystemError::IoErrorAtPath { path: from.to_path_buf(), error })
+        rename(from, to).map_err(|error| FileSystemError::IoErrorAtPath {
+            path: from.to_path_buf(),
+            error,
+        })
     }
 }
 
@@ -702,8 +720,9 @@ impl MockBindableUnixDomainSocketFile {
 
 #[cfg_attr(feature = "mock", mockall::automock)]
 pub trait Links: Send + Sync {
-    fn create(&self, from: &Path, to: &Path) -> Result<(), FileSystemError>;
-    fn read(&self, path: &Path) -> Result<PathBuf, FileSystemError>;
+    fn create_symbolic(&self, from: &Path, to: &Path) -> Result<(), FileSystemError>;
+    fn follow_symbolic(&self, path: &Path) -> Result<PathBuf, FileSystemError>;
+    fn create_hard(&self, from: &Path, to: &Path) -> Result<(), FileSystemError>;
 }
 
 #[derive(Default)]
@@ -716,12 +735,16 @@ impl UnixLinks {
 }
 
 impl Links for UnixLinks {
-    fn create(&self, from: &Path, to: &Path) -> Result<(), FileSystemError> {
+    fn create_symbolic(&self, from: &Path, to: &Path) -> Result<(), FileSystemError> {
         Ok(symlink(from, to)?)
     }
 
-    fn read(&self, path: &Path) -> Result<PathBuf, FileSystemError> {
+    fn follow_symbolic(&self, path: &Path) -> Result<PathBuf, FileSystemError> {
         Ok(read_link(path)?)
+    }
+
+    fn create_hard(&self, from: &Path, to: &Path) -> Result<(), FileSystemError> {
+        Ok(hard_link(from, to)?)
     }
 }
 
@@ -734,23 +757,56 @@ impl MockLinks {
         let to = to.to_string();
         let to = PathBuf::from(to);
 
-        self.expect_read()
+        self.expect_follow_symbolic()
             .with(predicate::eq(from.clone()))
             .returning(move |_| Ok(to.clone()));
 
         self
     }
 
-    pub fn expect_create_with(&mut self, from: &str, to: &str) -> &mut Self {
+    pub fn expect_create_symbolic_with(&mut self, from: &str, to: &str) -> &mut Self {
         let from = from.to_string();
         let from = PathBuf::from(from);
 
         let to = to.to_string();
         let to = PathBuf::from(to);
 
-        self.expect_create()
+        self.expect_create_symbolic()
             .with(predicate::eq(from.clone()), predicate::eq(to.clone()))
             .returning(|_, _| Ok(()));
+
+        self
+    }
+
+    pub fn expect_create_hard_with(&mut self, from: &str, to: &str) -> &mut Self {
+        let from = from.to_string();
+        let from = PathBuf::from(from);
+
+        let to = to.to_string();
+        let to = PathBuf::from(to);
+
+        self.expect_create_hard()
+            .with(predicate::eq(from.clone()), predicate::eq(to.clone()))
+            .returning(|_, _| Ok(()));
+
+        self
+    }
+
+    pub fn given_create_hard_fails_once_with(
+        &mut self,
+        from: &str,
+        to: &str,
+        error: FileSystemError,
+    ) -> &mut Self {
+        let from = from.to_string();
+        let from = PathBuf::from(from);
+
+        let to = to.to_string();
+        let to = PathBuf::from(to);
+
+        self.expect_create_hard()
+            .with(predicate::eq(from.clone()), predicate::eq(to.clone()))
+            .return_once(move |_, _| Err(error));
 
         self
     }
