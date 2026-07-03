@@ -103,6 +103,7 @@ impl Drop for PartialUpload {
     }
 }
 
+#[cfg_attr(test, mockall::automock)]
 pub trait BlobUploader: Send + Sync {
     fn start(&self, registry: &Name) -> Result<Uuid, BlobUploaderError>;
     fn write_chunk<'a>(

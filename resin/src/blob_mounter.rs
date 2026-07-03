@@ -4,12 +4,13 @@ use crate::{
 use file_system::{FileDeleter, FileSystemError, Folder, Links};
 use std::{path::PathBuf, sync::Arc};
 
+#[cfg_attr(test, mockall::automock)]
 pub trait BlobMounter: Send + Sync {
-    fn mount_blob(
+    fn mount_blob<'a>(
         &self,
-        source_registry: Option<&Name>,
-        digest: &Digest,
-        destination_registry: &Name,
+        source_registry: Option<&'a Name>,
+        digest: &'a Digest,
+        destination_registry: &'a Name,
     ) -> Result<bool, FileSystemError>;
 }
 

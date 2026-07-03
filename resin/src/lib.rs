@@ -1451,6 +1451,149 @@ mod upload {
                 assert!(matches!(actual, Err(ServerError::BadRequest(_))));
             }
         }
+
+        mod start_upload {
+            use crate::{
+                UploadState,
+                blob_mounter::MockBlobMounter,
+                blob_uploader::MockBlobUploader,
+                name::Name,
+                upload::{StartParams, start_upload},
+            };
+            use axum::response::IntoResponse;
+            use std::{str::FromStr, sync::Arc};
+            use uuid::Uuid;
+
+            #[test]
+            fn test_should_return_created_when_mount_succeeds() {
+                let sha = "ff".repeat(32);
+                let mut blob_mounter = MockBlobMounter::new();
+                let blob_uploader = MockBlobUploader::new();
+
+                blob_mounter
+                    .expect_mount_blob()
+                    .returning(|_, _, _| Ok(true));
+
+                let state = UploadState {
+                    blob_uploader: Arc::new(blob_uploader),
+                    blob_mounter: Arc::new(blob_mounter),
+                };
+                let name = Name::from_str("foo").unwrap();
+                let params = StartParams {
+                    mount: Some(format!("sha256:{sha}")),
+                    from: None,
+                };
+
+                let actual = start_upload(state, name, params).map(IntoResponse::into_response);
+
+                let Ok(response) = actual else {
+                    panic!("expected success");
+                };
+                assert_eq!(response.status(), axum::http::StatusCode::CREATED);
+                assert!(response.headers().contains_key("Location"));
+                assert!(response.headers().contains_key("docker-content-digest"));
+            }
+
+            #[test]
+            fn test_should_fall_back_to_normal_upload_when_mount_misses() {
+                let sha = "ff".repeat(32);
+                let mut blob_mounter = MockBlobMounter::new();
+                let mut blob_uploader = MockBlobUploader::new();
+
+                blob_mounter
+                    .expect_mount_blob()
+                    .returning(|_, _, _| Ok(false));
+                blob_uploader.expect_start().returning(|_| Ok(Uuid::max()));
+
+                let state = UploadState {
+                    blob_uploader: Arc::new(blob_uploader),
+                    blob_mounter: Arc::new(blob_mounter),
+                };
+                let name = Name::from_str("foo").unwrap();
+                let params = StartParams {
+                    mount: Some(format!("sha256:{sha}")),
+                    from: None,
+                };
+
+                let actual = start_upload(state, name, params).map(IntoResponse::into_response);
+
+                let Ok(response) = actual else {
+                    panic!("expected success");
+                };
+                assert_eq!(response.status(), axum::http::StatusCode::ACCEPTED);
+            }
+
+            #[test]
+            fn test_should_skip_mounting_when_mount_param_is_absent() {
+                let blob_mounter = MockBlobMounter::new();
+                let mut blob_uploader = MockBlobUploader::new();
+
+                blob_uploader.expect_start().returning(|_| Ok(Uuid::max()));
+
+                let state = UploadState {
+                    blob_uploader: Arc::new(blob_uploader),
+                    blob_mounter: Arc::new(blob_mounter),
+                };
+                let name = Name::from_str("foo").unwrap();
+                let params = StartParams {
+                    mount: None,
+                    from: None,
+                };
+
+                let actual = start_upload(state, name, params).map(IntoResponse::into_response);
+
+                let Ok(response) = actual else {
+                    panic!("expected success");
+                };
+                assert_eq!(response.status(), axum::http::StatusCode::ACCEPTED);
+            }
+
+            #[test]
+            fn test_should_fail_when_mount_is_not_a_valid_digest() {
+                let blob_mounter = MockBlobMounter::new();
+                let blob_uploader = MockBlobUploader::new();
+
+                let state = UploadState {
+                    blob_uploader: Arc::new(blob_uploader),
+                    blob_mounter: Arc::new(blob_mounter),
+                };
+                let name = Name::from_str("foo").unwrap();
+                let params = StartParams {
+                    mount: Some("not-a-digest".to_string()),
+                    from: None,
+                };
+
+                let actual = start_upload(state, name, params);
+
+                assert!(actual.is_err());
+            }
+
+            #[test]
+            fn test_should_ignore_malformed_from_hint() {
+                let sha = "ff".repeat(32);
+                let mut blob_mounter = MockBlobMounter::new();
+                let blob_uploader = MockBlobUploader::new();
+
+                blob_mounter
+                    .expect_mount_blob()
+                    .withf(|source_registry, _, _| source_registry.is_none())
+                    .returning(|_, _, _| Ok(true));
+
+                let state = UploadState {
+                    blob_uploader: Arc::new(blob_uploader),
+                    blob_mounter: Arc::new(blob_mounter),
+                };
+                let name = Name::from_str("foo").unwrap();
+                let params = StartParams {
+                    mount: Some(format!("sha256:{sha}")),
+                    from: Some("Oops".to_string()),
+                };
+
+                let actual = start_upload(state, name, params).map(IntoResponse::into_response);
+
+                assert!(actual.is_ok());
+            }
+        }
     }
 }
 
