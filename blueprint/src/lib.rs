@@ -1,4 +1,7 @@
+pub mod bootstrap;
 pub mod commands;
+pub mod listener;
+pub mod service;
 
 use credentials::Credentials;
 use file_system::{Folder, Modes, Permissions};
@@ -16,6 +19,44 @@ pub trait HasFolder {
 
 pub trait HasPermissions {
     fn permissions(&self) -> &dyn Permissions;
+}
+
+pub struct StandardContext<'a> {
+    pub credentials: &'a dyn Credentials,
+    pub folder: &'a dyn Folder,
+    pub permissions: &'a dyn Permissions,
+}
+
+impl<'a> StandardContext<'a> {
+    pub fn new(
+        credentials: &'a dyn Credentials,
+        folder: &'a dyn Folder,
+        permissions: &'a dyn Permissions,
+    ) -> Self {
+        Self {
+            credentials,
+            folder,
+            permissions,
+        }
+    }
+}
+
+impl<'a> HasCredentials for StandardContext<'a> {
+    fn credentials(&self) -> &dyn Credentials {
+        self.credentials
+    }
+}
+
+impl<'a> HasFolder for StandardContext<'a> {
+    fn folder(&self) -> &dyn Folder {
+        self.folder
+    }
+}
+
+impl<'a> HasPermissions for StandardContext<'a> {
+    fn permissions(&self) -> &dyn Permissions {
+        self.permissions
+    }
 }
 
 pub trait Command<TContext>: std::fmt::Display {

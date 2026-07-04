@@ -8,6 +8,8 @@ mod name;
 mod repository_store;
 mod tag_store;
 
+pub use bootstrap::service_definition;
+
 use crate::{
     blob_mounter::{BlobMounter, FileBlobMounter},
     blob_store::{BlobError, BlobStore, FileBlobStore},
@@ -29,8 +31,8 @@ use config::DouglasFolders;
 use credentials::create_credentials;
 use file_system::{
     FileAppender, FileDeleter, FileReader, FileRenamer, FileSystemError, FileWriter, Folder,
-    Inspect, Links, UnixFileAppender, UnixFileDeleter, UnixFileReader, UnixFileRenamer,
-    UnixFileWriter, UnixFolder, UnixInspect, UnixLinks,
+    Inspect, Links, Permissions, UnixFileAppender, UnixFileDeleter, UnixFileReader,
+    UnixFileRenamer, UnixFileWriter, UnixFolder, UnixInspect, UnixLinks, UnixPermissions,
 };
 use log::{BufferedFileReporter, Outcome, Reporter, ScopeKind, Span, TuiReporter};
 use os::{Os, Unix};
@@ -226,6 +228,7 @@ impl Server {
         let file_writer: Arc<dyn FileWriter> = Arc::new(UnixFileWriter::new());
         let file_appender: Arc<dyn FileAppender> = Arc::new(UnixFileAppender::new());
         let links: Arc<dyn Links> = Arc::new(UnixLinks::new());
+        let permissions: Arc<dyn Permissions> = Arc::new(UnixPermissions::new());
 
         let (root_path, log_path) = if reporting_fd.is_none() {
             let mut root = std::env::temp_dir();
@@ -254,6 +257,7 @@ impl Server {
                 reporting_fd,
                 &*credentials,
                 &*folder,
+                &*permissions,
                 log_path.clone(),
                 root_path.clone(),
                 repositories_root.clone(),

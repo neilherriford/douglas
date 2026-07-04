@@ -160,6 +160,7 @@ impl MockCredentials {
 
         self
     }
+
     pub fn expect_join_group_with(&mut self, name: &str, group_name: &str) -> &mut Self {
         let name = name.to_string();
         let group_name = group_name.to_string();
@@ -167,6 +168,15 @@ impl MockCredentials {
         self.expect_join_group()
             .with(predicate::eq(name), predicate::eq(group_name))
             .returning(|_, _| Ok(()));
+
+        self
+    }
+
+    pub fn given_user_memberships(&mut self, user: &str, groups: Vec<&str>) -> &mut Self {
+        let groups: Vec<String> = groups.iter().map(|group| group.to_string()).collect();
+        self.expect_group_memberships()
+            .with(predicate::eq(user.to_string()))
+            .returning(move |_| groups.clone());
 
         self
     }
@@ -178,6 +188,6 @@ pub fn create_credentials(os: Arc<dyn Os>) -> Box<dyn Credentials> {
 }
 
 #[cfg(target_os = "linux")]
-pub fn create_credentials(os: Arc<dyn Os>) -> Box<dyn Credentials> {
+pub fn create_credentials(os: Arc<dyn Os>) -> Box<dyn ServiceCredentials> {
     Box::new(LinuxCredentials::new(Arc::clone(&os)))
 }

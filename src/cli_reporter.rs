@@ -93,14 +93,10 @@ struct ActiveScope {
 
 #[derive(Default)]
 struct AppState {
-    /// Insertion-ordered list of scope IDs currently in flight.
     scope_order: Vec<ScopeId>,
     scope_map: HashMap<ScopeId, ActiveScope>,
-    /// Recent log lines, capped at `MAX_LINES`.
     lines: VecDeque<String>,
-    /// Incremented every tick; used to animate the spinner.
     spinner: u8,
-    /// Set when the reporter channel closes — work is done.
     done: bool,
 }
 

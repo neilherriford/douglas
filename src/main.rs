@@ -14,7 +14,7 @@ use credentials::{
     well_known::{DOUGLAS_RESIN_GROUP, DOUGLAS_RESIN_USER},
 };
 use daemonize::Daemonize;
-use file_system::{FileReader, Folder, Permissions, UnixFileReader, UnixFolder, UnixPermissions};
+use file_system::{Folder, Permissions, UnixFolder, UnixPermissions};
 use log::{BufferedFileReporter, Reporter, TeeReporter};
 use os::{EnvironmentVariableReader, Os, Unix, UnixEnvironmentVariableReader};
 use std::{
@@ -84,9 +84,17 @@ enum ServiceCommand {
         notify_fd: i32,
     },
     Resin {
-        #[arg(long, default_value_t = false, help = "Debug mode — runs in foreground with TUI, no pipe required")]
+        #[arg(
+            long,
+            default_value_t = false,
+            help = "Debug mode — runs in foreground with TUI, no pipe required"
+        )]
         dbg: bool,
-        #[arg(long, help = "File descriptor to stream boot information to", required_unless_present = "dbg")]
+        #[arg(
+            long,
+            help = "File descriptor to stream boot information to",
+            required_unless_present = "dbg"
+        )]
         notify_fd: Option<i32>,
     },
 }
@@ -119,7 +127,11 @@ fn main() -> ExitCode {
             service: ServiceCommand::Resin { dbg: true, .. },
         } => run_with_tokio(resin_debug_mode()),
         Commands::Service {
-            service: ServiceCommand::Resin { notify_fd: Some(fd), .. },
+            service:
+                ServiceCommand::Resin {
+                    notify_fd: Some(fd),
+                    ..
+                },
         } => start_resin(fd),
         Commands::Service {
             service: ServiceCommand::Resin { .. },
@@ -219,7 +231,6 @@ async fn start(plan_only: bool) -> ExitCode {
     };
 
     let douglas_folders = DouglasFolders::new();
-    let file_reader: Arc<dyn FileReader> = Arc::new(UnixFileReader::new());
     let folder: Arc<dyn Folder> = Arc::new(UnixFolder::new());
     let os: Arc<dyn Os> = Arc::new(Unix::new());
     let credentials = Arc::from(create_credentials(Arc::clone(&os)));
@@ -241,7 +252,6 @@ async fn start(plan_only: bool) -> ExitCode {
         permissions,
         environment_variable_reader,
         folder,
-        file_reader,
         os,
         douglas_folders,
     )

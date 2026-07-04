@@ -8,3 +8,8 @@ credentials = { workspace = true }
 file_system = { workspace = true }
 log = { workspace = true }
 thiserror = { workspace = true }
+
+[dev-dependencies]
+credentials = { workspace = true, features = ["mock"] }
+file_system = { workspace = true, features = ["mock"] }
+mockall = { workspace = true }

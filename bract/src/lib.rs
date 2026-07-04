@@ -1,8 +1,9 @@
 mod bootstrap;
-mod create_listener;
 mod encoding;
 
-use crate::create_listener::CreateListener;
+pub use bootstrap::service_definition;
+
+use blueprint::listener::SocketListenerFactory;
 use config::DouglasFolders;
 use credentials::{CredentialsError, create_credentials};
 use file_system::{
@@ -53,7 +54,7 @@ pub struct Mount {
 }
 
 pub struct Bract {
-    listener_factories: Vec<CreateListener>,
+    listener_factories: Vec<SocketListenerFactory>,
     shutdown_sender: Sender<()>,
     reporter: Arc<dyn Reporter>,
 }
@@ -81,12 +82,18 @@ impl Bract {
 
         let permissions: Arc<dyn Permissions> = Arc::from(*permissions);
 
-        let listener_factories = vec![CreateListener::new(
-            &douglas_folders.socket_file("bract"),
-            Arc::clone(&file_deleter),
-            Arc::clone(&permissions),
-            Arc::clone(&unix_domain_socket),
-        )];
+        let listener_factories = bootstrap::service_definition(&douglas_folders)
+            .owned_sockets
+            .into_iter()
+            .map(|socket_definition| {
+                SocketListenerFactory::new(
+                    socket_definition,
+                    Arc::clone(&file_deleter),
+                    Arc::clone(&permissions),
+                    Arc::clone(&unix_domain_socket),
+                )
+            })
+            .collect();
 
         let reporter: Arc<dyn Reporter> =
             Arc::new(BufferedFileReporter::new(douglas_folders.log_file("bract")));

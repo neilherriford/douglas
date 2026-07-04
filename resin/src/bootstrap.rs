@@ -1,26 +1,34 @@
 use crate::Error;
-use blueprint::{Command, CommandExecutor, HasFolder, JournalingExecutor, commands::CreateFolder};
-use credentials::Credentials;
-use file_system::Folder;
-use log::{BufferedFileReporter, Level, PipeReporter, Reporter, ScopeKind, Span, TeeReporter};
-use std::{path::PathBuf, sync::Arc};
+use blueprint::{
+    Command,
+    bootstrap::{build_boot_reporter, execute_plan, resolve_plan},
+    service::{
+        BootstrapReporting, ServiceDefinition, ServiceState, ServiceUser, discover_service_state,
+        plan_service_bootstrap,
+    },
+};
+use config::DouglasFolders;
+use credentials::{
+    Credentials,
+    well_known::{DOUGLAS_RESIN_GROUP, DOUGLAS_RESIN_USER},
+};
+use file_system::{Folder, Modes, Permissions};
+use log::{ScopeKind, Span};
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 pub async fn bootstrap(
     reporting_fd: Option<i32>,
     credentials: &dyn Credentials,
     folder: &dyn Folder,
+    permissions: &dyn Permissions,
     log_path: PathBuf,
     root_path: PathBuf,
     repositories_path: PathBuf,
 ) -> Result<(), Error> {
-    let boot_reporter: Arc<dyn Reporter> = {
-        let mut sinks: Vec<Box<dyn Reporter>> = vec![Box::new(BufferedFileReporter::new(log_path))];
-
-        if let Some(fd) = reporting_fd {
-            sinks.push(Box::new(unsafe { PipeReporter::from_raw_fd(fd) }));
-        }
-        Arc::new(TeeReporter::new(sinks))
-    };
+    let boot_reporter = build_boot_reporter(log_path, reporting_fd);
 
     let guard = Span::new(
         Arc::clone(&boot_reporter),
@@ -29,70 +37,58 @@ pub async fn bootstrap(
     )
     .start_guard();
 
+    let definition = definition_for(repositories_path);
+
     let state = {
         let mut state_observer = StateObserver::new(credentials, folder);
         state_observer
-            .discover(guard.span(), root_path, repositories_path)
+            .discover(
+                guard.span(),
+                &definition,
+                &root_path,
+                credentials,
+                folder,
+                permissions,
+            )
             .await?
     };
 
-    let plan = match create_plan(state) {
+    let plan = match resolve_plan(guard.span(), create_plan(&definition, state)) {
         Ok(plan) => plan,
-        Err(err) => {
-            guard.span().message(Level::Warn, &err.to_string());
-            return guard.finish(Err(err));
-        }
+        Err(err) => return guard.finish(Err(err)),
     };
 
-    guard
-        .span()
-        .plan_hint(plan.iter().map(std::string::ToString::to_string).collect());
+    let mut context = Context::new(credentials, folder, permissions);
+    let result = execute_plan(guard.span(), plan, &mut context, || {
+        Error::FailedBoostrap(Vec::new())
+    });
 
-    let mut executor = JournalingExecutor::new();
-    let execution_result = {
-        let mut context = Context { folder };
-        executor.run(
-            &guard
-                .span()
-                .create_child("Executing plan", ScopeKind::Phase),
-            &mut context,
-            plan,
-        )
-    };
+    guard.finish(result)
+}
 
-    match execution_result {
-        blueprint::ExecutionResult::Success => guard.finish(Ok(())),
-        blueprint::ExecutionResult::Failed {
-            failed_at_step,
-            failed_at_step_name,
-            perform_error,
-            rollback_errors,
-        } => {
-            guard.span().message(
-                Level::Warn,
-                &format!(
-                    "Failed at step {failed_at_step}. {failed_at_step_name}: '{perform_error}'"
-                ),
-            );
-            if !rollback_errors.is_empty() {
-                guard.span().message(
-                    Level::Warn,
-                    "Additionally, ran into these errors while rolling back",
-                );
-                for error in rollback_errors {
-                    guard.span().message(Level::Warn, &error.to_string());
-                }
-            }
-            guard.finish(Err(Error::FailedBoostrap(Vec::new())))
-        }
-    }
+pub fn service_definition(douglas_folders: &DouglasFolders) -> ServiceDefinition {
+    let mut repositories_path = douglas_folders.resin.clone();
+    repositories_path.push("repositories");
+    definition_for(repositories_path)
+}
+
+fn definition_for(repositories_path: PathBuf) -> ServiceDefinition {
+    ServiceDefinition::new(
+        ServiceUser::create_managed(DOUGLAS_RESIN_USER),
+        DOUGLAS_RESIN_GROUP,
+        vec![(
+            repositories_path,
+            Modes::OwnerReadWriteExecuteGroupReadWriteExecute,
+        )],
+        BootstrapReporting::Pipe,
+    )
 }
 
 #[derive(Default)]
 struct State {
     is_root: bool,
     root_path_exists: bool,
-    folders_missing: Vec<PathBuf>,
+    service: ServiceState,
 }
 
 struct StateObserver<'a> {
@@ -111,8 +107,11 @@ impl<'a> StateObserver<'a> {
     pub async fn discover(
         &mut self,
         span: &Span,
-        root_path: PathBuf,
-        repositories_path: PathBuf,
+        definition: &ServiceDefinition,
+        root_path: &Path,
+        credentials: &dyn Credentials,
+        folder: &dyn Folder,
+        permissions: &dyn Permissions,
     ) -> Result<State, Error> {
         let guard = span
             .create_child(
@@ -121,9 +120,11 @@ impl<'a> StateObserver<'a> {
             )
             .start_guard();
 
+        let root_path_exists = self.folder.exists(root_path);
+
         let mut result = State {
             is_root: self.credentials.is_root(),
-            root_path_exists: self.folder.exists(&root_path),
+            root_path_exists,
             ..Default::default()
         };
 
@@ -131,37 +132,16 @@ impl<'a> StateObserver<'a> {
             return guard.finish(Ok(result));
         }
 
-        self.check_folder_presence(&mut result, repositories_path);
+        result.service = discover_service_state(definition, credentials, folder, permissions)?;
 
         guard.finish(Ok(result))
     }
-
-    fn check_folder_presence(&mut self, result: &mut State, path: PathBuf) {
-        if !self.folder.exists(&path) {
-            result.folders_missing.push(path);
-        }
-    }
 }
 
-struct Context<'a> {
-    folder: &'a dyn Folder,
-}
+type Context<'a> = blueprint::StandardContext<'a>;
+type Step<'a> = Box<dyn Command<Context<'a>>>;
 
-impl<'a> HasFolder for Context<'a> {
-    fn folder(&self) -> &dyn Folder {
-        self.folder
-    }
-}
-
-type Step = Box<dyn for<'a> Command<Context<'a>>>;
-
-fn push_step(steps: &mut Vec<Step>, command: impl for<'a> Command<Context<'a>> + 'static) {
-    steps.push(Box::new(command));
-}
-
-fn create_plan(state: State) -> Result<Vec<Step>, Error> {
-    let mut result = Vec::new();
-
+fn create_plan<'a>(definition: &ServiceDefinition, state: State) -> Result<Vec<Step<'a>>, Error> {
     if state.is_root {
         return Err(Error::CannotBeRoot);
     }
@@ -170,9 +150,5 @@ fn create_plan(state: State) -> Result<Vec<Step>, Error> {
         return Err(Error::MissingRootPath);
     }
 
-    for folder in state.folders_missing {
-        push_step(&mut result, CreateFolder::new(folder.clone()));
-    }
-
-    Ok(result)
+    Ok(plan_service_bootstrap(definition, &state.service))
 }

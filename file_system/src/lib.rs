@@ -656,6 +656,29 @@ impl MockPermissions {
 
         self
     }
+
+    pub fn given_ownership_and_mode(
+        &mut self,
+        path: &str,
+        user: &str,
+        group: &str,
+        mode: Modes,
+    ) -> &mut Self {
+        let path = path.to_string();
+        let path = PathBuf::from(path);
+        let user = user.to_string();
+        let group = group.to_string();
+
+        self.expect_get_user_and_group_ownership()
+            .with(predicate::eq(path.clone()))
+            .returning(move |_| Ok((user.clone(), group.clone())));
+
+        self.expect_get_mode()
+            .with(predicate::eq(path))
+            .returning(move |_| Ok(mode));
+
+        self
+    }
 }
 
 #[async_trait]

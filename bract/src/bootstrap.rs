@@ -1,20 +1,18 @@
+use crate::BootstrapError;
 use blueprint::{
-    Command, CommandExecutor, FolderModeRequirement, FolderOwnershipRequirement,
-    GroupMembershipRequirement, HasCredentials, HasFolder, HasPermissions, JournalingExecutor,
-    RunningStatus,
-    commands::{AddUserToGroup, CreateFolder, CreateGroup, SetMode, SetOwnership},
+    Command, RunningStatus,
+    bootstrap::{build_boot_reporter, execute_plan, resolve_plan},
+    listener::{ListenerDefinition, LivenessCheck, check_liveness},
+    service::{
+        BootstrapReporting, ServiceDefinition, ServiceState, ServiceUser, discover_service_state,
+        plan_service_bootstrap,
+    },
 };
 use config::DouglasFolders;
 use credentials::{Credentials, well_known::DOUGLAS_ADMIN_GROUP};
 use file_system::{Folder, Modes, Permissions};
-use log::{BufferedFileReporter, Level, PipeReporter, Reporter, ScopeKind, Span, TeeReporter};
-use std::{
-    os::unix::net::UnixStream,
-    path::{Path, PathBuf},
-    sync::Arc,
-};
-
-use crate::BootstrapError;
+use log::{Level, ScopeKind, Span};
+use std::sync::Arc;
 
 pub async fn bootstrap(
     reporting_fd: i32,
@@ -23,14 +21,7 @@ pub async fn bootstrap(
     permissions: &dyn Permissions,
     douglas_folders: &DouglasFolders,
 ) -> Result<(), BootstrapError> {
-    let boot_reporter: Arc<dyn Reporter> = {
-        let mut sinks: Vec<Box<dyn Reporter>> = vec![Box::new(BufferedFileReporter::new(
-            douglas_folders.log_file("bract"),
-        ))];
-
-        sinks.push(Box::new(unsafe { PipeReporter::from_raw_fd(reporting_fd) }));
-        Arc::new(TeeReporter::new(sinks))
-    };
+    let boot_reporter = build_boot_reporter(douglas_folders.log_file("bract"), Some(reporting_fd));
 
     let guard = Span::new(
         Arc::clone(&boot_reporter),
@@ -50,11 +41,12 @@ pub async fn bootstrap(
             }
         };
 
+    let definition = service_definition(douglas_folders);
+
     let state = {
-        let mut state_observer =
-            StateObserver::new(credentials, folder, permissions, &mut *docker_ping);
+        let mut state_observer = StateObserver::new(credentials, folder, &mut *docker_ping);
         state_observer
-            .discover(guard.span(), douglas_folders)
+            .discover(guard.span(), &definition, credentials, folder, permissions)
             .await?
     };
 
@@ -68,102 +60,72 @@ pub async fn bootstrap(
         return guard.finish(Err(BootstrapError::MustHaveRunningDocker));
     }
 
-    let plan = match create_plan(state) {
+    let plan = match resolve_plan(guard.span(), create_plan(&definition, state)) {
         Ok(plan) => plan,
-        Err(err) => {
-            guard.span().message(Level::Warn, &err.to_string());
-            return guard.finish(Err(err));
-        }
+        Err(err) => return guard.finish(Err(err)),
     };
 
-    guard
-        .span()
-        .plan_hint(plan.iter().map(std::string::ToString::to_string).collect());
+    let mut context = Context::new(credentials, folder, permissions);
+    let result = execute_plan(guard.span(), plan, &mut context, || {
+        BootstrapError::FailedBoostrap(Vec::new())
+    });
 
-    let mut executor = JournalingExecutor::new();
-    let execution_result = {
-        let mut context = Context {
-            credentials,
-            folder,
-            permissions,
-        };
-        executor.run(
-            &guard
-                .span()
-                .create_child("Executing plan", ScopeKind::Phase),
-            &mut context,
-            plan,
-        )
-    };
-
-    match execution_result {
-        blueprint::ExecutionResult::Success => guard.finish(Ok(())),
-        blueprint::ExecutionResult::Failed {
-            failed_at_step,
-            failed_at_step_name,
-            perform_error,
-            rollback_errors,
-        } => {
-            guard.span().message(
-                Level::Warn,
-                &format!(
-                    "Failed at step {failed_at_step}. {failed_at_step_name}: '{perform_error}'"
-                ),
-            );
-            if !rollback_errors.is_empty() {
-                guard.span().message(
-                    Level::Warn,
-                    "Additionally, ran into these errors while rolling back",
-                );
-                for error in rollback_errors {
-                    guard.span().message(Level::Warn, &error.to_string());
-                }
-            }
-            guard.finish(Err(BootstrapError::FailedBoostrap(Vec::new())))
-        }
-    }
+    guard.finish(result)
 }
 
-struct Context<'a> {
-    credentials: &'a dyn Credentials,
-    folder: &'a dyn Folder,
-    permissions: &'a dyn Permissions,
+pub fn service_definition(douglas_folders: &DouglasFolders) -> ServiceDefinition {
+    ServiceDefinition::with_sockets(
+        ServiceUser::create_system(credentials::ROOT_USER_NAME),
+        DOUGLAS_ADMIN_GROUP,
+        vec![
+            (
+                douglas_folders.logs.clone(),
+                Modes::InheritedOwnerReadWriteExecuteGroupReadWriteExecute,
+            ),
+            (
+                douglas_folders.transients.clone(),
+                Modes::OwnerReadWriteExecuteGroupReadWriteExecute,
+            ),
+            (
+                douglas_folders.applications.clone(),
+                Modes::OwnerReadWriteExecuteGroupReadWriteExecute,
+            ),
+            (
+                douglas_folders.application_services.clone(),
+                Modes::OwnerReadWriteExecuteGroupReadWriteExecute,
+            ),
+            (
+                douglas_folders.application_mounts.clone(),
+                Modes::OwnerReadWriteExecuteGroupReadWriteExecute,
+            ),
+            (
+                douglas_folders.configs.clone(),
+                Modes::InheritedOwnerReadWriteExecuteGroupReadWriteExecute,
+            ),
+        ],
+        vec![ListenerDefinition::new(
+            &douglas_folders.socket_file("bract"),
+            credentials::ROOT_USER_NAME,
+            DOUGLAS_ADMIN_GROUP,
+            Modes::OwnerReadWriteGroupReadWrite,
+        )],
+        BootstrapReporting::Pipe,
+    )
 }
 
-impl<'a> HasCredentials for Context<'a> {
-    fn credentials(&self) -> &dyn Credentials {
-        self.credentials
-    }
-}
-
-impl<'a> HasFolder for Context<'a> {
-    fn folder(&self) -> &dyn Folder {
-        self.folder
-    }
-}
-
-impl<'a> HasPermissions for Context<'a> {
-    fn permissions(&self) -> &dyn Permissions {
-        self.permissions
-    }
-}
+type Context<'a> = blueprint::StandardContext<'a>;
 
 #[derive(Default)]
 struct State {
     is_root: bool,
     bract_running_status: RunningStatus,
     docker_running_status: RunningStatus,
-    groups_missing: Vec<String>,
-    group_members_missing: Vec<GroupMembershipRequirement>,
-    folders_missing: Vec<PathBuf>,
-    folders_missing_ownership: Vec<FolderOwnershipRequirement>,
-    folders_missing_mode: Vec<FolderModeRequirement>,
+    service: ServiceState,
 }
 
 struct StateObserver<'a> {
     credentials: &'a dyn Credentials,
     folder: &'a dyn Folder,
-    permissions: &'a dyn Permissions,
     docker_ping: &'a mut dyn docker::Ping,
 }
 
@@ -171,13 +133,11 @@ impl<'a> StateObserver<'a> {
     pub fn new(
         credentials: &'a dyn Credentials,
         folder: &'a dyn Folder,
-        permissions: &'a dyn Permissions,
         docker_ping: &'a mut dyn docker::Ping,
     ) -> Self {
         Self {
             credentials,
             folder,
-            permissions,
             docker_ping,
         }
     }
@@ -185,7 +145,10 @@ impl<'a> StateObserver<'a> {
     pub async fn discover(
         &mut self,
         span: &Span,
-        douglas_folders: &DouglasFolders,
+        definition: &ServiceDefinition,
+        credentials: &dyn Credentials,
+        folder: &dyn Folder,
+        permissions: &dyn Permissions,
     ) -> Result<State, BootstrapError> {
         let guard = span
             .create_child(
@@ -195,7 +158,7 @@ impl<'a> StateObserver<'a> {
             .start_guard();
 
         let mut result = State {
-            bract_running_status: self.check_socket(guard.span(), "bract.sock", douglas_folders),
+            bract_running_status: self.check_bract_socket(guard.span(), definition),
             ..Default::default()
         };
 
@@ -207,126 +170,25 @@ impl<'a> StateObserver<'a> {
             return guard.finish(Ok(result));
         }
         result.is_root = true;
-        self.check_system_folders(&mut result, douglas_folders)?;
         result.docker_running_status = self.check_docker_running_status(guard.span()).await;
         if result.docker_running_status != RunningStatus::Running {
             return guard.finish(Ok(result));
         }
 
+        result.service = discover_service_state(definition, credentials, folder, permissions)?;
+
         guard.finish(Ok(result))
     }
 
-    fn check_system_folders(
-        &mut self,
-        result: &mut State,
-        douglas_folders: &DouglasFolders,
-    ) -> Result<(), BootstrapError> {
-        for (path, expected_mode) in [
-            (
-                &douglas_folders.logs,
-                Modes::InheritedOwnerReadWriteExecuteGroupReadWriteExecute,
-            ),
-            (
-                &douglas_folders.transients,
-                Modes::OwnerReadWriteExecuteGroupReadWriteExecute,
-            ),
-            (
-                &douglas_folders.applications,
-                Modes::OwnerReadWriteExecuteGroupReadWriteExecute,
-            ),
-            (
-                &douglas_folders.application_services,
-                Modes::OwnerReadWriteExecuteGroupReadWriteExecute,
-            ),
-            (
-                &douglas_folders.application_mounts,
-                Modes::OwnerReadWriteExecuteGroupReadWriteExecute,
-            ),
-            (
-                &douglas_folders.configs,
-                Modes::InheritedOwnerReadWriteExecuteGroupReadWriteExecute,
-            ),
-        ] {
-            self.check_system_folder(result, path, expected_mode)?;
-        }
-        Ok(())
-    }
-
-    fn check_system_folder(
-        &self,
-        state: &mut State,
-        system_folder: &Path,
-        expected_mode: Modes,
-    ) -> Result<(), BootstrapError> {
-        if self.folder.exists(system_folder) {
-            let (owning_user, owning_group) = self
-                .permissions
-                .get_user_and_group_ownership(system_folder)?;
-            if owning_user != credentials::ROOT_USER_NAME || owning_group != DOUGLAS_ADMIN_GROUP {
-                state
-                    .folders_missing_ownership
-                    .push(FolderOwnershipRequirement {
-                        path: system_folder.to_path_buf(),
-                        owning_user_name: credentials::ROOT_USER_NAME.to_string(),
-                        owning_group_name: DOUGLAS_ADMIN_GROUP.to_string(),
-                    });
-            }
-
-            let actual_mode = self.permissions.get_mode(system_folder)?;
-            if actual_mode != expected_mode {
-                state.folders_missing_mode.push(FolderModeRequirement {
-                    path: system_folder.to_path_buf(),
-                    mode: expected_mode,
-                });
-            }
-        } else {
-            state.folders_missing.push(system_folder.to_path_buf());
-            state
-                .folders_missing_ownership
-                .push(FolderOwnershipRequirement {
-                    path: system_folder.to_path_buf(),
-                    owning_user_name: credentials::ROOT_USER_NAME.to_string(),
-                    owning_group_name: DOUGLAS_ADMIN_GROUP.to_string(),
-                });
-            state.folders_missing_mode.push(FolderModeRequirement {
-                path: system_folder.to_path_buf(),
-                mode: expected_mode,
-            });
-        }
-        Ok(())
-    }
-
-    fn check_socket(
-        &self,
-        span: &Span,
-        socket_file_name: &str,
-        douglas_folders: &DouglasFolders,
-    ) -> RunningStatus {
-        let mut socket_path = douglas_folders.transients.clone();
-        socket_path.push(socket_file_name);
-        let socket_path = socket_path.as_path();
-        if self.folder.exists(socket_path) {
-            match UnixStream::connect(socket_path) {
-                Ok(_) => RunningStatus::Running,
-                Err(err) => match err.kind() {
-                    std::io::ErrorKind::NotFound
-                    | std::io::ErrorKind::ConnectionRefused
-                    | std::io::ErrorKind::PermissionDenied => RunningStatus::NotRunning,
-                    _ => {
-                        span.message(
-                            Level::Warn,
-                            &format!(
-                                "Could not determine status of socket '{}': '{err}'",
-                                socket_path.to_str().unwrap_or_default(),
-                            ),
-                        );
-                        RunningStatus::Unknown
-                    }
-                },
-            }
-        } else {
-            RunningStatus::NotRunning
-        }
+    fn check_bract_socket(&self, span: &Span, definition: &ServiceDefinition) -> RunningStatus {
+        let Some(socket) = definition.owned_sockets.first() else {
+            return RunningStatus::Unknown;
+        };
+        check_liveness(
+            span,
+            self.folder,
+            &LivenessCheck::UnixSocket(socket.socket_path.clone()),
+        )
     }
 
     async fn check_docker_running_status(&mut self, span: &Span) -> RunningStatus {
@@ -340,17 +202,14 @@ impl<'a> StateObserver<'a> {
     }
 }
 
-type Step = Box<dyn for<'a> Command<Context<'a>>>;
+type Step<'a> = Box<dyn Command<Context<'a>>>;
 
-fn push_step(steps: &mut Vec<Step>, command: impl for<'a> Command<Context<'a>> + 'static) {
-    steps.push(Box::new(command));
-}
-
-fn create_plan(state: State) -> Result<Vec<Step>, BootstrapError> {
-    let mut result = Vec::new();
-
+fn create_plan<'a>(
+    definition: &ServiceDefinition,
+    state: State,
+) -> Result<Vec<Step<'a>>, BootstrapError> {
     if state.bract_running_status == RunningStatus::Running {
-        return Ok(result);
+        return Ok(Vec::new());
     }
 
     if state.docker_running_status != RunningStatus::Running {
@@ -361,38 +220,5 @@ fn create_plan(state: State) -> Result<Vec<Step>, BootstrapError> {
         return Err(BootstrapError::MustBeRoot);
     }
 
-    for group_name in &state.groups_missing {
-        push_step(&mut result, CreateGroup::new(group_name));
-    }
-
-    for expected in &state.group_members_missing {
-        push_step(
-            &mut result,
-            AddUserToGroup::new(&expected.user_name, &expected.group_name),
-        );
-    }
-
-    for folder in &state.folders_missing {
-        push_step(&mut result, CreateFolder::new(folder.clone()));
-    }
-
-    for expeced in &state.folders_missing_ownership {
-        push_step(
-            &mut result,
-            SetOwnership::new(
-                expeced.path.clone(),
-                &expeced.owning_user_name,
-                &expeced.owning_group_name,
-            ),
-        );
-    }
-
-    for expected in &state.folders_missing_mode {
-        push_step(
-            &mut result,
-            SetMode::new(expected.path.clone(), expected.mode),
-        );
-    }
-
-    Ok(result)
+    Ok(plan_service_bootstrap(definition, &state.service))
 }
