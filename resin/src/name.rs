@@ -80,7 +80,7 @@ impl FromStr for Name {
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         match Name::split(value) {
-            Some((namespace, name)) => Name::from_namespaced(&namespace, &name),
+            Some((namespace, name)) => Name::from_namespaced(namespace, name),
             None => {
                 Name::assert_is_valid(value)?;
                 Ok(Name {

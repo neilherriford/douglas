@@ -1,6 +1,6 @@
 use crate::{
-    Command, FolderModeRequirement, FolderOwnershipRequirement, HasCredentials, HasFolder,
-    HasPermissions, commands, listener::ListenerDefinition,
+    Command, FolderModeRequirement, FolderOwnershipRequirement, GroupMembershipRequirement,
+    HasCredentials, HasFolder, HasPermissions, commands, listener::ListenerDefinition,
 };
 use credentials::Credentials;
 use file_system::{FileSystemError, Folder, Modes, Permissions};
@@ -40,6 +40,7 @@ pub struct ServiceDefinition {
     pub group: String,
     pub owned_folders: Vec<(PathBuf, Modes)>,
     pub owned_sockets: Vec<ListenerDefinition>,
+    pub additional_groups: Vec<String>,
     pub bootstrap_reporting: BootstrapReporting,
 }
 
@@ -49,6 +50,7 @@ impl ServiceDefinition {
         group: &str,
         owned_folders: Vec<(PathBuf, Modes)>,
         owned_sockets: Vec<ListenerDefinition>,
+        additional_groups: &[&str],
         bootstrap_reporting: BootstrapReporting,
     ) -> Self {
         Self {
@@ -56,6 +58,10 @@ impl ServiceDefinition {
             group: group.to_string(),
             owned_folders,
             owned_sockets,
+            additional_groups: additional_groups
+                .iter()
+                .map(|name| name.to_string())
+                .collect(),
             bootstrap_reporting,
         }
     }
@@ -66,7 +72,14 @@ impl ServiceDefinition {
         owned_folders: Vec<(PathBuf, Modes)>,
         bootstrap_reporting: BootstrapReporting,
     ) -> Self {
-        Self::with_sockets(user, group, owned_folders, Vec::new(), bootstrap_reporting)
+        Self::with_sockets(
+            user,
+            group,
+            owned_folders,
+            Vec::new(),
+            &[],
+            bootstrap_reporting,
+        )
     }
 }
 
@@ -75,6 +88,8 @@ pub struct ServiceState {
     pub group_missing: bool,
     pub user_missing: bool,
     pub group_membership_missing: bool,
+    pub additional_groups_missing: Vec<String>,
+    pub additional_group_memberships_missing: Vec<GroupMembershipRequirement>,
     pub folders_missing: Vec<PathBuf>,
     pub folders_missing_ownership: Vec<FolderOwnershipRequirement>,
     pub folders_missing_mode: Vec<FolderModeRequirement>,
@@ -104,6 +119,26 @@ pub fn discover_service_state(
                 .iter()
                 .any(|member| member == name)
     );
+
+    if let ServiceUser::Managed(user_name) = &definition.user {
+        for group_name in &definition.additional_groups {
+            let is_member = if credentials.group_exists(group_name) {
+                credentials
+                    .group_memberships(group_name)
+                    .iter()
+                    .any(|member| member == user_name)
+            } else {
+                state.additional_groups_missing.push(group_name.clone());
+                false
+            };
+
+            if !is_member {
+                state
+                    .additional_group_memberships_missing
+                    .push(GroupMembershipRequirement::new(group_name, user_name));
+            }
+        }
+    }
 
     for (path, expected_mode) in &definition.owned_folders {
         discover_folder_state(
@@ -190,6 +225,17 @@ where
         )));
     }
 
+    for group_name in &state.additional_groups_missing {
+        steps.push(Box::new(commands::CreateGroup::new(group_name)));
+    }
+
+    for requirement in &state.additional_group_memberships_missing {
+        steps.push(Box::new(commands::AddUserToGroup::new(
+            &requirement.user_name,
+            &requirement.group_name,
+        )));
+    }
+
     for folder in &state.folders_missing {
         steps.push(Box::new(commands::CreateFolder::new(folder.clone())));
     }
@@ -237,6 +283,17 @@ mod tests {
                 "douglas-admin",
                 vec![(PathBuf::from("/var/lib/foo"), Modes::OwnerReadWrite)],
                 BootstrapReporting::None,
+            )
+        }
+
+        fn definition_with_additional_group() -> ServiceDefinition {
+            ServiceDefinition::with_sockets(
+                ServiceUser::create_managed("foo"),
+                "foo",
+                vec![(PathBuf::from("/var/lib/foo"), Modes::OwnerReadWrite)],
+                Vec::new(),
+                &["shared"],
+                BootstrapReporting::Pipe,
             )
         }
 
@@ -472,12 +529,120 @@ mod tests {
             assert!(!state.user_missing);
             assert!(!state.group_membership_missing);
         }
+
+        #[test]
+        fn test_should_flag_missing_additional_group_and_membership() {
+            let mut credentials = MockCredentials::new();
+            let mut folder = MockFolder::new();
+            let mut permissions = MockPermissions::new();
+
+            credentials
+                .given_group_exists("foo")
+                .given_user_exists("foo")
+                .given_user_memberships("foo", vec!["foo"]);
+            credentials.given_group_does_not_exist("shared");
+
+            folder.given_exists("/var/lib/foo");
+            permissions.given_ownership_and_mode(
+                "/var/lib/foo",
+                "foo",
+                "foo",
+                Modes::OwnerReadWrite,
+            );
+
+            let state = discover_service_state(
+                &definition_with_additional_group(),
+                &credentials,
+                &folder,
+                &permissions,
+            )
+            .expect("should discover");
+
+            assert_eq!(state.additional_groups_missing, vec!["shared".to_string()]);
+            assert_eq!(state.additional_group_memberships_missing.len(), 1);
+            assert_eq!(
+                state.additional_group_memberships_missing[0].group_name,
+                "shared"
+            );
+            assert_eq!(
+                state.additional_group_memberships_missing[0].user_name,
+                "foo"
+            );
+        }
+
+        #[test]
+        fn test_should_flag_missing_membership_when_additional_group_already_exists() {
+            let mut credentials = MockCredentials::new();
+            let mut folder = MockFolder::new();
+            let mut permissions = MockPermissions::new();
+
+            credentials
+                .given_group_exists("foo")
+                .given_user_exists("foo")
+                .given_user_memberships("foo", vec!["foo"]);
+            credentials
+                .given_group_exists("shared")
+                .given_user_memberships("shared", vec!["someone_else"]);
+
+            folder.given_exists("/var/lib/foo");
+            permissions.given_ownership_and_mode(
+                "/var/lib/foo",
+                "foo",
+                "foo",
+                Modes::OwnerReadWrite,
+            );
+
+            let state = discover_service_state(
+                &definition_with_additional_group(),
+                &credentials,
+                &folder,
+                &permissions,
+            )
+            .expect("should discover");
+
+            assert!(state.additional_groups_missing.is_empty());
+            assert_eq!(state.additional_group_memberships_missing.len(), 1);
+        }
+
+        #[test]
+        fn test_should_not_flag_additional_group_when_already_a_member() {
+            let mut credentials = MockCredentials::new();
+            let mut folder = MockFolder::new();
+            let mut permissions = MockPermissions::new();
+
+            credentials
+                .given_group_exists("foo")
+                .given_user_exists("foo")
+                .given_user_memberships("foo", vec!["foo"]);
+            credentials
+                .given_group_exists("shared")
+                .given_user_memberships("shared", vec!["foo"]);
+
+            folder.given_exists("/var/lib/foo");
+            permissions.given_ownership_and_mode(
+                "/var/lib/foo",
+                "foo",
+                "foo",
+                Modes::OwnerReadWrite,
+            );
+
+            let state = discover_service_state(
+                &definition_with_additional_group(),
+                &credentials,
+                &folder,
+                &permissions,
+            )
+            .expect("should discover");
+
+            assert!(state.additional_groups_missing.is_empty());
+            assert!(state.additional_group_memberships_missing.is_empty());
+        }
     }
 
     mod plan_service_bootstrap {
         use crate::{
-            Command, FolderModeRequirement, FolderOwnershipRequirement, HasCredentials, HasFolder,
-            HasPermissions,
+            Command, FolderModeRequirement, FolderOwnershipRequirement, GroupMembershipRequirement,
+            HasCredentials, HasFolder, HasPermissions,
             service::{
                 BootstrapReporting, ServiceDefinition, ServiceState, ServiceUser,
                 plan_service_bootstrap,
@@ -611,6 +776,24 @@ mod tests {
             assert!(descriptions[0].contains("Create folder"));
             assert!(descriptions[1].contains("Set ownership"));
             assert!(descriptions[2].contains("Set mode"));
+        }
+
+        #[test]
+        fn test_should_create_additional_group_and_add_membership_when_missing() {
+            let state = ServiceState {
+                additional_groups_missing: vec!["shared".to_string()],
+                additional_group_memberships_missing: vec![GroupMembershipRequirement::new(
+                    "shared", "foo",
+                )],
+                ..Default::default()
+            };
+
+            let steps = plan_service_bootstrap::<TestContext>(&definition(), &state);
+            let descriptions = descriptions(&steps);
+
+            assert_eq!(descriptions.len(), 2);
+            assert!(descriptions[0].contains("Create group 'shared'"));
+            assert!(descriptions[1].contains("Add user 'foo' to group 'shared'"));
         }
     }
 }

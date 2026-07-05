@@ -109,6 +109,7 @@ pub fn service_definition(douglas_folders: &DouglasFolders) -> ServiceDefinition
             DOUGLAS_ADMIN_GROUP,
             Modes::OwnerReadWriteGroupReadWrite,
         )],
+        &[],
         BootstrapReporting::Pipe,
     )
 }

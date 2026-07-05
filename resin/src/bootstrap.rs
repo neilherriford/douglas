@@ -8,16 +8,17 @@ use blueprint::{
     },
 };
 use config::DouglasFolders;
-use credentials::{
-    Credentials,
-    well_known::{DOUGLAS_RESIN_GROUP, DOUGLAS_RESIN_USER},
-};
+use credentials::{Credentials, well_known::DOUGLAS_RESIN_SEEDBANK_GROUP};
 use file_system::{Folder, Modes, Permissions};
 use log::{ScopeKind, Span};
 use std::{
     path::{Path, PathBuf},
     sync::Arc,
 };
+
+pub static DOUGLAS_RESIN_USER: &str = "douglas-resin";
+pub static DOUGLAS_RESIN_GROUP: &str = "douglas-resin";
+pub static RESIN: &str = "resin";
 
 pub async fn bootstrap(
     reporting_fd: Option<i32>,
@@ -67,19 +68,21 @@ pub async fn bootstrap(
 }
 
 pub fn service_definition(douglas_folders: &DouglasFolders) -> ServiceDefinition {
-    let mut repositories_path = douglas_folders.resin.clone();
+    let mut repositories_path = douglas_folders.service_root(RESIN);
     repositories_path.push("repositories");
     definition_for(repositories_path)
 }
 
 fn definition_for(repositories_path: PathBuf) -> ServiceDefinition {
-    ServiceDefinition::new(
+    ServiceDefinition::with_sockets(
         ServiceUser::create_managed(DOUGLAS_RESIN_USER),
         DOUGLAS_RESIN_GROUP,
         vec![(
             repositories_path,
             Modes::OwnerReadWriteExecuteGroupReadWriteExecute,
         )],
+        Vec::new(),
+        &[DOUGLAS_RESIN_SEEDBANK_GROUP],
         BootstrapReporting::Pipe,
     )
 }

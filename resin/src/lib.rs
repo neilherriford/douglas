@@ -8,6 +8,9 @@ mod name;
 mod repository_store;
 mod tag_store;
 
+pub use bootstrap::DOUGLAS_RESIN_GROUP;
+pub use bootstrap::DOUGLAS_RESIN_USER;
+pub use bootstrap::RESIN;
 pub use bootstrap::service_definition;
 
 use crate::{
@@ -57,6 +60,7 @@ pub enum Error {
 pub const DEFAULT_PORT: u16 = 7376;
 
 #[derive(Clone)]
+#[allow(dead_code)]
 struct ErrorDetail(String);
 
 enum ServerError {
@@ -233,11 +237,11 @@ impl Server {
         let (root_path, log_path) = if reporting_fd.is_none() {
             let mut root = std::env::temp_dir();
             root.push("douglas-resin-dbg");
-            (root, douglas_folders.log_file("resin"))
+            (root, douglas_folders.log_file(RESIN))
         } else {
             (
-                douglas_folders.resin.clone(),
-                douglas_folders.log_file("resin"),
+                douglas_folders.service_root(RESIN),
+                douglas_folders.log_file(RESIN),
             )
         };
 

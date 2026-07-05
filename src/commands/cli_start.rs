@@ -62,7 +62,7 @@ fn known_services(
             liveness: LivenessCheck::UnixSocket(bract_socket.socket_path),
         },
         DouglasService {
-            name: "resin",
+            name: resin::RESIN,
             bootstrap_reporting: resin::service_definition(douglas_folders).bootstrap_reporting,
             liveness: LivenessCheck::TcpPort {
                 host: "127.0.0.1".to_string(),

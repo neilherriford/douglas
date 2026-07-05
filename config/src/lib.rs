@@ -6,7 +6,7 @@ pub struct DouglasFolders {
     pub application_services: PathBuf,
     pub application_mounts: PathBuf,
     pub configs: PathBuf,
-    pub resin: PathBuf,
+    services_root: PathBuf,
 }
 
 impl DouglasFolders {
@@ -19,6 +19,12 @@ impl DouglasFolders {
     pub fn socket_file(&self, name: &str) -> PathBuf {
         let mut result = self.transients.clone();
         result.push(format!("{name}.sock"));
+        result
+    }
+
+    pub fn service_root(&self, name: &str) -> PathBuf {
+        let mut result = self.services_root.clone();
+        result.push(name);
         result
     }
 }
@@ -40,7 +46,7 @@ impl DouglasFolders {
             application_services: PathBuf::from("/Library/Application Support/douglas/services/"),
             application_mounts: PathBuf::from("/Library/Application Support/douglas/mounts/"),
             configs: PathBuf::from("/Library/Preferences/douglas/"),
-            resin: PathBuf::from("/Library/Application Support/douglas/resin/"),
+            services_root: PathBuf::from("/Library/Application Support/douglas/"),
         }
     }
 }
@@ -56,7 +62,7 @@ impl DouglasFolders {
             application_services: PathBuf::from("/var/lib/douglas/services/"),
             application_mounts: PathBuf::from("/var/lib/douglas/mounts/"),
             configs: PathBuf::from("/etc/douglas/"),
-            resin: PathBuf::from("/var/lib/douglas/resin/"),
+            services_root: PathBuf::from("/var/lib/douglas/"),
         }
     }
 }

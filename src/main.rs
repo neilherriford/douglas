@@ -9,10 +9,7 @@ mod cli_reporter;
 use crate::cli_reporter::CliReporter;
 use ::config::DouglasFolders;
 use clap::{Parser, Subcommand, ValueEnum};
-use credentials::{
-    create_credentials,
-    well_known::{DOUGLAS_RESIN_GROUP, DOUGLAS_RESIN_USER},
-};
+use credentials::create_credentials;
 use daemonize::Daemonize;
 use file_system::{Folder, Permissions, UnixFolder, UnixPermissions};
 use log::{BufferedFileReporter, Reporter, TeeReporter};
@@ -183,8 +180,8 @@ async fn run_bract_server(reporting_fd: i32) -> ExitCode {
 
 fn start_resin(reporting_fd: i32) -> ExitCode {
     match Daemonize::new()
-        .user(DOUGLAS_RESIN_USER)
-        .group(DOUGLAS_RESIN_GROUP)
+        .user(resin::DOUGLAS_RESIN_USER)
+        .group(resin::DOUGLAS_RESIN_GROUP)
         .start()
     {
         Ok(()) => run_with_tokio(run_resin_server(reporting_fd)),
