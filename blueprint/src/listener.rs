@@ -1,7 +1,6 @@
 use crate::RunningStatus;
 use file_system::{
-    BindableUnixDomainSocketFile, FileDeleter, FileSystemError, Folder, Listener, Modes,
-    Permissions,
+    BindableUnixDomainSocketFile, FileDeleter, FileSystemError, Listener, Modes, Permissions,
 };
 use log::{Level, Outcome, ScopeKind, Span};
 use std::io::ErrorKind;
@@ -87,17 +86,15 @@ pub enum LivenessCheck {
     TcpPort { host: String, port: u16 },
 }
 
-pub fn check_liveness(span: &Span, folder: &dyn Folder, check: &LivenessCheck) -> RunningStatus {
+pub fn check_liveness(span: &Span, check: &LivenessCheck) -> RunningStatus {
     match check {
-        LivenessCheck::UnixSocket(socket_path) => check_unix_socket(span, folder, socket_path),
+        LivenessCheck::UnixSocket(socket_path) => check_unix_socket(span, socket_path),
         LivenessCheck::TcpPort { host, port } => check_tcp_port(span, host, *port),
     }
 }
 
-fn check_unix_socket(span: &Span, folder: &dyn Folder, socket_path: &Path) -> RunningStatus {
-    if !folder.exists(socket_path) {
-        return RunningStatus::NotRunning;
-    }
+// UDS presence can only be verified by trying to connect to it
+fn check_unix_socket(span: &Span, socket_path: &Path) -> RunningStatus {
     match UnixStream::connect(socket_path) {
         Ok(_) => RunningStatus::Running,
         Err(err) => classify_connect_error(span, &socket_path.to_string_lossy(), err),
@@ -139,8 +136,7 @@ mod tests {
     };
     use crate::RunningStatus;
     use file_system::{
-        MockBindableUnixDomainSocketFile, MockFileDeleter, MockFolder, MockListener,
-        MockPermissions, Modes,
+        MockBindableUnixDomainSocketFile, MockFileDeleter, MockListener, MockPermissions, Modes,
     };
     use log::{Event, Reporter, ScopeKind, Span};
     use std::io::ErrorKind;
@@ -192,13 +188,9 @@ mod tests {
 
     #[test]
     fn test_should_report_not_running_when_socket_file_missing() {
-        let mut folder = MockFolder::new();
-        folder.given_does_not_exist("/run/douglas/test.sock");
-
         let status = check_liveness(
             &span(),
-            &folder,
-            &LivenessCheck::UnixSocket(PathBuf::from("/run/douglas/test.sock")),
+            &LivenessCheck::UnixSocket(PathBuf::from("/run/douglas/definitely-missing.sock")),
         );
 
         assert!(status == RunningStatus::NotRunning);

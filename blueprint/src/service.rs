@@ -28,7 +28,7 @@ impl ServiceUser {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub enum BootstrapReporting {
     None,
     Pipe,
@@ -114,19 +114,14 @@ pub fn discover_service_state(
         &definition.user,
         ServiceUser::Managed(name)
         if !state.group_missing
-            && !credentials
-                .group_memberships(&definition.group)
-                .iter()
-                .any(|member| member == name)
+            && !state.user_missing
+            && !user_is_in_group(credentials, &definition.group, name)
     );
 
     if let ServiceUser::Managed(user_name) = &definition.user {
         for group_name in &definition.additional_groups {
             let is_member = if credentials.group_exists(group_name) {
-                credentials
-                    .group_memberships(group_name)
-                    .iter()
-                    .any(|member| member == user_name)
+                user_is_in_group(credentials, group_name, user_name)
             } else {
                 state.additional_groups_missing.push(group_name.clone());
                 false
@@ -152,6 +147,24 @@ pub fn discover_service_state(
     }
 
     Ok(state)
+}
+
+fn user_is_in_group(credentials: &dyn Credentials, group_name: &str, user_name: &str) -> bool {
+    if credentials
+        .group_memberships(group_name)
+        .iter()
+        .any(|member| member == user_name)
+    {
+        return true;
+    }
+
+    match (
+        credentials.get_group_id(group_name),
+        credentials.get_primary_group(user_name),
+    ) {
+        (Some(group_id), Ok(primary_group_id)) => group_id == primary_group_id,
+        _ => false,
+    }
 }
 
 fn discover_folder_state(
@@ -266,6 +279,7 @@ mod tests {
         };
         use credentials::MockCredentials;
         use file_system::{MockFolder, MockPermissions, Modes};
+        use mockall::predicate;
         use std::path::PathBuf;
 
         fn definition() -> ServiceDefinition {
@@ -354,9 +368,14 @@ mod tests {
             let mut permissions = MockPermissions::new();
 
             credentials
-                .given_group_exists("foo")
+                .given_group_exists_with_gid("foo", 100)
                 .given_user_exists("foo")
                 .given_user_memberships("foo", vec!["bar"]);
+
+            credentials
+                .expect_get_primary_group()
+                .with(predicate::eq("foo".to_string()))
+                .returning(|_| Ok(200));
 
             folder.given_exists("/var/lib/foo");
             permissions.given_ownership_and_mode(
@@ -382,6 +401,30 @@ mod tests {
                 .given_group_exists("foo")
                 .given_user_exists("foo")
                 .given_user_memberships("foo", vec!["foo"]);
+            folder.given_exists("/var/lib/foo");
+            permissions.given_ownership_and_mode(
+                "/var/lib/foo",
+                "foo",
+                "foo",
+                Modes::OwnerReadWrite,
+            );
+
+            let state = discover_service_state(&definition(), &credentials, &folder, &permissions)
+                .expect("should discover");
+
+            assert!(!state.group_membership_missing);
+        }
+
+        #[test]
+        fn test_should_not_flag_group_membership_when_it_is_the_users_primary_group() {
+            let mut credentials = MockCredentials::new();
+            let mut folder = MockFolder::new();
+            let mut permissions = MockPermissions::new();
+
+            credentials
+                .given_user_exists_with_primary_group("foo", "foo", 100)
+                .given_user_memberships("foo", vec![]);
+
             folder.given_exists("/var/lib/foo");
             permissions.given_ownership_and_mode(
                 "/var/lib/foo",
@@ -577,13 +620,10 @@ mod tests {
             let mut permissions = MockPermissions::new();
 
             credentials
-                .given_group_exists("foo")
-                .given_user_exists("foo")
-                .given_user_memberships("foo", vec!["foo"]);
-            credentials
-                .given_group_exists("shared")
+                .given_user_exists_with_primary_group("foo", "foo", 200)
+                .given_user_memberships("foo", vec!["foo"])
+                .given_group_exists_with_gid("shared", 100)
                 .given_user_memberships("shared", vec!["someone_else"]);
-
             folder.given_exists("/var/lib/foo");
             permissions.given_ownership_and_mode(
                 "/var/lib/foo",

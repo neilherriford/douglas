@@ -736,11 +736,13 @@ dependencies = [
  "os_pipe",
  "ratatui",
  "resin",
+ "seedbank",
  "serde",
  "serde_json",
  "simple_rest_client",
  "thiserror 1.0.69",
  "tokio",
+ "users",
  "utils",
 ]
 
@@ -2149,9 +2151,18 @@ checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 name = "seedbank"
 version = "0.1.0"
 dependencies = [
+ "blueprint",
+ "config",
+ "credentials",
  "file_system",
+ "log 0.1.0",
+ "mockall",
+ "os",
+ "regex",
  "serde",
+ "serde_json",
  "thiserror 1.0.69",
+ "tokio",
  "toml",
 ]
 

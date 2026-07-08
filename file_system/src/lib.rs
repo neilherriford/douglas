@@ -6,7 +6,7 @@ use nix::sys::stat::{Mode, stat, umask};
 use std::ffi::OsString;
 use std::fs::{
     File, Metadata, Permissions as Perms, create_dir_all, metadata, read_dir, read_link,
-    read_to_string, remove_file, rename, set_permissions,
+    read_to_string, remove_dir_all, remove_file, rename, set_permissions,
 };
 use std::fs::{OpenOptions, hard_link};
 use std::io::Write;
@@ -112,6 +112,8 @@ pub enum Modes {
     OwnerReadWriteGroupReadWrite,
     OwnerReadWriteExecuteGroupReadWriteExecute,
     InheritedOwnerReadWriteExecuteGroupReadWriteExecute,
+    OwnerReadWriteExecuteGroupReadWriteExecuteOtherExecute,
+    InheritedOwnerReadWriteExecuteGroupReadWriteExecuteOtherExecute,
     Other(u32),
 }
 
@@ -124,6 +126,8 @@ impl From<Modes> for u32 {
             Modes::OwnerReadWriteGroupReadWrite => 0o660,
             Modes::OwnerReadWriteExecuteGroupReadWriteExecute => 0o770,
             Modes::InheritedOwnerReadWriteExecuteGroupReadWriteExecute => 0o2770,
+            Modes::OwnerReadWriteExecuteGroupReadWriteExecuteOtherExecute => 0o771,
+            Modes::InheritedOwnerReadWriteExecuteGroupReadWriteExecuteOtherExecute => 0o2771,
             Modes::Other(v) => v,
         }
     }
@@ -283,6 +287,38 @@ impl MockFileDeleter {
 }
 
 #[cfg_attr(feature = "mock", mockall::automock)]
+pub trait FolderDeleter: Send + Sync {
+    fn delete(&self, path: &Path) -> Result<(), FileSystemError>;
+}
+
+#[cfg(feature = "mock")]
+impl MockFolderDeleter {
+    pub fn expect_folder_to_be_deleted(&mut self, path: &str) -> &mut Self {
+        let path = path.to_string();
+        let path = PathBuf::from(path);
+
+        self.expect_delete()
+            .with(predicate::eq(path.clone()))
+            .returning(|_| Ok(()));
+        self
+    }
+
+    pub fn given_delete_to_fail_once_with(
+        &mut self,
+        path: &str,
+        error: FileSystemError,
+    ) -> &mut Self {
+        let path = path.to_string();
+        let path = PathBuf::from(path);
+
+        self.expect_delete()
+            .with(predicate::eq(path.clone()))
+            .return_once(move |_| Err(error));
+        self
+    }
+}
+
+#[cfg_attr(feature = "mock", mockall::automock)]
 pub trait FileRenamer: Send + Sync {
     fn rename(&self, from: &Path, to: &Path) -> Result<(), FileSystemError>;
 }
@@ -346,7 +382,7 @@ impl FileWriter for UnixFileWriter {
     }
 
     fn exists(&self, path: &Path) -> bool {
-        path.exists()
+        path.exists() && !path.is_dir()
     }
 
     fn write_all_bytes(&self, path: &Path, bytes: &[u8]) -> Result<(), FileSystemError> {
@@ -398,7 +434,7 @@ impl FileAppender for UnixFileAppender {
     }
 
     fn exists(&self, path: &Path) -> bool {
-        path.exists()
+        path.exists() && !path.is_dir()
     }
 
     fn append_all_bytes(&self, path: &Path, bytes: &[u8]) -> Result<(), FileSystemError> {
@@ -446,7 +482,7 @@ impl FileReader for UnixFileReader {
         })
     }
     fn exists(&self, path: &Path) -> bool {
-        path.exists()
+        path.exists() && !path.is_dir()
     }
 
     fn create_reader(
@@ -480,6 +516,27 @@ impl FileDeleter for UnixFileDeleter {
     fn delete(&self, path: &Path) -> Result<(), FileSystemError> {
         if path.exists() {
             remove_file(path).map_err(|error| FileSystemError::IoErrorAtPath {
+                path: path.to_path_buf(),
+                error,
+            })?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Default)]
+pub struct UnixFolderDeleter {}
+
+impl UnixFolderDeleter {
+    pub fn new() -> Self {
+        Self {}
+    }
+}
+
+impl FolderDeleter for UnixFolderDeleter {
+    fn delete(&self, path: &Path) -> Result<(), FileSystemError> {
+        if path.exists() {
+            remove_dir_all(path).map_err(|error| FileSystemError::IoErrorAtPath {
                 path: path.to_path_buf(),
                 error,
             })?;
@@ -611,6 +668,8 @@ impl Permissions for UnixPermissions {
             0o660 => Modes::OwnerReadWriteGroupReadWrite,
             0o770 => Modes::OwnerReadWriteExecuteGroupReadWriteExecute,
             0o2770 => Modes::InheritedOwnerReadWriteExecuteGroupReadWriteExecute,
+            0o771 => Modes::OwnerReadWriteExecuteGroupReadWriteExecuteOtherExecute,
+            0o2771 => Modes::InheritedOwnerReadWriteExecuteGroupReadWriteExecuteOtherExecute,
             other => Modes::Other(other as u32),
         })
     }
@@ -699,7 +758,7 @@ impl Listener for tokio::net::UnixListener {
 }
 
 #[cfg_attr(feature = "mock", mockall::automock)]
-pub trait BindableUnixDomainSocketFile {
+pub trait BindableUnixDomainSocketFile: Send + Sync {
     fn bind(
         &self,
         path: &Path,

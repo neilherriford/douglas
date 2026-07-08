@@ -1,7 +1,7 @@
 use crate::{
     blob_paths::BlobFilePaths, digest::Digest, name::Name, repository_store::RepositoryStore,
 };
-use file_system::{FileDeleter, FileSystemError, Folder, Links};
+use file_system::{FileDeleter, FileSystemError, Folder, Inspect, Links};
 use std::{path::PathBuf, sync::Arc};
 
 #[cfg_attr(test, mockall::automock)]
@@ -17,6 +17,7 @@ pub trait BlobMounter: Send + Sync {
 pub struct FileBlobMounter {
     repository_store: Arc<dyn RepositoryStore>,
     folder: Arc<dyn Folder>,
+    inspect: Arc<dyn Inspect>,
     file_deleter: Arc<dyn FileDeleter>,
     links: Arc<dyn Links>,
     repositories_root: PathBuf,
@@ -26,6 +27,7 @@ impl FileBlobMounter {
     pub fn new(
         repository_store: Arc<dyn RepositoryStore>,
         folder: Arc<dyn Folder>,
+        inspect: Arc<dyn Inspect>,
         file_deleter: Arc<dyn FileDeleter>,
         links: Arc<dyn Links>,
         repositories_root: PathBuf,
@@ -33,6 +35,7 @@ impl FileBlobMounter {
         Self {
             repository_store,
             folder,
+            inspect,
             file_deleter,
             links,
             repositories_root,
@@ -56,7 +59,7 @@ impl FileBlobMounter {
         }
 
         let paths = BlobFilePaths::new(&root, digest);
-        if self.folder.exists(&paths.final_file) && self.folder.exists(&paths.mediatype_file) {
+        if self.inspect.exists(&paths.final_file) && self.inspect.exists(&paths.mediatype_file) {
             Ok(Some(paths))
         } else {
             Ok(None)
@@ -128,7 +131,10 @@ mod tests {
             name::Name,
             repository_store::MockRepositoryStore,
         };
-        use file_system::{FileDeleter, Folder, Links, MockFileDeleter, MockFolder, MockLinks};
+        use file_system::{
+            FileDeleter, Folder, Inspect, Links, MockFileDeleter, MockFolder, MockInspect,
+            MockLinks,
+        };
         use std::{path::PathBuf, str::FromStr, sync::Arc};
 
         const HEX: &str = "1b96011418a3675a82b529695daac30914827d65d2ff3e0bc6873526a1beefcf";
@@ -147,6 +153,7 @@ mod tests {
         #[test]
         fn test_should_mount_directly_when_hint_has_the_blob() {
             let mut folder = MockFolder::new();
+            let mut inspect = MockInspect::new();
             let file_deleter = MockFileDeleter::new();
             let mut links = MockLinks::new();
             let repository_store = MockRepositoryStore::new();
@@ -158,11 +165,12 @@ mod tests {
 
             folder
                 .given_exists("/tmp/source")
-                .given_exists(&source_final)
-                .given_exists(&source_mediatype)
                 .expect_create_folder_recursively_with(&format!(
                     "/tmp/dest/blobs/sha256/{PREFIX}/{HEX}"
                 ));
+            inspect
+                .given_exists(&source_final)
+                .given_exists(&source_mediatype);
 
             links
                 .expect_create_hard_with(&source_final, &dest_final)
@@ -171,6 +179,7 @@ mod tests {
             let mounter = FileBlobMounter::new(
                 Arc::new(repository_store),
                 Arc::new(folder) as Arc<dyn Folder>,
+                Arc::new(inspect) as Arc<dyn Inspect>,
                 Arc::new(file_deleter) as Arc<dyn FileDeleter>,
                 Arc::new(links) as Arc<dyn Links>,
                 PathBuf::from("/tmp"),
@@ -183,6 +192,7 @@ mod tests {
         #[test]
         fn test_should_fall_back_to_scan_when_hint_misses() {
             let mut folder = MockFolder::new();
+            let mut inspect = MockInspect::new();
             let file_deleter = MockFileDeleter::new();
             let mut links = MockLinks::new();
             let mut repository_store = MockRepositoryStore::new();
@@ -195,13 +205,14 @@ mod tests {
 
             folder
                 .given_exists("/tmp/source")
-                .given_does_not_exist(&blob_paths("source").0)
                 .given_exists("/tmp/other")
-                .given_exists(&other_final)
-                .given_exists(&other_mediatype)
                 .expect_create_folder_recursively_with(&format!(
                     "/tmp/dest/blobs/sha256/{PREFIX}/{HEX}"
                 ));
+            inspect
+                .given_does_not_exist(&blob_paths("source").0)
+                .given_exists(&other_final)
+                .given_exists(&other_mediatype);
 
             repository_store
                 .expect_list()
@@ -214,6 +225,7 @@ mod tests {
             let mounter = FileBlobMounter::new(
                 Arc::new(repository_store),
                 Arc::new(folder) as Arc<dyn Folder>,
+                Arc::new(inspect) as Arc<dyn Inspect>,
                 Arc::new(file_deleter) as Arc<dyn FileDeleter>,
                 Arc::new(links) as Arc<dyn Links>,
                 PathBuf::from("/tmp"),
@@ -230,6 +242,7 @@ mod tests {
         #[test]
         fn test_should_skip_repository_search_when_hint_root_does_not_exist() {
             let mut folder = MockFolder::new();
+            let mut inspect = MockInspect::new();
             let file_deleter = MockFileDeleter::new();
             let mut links = MockLinks::new();
             let mut repository_store = MockRepositoryStore::new();
@@ -243,11 +256,12 @@ mod tests {
             folder
                 .given_does_not_exist("/tmp/missing")
                 .given_exists("/tmp/other")
-                .given_exists(&other_final)
-                .given_exists(&other_mediatype)
                 .expect_create_folder_recursively_with(&format!(
                     "/tmp/dest/blobs/sha256/{PREFIX}/{HEX}"
                 ));
+            inspect
+                .given_exists(&other_final)
+                .given_exists(&other_mediatype);
 
             repository_store
                 .expect_list()
@@ -260,6 +274,7 @@ mod tests {
             let mounter = FileBlobMounter::new(
                 Arc::new(repository_store),
                 Arc::new(folder) as Arc<dyn Folder>,
+                Arc::new(inspect) as Arc<dyn Inspect>,
                 Arc::new(file_deleter) as Arc<dyn FileDeleter>,
                 Arc::new(links) as Arc<dyn Links>,
                 PathBuf::from("/tmp"),
@@ -276,6 +291,7 @@ mod tests {
         #[test]
         fn test_should_scan_all_repositories_when_no_hint_given() {
             let mut folder = MockFolder::new();
+            let mut inspect = MockInspect::new();
             let file_deleter = MockFileDeleter::new();
             let mut links = MockLinks::new();
             let mut repository_store = MockRepositoryStore::new();
@@ -289,13 +305,14 @@ mod tests {
 
             folder
                 .given_exists("/tmp/foo")
-                .given_does_not_exist(&foo_final)
                 .given_exists("/tmp/bar")
-                .given_exists(&bar_final)
-                .given_exists(&bar_mediatype)
                 .expect_create_folder_recursively_with(&format!(
                     "/tmp/dest/blobs/sha256/{PREFIX}/{HEX}"
                 ));
+            inspect
+                .given_does_not_exist(&foo_final)
+                .given_exists(&bar_final)
+                .given_exists(&bar_mediatype);
 
             repository_store
                 .expect_list()
@@ -308,6 +325,7 @@ mod tests {
             let mounter = FileBlobMounter::new(
                 Arc::new(repository_store),
                 Arc::new(folder) as Arc<dyn Folder>,
+                Arc::new(inspect) as Arc<dyn Inspect>,
                 Arc::new(file_deleter) as Arc<dyn FileDeleter>,
                 Arc::new(links) as Arc<dyn Links>,
                 PathBuf::from("/tmp"),
@@ -320,6 +338,7 @@ mod tests {
         #[test]
         fn test_should_return_false_when_not_found_anywhere() {
             let mut folder = MockFolder::new();
+            let inspect = MockInspect::new();
             let file_deleter = MockFileDeleter::new();
             let links = MockLinks::new();
             let mut repository_store = MockRepositoryStore::new();
@@ -339,6 +358,7 @@ mod tests {
             let mounter = FileBlobMounter::new(
                 Arc::new(repository_store),
                 Arc::new(folder) as Arc<dyn Folder>,
+                Arc::new(inspect) as Arc<dyn Inspect>,
                 Arc::new(file_deleter) as Arc<dyn FileDeleter>,
                 Arc::new(links) as Arc<dyn Links>,
                 PathBuf::from("/tmp"),
@@ -351,6 +371,7 @@ mod tests {
         #[test]
         fn test_should_clean_up_content_link_when_mediatype_link_fails() {
             let mut folder = MockFolder::new();
+            let mut inspect = MockInspect::new();
             let mut file_deleter = MockFileDeleter::new();
             let mut links = MockLinks::new();
             let repository_store = MockRepositoryStore::new();
@@ -362,11 +383,12 @@ mod tests {
 
             folder
                 .given_exists("/tmp/source")
-                .given_exists(&source_final)
-                .given_exists(&source_mediatype)
                 .expect_create_folder_recursively_with(&format!(
                     "/tmp/dest/blobs/sha256/{PREFIX}/{HEX}"
                 ));
+            inspect
+                .given_exists(&source_final)
+                .given_exists(&source_mediatype);
 
             links
                 .expect_create_hard_with(&source_final, &dest_final)
@@ -381,6 +403,7 @@ mod tests {
             let mounter = FileBlobMounter::new(
                 Arc::new(repository_store),
                 Arc::new(folder) as Arc<dyn Folder>,
+                Arc::new(inspect) as Arc<dyn Inspect>,
                 Arc::new(file_deleter) as Arc<dyn FileDeleter>,
                 Arc::new(links) as Arc<dyn Links>,
                 PathBuf::from("/tmp"),

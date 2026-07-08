@@ -188,6 +188,7 @@ fn render_loop(mut terminal: Terminal<CrosstermBackend<Stdout>>, rx: &mpsc::Rece
 fn draw(f: &mut Frame, state: &AppState) {
     let area = f.area();
 
+    #[allow(clippy::cast_possible_truncation)]
     let running_height = (state.scope_order.len() as u16 + 2)
         .max(3)
         .min(area.height / 2);
@@ -212,9 +213,13 @@ fn draw(f: &mut Frame, state: &AppState) {
         chunks[0],
     );
 
+    let visible_lines = chunks[1].height.saturating_sub(2).max(1) as usize;
     let log_items: Vec<ListItem> = state
         .lines
         .iter()
+        .rev()
+        .take(visible_lines)
+        .rev()
         .map(|l| ListItem::new(l.as_str()))
         .collect();
 

@@ -85,6 +85,22 @@ impl MockCredentials {
         self.given_user(user_name, true)
     }
 
+    pub fn given_user_exists_with_primary_group(
+        &mut self,
+        user_name: &str,
+        primary_group: &str,
+        gid: u32,
+    ) -> &mut Self {
+        let user_name = user_name.to_string();
+
+        self.given_group_exists_with_gid(primary_group, gid);
+        self.expect_get_primary_group()
+            .with(predicate::eq(user_name.clone()))
+            .returning(move |_| Ok(gid));
+
+        self.given_user(&user_name.clone(), true)
+    }
+
     pub fn given_user_does_not_exist(&mut self, user_name: &str) -> &mut Self {
         self.given_user(user_name, false)
     }
@@ -100,6 +116,14 @@ impl MockCredentials {
 
     pub fn given_group_exists(&mut self, group_name: &str) -> &mut Self {
         self.given_group(group_name, true)
+    }
+
+    pub fn given_group_exists_with_gid(&mut self, group_name: &str, gid: u32) -> &mut Self {
+        let group_name = group_name.to_string();
+        self.expect_get_group_id()
+            .with(predicate::eq(group_name.clone()))
+            .returning(move |_| Some(gid));
+        self.given_group(&group_name.clone(), true)
     }
 
     pub fn given_group_does_not_exist(&mut self, group_name: &str) -> &mut Self {
@@ -187,6 +211,6 @@ pub fn create_credentials(os: Arc<dyn Os>) -> Box<dyn Credentials> {
 }
 
 #[cfg(target_os = "linux")]
-pub fn create_credentials(os: Arc<dyn Os>) -> Box<dyn ServiceCredentials> {
+pub fn create_credentials(os: Arc<dyn Os>) -> Box<dyn Credentials> {
     Box::new(LinuxCredentials::new(Arc::clone(&os)))
 }

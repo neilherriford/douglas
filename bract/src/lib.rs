@@ -96,7 +96,7 @@ impl Bract {
             .collect();
 
         let reporter: Arc<dyn Reporter> =
-            Arc::new(BufferedFileReporter::new(douglas_folders.log_file("bract")));
+            Arc::new(BufferedFileReporter::new(douglas_folders.service_log_file("bract")));
 
         Ok(Self {
             listener_factories,

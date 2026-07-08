@@ -1,0 +1,22 @@
+[package]
+name = "seedbank"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+blueprint = { workspace = true }
+config = { workspace = true }
+credentials = { workspace = true }
+file_system = { workspace = true }
+log = { workspace = true }
+os = { workspace = true }
+regex = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+toml = { workspace = true }
+
+[dev-dependencies]
+file_system = { workspace = true, features = ["mock"] }
+mockall = { workspace = true }

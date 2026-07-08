@@ -21,7 +21,10 @@ pub async fn bootstrap(
     permissions: &dyn Permissions,
     douglas_folders: &DouglasFolders,
 ) -> Result<(), BootstrapError> {
-    let boot_reporter = build_boot_reporter(douglas_folders.log_file("bract"), Some(reporting_fd));
+    let boot_reporter = build_boot_reporter(
+        douglas_folders.service_log_file("bract"),
+        Some(reporting_fd),
+    );
 
     let guard = Span::new(
         Arc::clone(&boot_reporter),
@@ -44,7 +47,7 @@ pub async fn bootstrap(
     let definition = service_definition(douglas_folders);
 
     let state = {
-        let mut state_observer = StateObserver::new(credentials, folder, &mut *docker_ping);
+        let mut state_observer = StateObserver::new(credentials, &mut *docker_ping);
         state_observer
             .discover(guard.span(), &definition, credentials, folder, permissions)
             .await?
@@ -80,15 +83,15 @@ pub fn service_definition(douglas_folders: &DouglasFolders) -> ServiceDefinition
         vec![
             (
                 douglas_folders.logs.clone(),
-                Modes::InheritedOwnerReadWriteExecuteGroupReadWriteExecute,
+                Modes::InheritedOwnerReadWriteExecuteGroupReadWriteExecuteOtherExecute,
             ),
             (
                 douglas_folders.transients.clone(),
-                Modes::OwnerReadWriteExecuteGroupReadWriteExecute,
+                Modes::OwnerReadWriteExecuteGroupReadWriteExecuteOtherExecute,
             ),
             (
                 douglas_folders.applications.clone(),
-                Modes::OwnerReadWriteExecuteGroupReadWriteExecute,
+                Modes::OwnerReadWriteExecuteGroupReadWriteExecuteOtherExecute,
             ),
             (
                 douglas_folders.application_services.clone(),
@@ -101,6 +104,14 @@ pub fn service_definition(douglas_folders: &DouglasFolders) -> ServiceDefinition
             (
                 douglas_folders.configs.clone(),
                 Modes::InheritedOwnerReadWriteExecuteGroupReadWriteExecute,
+            ),
+            (
+                douglas_folders.socket_dir("bract"),
+                Modes::OwnerReadWriteExecuteGroupReadWriteExecute,
+            ),
+            (
+                douglas_folders.log_dir("bract"),
+                Modes::OwnerReadWriteExecuteGroupReadWriteExecute,
             ),
         ],
         vec![ListenerDefinition::new(
@@ -126,19 +137,13 @@ struct State {
 
 struct StateObserver<'a> {
     credentials: &'a dyn Credentials,
-    folder: &'a dyn Folder,
     docker_ping: &'a mut dyn docker::Ping,
 }
 
 impl<'a> StateObserver<'a> {
-    pub fn new(
-        credentials: &'a dyn Credentials,
-        folder: &'a dyn Folder,
-        docker_ping: &'a mut dyn docker::Ping,
-    ) -> Self {
+    pub fn new(credentials: &'a dyn Credentials, docker_ping: &'a mut dyn docker::Ping) -> Self {
         Self {
             credentials,
-            folder,
             docker_ping,
         }
     }
@@ -185,11 +190,7 @@ impl<'a> StateObserver<'a> {
         let Some(socket) = definition.owned_sockets.first() else {
             return RunningStatus::Unknown;
         };
-        check_liveness(
-            span,
-            self.folder,
-            &LivenessCheck::UnixSocket(socket.socket_path.clone()),
-        )
+        check_liveness(span, &LivenessCheck::UnixSocket(socket.socket_path.clone()))
     }
 
     async fn check_docker_running_status(&mut self, span: &Span) -> RunningStatus {

@@ -3,12 +3,15 @@ use blueprint::{
     bootstrap::{execute_plan, resolve_plan},
     commands::{AddUserToGroup, CreateGroup},
     listener::{LivenessCheck, check_liveness},
-    service::BootstrapReporting,
+    service::{
+        BootstrapReporting, ServiceDefinition, ServiceState, discover_service_state,
+        plan_service_bootstrap,
+    },
 };
 use command_fds::{CommandFdExt, FdMapping, FdMappingCollision};
 use config::DouglasFolders;
 use credentials::{Credentials, well_known::DOUGLAS_ADMIN_GROUP};
-use file_system::{Folder, Permissions};
+use file_system::{FileSystemError, Folder, Permissions};
 use log::{Level, Outcome, Reporter, ScopeKind, Span};
 use os::{EnvironmentVariableReader, Os};
 use os_pipe::{PipeReader, PipeWriter};
@@ -33,11 +36,13 @@ pub enum CliBootstrapError {
     StartTimeout(String),
     #[error("Service '{0}' has no configured control socket")]
     MissingControlSocket(&'static str),
+    #[error("File system error: {0}")]
+    FileSystemError(#[from] FileSystemError),
 }
 
-type Step = Box<dyn for<'a> Command<Context<'a>>>;
+type Step<'a> = Box<dyn Command<Context<'a>>>;
 
-fn push_step(steps: &mut Vec<Step>, command: impl for<'a> Command<Context<'a>> + 'static) {
+fn push_step<'a>(steps: &mut Vec<Step<'a>>, command: impl Command<Context<'a>> + 'static) {
     steps.push(Box::new(command));
 }
 
@@ -45,29 +50,47 @@ struct DouglasService {
     name: &'static str,
     bootstrap_reporting: BootstrapReporting,
     liveness: LivenessCheck,
+    definition: ServiceDefinition,
 }
 
 fn known_services(
     douglas_folders: &DouglasFolders,
 ) -> Result<Vec<DouglasService>, CliBootstrapError> {
     let bract_definition = bract::service_definition(douglas_folders);
-    let Some(bract_socket) = bract_definition.owned_sockets.into_iter().next() else {
+    let Some(bract_socket) = bract_definition.owned_sockets.first() else {
         return Err(CliBootstrapError::MissingControlSocket("bract"));
     };
+    let bract_liveness = LivenessCheck::UnixSocket(bract_socket.socket_path.clone());
+
+    let seedbank_definition = seedbank::service_definition(douglas_folders);
+    let Some(seedbank_socket) = seedbank_definition.owned_sockets.first() else {
+        return Err(CliBootstrapError::MissingControlSocket(seedbank::SEEDBANK));
+    };
+    let seedbank_liveness = LivenessCheck::UnixSocket(seedbank_socket.socket_path.clone());
+
+    let resin_definition = resin::service_definition(douglas_folders);
 
     Ok(vec![
         DouglasService {
             name: "bract",
             bootstrap_reporting: bract_definition.bootstrap_reporting,
-            liveness: LivenessCheck::UnixSocket(bract_socket.socket_path),
+            liveness: bract_liveness,
+            definition: bract_definition,
         },
         DouglasService {
             name: resin::RESIN,
-            bootstrap_reporting: resin::service_definition(douglas_folders).bootstrap_reporting,
+            bootstrap_reporting: resin_definition.bootstrap_reporting,
             liveness: LivenessCheck::TcpPort {
                 host: "127.0.0.1".to_string(),
                 port: resin::DEFAULT_PORT,
             },
+            definition: resin_definition,
+        },
+        DouglasService {
+            name: seedbank::SEEDBANK,
+            bootstrap_reporting: seedbank_definition.bootstrap_reporting,
+            liveness: seedbank_liveness,
+            definition: seedbank_definition,
         },
     ])
 }
@@ -103,13 +126,14 @@ struct State {
     is_root: bool,
     groups_missing: Vec<String>,
     group_members_missing: Vec<GroupMembershipRequirement>,
-    services_needing_start: Vec<DouglasService>,
+    services_needing_start: Vec<(DouglasService, ServiceState)>,
 }
 
 struct StateObserver<'a> {
     credentials: &'a dyn Credentials,
     environment_variable_reader: &'a dyn EnvironmentVariableReader,
     folder: &'a dyn Folder,
+    permissions: &'a dyn Permissions,
 }
 
 impl<'a> StateObserver<'a> {
@@ -117,11 +141,13 @@ impl<'a> StateObserver<'a> {
         credentials: &'a dyn Credentials,
         environment_variable_reader: &'a dyn EnvironmentVariableReader,
         folder: &'a dyn Folder,
+        permissions: &'a dyn Permissions,
     ) -> Self {
         Self {
             credentials,
             environment_variable_reader,
             folder,
+            permissions,
         }
     }
 
@@ -154,9 +180,18 @@ impl<'a> StateObserver<'a> {
         };
 
         for service in services {
-            let status = check_liveness(guard.span(), self.folder, &service.liveness);
+            let status = check_liveness(guard.span(), &service.liveness);
             if status != RunningStatus::Running {
-                result.services_needing_start.push(service);
+                let service_state = match discover_service_state(
+                    &service.definition,
+                    self.credentials,
+                    self.folder,
+                    self.permissions,
+                ) {
+                    Ok(service_state) => service_state,
+                    Err(err) => return guard.finish(Err(err.into())),
+                };
+                result.services_needing_start.push((service, service_state));
             }
         }
 
@@ -211,7 +246,7 @@ impl<'a> StateObserver<'a> {
     }
 }
 
-fn create_plan(state: State) -> Result<Vec<Step>, CliBootstrapError> {
+fn create_plan<'a>(state: State) -> Result<Vec<Step<'a>>, CliBootstrapError> {
     if !state.is_root {
         return Err(CliBootstrapError::MustBeRoot);
     }
@@ -229,11 +264,31 @@ fn create_plan(state: State) -> Result<Vec<Step>, CliBootstrapError> {
         );
     }
 
-    for service in state.services_needing_start {
+    for (service, service_state) in &state.services_needing_start {
+        for step in plan_service_bootstrap::<Context<'a>>(&service.definition, service_state) {
+            result.push(step);
+        }
+    }
+
+    for (service, _) in &state.services_needing_start {
         if matches!(service.bootstrap_reporting, BootstrapReporting::Pipe) {
             push_step(&mut result, CreatePipe::new(service.name));
         }
-        push_step(&mut result, StartService::new(service));
+    }
+
+    for (service, _) in &state.services_needing_start {
+        let needs_reporting_pipe = matches!(service.bootstrap_reporting, BootstrapReporting::Pipe);
+        push_step(
+            &mut result,
+            StartService::new(service.name, needs_reporting_pipe),
+        );
+    }
+
+    for (service, _) in state.services_needing_start {
+        push_step(
+            &mut result,
+            WaitForServiceReady::new(service.name, service.liveness),
+        );
     }
 
     Ok(result)
@@ -282,24 +337,28 @@ impl<'a> Command<Context<'a>> for CreatePipe {
 }
 
 struct StartService {
-    process: DouglasService,
+    name: &'static str,
+    needs_reporting_pipe: bool,
 }
 
 impl StartService {
-    pub fn new(process: DouglasService) -> Self {
-        Self { process }
+    pub fn new(name: &'static str, needs_reporting_pipe: bool) -> Self {
+        Self {
+            name,
+            needs_reporting_pipe,
+        }
     }
 }
 
 impl std::fmt::Display for StartService {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Start {}", self.process.name)
+        write!(f, "Start {}", self.name)
     }
 }
 
 impl<'a> Command<Context<'a>> for StartService {
     fn name(&self) -> String {
-        format!("Start {}", self.process.name)
+        format!("Start {}", self.name)
     }
 
     fn run(
@@ -308,11 +367,11 @@ impl<'a> Command<Context<'a>> for StartService {
         context: &mut Context<'a>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let guard = span
-            .create_child(&format!("Starting {}…", self.process.name), ScopeKind::Step)
+            .create_child(&format!("Starting {}…", self.name), ScopeKind::Step)
             .start_guard();
 
-        let pipe = if matches!(self.process.bootstrap_reporting, BootstrapReporting::Pipe) {
-            let Some(pipe) = context.pipes.remove(self.process.name) else {
+        let pipe = if self.needs_reporting_pipe {
+            let Some(pipe) = context.pipes.remove(self.name) else {
                 return Err(Box::new(CliBootstrapError::PipeRequired));
             };
             Some(pipe)
@@ -320,13 +379,45 @@ impl<'a> Command<Context<'a>> for StartService {
             None
         };
 
-        spawn_service(
-            &self.process,
-            pipe,
-            context.os,
-            context.folder,
-            guard.span(),
-        )?;
+        spawn_service(self.name, pipe, context.os, guard.span())?;
+
+        guard.finish_with_outcome(Outcome::Ok);
+        Ok(())
+    }
+}
+
+struct WaitForServiceReady {
+    name: &'static str,
+    liveness: LivenessCheck,
+}
+
+impl WaitForServiceReady {
+    pub fn new(name: &'static str, liveness: LivenessCheck) -> Self {
+        Self { name, liveness }
+    }
+}
+
+impl std::fmt::Display for WaitForServiceReady {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Wait for {} to be ready", self.name)
+    }
+}
+
+impl<'a> Command<Context<'a>> for WaitForServiceReady {
+    fn name(&self) -> String {
+        format!("Wait for {}", self.name)
+    }
+
+    fn run(
+        &mut self,
+        span: &Span,
+        _context: &mut Context<'a>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let guard = span
+            .create_child(&format!("Waiting for {}…", self.name), ScopeKind::Step)
+            .start_guard();
+
+        wait_until_running(self.name, &self.liveness, guard.span())?;
 
         guard.finish_with_outcome(Outcome::Ok);
         Ok(())
@@ -334,14 +425,13 @@ impl<'a> Command<Context<'a>> for StartService {
 }
 
 fn spawn_service(
-    process: &DouglasService,
+    name: &'static str,
     pipe: Option<(PipeReader, PipeWriter)>,
     os: &dyn Os,
-    folder: &dyn Folder,
     span: &Span,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut command = std::process::Command::new(os.current_executable()?);
-    command.args(["service", process.name]);
+    command.args(["service", name]);
 
     match pipe {
         Some((pipe_reader, pipe_writer)) => {
@@ -356,44 +446,55 @@ fn spawn_service(
                 }
                 Err(err) => return Err(Box::new(CliBootstrapError::SpawnError(err))),
             }
-            forward_logs_in_background(pipe_reader, span.clone());
+            forward_logs_in_background(name, pipe_reader, span.clone());
         }
         None => {
             command.spawn()?;
         }
     }
 
-    wait_until_running(process, folder, span)
+    Ok(())
 }
 
-fn forward_logs_in_background(pipe_reader: PipeReader, span: Span) {
+fn forward_logs_in_background(service_name: &'static str, pipe_reader: PipeReader, span: Span) {
     std::thread::spawn(move || {
         use std::io::BufRead;
         let reader = std::io::BufReader::new(pipe_reader);
         for line in reader.lines() {
             let Ok(line) = line else { break };
-            let Ok(event) = serde_json::from_str::<log::Event>(&line) else {
+            let Ok(mut event) = serde_json::from_str::<log::Event>(&line) else {
                 continue;
             };
+            tag_event_with_service(&mut event, service_name);
             span.reporter.emit(event);
         }
     });
 }
 
+fn tag_event_with_service(event: &mut log::Event, service_name: &str) {
+    match &mut event.kind {
+        log::EventKind::ScopeStarted { label, .. } | log::EventKind::ScopeEnded { label, .. } => {
+            *label = format!("[{service_name}] {label}");
+        }
+        log::EventKind::Message { text, .. } => {
+            *text = format!("[{service_name}] {text}");
+        }
+        log::EventKind::PlanHint { .. } | log::EventKind::Progress { .. } => {}
+    }
+}
+
 fn wait_until_running(
-    process: &DouglasService,
-    folder: &dyn Folder,
+    name: &str,
+    liveness: &LivenessCheck,
     span: &Span,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let deadline = Instant::now() + Duration::from_mins(5);
     loop {
-        if check_liveness(span, folder, &process.liveness) == RunningStatus::Running {
+        if check_liveness(span, liveness) == RunningStatus::Running {
             return Ok(());
         }
         if Instant::now() >= deadline {
-            return Err(Box::new(CliBootstrapError::StartTimeout(
-                process.name.to_string(),
-            )));
+            return Err(Box::new(CliBootstrapError::StartTimeout(name.to_string())));
         }
         std::thread::sleep(Duration::from_millis(200));
     }
@@ -420,6 +521,7 @@ pub async fn cli_start(
         credentials.as_ref(),
         environment_variable_reader.as_ref(),
         folder.as_ref(),
+        permissions.as_ref(),
     );
     let state = match state_observer.discover(guard.span(), &douglas_folders) {
         Ok(state) => state,
@@ -455,5 +557,188 @@ pub async fn cli_start(
         Err(()) => {
             guard.finish_with_outcome(Outcome::Failed);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        CliBootstrapError, DouglasService, State, create_plan, tag_event_with_service,
+        wait_until_running,
+    };
+    use blueprint::{
+        listener::LivenessCheck,
+        service::{BootstrapReporting, ServiceDefinition, ServiceState, ServiceUser},
+    };
+    use log::{Event, EventKind, Level, ScopeId, ScopeKind, Span};
+    use std::sync::Arc;
+
+    struct NullReporter;
+    impl log::Reporter for NullReporter {
+        fn emit(&self, _event: Event) {}
+    }
+
+    fn span() -> Span {
+        Span::new(Arc::new(NullReporter), "test", ScopeKind::Group)
+    }
+
+    fn service(name: &'static str, liveness: LivenessCheck) -> DouglasService {
+        DouglasService {
+            name,
+            bootstrap_reporting: BootstrapReporting::Pipe,
+            liveness,
+            definition: ServiceDefinition::new(
+                ServiceUser::create_managed(name),
+                name,
+                Vec::new(),
+                BootstrapReporting::Pipe,
+            ),
+        }
+    }
+
+    fn tcp_liveness(port: u16) -> LivenessCheck {
+        LivenessCheck::TcpPort {
+            host: "127.0.0.1".to_string(),
+            port,
+        }
+    }
+
+    fn step_descriptions(steps: &[Box<dyn blueprint::Command<super::Context<'_>>>]) -> Vec<String> {
+        steps.iter().map(std::string::ToString::to_string).collect()
+    }
+
+    #[test]
+    fn test_create_plan_should_error_when_not_root() {
+        let state = State {
+            is_root: false,
+            ..Default::default()
+        };
+
+        let result = create_plan(state);
+
+        assert!(matches!(result, Err(CliBootstrapError::MustBeRoot)));
+    }
+
+    #[test]
+    fn test_create_plan_should_produce_no_steps_when_nothing_is_needed() {
+        let state = State {
+            is_root: true,
+            ..Default::default()
+        };
+
+        let Ok(steps) = create_plan(state) else {
+            panic!("should plan");
+        };
+
+        assert!(steps.is_empty());
+    }
+
+    #[test]
+    fn test_create_plan_should_batch_pipes_starts_and_waits_across_services() {
+        let state = State {
+            is_root: true,
+            services_needing_start: vec![
+                (service("bract", tcp_liveness(1)), ServiceState::default()),
+                (service("resin", tcp_liveness(2)), ServiceState::default()),
+            ],
+            ..Default::default()
+        };
+
+        let Ok(steps) = create_plan(state) else {
+            panic!("should plan");
+        };
+        let descriptions = step_descriptions(&steps);
+        let Some(last_pipe) = descriptions
+            .iter()
+            .rposition(|d| d.starts_with("Create pipe for"))
+        else {
+            panic!("expected pipe steps");
+        };
+        let Some(first_start) = descriptions.iter().position(|d| d.starts_with("Start ")) else {
+            panic!("expected start steps");
+        };
+        let Some(last_start) = descriptions.iter().rposition(|d| d.starts_with("Start ")) else {
+            panic!("expected start steps");
+        };
+        let Some(first_wait) = descriptions.iter().position(|d| d.starts_with("Wait for")) else {
+            panic!("expected wait steps");
+        };
+
+        assert!(last_pipe < first_start, "all pipes must precede all starts");
+        assert!(last_start < first_wait, "all starts must precede all waits");
+        assert_eq!(
+            descriptions
+                .iter()
+                .filter(|d| d.starts_with("Start "))
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn test_tag_event_with_service_should_prefix_scope_started_label() {
+        let mut event = Event::start_scope(ScopeId::new(), "Bootstrapping", ScopeKind::Group);
+
+        tag_event_with_service(&mut event, "seedbank");
+
+        assert!(matches!(
+            event.kind,
+            EventKind::ScopeStarted { ref label, .. } if label == "[seedbank] Bootstrapping"
+        ));
+    }
+
+    #[test]
+    fn test_tag_event_with_service_should_prefix_message_text() {
+        let mut event = Event::new(
+            ScopeId::new(),
+            EventKind::Message {
+                level: Level::Info,
+                text: "hello".to_string(),
+            },
+        );
+
+        tag_event_with_service(&mut event, "resin");
+
+        assert!(matches!(
+            event.kind,
+            EventKind::Message { ref text, .. } if text == "[resin] hello"
+        ));
+    }
+
+    #[test]
+    fn test_tag_event_with_service_should_leave_plan_hint_untouched() {
+        let mut event = Event::new(
+            ScopeId::new(),
+            EventKind::PlanHint {
+                steps: vec!["one".to_string()],
+            },
+        );
+
+        tag_event_with_service(&mut event, "resin");
+
+        assert!(matches!(
+            event.kind,
+            EventKind::PlanHint { ref steps } if steps == &vec!["one".to_string()]
+        ));
+    }
+
+    #[test]
+    fn test_wait_until_running_should_return_immediately_when_already_running() {
+        let Ok(listener) = std::net::TcpListener::bind("127.0.0.1:0") else {
+            panic!("should bind");
+        };
+        let Ok(local_addr) = listener.local_addr() else {
+            panic!("should have local addr");
+        };
+        let port = local_addr.port();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                drop(stream);
+            }
+        });
+
+        let result = wait_until_running("test-service", &tcp_liveness(port), &span());
+
+        assert!(result.is_ok());
     }
 }

@@ -356,7 +356,7 @@ impl ApplicationDefinitionRepositry for FileApplicationDefinitionRepositry {
     ) -> Result<ApplicationDefinition, ApplicationDefinitionRepositryError> {
         let path = self.qualified_path_for_display_name(display_name);
 
-        if !self.folder.exists(&path) {
+        if !self.file_reader.exists(&path) {
             return Err(ApplicationDefinitionRepositryError::NoDefnition(
                 display_name.to_string(),
             ));
@@ -380,6 +380,6 @@ impl ApplicationDefinitionRepositry for FileApplicationDefinitionRepositry {
 
     fn exists(&self, display_name: &str) -> bool {
         let path = self.qualified_path_for_display_name(display_name);
-        self.folder.exists(&path)
+        self.file_reader.exists(&path)
     }
 }

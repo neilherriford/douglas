@@ -237,11 +237,11 @@ impl Server {
         let (root_path, log_path) = if reporting_fd.is_none() {
             let mut root = std::env::temp_dir();
             root.push("douglas-resin-dbg");
-            (root, douglas_folders.log_file(RESIN))
+            (root, douglas_folders.service_log_file(RESIN))
         } else {
             (
                 douglas_folders.service_root(RESIN),
-                douglas_folders.log_file(RESIN),
+                douglas_folders.service_log_file(RESIN),
             )
         };
 
@@ -262,9 +262,7 @@ impl Server {
                 &*credentials,
                 &*folder,
                 &*permissions,
-                log_path.clone(),
-                root_path.clone(),
-                repositories_root.clone(),
+                &douglas_folders,
             )
             .await?;
             Arc::new(BufferedFileReporter::new(log_path))
@@ -277,7 +275,7 @@ impl Server {
             Arc::clone(&file_reader),
             Arc::clone(&file_renamer),
             Arc::clone(&file_deleter),
-            inspect,
+            Arc::clone(&inspect),
         ));
 
         let blob_uploader: Arc<dyn BlobUploader> = Arc::new(FileBlobUploader::new(
@@ -308,6 +306,7 @@ impl Server {
         let blob_mounter = Arc::new(FileBlobMounter::new(
             Arc::clone(&repository_store),
             Arc::clone(&folder),
+            Arc::clone(&inspect),
             Arc::clone(&file_deleter),
             Arc::clone(&links),
             repositories_root.clone(),
