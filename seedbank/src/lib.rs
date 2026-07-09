@@ -17,6 +17,8 @@ use os::{Os, Unix};
 use regex::Regex;
 use serde::{Deserialize, Serialize, Serializer};
 use std::{
+    collections::HashSet,
+    num::ParseIntError,
     path::PathBuf,
     str::FromStr,
     sync::{Arc, LazyLock},
@@ -26,6 +28,8 @@ use tokio::sync::broadcast::{self, Sender};
 
 pub(crate) static SEEDS_ROOT_NAME: &str = "seeds";
 pub static SEEDBANK: &str = "seedbank";
+
+static MAX_SEEDLINGS: u16 = 4096;
 
 #[derive(Error, Debug)]
 pub enum Error {
@@ -39,6 +43,8 @@ pub enum Error {
     AlreadyExists(Name),
     #[error("Seedling does not exist {0}")]
     NotFound(Name),
+    #[error("Seedling limit reached")]
+    TooManySeedlings,
 
     #[error("IO Error {0}")]
     IoError(#[from] std::io::Error),
@@ -46,6 +52,8 @@ pub enum Error {
     FileSystemError(#[from] FileSystemError),
     #[error("Name parse error: {0}")]
     NameParseError(#[from] NameParseError),
+    #[error("Id parse error: {0}")]
+    IdParseError(#[from] IdParseError),
     #[error("Seedling serialization error: {0}")]
     SeedlingSerializationError(#[from] toml::ser::Error),
     #[error("Seedling deserialization error: {0}")]
@@ -120,9 +128,69 @@ impl<'de> Deserialize<'de> for Name {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Error)]
+pub enum IdParseError {
+    #[error("Id too large {0}")]
+    TooLarge(u16),
+    #[error("Integer parse error {0}")]
+    ParseIntError(#[from] ParseIntError),
+}
+
+#[derive(Debug, PartialEq, Eq, Clone, Hash, PartialOrd, Ord)]
+pub struct Id {
+    value: u16,
+}
+
+impl Id {
+    fn assert_is_valid(value: u16) -> Result<(), IdParseError> {
+        if value >= MAX_SEEDLINGS {
+            Err(IdParseError::TooLarge(value))
+        } else {
+            Ok(())
+        }
+    }
+}
+
+impl std::fmt::Display for Id {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.value.to_string())
+    }
+}
+
+impl FromStr for Id {
+    type Err = IdParseError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let value: u16 = s.parse()?;
+        Self::assert_is_valid(value)?;
+        Ok(Self { value })
+    }
+}
+
+impl Serialize for Id {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&self.value.to_string())
+    }
+}
+
+impl<'de> Deserialize<'de> for Id {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Id::from_str(&value).map_err(serde::de::Error::custom)
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Seedling {
+    id: Id,
     name: Name,
+    content: SeedlingContent,
 }
 
 impl std::fmt::Display for Seedling {
@@ -131,14 +199,17 @@ impl std::fmt::Display for Seedling {
     }
 }
 
+#[derive(Debug, Default, Serialize, Deserialize, Clone)]
+pub struct SeedlingContent {}
+
 #[cfg_attr(test, mockall::automock)]
 pub trait Seedbank {
     fn list(&self) -> Result<Vec<Name>, Error>;
     fn exists(&self, name: &Name) -> Result<bool, Error>;
     fn load(&self, name: &Name) -> Result<Seedling, Error>;
-    fn create(&self, seedling: &Seedling) -> Result<(), Error>;
+    fn create(&self, name: &Name, content: &SeedlingContent) -> Result<(), Error>;
     fn delete(&self, name: &Name) -> Result<(), Error>;
-    fn update(&self, seedling: &Seedling) -> Result<(), Error>;
+    fn update(&self, name: &Name, content: &SeedlingContent) -> Result<(), Error>;
 }
 
 pub struct Server {
@@ -217,13 +288,28 @@ impl Server {
         expected_path
     }
 
-    fn save_seedling(&self, seedling: &Seedling) -> Result<(), Error> {
-        let path = self.create_seedling_path(&seedling.name);
-        self.folder.create_recursively(&path)?;
-        let contents = toml::to_string(seedling)?;
-        let mut manifest_path = path;
-        manifest_path.push("seedling.toml");
-        self.file_writer.write_all(&manifest_path, &contents)?;
+    fn content_path(&self, name: &Name) -> PathBuf {
+        let mut path = self.create_seedling_path(name);
+        path.push("seedling.toml");
+        path
+    }
+
+    fn id_path(&self, name: &Name) -> PathBuf {
+        let mut path = self.create_seedling_path(name);
+        path.push("id");
+        path
+    }
+
+    fn write_content(&self, name: &Name, content: &SeedlingContent) -> Result<(), Error> {
+        let contents = toml::to_string(content)?;
+        self.file_writer
+            .write_all(&self.content_path(name), &contents)?;
+        Ok(())
+    }
+
+    fn write_id(&self, name: &Name, id: &Id) -> Result<(), Error> {
+        self.file_writer
+            .write_all(&self.id_path(name), &id.to_string())?;
         Ok(())
     }
 
@@ -303,6 +389,53 @@ impl Server {
 
         let _ = writer.write_all(serialized.as_bytes()).await;
     }
+
+    fn get_next_id(&self) -> Result<Id, Error> {
+        let used_ids: HashSet<u16> = self
+            .list()?
+            .iter()
+            .filter_map(|name| self.load_id(name).ok().map(|id| id.value))
+            .collect();
+
+        (0..MAX_SEEDLINGS)
+            .find(|id| !used_ids.contains(id))
+            .map(|value| Id { value })
+            .ok_or(Error::TooManySeedlings)
+    }
+
+    fn load_id(&self, name: &Name) -> Result<Id, Error> {
+        match self.file_reader.read_all(&self.id_path(name)) {
+            Ok(raw) => Ok(Id::from_str(raw.trim())?),
+            Err(FileSystemError::IoErrorAtPath { error, .. })
+                if error.kind() == std::io::ErrorKind::NotFound =>
+            {
+                Err(Error::NotFound(name.clone()))
+            }
+            Err(err) => Err(err.into()),
+        }
+    }
+
+    fn load_manifest(&self, name: &Name) -> Result<SeedlingContent, Error> {
+        match self.file_reader.read_all(&self.content_path(name)) {
+            Ok(raw) => Ok(toml::from_str::<SeedlingContent>(&raw)?),
+            Err(FileSystemError::IoErrorAtPath { error, .. })
+                if error.kind() == std::io::ErrorKind::NotFound =>
+            {
+                Err(Error::NotFound(name.clone()))
+            }
+            Err(err) => Err(err.into()),
+        }
+    }
+
+    fn load_seedling(&self, name: &Name) -> Result<Seedling, Error> {
+        let content = self.load_manifest(name)?;
+        let id = self.load_id(name)?;
+        Ok(Seedling {
+            id,
+            name: name.clone(),
+            content,
+        })
+    }
 }
 
 impl Seedbank for Server {
@@ -320,19 +453,33 @@ impl Seedbank for Server {
         Ok(self.folder.exists(&expected_path))
     }
 
-    fn create(&self, seedling: &Seedling) -> Result<(), Error> {
+    fn create(&self, name: &Name, content: &SeedlingContent) -> Result<(), Error> {
         let guard = Span::new(
             Arc::clone(&self.reporter),
-            &format!("Creating seedling {}…", seedling.name),
+            &format!("Creating seedling {name}…"),
             ScopeKind::Task,
         )
         .start_guard();
 
-        if self.exists(&seedling.name)? {
-            return guard.finish(Err(Error::AlreadyExists(seedling.name.clone())));
+        if self.exists(name)? {
+            return guard.finish(Err(Error::AlreadyExists(name.clone())));
         }
 
-        guard.finish(self.save_seedling(seedling))
+        let id = match self.get_next_id() {
+            Ok(id) => id,
+            Err(err) => return guard.finish(Err(err)),
+        };
+
+        let path = self.create_seedling_path(name);
+        if let Err(err) = self.folder.create_recursively(&path) {
+            return guard.finish(Err(err.into()));
+        }
+
+        if let Err(err) = self.write_id(name, &id) {
+            return guard.finish(Err(err));
+        }
+
+        guard.finish(self.write_content(name, content))
     }
 
     fn load(&self, name: &Name) -> Result<Seedling, Error> {
@@ -343,16 +490,7 @@ impl Seedbank for Server {
         )
         .start_guard();
 
-        if !self.exists(name)? {
-            return guard.finish(Err(Error::NotFound(name.clone())));
-        }
-
-        let mut path = self.create_seedling_path(name);
-        path.push("seedling.toml");
-        let raw = self.file_reader.read_all(&path)?;
-        let seedling = toml::from_str::<Seedling>(&raw)?;
-
-        guard.finish(Ok(seedling))
+        guard.finish(self.load_seedling(name))
     }
 
     fn delete(&self, name: &Name) -> Result<(), Error> {
@@ -372,19 +510,19 @@ impl Seedbank for Server {
         guard.finish(Ok(()))
     }
 
-    fn update(&self, seedling: &Seedling) -> Result<(), Error> {
+    fn update(&self, name: &Name, content: &SeedlingContent) -> Result<(), Error> {
         let guard = Span::new(
             Arc::clone(&self.reporter),
-            &format!("Updating seedling {}…", seedling.name),
+            &format!("Updating seedling {name}…"),
             ScopeKind::Task,
         )
         .start_guard();
 
-        if !self.exists(&seedling.name)? {
-            return Err(Error::NotFound(seedling.name.clone()));
+        if !self.exists(name)? {
+            return guard.finish(Err(Error::NotFound(name.clone())));
         }
 
-        guard.finish(self.save_seedling(seedling))
+        guard.finish(self.write_content(name, content))
     }
 }
 
@@ -402,6 +540,10 @@ mod tests {
 
     fn name(value: &str) -> Name {
         Name::from_str(value).expect("valid name")
+    }
+
+    fn id(value: u16) -> Id {
+        Id { value }
     }
 
     fn build_server(
@@ -478,18 +620,19 @@ mod tests {
     }
 
     #[test]
-    fn test_create_should_write_seedling_manifest() {
-        let seedling = Seedling { name: name("foo") };
-
+    fn test_create_should_assign_next_id_and_write_seedling_manifest() {
         let mut folder = MockFolder::new();
         folder.given_does_not_exist("/var/lib/seedbank/seeds/foo");
+        folder.given_folder_entries("/var/lib/seedbank/seeds", Vec::new());
         folder.expect_create_folder_recursively_with("/var/lib/seedbank/seeds/foo");
 
         let mut file_writer = MockFileWriter::new();
-        file_writer.expect_write_to_file_with_contents(
-            "/var/lib/seedbank/seeds/foo/seedling.toml",
-            &toml::to_string(&seedling).expect("should serialize"),
-        );
+        file_writer
+            .expect_write_to_file_with_contents(
+                "/var/lib/seedbank/seeds/foo/seedling.toml",
+                &toml::to_string(&SeedlingContent::default()).expect("should serialize"),
+            )
+            .expect_write_to_file_with_contents("/var/lib/seedbank/seeds/foo/id", "0");
 
         let server = build_server(
             folder,
@@ -498,7 +641,11 @@ mod tests {
             file_writer,
         );
 
-        assert!(server.create(&seedling).is_ok());
+        assert!(
+            server
+                .create(&name("foo"), &SeedlingContent::default())
+                .is_ok()
+        );
     }
 
     #[test]
@@ -513,24 +660,20 @@ mod tests {
             MockFileWriter::new(),
         );
 
-        let result = server.create(&Seedling { name: name("foo") });
+        let result = server.create(&name("foo"), &SeedlingContent::default());
 
         assert!(matches!(result, Err(Error::AlreadyExists(_))));
     }
 
     #[test]
     fn test_load_should_parse_seedling_manifest() {
-        let mut folder = MockFolder::new();
-        folder.given_exists("/var/lib/seedbank/seeds/foo");
-
         let mut file_reader = MockFileReader::new();
-        file_reader.given_can_read_all_with_contents(
-            "/var/lib/seedbank/seeds/foo/seedling.toml",
-            "name = \"foo\"\n",
-        );
+        file_reader
+            .given_can_read_all_with_contents("/var/lib/seedbank/seeds/foo/seedling.toml", "")
+            .given_can_read_all_with_contents("/var/lib/seedbank/seeds/foo/id", "0");
 
         let server = build_server(
-            folder,
+            MockFolder::new(),
             MockFolderDeleter::new(),
             file_reader,
             MockFileWriter::new(),
@@ -539,17 +682,23 @@ mod tests {
         let seedling = server.load(&name("foo")).expect("should load");
 
         assert_eq!(seedling.name, name("foo"));
+        assert_eq!(seedling.id, id(0));
     }
 
     #[test]
     fn test_load_should_fail_when_missing() {
-        let mut folder = MockFolder::new();
-        folder.given_does_not_exist("/var/lib/seedbank/seeds/foo");
+        let mut file_reader = MockFileReader::new();
+        file_reader.expect_read_all().returning(|path| {
+            Err(FileSystemError::IoErrorAtPath {
+                path: path.to_path_buf(),
+                error: std::io::Error::from(std::io::ErrorKind::NotFound),
+            })
+        });
 
         let server = build_server(
-            folder,
+            MockFolder::new(),
             MockFolderDeleter::new(),
-            MockFileReader::new(),
+            file_reader,
             MockFileWriter::new(),
         );
 
@@ -595,16 +744,13 @@ mod tests {
 
     #[test]
     fn test_update_should_overwrite_seedling_manifest() {
-        let seedling = Seedling { name: name("foo") };
-
         let mut folder = MockFolder::new();
         folder.given_exists("/var/lib/seedbank/seeds/foo");
-        folder.expect_create_folder_recursively_with("/var/lib/seedbank/seeds/foo");
 
         let mut file_writer = MockFileWriter::new();
         file_writer.expect_write_to_file_with_contents(
             "/var/lib/seedbank/seeds/foo/seedling.toml",
-            &toml::to_string(&seedling).expect("should serialize"),
+            &toml::to_string(&SeedlingContent::default()).expect("should serialize"),
         );
 
         let server = build_server(
@@ -614,7 +760,11 @@ mod tests {
             file_writer,
         );
 
-        assert!(server.update(&seedling).is_ok());
+        assert!(
+            server
+                .update(&name("foo"), &SeedlingContent::default())
+                .is_ok()
+        );
     }
 
     #[test]
@@ -629,8 +779,121 @@ mod tests {
             MockFileWriter::new(),
         );
 
-        let result = server.update(&Seedling { name: name("foo") });
+        let result = server.update(&name("foo"), &SeedlingContent::default());
 
         assert!(matches!(result, Err(Error::NotFound(_))));
+    }
+
+    #[test]
+    fn test_get_next_id_should_return_zero_when_no_seedlings_exist() {
+        let mut folder = MockFolder::new();
+        folder.given_folder_entries("/var/lib/seedbank/seeds", Vec::new());
+
+        let server = build_server(
+            folder,
+            MockFolderDeleter::new(),
+            MockFileReader::new(),
+            MockFileWriter::new(),
+        );
+
+        let next = server.get_next_id().expect("should allocate");
+
+        assert_eq!(next, id(0));
+    }
+
+    #[test]
+    fn test_get_next_id_should_fill_the_first_gap_rather_than_extend() {
+        let mut folder = MockFolder::new();
+        folder.given_folder_entries(
+            "/var/lib/seedbank/seeds",
+            vec![
+                Entry::create_directory("a"),
+                Entry::create_directory("b"),
+                Entry::create_directory("c"),
+            ],
+        );
+
+        let mut file_reader = MockFileReader::new();
+        file_reader
+            .given_can_read_all_with_contents("/var/lib/seedbank/seeds/a/id", "0")
+            .given_can_read_all_with_contents("/var/lib/seedbank/seeds/b/id", "2")
+            .given_can_read_all_with_contents("/var/lib/seedbank/seeds/c/id", "3");
+
+        let server = build_server(
+            folder,
+            MockFolderDeleter::new(),
+            file_reader,
+            MockFileWriter::new(),
+        );
+
+        let next = server.get_next_id().expect("should allocate");
+
+        assert_eq!(next, id(1));
+    }
+
+    #[test]
+    fn test_get_next_id_should_skip_seedlings_with_no_assigned_id_yet() {
+        let mut folder = MockFolder::new();
+        folder.given_folder_entries(
+            "/var/lib/seedbank/seeds",
+            vec![Entry::create_directory("unassigned")],
+        );
+
+        let mut file_reader = MockFileReader::new();
+        file_reader.expect_read_all().returning(|path| {
+            Err(FileSystemError::IoErrorAtPath {
+                path: path.to_path_buf(),
+                error: std::io::Error::from(std::io::ErrorKind::NotFound),
+            })
+        });
+
+        let server = build_server(
+            folder,
+            MockFolderDeleter::new(),
+            file_reader,
+            MockFileWriter::new(),
+        );
+
+        let next = server.get_next_id().expect("should allocate");
+
+        assert_eq!(next, id(0));
+    }
+
+    #[test]
+    fn test_get_next_id_should_error_when_every_slot_is_taken() {
+        let entries: Vec<Entry> = (0..MAX_SEEDLINGS)
+            .map(|value| Entry::create_directory(&format!("seed{value}")))
+            .collect();
+
+        let mut folder = MockFolder::new();
+        folder.given_folder_entries("/var/lib/seedbank/seeds", entries);
+
+        let mut file_reader = MockFileReader::new();
+        file_reader.expect_read_all().returning(|path| {
+            let Some(seedling_name) = path
+                .parent()
+                .and_then(|parent| parent.file_name())
+                .and_then(|name| name.to_str())
+            else {
+                panic!("unexpected path {path:?}");
+            };
+            let value: u16 = seedling_name
+                .trim_start_matches("seed")
+                .parse()
+                .expect("should be a synthetic seed name");
+
+            Ok(value.to_string())
+        });
+
+        let server = build_server(
+            folder,
+            MockFolderDeleter::new(),
+            file_reader,
+            MockFileWriter::new(),
+        );
+
+        let result = server.get_next_id();
+
+        assert!(matches!(result, Err(Error::TooManySeedlings)));
     }
 }

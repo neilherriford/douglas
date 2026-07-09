@@ -1,4 +1,4 @@
-use crate::{Error, Name, Seedbank, Seedling};
+use crate::{Error, Name, Seedbank, Seedling, SeedlingContent};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -7,9 +7,9 @@ pub enum Request {
     List,
     Exists { name: Name },
     Load { name: Name },
-    Create { seedling: Seedling },
+    Create { name: Name, content: SeedlingContent },
     Delete { name: Name },
-    Update { seedling: Seedling },
+    Update { name: Name, content: SeedlingContent },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -36,7 +36,7 @@ pub fn handle(seedbank: &dyn Seedbank, request: Request) -> Response {
             Ok(seedling) => Response::Seedling { seedling },
             Err(err) => error_response(err),
         },
-        Request::Create { seedling } => match seedbank.create(&seedling) {
+        Request::Create { name, content } => match seedbank.create(&name, &content) {
             Ok(()) => Response::Ok,
             Err(err) => error_response(err),
         },
@@ -44,7 +44,7 @@ pub fn handle(seedbank: &dyn Seedbank, request: Request) -> Response {
             Ok(()) => Response::Ok,
             Err(err) => error_response(err),
         },
-        Request::Update { seedling } => match seedbank.update(&seedling) {
+        Request::Update { name, content } => match seedbank.update(&name, &content) {
             Ok(()) => Response::Ok,
             Err(err) => error_response(err),
         },
@@ -60,19 +60,21 @@ fn error_response(err: Error) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::MockSeedbank;
+    use crate::{Id, MockSeedbank};
     use std::str::FromStr;
 
     fn name(value: &str) -> Name {
         Name::from_str(value).expect("valid name")
     }
 
+    fn id(value: u16) -> Id {
+        Id { value }
+    }
+
     #[test]
     fn test_list_should_wrap_success_in_names() {
         let mut seedbank = MockSeedbank::new();
-        seedbank
-            .expect_list()
-            .returning(|| Ok(vec![name("foo")]));
+        seedbank.expect_list().returning(|| Ok(vec![name("foo")]));
 
         let response = handle(&seedbank, Request::List);
 
@@ -112,7 +114,9 @@ mod tests {
             .withf(|loaded| loaded == &name("foo"))
             .returning(|name| {
                 Ok(Seedling {
+                    id: id(0),
                     name: name.clone(),
+                    content: SeedlingContent::default(),
                 })
             });
 
@@ -125,17 +129,18 @@ mod tests {
     }
 
     #[test]
-    fn test_create_should_dispatch_with_seedling_and_wrap_ok() {
+    fn test_create_should_dispatch_with_name_and_content_and_wrap_ok() {
         let mut seedbank = MockSeedbank::new();
         seedbank
             .expect_create()
-            .withf(|created| created.name == name("foo"))
-            .returning(|_| Ok(()));
+            .withf(|created, _content| created == &name("foo"))
+            .returning(|_, _| Ok(()));
 
         let response = handle(
             &seedbank,
             Request::Create {
-                seedling: Seedling { name: name("foo") },
+                name: name("foo"),
+                content: SeedlingContent::default(),
             },
         );
 
@@ -156,17 +161,18 @@ mod tests {
     }
 
     #[test]
-    fn test_update_should_dispatch_with_seedling_and_wrap_ok() {
+    fn test_update_should_dispatch_with_name_and_content_and_wrap_ok() {
         let mut seedbank = MockSeedbank::new();
         seedbank
             .expect_update()
-            .withf(|updated| updated.name == name("foo"))
-            .returning(|_| Ok(()));
+            .withf(|updated, _content| updated == &name("foo"))
+            .returning(|_, _| Ok(()));
 
         let response = handle(
             &seedbank,
             Request::Update {
-                seedling: Seedling { name: name("foo") },
+                name: name("foo"),
+                content: SeedlingContent::default(),
             },
         );
 
