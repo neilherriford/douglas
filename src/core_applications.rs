@@ -1,5 +1,5 @@
 use crate::application_definition::{ApplicationDefinition, MountFile, MountTemplate};
-use docker::{Capability, EnvironmentVariable, ImageName};
+use docker::{Capability, EnvironmentVariable, VersionedImageName};
 
 pub struct OpenBao {}
 
@@ -107,8 +107,8 @@ impl ApplicationDefinition for OpenBao {
         "openbao".to_string()
     }
 
-    fn image_name(&self) -> ImageName {
-        ImageName::specific("openbao", "openbao", "2.4.3")
+    fn image_name(&self) -> VersionedImageName {
+        VersionedImageName::namespaced_specific("openbao", "openbao", "2.4.3")
     }
 
     fn command(&self) -> Option<String> {

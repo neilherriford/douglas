@@ -7,6 +7,7 @@ pub use protocol::{Request, Response};
 use blueprint::listener::SocketListenerFactory;
 use config::DouglasFolders;
 use credentials::create_credentials;
+use docker_types::VersionedImageName;
 use file_system::{
     BindableUnixDomainSocketFile, FileDeleter, FileReader, FileSystemError, FileWriter, Folder,
     FolderDeleter, Permissions, UnixDomainSocket, UnixFileDeleter, UnixFileReader, UnixFileWriter,
@@ -190,7 +191,7 @@ impl<'de> Deserialize<'de> for Id {
 pub struct Seedling {
     id: Id,
     name: Name,
-    content: SeedlingContent,
+    definition: SeedlingDefinition,
 }
 
 impl std::fmt::Display for Seedling {
@@ -199,17 +200,25 @@ impl std::fmt::Display for Seedling {
     }
 }
 
-#[derive(Debug, Default, Serialize, Deserialize, Clone)]
-pub struct SeedlingContent {}
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct SeedlingDefinition {
+    pub image: VersionedImageName,
+}
+
+impl SeedlingDefinition {
+    pub fn new(image: VersionedImageName) -> Self {
+        Self { image }
+    }
+}
 
 #[cfg_attr(test, mockall::automock)]
 pub trait Seedbank {
     fn list(&self) -> Result<Vec<Name>, Error>;
     fn exists(&self, name: &Name) -> Result<bool, Error>;
     fn load(&self, name: &Name) -> Result<Seedling, Error>;
-    fn create(&self, name: &Name, content: &SeedlingContent) -> Result<(), Error>;
+    fn create(&self, name: &Name, definition: &SeedlingDefinition) -> Result<(), Error>;
     fn delete(&self, name: &Name) -> Result<(), Error>;
-    fn update(&self, name: &Name, content: &SeedlingContent) -> Result<(), Error>;
+    fn update(&self, name: &Name, definition: &SeedlingDefinition) -> Result<(), Error>;
 }
 
 pub struct Server {
@@ -288,7 +297,7 @@ impl Server {
         expected_path
     }
 
-    fn content_path(&self, name: &Name) -> PathBuf {
+    fn definition_path(&self, name: &Name) -> PathBuf {
         let mut path = self.create_seedling_path(name);
         path.push("seedling.toml");
         path
@@ -300,10 +309,10 @@ impl Server {
         path
     }
 
-    fn write_content(&self, name: &Name, content: &SeedlingContent) -> Result<(), Error> {
-        let contents = toml::to_string(content)?;
+    fn write_definition(&self, name: &Name, definition: &SeedlingDefinition) -> Result<(), Error> {
+        let contents = toml::to_string(definition)?;
         self.file_writer
-            .write_all(&self.content_path(name), &contents)?;
+            .write_all(&self.definition_path(name), &contents)?;
         Ok(())
     }
 
@@ -415,9 +424,9 @@ impl Server {
         }
     }
 
-    fn load_manifest(&self, name: &Name) -> Result<SeedlingContent, Error> {
-        match self.file_reader.read_all(&self.content_path(name)) {
-            Ok(raw) => Ok(toml::from_str::<SeedlingContent>(&raw)?),
+    fn load_definition(&self, name: &Name) -> Result<SeedlingDefinition, Error> {
+        match self.file_reader.read_all(&self.definition_path(name)) {
+            Ok(raw) => Ok(toml::from_str::<SeedlingDefinition>(&raw)?),
             Err(FileSystemError::IoErrorAtPath { error, .. })
                 if error.kind() == std::io::ErrorKind::NotFound =>
             {
@@ -428,12 +437,12 @@ impl Server {
     }
 
     fn load_seedling(&self, name: &Name) -> Result<Seedling, Error> {
-        let content = self.load_manifest(name)?;
+        let definition = self.load_definition(name)?;
         let id = self.load_id(name)?;
         Ok(Seedling {
             id,
             name: name.clone(),
-            content,
+            definition,
         })
     }
 }
@@ -453,7 +462,7 @@ impl Seedbank for Server {
         Ok(self.folder.exists(&expected_path))
     }
 
-    fn create(&self, name: &Name, content: &SeedlingContent) -> Result<(), Error> {
+    fn create(&self, name: &Name, definition: &SeedlingDefinition) -> Result<(), Error> {
         let guard = Span::new(
             Arc::clone(&self.reporter),
             &format!("Creating seedling {name}…"),
@@ -479,7 +488,7 @@ impl Seedbank for Server {
             return guard.finish(Err(err));
         }
 
-        guard.finish(self.write_content(name, content))
+        guard.finish(self.write_definition(name, definition))
     }
 
     fn load(&self, name: &Name) -> Result<Seedling, Error> {
@@ -510,7 +519,7 @@ impl Seedbank for Server {
         guard.finish(Ok(()))
     }
 
-    fn update(&self, name: &Name, content: &SeedlingContent) -> Result<(), Error> {
+    fn update(&self, name: &Name, definition: &SeedlingDefinition) -> Result<(), Error> {
         let guard = Span::new(
             Arc::clone(&self.reporter),
             &format!("Updating seedling {name}…"),
@@ -522,7 +531,7 @@ impl Seedbank for Server {
             return guard.finish(Err(Error::NotFound(name.clone())));
         }
 
-        guard.finish(self.write_content(name, content))
+        guard.finish(self.write_definition(name, definition))
     }
 }
 
@@ -544,6 +553,10 @@ mod tests {
 
     fn id(value: u16) -> Id {
         Id { value }
+    }
+
+    fn definition() -> SeedlingDefinition {
+        SeedlingDefinition::new(VersionedImageName::latest("test"))
     }
 
     fn build_server(
@@ -630,7 +643,7 @@ mod tests {
         file_writer
             .expect_write_to_file_with_contents(
                 "/var/lib/seedbank/seeds/foo/seedling.toml",
-                &toml::to_string(&SeedlingContent::default()).expect("should serialize"),
+                &toml::to_string(&definition()).expect("should serialize"),
             )
             .expect_write_to_file_with_contents("/var/lib/seedbank/seeds/foo/id", "0");
 
@@ -641,11 +654,7 @@ mod tests {
             file_writer,
         );
 
-        assert!(
-            server
-                .create(&name("foo"), &SeedlingContent::default())
-                .is_ok()
-        );
+        assert!(server.create(&name("foo"), &definition()).is_ok());
     }
 
     #[test]
@@ -660,7 +669,7 @@ mod tests {
             MockFileWriter::new(),
         );
 
-        let result = server.create(&name("foo"), &SeedlingContent::default());
+        let result = server.create(&name("foo"), &definition());
 
         assert!(matches!(result, Err(Error::AlreadyExists(_))));
     }
@@ -669,7 +678,10 @@ mod tests {
     fn test_load_should_parse_seedling_manifest() {
         let mut file_reader = MockFileReader::new();
         file_reader
-            .given_can_read_all_with_contents("/var/lib/seedbank/seeds/foo/seedling.toml", "")
+            .given_can_read_all_with_contents(
+                "/var/lib/seedbank/seeds/foo/seedling.toml",
+                &toml::to_string(&definition()).expect("should serialize"),
+            )
             .given_can_read_all_with_contents("/var/lib/seedbank/seeds/foo/id", "0");
 
         let server = build_server(
@@ -750,7 +762,7 @@ mod tests {
         let mut file_writer = MockFileWriter::new();
         file_writer.expect_write_to_file_with_contents(
             "/var/lib/seedbank/seeds/foo/seedling.toml",
-            &toml::to_string(&SeedlingContent::default()).expect("should serialize"),
+            &toml::to_string(&definition()).expect("should serialize"),
         );
 
         let server = build_server(
@@ -760,11 +772,7 @@ mod tests {
             file_writer,
         );
 
-        assert!(
-            server
-                .update(&name("foo"), &SeedlingContent::default())
-                .is_ok()
-        );
+        assert!(server.update(&name("foo"), &definition()).is_ok());
     }
 
     #[test]
@@ -779,7 +787,7 @@ mod tests {
             MockFileWriter::new(),
         );
 
-        let result = server.update(&name("foo"), &SeedlingContent::default());
+        let result = server.update(&name("foo"), &definition());
 
         assert!(matches!(result, Err(Error::NotFound(_))));
     }

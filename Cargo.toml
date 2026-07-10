@@ -46,7 +46,7 @@ members = [
     "log",
     "file_system",
     "os",
-    "bract", "config", "utils", "openbao", "blueprint", "service_library", "application_definition_repository", "resin", "seedbank",
+    "bract", "config", "utils", "openbao", "blueprint", "service_library", "application_definition_repository", "resin", "seedbank", "docker_types",
 ]
 
 [workspace.dependencies]
@@ -77,6 +77,7 @@ bract = { path = "./bract" }
 config = { path = "./config" }
 credentials = { path = "./credentials" }
 docker = { path = "./docker" }
+docker_types = { path = "./docker_types" }
 file_system = { path = "./file_system" }
 log = { path = "./log" }
 openbao = { path = "./openbao" }

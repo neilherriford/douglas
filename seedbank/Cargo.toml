@@ -7,6 +7,7 @@ edition = "2024"
 blueprint = { workspace = true }
 config = { workspace = true }
 credentials = { workspace = true }
+docker_types = { workspace = true }
 file_system = { workspace = true }
 log = { workspace = true, features = ["tui"] }
 os = { workspace = true }

@@ -1,15 +1,27 @@
-use crate::{Error, Name, Seedbank, Seedling, SeedlingContent};
+use crate::{Error, Name, Seedbank, Seedling, SeedlingDefinition};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum Request {
     List,
-    Exists { name: Name },
-    Load { name: Name },
-    Create { name: Name, content: SeedlingContent },
-    Delete { name: Name },
-    Update { name: Name, content: SeedlingContent },
+    Exists {
+        name: Name,
+    },
+    Load {
+        name: Name,
+    },
+    Create {
+        name: Name,
+        definition: SeedlingDefinition,
+    },
+    Delete {
+        name: Name,
+    },
+    Update {
+        name: Name,
+        definition: SeedlingDefinition,
+    },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -36,7 +48,7 @@ pub fn handle(seedbank: &dyn Seedbank, request: Request) -> Response {
             Ok(seedling) => Response::Seedling { seedling },
             Err(err) => error_response(err),
         },
-        Request::Create { name, content } => match seedbank.create(&name, &content) {
+        Request::Create { name, definition } => match seedbank.create(&name, &definition) {
             Ok(()) => Response::Ok,
             Err(err) => error_response(err),
         },
@@ -44,7 +56,7 @@ pub fn handle(seedbank: &dyn Seedbank, request: Request) -> Response {
             Ok(()) => Response::Ok,
             Err(err) => error_response(err),
         },
-        Request::Update { name, content } => match seedbank.update(&name, &content) {
+        Request::Update { name, definition } => match seedbank.update(&name, &definition) {
             Ok(()) => Response::Ok,
             Err(err) => error_response(err),
         },
@@ -61,6 +73,7 @@ fn error_response(err: Error) -> Response {
 mod tests {
     use super::*;
     use crate::{Id, MockSeedbank};
+    use docker_types::VersionedImageName;
     use std::str::FromStr;
 
     fn name(value: &str) -> Name {
@@ -69,6 +82,10 @@ mod tests {
 
     fn id(value: u16) -> Id {
         Id { value }
+    }
+
+    fn definition() -> SeedlingDefinition {
+        SeedlingDefinition::new(VersionedImageName::latest("test"))
     }
 
     #[test]
@@ -116,7 +133,7 @@ mod tests {
                 Ok(Seedling {
                     id: id(0),
                     name: name.clone(),
-                    content: SeedlingContent::default(),
+                    definition: definition(),
                 })
             });
 
@@ -129,18 +146,18 @@ mod tests {
     }
 
     #[test]
-    fn test_create_should_dispatch_with_name_and_content_and_wrap_ok() {
+    fn test_create_should_dispatch_with_name_and_definition_and_wrap_ok() {
         let mut seedbank = MockSeedbank::new();
         seedbank
             .expect_create()
-            .withf(|created, _content| created == &name("foo"))
+            .withf(|created, _definition| created == &name("foo"))
             .returning(|_, _| Ok(()));
 
         let response = handle(
             &seedbank,
             Request::Create {
                 name: name("foo"),
-                content: SeedlingContent::default(),
+                definition: definition(),
             },
         );
 
@@ -161,18 +178,18 @@ mod tests {
     }
 
     #[test]
-    fn test_update_should_dispatch_with_name_and_content_and_wrap_ok() {
+    fn test_update_should_dispatch_with_name_and_definition_and_wrap_ok() {
         let mut seedbank = MockSeedbank::new();
         seedbank
             .expect_update()
-            .withf(|updated, _content| updated == &name("foo"))
+            .withf(|updated, _definition| updated == &name("foo"))
             .returning(|_, _| Ok(()));
 
         let response = handle(
             &seedbank,
             Request::Update {
                 name: name("foo"),
-                content: SeedlingContent::default(),
+                definition: definition(),
             },
         );
 

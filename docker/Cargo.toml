@@ -6,6 +6,7 @@ publish = false
 
 [dependencies]
 async-trait = { workspace = true }
+docker_types = { workspace = true }
 file_system = { workspace = true }
 http-body-util = { workspace = true }
 hyper = { workspace = true }

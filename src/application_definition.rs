@@ -1,4 +1,4 @@
-use docker::{Capability, EnvironmentVariable, ImageName, Label};
+use docker::{Capability, EnvironmentVariable, Label, VersionedImageName};
 use std::{collections::HashMap, path::PathBuf};
 
 #[derive(Debug, PartialEq, Eq, Clone)]
@@ -67,7 +67,7 @@ impl MountTemplate {
 
 pub trait ApplicationDefinition {
     fn name(&self) -> String;
-    fn image_name(&self) -> ImageName;
+    fn image_name(&self) -> VersionedImageName;
     fn command(&self) -> Option<String>;
     fn environment_variables(&self) -> Vec<EnvironmentVariable>;
     fn added_capabilities(&self) -> Vec<Capability>;

@@ -1,6 +1,6 @@
 use super::{assert_no_docker_errors, assert_non_empty_string_argument};
 use crate::Image;
-use crate::{DockerError, Id, ImageName};
+use crate::{DockerError, Id, VersionedImageName};
 use log::{Reporter, Span};
 use serde_json::from_value;
 use serde_json::value::Value as Json;
@@ -57,7 +57,10 @@ impl ImageCommand {
         guard.finish(Ok(from_value(json)?))
     }
 
-    pub async fn find_by_name(&mut self, image_name: &ImageName) -> Result<Image, DockerError> {
+    pub async fn find_by_name(
+        &mut self,
+        image_name: &VersionedImageName,
+    ) -> Result<Image, DockerError> {
         let guard = Span::new(
             Arc::clone(&self.reporter),
             "Find image by name",
@@ -67,10 +70,7 @@ impl ImageCommand {
         assert_non_empty_string_argument("name", &image_name.name)?;
 
         let request = Request::Get {
-            path: format!(
-                "/images/{}/{}:{}/json",
-                image_name.namespace, image_name.name, image_name.version
-            ),
+            path: format!("/images/{image_name}/json"),
             headers: vec![],
         };
 
@@ -110,7 +110,7 @@ impl ImageCommand {
         )
     }
 
-    pub async fn pull(&mut self, image_name: &ImageName) -> Result<Image, DockerError> {
+    pub async fn pull(&mut self, image_name: &VersionedImageName) -> Result<Image, DockerError> {
         let guard = Span::new(
             Arc::clone(&self.reporter),
             "Pull image",
@@ -122,10 +122,7 @@ impl ImageCommand {
             path: simple_rest_client::create_path_and_query_string(
                 "/images/create",
                 HashMap::from([
-                    (
-                        "fromImage",
-                        format!("{}/{}", image_name.namespace, image_name.name).as_str(),
-                    ),
+                    ("fromImage", image_name.formatted_name().as_str()),
                     ("tag", &image_name.version.to_string()),
                 ]),
             ),
