@@ -892,8 +892,8 @@ mod tests {
             use crate::blob_store::{BlobError, BlobStore, FileBlobStore};
             use crate::digest;
             use file_system::{
-                Entry, EntryKind, FileSystemError, MockFileDeleter, MockFileReader,
-                MockFileRenamer, MockFileWriter, MockFolder, MockInspect,
+                Entry, FileSystemError, MockFileDeleter, MockFileReader, MockFileRenamer,
+                MockFileWriter, MockFolder, MockInspect,
             };
             use mockall::predicate;
             use std::{path::PathBuf, sync::Arc};
@@ -980,12 +980,7 @@ mod tests {
                 inspect.given_exists(&format!("/tmp/blobs/sha256/ff/{sha}/{sha}"));
                 folder.given_folder_entries(
                     &format!("/tmp/blobs/sha256/ff/{sha}"),
-                    vec![Entry {
-                        name: sha.clone(),
-                        kind: EntryKind::File,
-                        is_link: false,
-                        size: 0,
-                    }],
+                    vec![Entry::create_file_entry(&sha)],
                 );
 
                 file_deleter.given_delete_to_fail_once_with(
@@ -1027,24 +1022,9 @@ mod tests {
                 folder.given_folder_entries(
                     &format!("/tmp/blobs/sha256/ff/{sha}"),
                     vec![
-                        Entry {
-                            name: sha.clone(),
-                            kind: EntryKind::File,
-                            is_link: false,
-                            size: 0,
-                        },
-                        Entry {
-                            name: format!("{sha}.mediatype"),
-                            kind: EntryKind::File,
-                            is_link: false,
-                            size: 0,
-                        },
-                        Entry {
-                            name: "whoops".to_string(),
-                            kind: EntryKind::Directory,
-                            is_link: false,
-                            size: 0,
-                        },
+                        Entry::create_file_entry(&sha),
+                        Entry::create_file_entry(&format!("{sha}.mediatype")),
+                        Entry::create_directory("whoops"),
                     ],
                 );
 
@@ -1074,7 +1054,7 @@ mod tests {
             use crate::digest;
             use file_system::{
                 BufferedFileWiter, Entry, EntryKind, FileDeleter, FileReader, FileRenamer,
-                FileSystemError, FileWriter, Folder, Inspect,
+                FileSystemError, FileWriter, Folder, Inspect, RelativePath,
             };
             use std::collections::HashMap;
             use std::path::{Path, PathBuf};
@@ -1127,6 +1107,22 @@ mod tests {
                 fn split(&self, path: &Path) -> Vec<PathBuf> {
                     path.ancestors().map(|p| p.to_path_buf()).collect()
                 }
+                fn create_relative_path(
+                    &self,
+                    root: &Path,
+                    child: &Path,
+                ) -> Result<RelativePath, FileSystemError> {
+                    let relative =
+                        child
+                            .strip_prefix(root)
+                            .map_err(|_| FileSystemError::NotChild {
+                                root: root.to_path_buf(),
+                                child: child.to_path_buf(),
+                            })?;
+
+                    RelativePath::try_from(relative.to_path_buf())
+                        .map_err(|_| FileSystemError::InvalidPath(child.to_path_buf()))
+                }
             }
 
             impl Inspect for FakeDisk {
@@ -1145,6 +1141,7 @@ mod tests {
                             .unwrap_or_default()
                             .to_string_lossy()
                             .into_owned(),
+                        path: path.to_path_buf(),
                         kind: EntryKind::File,
                         is_link: false,
                         size,
@@ -1215,6 +1212,14 @@ mod tests {
                         .ok_or(FileSystemError::ExpectedFileError)?
                         .clone();
                     Ok(String::from_utf8_lossy(&bytes).into_owned())
+                }
+                fn read_all_bytes(&self, path: &Path) -> Result<Vec<u8>, FileSystemError> {
+                    self.0
+                        .lock()
+                        .unwrap()
+                        .get(path)
+                        .cloned()
+                        .ok_or(FileSystemError::ExpectedFileError)
                 }
                 fn exists(&self, path: &Path) -> bool {
                     self.0.lock().unwrap().contains_key(path)
@@ -1353,15 +1358,7 @@ mod tests {
 
             let path = format!("/tmp/blobs/sha256/ff/{sha}/{sha}");
             inspect.given_exists(&path);
-            inspect.expect_entry_with_metadata(
-                &path,
-                Entry {
-                    name: sha.clone(),
-                    kind: file_system::EntryKind::File,
-                    is_link: false,
-                    size: 123,
-                },
-            );
+            inspect.expect_entry_with_metadata(&path, Entry::create_file_entry(&sha));
             file_reader.given_can_read_all_with_contents(
                 &format!("/tmp/blobs/sha256/ff/{sha}/{sha}.mediatype"),
                 "application/vnd.oci.image.manifest.v1+json",
@@ -1397,15 +1394,7 @@ mod tests {
 
             let path = format!("/tmp/blobs/sha256/ff/{sha}/{sha}");
             inspect.given_exists(&path);
-            inspect.expect_entry_with_metadata(
-                &path,
-                Entry {
-                    name: sha.clone(),
-                    kind: file_system::EntryKind::File,
-                    is_link: false,
-                    size: 42,
-                },
-            );
+            inspect.expect_entry_with_metadata(&path, Entry::create_file_entry(&sha));
             file_reader.given_can_read_all_with_contents(
                 &format!("/tmp/blobs/sha256/ff/{sha}/{sha}.mediatype"),
                 "application/vnd.oci.image.manifest.v1+json\n",
@@ -1441,15 +1430,7 @@ mod tests {
 
             let path = format!("/tmp/blobs/sha256/ff/{sha}/{sha}");
             inspect.given_exists(&path);
-            inspect.expect_entry_with_metadata(
-                &path,
-                Entry {
-                    name: sha.clone(),
-                    kind: file_system::EntryKind::File,
-                    is_link: false,
-                    size: 123,
-                },
-            );
+            inspect.expect_entry_with_metadata(&path, Entry::create_file_entry(&sha));
 
             let mediatype_path =
                 PathBuf::from(format!("/tmp/blobs/sha256/ff/{sha}/{sha}.mediatype"));

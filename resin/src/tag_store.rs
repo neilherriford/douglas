@@ -154,9 +154,7 @@ mod tests {
             name::Name,
             tag_store::{FileTagStore, TagStore, TagStoreError},
         };
-        use file_system::{
-            Entry, EntryKind, MockFileDeleter, MockFileReader, MockFileWriter, MockFolder,
-        };
+        use file_system::{Entry, MockFileDeleter, MockFileReader, MockFileWriter, MockFolder};
         use std::{path::PathBuf, str::FromStr, sync::Arc};
 
         #[test]
@@ -221,18 +219,8 @@ mod tests {
             folder.given_folder_entries(
                 "/tmp/oops/_manifests/tags",
                 vec![
-                    Entry {
-                        name: "foo".to_string(),
-                        kind: EntryKind::Directory,
-                        is_link: false,
-                        size: 0,
-                    },
-                    Entry {
-                        name: "bar".to_string(),
-                        kind: EntryKind::File,
-                        is_link: false,
-                        size: 123,
-                    },
+                    Entry::create_directory("foo"),
+                    Entry::create_file_entry("bar"),
                 ],
             );
 
@@ -263,24 +251,9 @@ mod tests {
             folder.given_folder_entries(
                 "/tmp/oops/_manifests/tags",
                 vec![
-                    Entry {
-                        name: "v2".to_string(),
-                        kind: EntryKind::File,
-                        is_link: false,
-                        size: 0,
-                    },
-                    Entry {
-                        name: "latest".to_string(),
-                        kind: EntryKind::File,
-                        is_link: false,
-                        size: 0,
-                    },
-                    Entry {
-                        name: "v1".to_string(),
-                        kind: EntryKind::File,
-                        is_link: false,
-                        size: 0,
-                    },
+                    Entry::create_file_entry("v2"),
+                    Entry::create_file_entry("latest"),
+                    Entry::create_file_entry("v1"),
                 ],
             );
 

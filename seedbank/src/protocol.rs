@@ -74,7 +74,7 @@ mod tests {
     use super::*;
     use crate::{Id, MockSeedbank};
     use docker_types::VersionedImageName;
-    use std::str::FromStr;
+    use std::{collections::HashMap, str::FromStr};
 
     fn name(value: &str) -> Name {
         Name::from_str(value).expect("valid name")
@@ -85,7 +85,7 @@ mod tests {
     }
 
     fn definition() -> SeedlingDefinition {
-        SeedlingDefinition::new(VersionedImageName::latest("test"))
+        SeedlingDefinition::new(VersionedImageName::latest("test"), HashMap::new())
     }
 
     #[test]

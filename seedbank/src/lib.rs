@@ -9,20 +9,22 @@ use config::DouglasFolders;
 use credentials::create_credentials;
 use docker_types::VersionedImageName;
 use file_system::{
-    BindableUnixDomainSocketFile, FileDeleter, FileReader, FileSystemError, FileWriter, Folder,
-    FolderDeleter, Permissions, UnixDomainSocket, UnixFileDeleter, UnixFileReader, UnixFileWriter,
-    UnixFolder, UnixFolderDeleter, UnixPermissions,
+    BindableUnixDomainSocketFile, Entry, FileDeleter, FileReader, FileSystemError, FileWriter,
+    Folder, FolderDeleter, Inspect, Permissions, RelativePath, RelativePathError, UnixDomainSocket,
+    UnixFileDeleter, UnixFileReader, UnixFileWriter, UnixFolder, UnixFolderDeleter, UnixInspect,
+    UnixPermissions,
 };
 use log::{BufferedFileReporter, Reporter, ScopeKind, Span, TuiReporter};
 use os::{Os, Unix};
 use regex::Regex;
 use serde::{Deserialize, Serialize, Serializer};
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
+    hash::Hasher,
     num::ParseIntError,
-    path::PathBuf,
+    path::{Path, PathBuf},
     str::FromStr,
-    sync::{Arc, LazyLock},
+    sync::{Arc, LazyLock, Mutex},
 };
 use thiserror::Error;
 use tokio::sync::broadcast::{self, Sender};
@@ -71,7 +73,7 @@ pub enum NameParseError {
     InvalidName,
 }
 
-#[derive(Debug, PartialEq, Eq, Clone)]
+#[derive(Debug, PartialEq, Eq, Clone, Hash)]
 pub struct Name {
     value: String,
 }
@@ -200,14 +202,104 @@ impl std::fmt::Display for Seedling {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq, Hash)]
+pub enum MountType {
+    Persisted,
+    PersistedShared(Vec<Name>),
+    InMemory,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+pub struct MountFile {
+    file_relative_path: RelativePath,
+    contents: Vec<u8>,
+}
+
+impl MountFile {
+    pub fn in_root(contents: Vec<u8>) -> Self {
+        Self::new(RelativePath::root(), contents)
+    }
+
+    pub fn new(file_relative_path: RelativePath, contents: Vec<u8>) -> Self {
+        Self {
+            file_relative_path,
+            contents,
+        }
+    }
+}
+
+impl std::hash::Hash for MountFile {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.file_relative_path.hash(state);
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq, Hash)]
+pub enum MountContents {
+    FolderOnly(RelativePath),
+    File(MountFile),
+}
+
+impl MountContents {
+    pub fn file(
+        relative_file_path: &str,
+        contents: &[u8],
+    ) -> Result<MountContents, RelativePathError> {
+        let file_relative_path = RelativePath::try_from(PathBuf::from(relative_file_path))?;
+        Ok(MountContents::File(MountFile {
+            file_relative_path,
+            contents: Vec::from(contents),
+        }))
+    }
+
+    pub fn folder_only(relative_path: &str) -> Result<MountContents, RelativePathError> {
+        let relative_path = RelativePath::try_from(PathBuf::from(relative_path))?;
+        Ok(MountContents::FolderOnly(relative_path))
+    }
+
+    pub fn relative_path(&self) -> &RelativePath {
+        match self {
+            MountContents::FolderOnly(path) => path,
+            MountContents::File(file) => &file.file_relative_path,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Mount {
+    kind: MountType,
+    remote_path: PathBuf,
+    #[serde(skip)]
+    contents: HashSet<MountContents>,
+}
+
+impl Mount {
+    pub fn build(kind: MountType, remote_path: PathBuf, contents: HashSet<MountContents>) -> Self {
+        Self {
+            kind,
+            remote_path,
+            contents,
+        }
+    }
+
+    pub fn contents(&self) -> &HashSet<MountContents> {
+        &self.contents
+    }
+
+    pub fn contents_mut(&mut self) -> &mut HashSet<MountContents> {
+        &mut self.contents
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SeedlingDefinition {
     pub image: VersionedImageName,
+    pub mounts: HashMap<Name, Mount>,
 }
 
 impl SeedlingDefinition {
-    pub fn new(image: VersionedImageName) -> Self {
-        Self { image }
+    pub fn new(image: VersionedImageName, mounts: HashMap<Name, Mount>) -> Self {
+        Self { image, mounts }
     }
 }
 
@@ -225,11 +317,14 @@ pub struct Server {
     reporter: Arc<dyn Reporter>,
     folder: Arc<dyn Folder>,
     folder_deleter: Arc<dyn FolderDeleter>,
+    file_deleter: Arc<dyn FileDeleter>,
     file_reader: Arc<dyn FileReader>,
     file_writer: Arc<dyn FileWriter>,
+    inspect: Arc<dyn Inspect>,
     seeds: PathBuf,
     listener_factories: Vec<SocketListenerFactory>,
     shutdown_sender: Sender<()>,
+    global_lock: Mutex<()>,
 }
 
 impl Server {
@@ -241,6 +336,7 @@ impl Server {
         let file_reader: Arc<dyn FileReader> = Arc::new(UnixFileReader::new());
         let file_writer: Arc<dyn FileWriter> = Arc::new(UnixFileWriter::new());
         let file_deleter: Arc<dyn FileDeleter> = Arc::new(UnixFileDeleter::new());
+        let inspect: Arc<dyn Inspect> = Arc::new(UnixInspect::new());
         let unix_domain_socket: Arc<dyn BindableUnixDomainSocketFile> =
             Arc::new(UnixDomainSocket::new());
         let douglas_folders = DouglasFolders::new();
@@ -283,11 +379,14 @@ impl Server {
             reporter,
             folder,
             folder_deleter,
+            file_deleter,
             file_reader,
             file_writer,
+            inspect,
             seeds,
             listener_factories,
             shutdown_sender,
+            global_lock: Mutex::new(()),
         })
     }
 
@@ -308,12 +407,86 @@ impl Server {
         path.push("id");
         path
     }
+    fn mounts_root(&self, seedling_name: &Name) -> PathBuf {
+        let mut path = self.create_seedling_path(seedling_name);
+        path.push("mounts");
+        path
+    }
 
-    fn write_definition(&self, name: &Name, definition: &SeedlingDefinition) -> Result<(), Error> {
-        let contents = toml::to_string(definition)?;
+    fn mount_root(&self, seedling_name: &Name, mount_name: &Name) -> PathBuf {
+        let mut path = self.mounts_root(seedling_name);
+        path.push(mount_name.to_string());
+        path
+    }
+
+    fn mount_file(&self, seedling_name: &Name, mount_name: &Name, file: &RelativePath) -> PathBuf {
+        let path = self.mount_root(seedling_name, mount_name);
+        path.join(file)
+    }
+
+    fn create_mount_lookup(
+        seedling_definition: Option<&SeedlingDefinition>,
+    ) -> HashMap<Name, HashSet<MountContents>> {
+        seedling_definition
+            .iter()
+            .flat_map(|definitions| &definitions.mounts)
+            .map(|(name, mount)| (name.clone(), mount.contents().clone()))
+            .collect()
+    }
+
+    fn write_definition(
+        &self,
+        seedling_name: &Name,
+        current: Option<&SeedlingDefinition>,
+        proposed: &SeedlingDefinition,
+    ) -> Result<(), Error> {
+        self.purge_mounts(seedling_name, current, proposed)?;
+
+        let contents = toml::to_string(proposed)?;
+        self.write_mounts(seedling_name, &proposed.mounts)?;
         self.file_writer
-            .write_all(&self.definition_path(name), &contents)?;
+            .write_all(&self.definition_path(seedling_name), &contents)?;
+
         Ok(())
+    }
+
+    fn purge_mounts(
+        &self,
+        name: &Name,
+        current: Option<&SeedlingDefinition>,
+        proposed: &SeedlingDefinition,
+    ) -> Result<(), FileSystemError> {
+        let proposed_mount_lookup = Self::create_mount_lookup(Some(proposed));
+        let current_mount_lookup = Self::create_mount_lookup(current);
+
+        for (mount_name, current_contents) in current_mount_lookup {
+            match proposed_mount_lookup.get(&mount_name) {
+                Some(proposed_contents) => {
+                    for stale in current_contents.difference(proposed_contents) {
+                        self.delete_mount_contents(name, &mount_name, stale)?;
+                    }
+                }
+                None => {
+                    self.folder_deleter
+                        .delete(&self.mount_root(name, &mount_name))?;
+                }
+            };
+        }
+        Ok(())
+    }
+
+    fn delete_mount_contents(
+        &self,
+        seedling_name: &Name,
+        mount_name: &Name,
+        contents: &MountContents,
+    ) -> Result<(), FileSystemError> {
+        let path = self.mount_file(seedling_name, mount_name, contents.relative_path());
+
+        match contents {
+            MountContents::File(_) => self.file_deleter.delete(&path),
+            MountContents::FolderOnly(_) => self.folder_deleter.delete(&path),
+        }
     }
 
     fn write_id(&self, name: &Name, id: &Id) -> Result<(), Error> {
@@ -399,9 +572,23 @@ impl Server {
         let _ = writer.write_all(serialized.as_bytes()).await;
     }
 
+    fn list_seedlings(&self) -> Result<Vec<Name>, Error> {
+        Ok(self
+            .folder
+            .entries(&self.seeds)?
+            .iter()
+            .filter_map(|entry| Name::from_str(&entry.name).ok())
+            .collect())
+    }
+
+    fn seedling_exists(&self, name: &Name) -> Result<bool, Error> {
+        let expected_path = self.create_seedling_path(name);
+        Ok(self.folder.exists(&expected_path))
+    }
+
     fn get_next_id(&self) -> Result<Id, Error> {
         let used_ids: HashSet<u16> = self
-            .list()?
+            .list_seedlings()?
             .iter()
             .filter_map(|name| self.load_id(name).ok().map(|id| id.value))
             .collect();
@@ -424,18 +611,6 @@ impl Server {
         }
     }
 
-    fn load_definition(&self, name: &Name) -> Result<SeedlingDefinition, Error> {
-        match self.file_reader.read_all(&self.definition_path(name)) {
-            Ok(raw) => Ok(toml::from_str::<SeedlingDefinition>(&raw)?),
-            Err(FileSystemError::IoErrorAtPath { error, .. })
-                if error.kind() == std::io::ErrorKind::NotFound =>
-            {
-                Err(Error::NotFound(name.clone()))
-            }
-            Err(err) => Err(err.into()),
-        }
-    }
-
     fn load_seedling(&self, name: &Name) -> Result<Seedling, Error> {
         let definition = self.load_definition(name)?;
         let id = self.load_id(name)?;
@@ -445,21 +620,126 @@ impl Server {
             definition,
         })
     }
+
+    fn load_definition(&self, seedling_name: &Name) -> Result<SeedlingDefinition, Error> {
+        match self
+            .file_reader
+            .read_all(&self.definition_path(seedling_name))
+        {
+            Ok(raw) => {
+                let mut result = toml::from_str::<SeedlingDefinition>(&raw)?;
+                self.hydrate_mounts(seedling_name, &mut result)?;
+                Ok(result)
+            }
+            Err(FileSystemError::IoErrorAtPath { error, .. })
+                if error.kind() == std::io::ErrorKind::NotFound =>
+            {
+                Err(Error::NotFound(seedling_name.clone()))
+            }
+            Err(err) => Err(err.into()),
+        }
+    }
+
+    fn hydrate_mounts(
+        &self,
+        seedling_name: &Name,
+        seedling_definition: &mut SeedlingDefinition,
+    ) -> Result<(), Error> {
+        for (mount_name, mount) in seedling_definition.mounts.iter_mut() {
+            self.hydrate_mount_contents(seedling_name, mount_name, mount)?;
+        }
+        Ok(())
+    }
+
+    fn hydrate_mount_contents(
+        &self,
+        seedling_name: &Name,
+        mount_name: &Name,
+        mount: &mut Mount,
+    ) -> Result<(), Error> {
+        let mount_root = self.mount_root(seedling_name, mount_name);
+        let root_entry = self.inspect.read_metadata(&mount_root)?;
+
+        self.populate_mount_contents(&mount_root, root_entry, mount.contents_mut())
+    }
+
+    fn populate_mount_contents(
+        &self,
+        mount_root: &Path,
+        entry: Entry,
+        mount_contents: &mut HashSet<MountContents>,
+    ) -> Result<(), Error> {
+        if entry.is_link {
+            return Err(FileSystemError::InvalidPath(entry.path).into());
+        }
+
+        match entry.kind {
+            file_system::EntryKind::File => {
+                mount_contents.insert(MountContents::File(MountFile {
+                    file_relative_path: self
+                        .folder
+                        .create_relative_path(mount_root, &entry.path)?,
+                    contents: self.file_reader.read_all_bytes(&entry.path)?,
+                }));
+                Ok(())
+            }
+            file_system::EntryKind::Directory => {
+                let entries = self.folder.entries(&entry.path)?;
+                if entries.is_empty() {
+                    mount_contents.insert(MountContents::FolderOnly(
+                        self.folder.create_relative_path(mount_root, &entry.path)?,
+                    ));
+                } else {
+                    for entry in entries {
+                        self.populate_mount_contents(mount_root, entry, mount_contents)?;
+                    }
+                }
+                Ok(())
+            }
+        }
+    }
+
+    fn write_mounts(
+        &self,
+        seedling_name: &Name,
+        mounts: &HashMap<Name, Mount>,
+    ) -> Result<(), FileSystemError> {
+        for (mount_name, mount) in mounts {
+            let root = self.mount_root(seedling_name, mount_name);
+            self.folder.create_recursively(&root)?;
+
+            for contents in mount.contents() {
+                match contents {
+                    MountContents::FolderOnly(relative_path) => {
+                        let path = root.join(relative_path);
+                        self.folder.create_recursively(&path)?;
+                    }
+                    MountContents::File(mount_file) => {
+                        let mount_file_path = root.join(&mount_file.file_relative_path);
+                        let Some(mount_path) = self.folder.parent(&mount_file_path) else {
+                            return Err(FileSystemError::ExpectedFileError);
+                        };
+                        self.folder.create_recursively(&mount_path)?;
+
+                        self.file_writer
+                            .write_all_bytes(&mount_file_path, &mount_file.contents)?;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 impl Seedbank for Server {
     fn list(&self) -> Result<Vec<Name>, Error> {
-        Ok(self
-            .folder
-            .entries(&self.seeds)?
-            .iter()
-            .filter_map(|entry| Name::from_str(&entry.name).ok())
-            .collect())
+        let _lock = self.global_lock.lock().expect("seedbank lock poisoned");
+        self.list_seedlings()
     }
 
     fn exists(&self, name: &Name) -> Result<bool, Error> {
-        let expected_path = self.create_seedling_path(name);
-        Ok(self.folder.exists(&expected_path))
+        let _lock = self.global_lock.lock().expect("seedbank lock poisoned");
+        self.seedling_exists(name)
     }
 
     fn create(&self, name: &Name, definition: &SeedlingDefinition) -> Result<(), Error> {
@@ -469,8 +749,9 @@ impl Seedbank for Server {
             ScopeKind::Task,
         )
         .start_guard();
+        let _lock = self.global_lock.lock().expect("seedbank lock poisoned");
 
-        if self.exists(name)? {
+        if self.seedling_exists(name)? {
             return guard.finish(Err(Error::AlreadyExists(name.clone())));
         }
 
@@ -488,7 +769,7 @@ impl Seedbank for Server {
             return guard.finish(Err(err));
         }
 
-        guard.finish(self.write_definition(name, definition))
+        guard.finish(self.write_definition(name, None, definition))
     }
 
     fn load(&self, name: &Name) -> Result<Seedling, Error> {
@@ -498,6 +779,7 @@ impl Seedbank for Server {
             ScopeKind::Task,
         )
         .start_guard();
+        let _lock = self.global_lock.lock().expect("seedbank lock poisoned");
 
         guard.finish(self.load_seedling(name))
     }
@@ -509,8 +791,9 @@ impl Seedbank for Server {
             ScopeKind::Task,
         )
         .start_guard();
+        let _lock = self.global_lock.lock().expect("seedbank lock poisoned");
 
-        if !self.exists(name)? {
+        if !self.seedling_exists(name)? {
             return guard.finish(Err(Error::NotFound(name.clone())));
         }
         let path = self.create_seedling_path(name);
@@ -526,19 +809,28 @@ impl Seedbank for Server {
             ScopeKind::Task,
         )
         .start_guard();
+        let _lock = self.global_lock.lock().expect("seedbank lock poisoned");
 
-        if !self.exists(name)? {
+        if !self.seedling_exists(name)? {
             return guard.finish(Err(Error::NotFound(name.clone())));
         }
 
-        guard.finish(self.write_definition(name, definition))
+        let current = match self.load_definition(name) {
+            Ok(current) => current,
+            Err(err) => return guard.finish(Err(err)),
+        };
+
+        guard.finish(self.write_definition(name, Some(&current), definition))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use file_system::{Entry, MockFileReader, MockFileWriter, MockFolder, MockFolderDeleter};
+    use file_system::{
+        Entry, MockFileDeleter, MockFileReader, MockFileWriter, MockFolder, MockFolderDeleter,
+        MockInspect,
+    };
     use log::Event;
 
     struct NullReporter;
@@ -556,7 +848,23 @@ mod tests {
     }
 
     fn definition() -> SeedlingDefinition {
-        SeedlingDefinition::new(VersionedImageName::latest("test"))
+        SeedlingDefinition::new(VersionedImageName::latest("test"), HashMap::new())
+    }
+
+    fn definition_with_mounts(mounts: HashMap<Name, Mount>) -> SeedlingDefinition {
+        SeedlingDefinition::new(VersionedImageName::latest("test"), mounts)
+    }
+
+    fn mounts(pairs: Vec<(&str, Mount)>) -> HashMap<Name, Mount> {
+        pairs.into_iter().map(|(n, m)| (name(n), m)).collect()
+    }
+
+    fn mount(contents: HashSet<MountContents>) -> Mount {
+        Mount::build(
+            MountType::Persisted,
+            PathBuf::from("/etc/traefik"),
+            contents,
+        )
     }
 
     fn build_server(
@@ -571,11 +879,14 @@ mod tests {
             reporter: Arc::new(NullReporter),
             folder: Arc::new(folder),
             folder_deleter: Arc::new(folder_deleter),
+            file_deleter: Arc::new(MockFileDeleter::new()),
             file_reader: Arc::new(file_reader),
             file_writer: Arc::new(file_writer),
+            inspect: Arc::new(MockInspect::new()),
             seeds: PathBuf::from("/var/lib/seedbank/seeds"),
             listener_factories: Vec::new(),
             shutdown_sender,
+            global_lock: std::sync::Mutex::new(()),
         }
     }
 
@@ -759,18 +1070,19 @@ mod tests {
         let mut folder = MockFolder::new();
         folder.given_exists("/var/lib/seedbank/seeds/foo");
 
+        let mut file_reader = MockFileReader::new();
+        file_reader.given_can_read_all_with_contents(
+            "/var/lib/seedbank/seeds/foo/seedling.toml",
+            &toml::to_string(&definition()).expect("should serialize"),
+        );
+
         let mut file_writer = MockFileWriter::new();
         file_writer.expect_write_to_file_with_contents(
             "/var/lib/seedbank/seeds/foo/seedling.toml",
             &toml::to_string(&definition()).expect("should serialize"),
         );
 
-        let server = build_server(
-            folder,
-            MockFolderDeleter::new(),
-            MockFileReader::new(),
-            file_writer,
-        );
+        let server = build_server(folder, MockFolderDeleter::new(), file_reader, file_writer);
 
         assert!(server.update(&name("foo"), &definition()).is_ok());
     }
@@ -903,5 +1215,382 @@ mod tests {
         let result = server.get_next_id();
 
         assert!(matches!(result, Err(Error::TooManySeedlings)));
+    }
+
+    #[test]
+    fn test_hydrate_mount_contents_should_populate_a_single_file() {
+        let mount_root_path = "/var/lib/seedbank/seeds/foo/mounts/config";
+        let file_path = "/var/lib/seedbank/seeds/foo/mounts/config/static.yml";
+
+        let mut inspect = MockInspect::new();
+        inspect.expect_entry_with_metadata(
+            mount_root_path,
+            Entry::create_directory_in("/var/lib/seedbank/seeds/foo/mounts", "config"),
+        );
+
+        let mut folder = MockFolder::new();
+        folder
+            .given_folder_entries(
+                mount_root_path,
+                vec![Entry::create_file_entry_in(mount_root_path, "static.yml")],
+            )
+            .given_relative_path_with(mount_root_path, file_path, "static.yml");
+
+        let mut file_reader = MockFileReader::new();
+        file_reader.given_can_read_all_bytes_with_contents(file_path, b"abc");
+
+        let mut server = build_server(
+            folder,
+            MockFolderDeleter::new(),
+            file_reader,
+            MockFileWriter::new(),
+        );
+        server.inspect = Arc::new(inspect);
+
+        let mut mount = mount(HashSet::new());
+        server
+            .hydrate_mount_contents(&name("foo"), &name("config"), &mut mount)
+            .expect("should hydrate");
+
+        let expected = MountContents::file("static.yml", b"abc").expect("valid content");
+        assert_eq!(mount.contents(), &HashSet::from([expected]));
+    }
+
+    #[test]
+    fn test_hydrate_mount_contents_should_record_an_empty_directory_as_folder_only() {
+        let mount_root_path = "/var/lib/seedbank/seeds/foo/mounts/config";
+
+        let mut inspect = MockInspect::new();
+        inspect.expect_entry_with_metadata(
+            mount_root_path,
+            Entry::create_directory_in("/var/lib/seedbank/seeds/foo/mounts", "config"),
+        );
+
+        let mut folder = MockFolder::new();
+        folder
+            .given_folder_entries(mount_root_path, Vec::new())
+            .given_relative_path_with(mount_root_path, mount_root_path, "");
+
+        let mut server = build_server(
+            folder,
+            MockFolderDeleter::new(),
+            MockFileReader::new(),
+            MockFileWriter::new(),
+        );
+        server.inspect = Arc::new(inspect);
+
+        let mut mount = mount(HashSet::new());
+        server
+            .hydrate_mount_contents(&name("foo"), &name("config"), &mut mount)
+            .expect("should hydrate");
+
+        let expected = MountContents::folder_only("").expect("valid path");
+        assert_eq!(mount.contents(), &HashSet::from([expected]));
+    }
+
+    #[test]
+    fn test_hydrate_mount_contents_should_recurse_into_subdirectories() {
+        let mount_root_path = "/var/lib/seedbank/seeds/foo/mounts/config";
+        let subdir_path = "/var/lib/seedbank/seeds/foo/mounts/config/dynamic";
+        let file_path = "/var/lib/seedbank/seeds/foo/mounts/config/dynamic/app.yml";
+
+        let mut inspect = MockInspect::new();
+        inspect.expect_entry_with_metadata(
+            mount_root_path,
+            Entry::create_directory_in("/var/lib/seedbank/seeds/foo/mounts", "config"),
+        );
+
+        let mut folder = MockFolder::new();
+        folder
+            .given_folder_entries(
+                mount_root_path,
+                vec![Entry::create_directory_in(mount_root_path, "dynamic")],
+            )
+            .given_folder_entries(
+                subdir_path,
+                vec![Entry::create_file_entry_in(subdir_path, "app.yml")],
+            )
+            .given_relative_path_with(mount_root_path, file_path, "dynamic/app.yml");
+
+        let mut file_reader = MockFileReader::new();
+        file_reader.given_can_read_all_bytes_with_contents(file_path, b"abc");
+
+        let mut server = build_server(
+            folder,
+            MockFolderDeleter::new(),
+            file_reader,
+            MockFileWriter::new(),
+        );
+        server.inspect = Arc::new(inspect);
+
+        let mut mount = mount(HashSet::new());
+        server
+            .hydrate_mount_contents(&name("foo"), &name("config"), &mut mount)
+            .expect("should hydrate");
+
+        let expected = MountContents::file("dynamic/app.yml", b"abc").expect("valid content");
+        assert_eq!(mount.contents(), &HashSet::from([expected]));
+    }
+
+    #[test]
+    fn test_hydrate_mount_contents_should_reject_a_symlinked_mount_root() {
+        let mount_root_path = "/var/lib/seedbank/seeds/foo/mounts/config";
+
+        let mut inspect = MockInspect::new();
+        inspect.expect_entry_with_metadata(
+            mount_root_path,
+            Entry::create_symlink_in("/var/lib/seedbank/seeds/foo/mounts", "config"),
+        );
+
+        let mut server = build_server(
+            MockFolder::new(),
+            MockFolderDeleter::new(),
+            MockFileReader::new(),
+            MockFileWriter::new(),
+        );
+        server.inspect = Arc::new(inspect);
+
+        let mut mount = mount(HashSet::new());
+        let result = server.hydrate_mount_contents(&name("foo"), &name("config"), &mut mount);
+
+        assert!(matches!(
+            result,
+            Err(Error::FileSystemError(FileSystemError::InvalidPath(_)))
+        ));
+    }
+
+    #[test]
+    fn test_hydrate_mount_contents_should_reject_a_symlinked_child_entry() {
+        let mount_root_path = "/var/lib/seedbank/seeds/foo/mounts/config";
+
+        let mut inspect = MockInspect::new();
+        inspect.expect_entry_with_metadata(
+            mount_root_path,
+            Entry::create_directory_in("/var/lib/seedbank/seeds/foo/mounts", "config"),
+        );
+
+        let mut folder = MockFolder::new();
+        folder.given_folder_entries(
+            mount_root_path,
+            vec![Entry::create_symlink_in(mount_root_path, "sneaky")],
+        );
+
+        let mut server = build_server(
+            folder,
+            MockFolderDeleter::new(),
+            MockFileReader::new(),
+            MockFileWriter::new(),
+        );
+        server.inspect = Arc::new(inspect);
+
+        let mut mount = mount(HashSet::new());
+        let result = server.hydrate_mount_contents(&name("foo"), &name("config"), &mut mount);
+
+        assert!(matches!(
+            result,
+            Err(Error::FileSystemError(FileSystemError::InvalidPath(_)))
+        ));
+    }
+
+    #[test]
+    fn test_clean_mounts_should_delete_a_file_removed_from_the_proposed_definition() {
+        let current = definition_with_mounts(mounts(vec![(
+            "config",
+            mount(HashSet::from([
+                MountContents::file("static.yml", b"abc").expect("valid")
+            ])),
+        )]));
+        let proposed = definition_with_mounts(mounts(vec![("config", mount(HashSet::new()))]));
+
+        let mut file_deleter = MockFileDeleter::new();
+        file_deleter
+            .expect_file_to_be_deleted("/var/lib/seedbank/seeds/foo/mounts/config/static.yml");
+
+        let mut server = build_server(
+            MockFolder::new(),
+            MockFolderDeleter::new(),
+            MockFileReader::new(),
+            MockFileWriter::new(),
+        );
+        server.file_deleter = Arc::new(file_deleter);
+
+        server
+            .purge_mounts(&name("foo"), Some(&current), &proposed)
+            .expect("should clean");
+    }
+
+    #[test]
+    fn test_clean_mounts_should_delete_a_file_whose_content_changed_so_it_can_be_rewritten() {
+        let current = definition_with_mounts(mounts(vec![(
+            "config",
+            mount(HashSet::from([
+                MountContents::file("static.yml", b"old").expect("valid")
+            ])),
+        )]));
+        let proposed = definition_with_mounts(mounts(vec![(
+            "config",
+            mount(HashSet::from([
+                MountContents::file("static.yml", b"new").expect("valid")
+            ])),
+        )]));
+
+        let mut file_deleter = MockFileDeleter::new();
+        file_deleter
+            .expect_file_to_be_deleted("/var/lib/seedbank/seeds/foo/mounts/config/static.yml");
+
+        let mut server = build_server(
+            MockFolder::new(),
+            MockFolderDeleter::new(),
+            MockFileReader::new(),
+            MockFileWriter::new(),
+        );
+        server.file_deleter = Arc::new(file_deleter);
+
+        server
+            .purge_mounts(&name("foo"), Some(&current), &proposed)
+            .expect("should clean");
+    }
+
+    #[test]
+    fn test_clean_mounts_should_delete_the_whole_mount_when_removed_from_the_proposed_definition() {
+        let current = definition_with_mounts(mounts(vec![("config", mount(HashSet::new()))]));
+        let proposed = definition_with_mounts(HashMap::new());
+
+        let mut folder_deleter = MockFolderDeleter::new();
+        folder_deleter.expect_folder_to_be_deleted("/var/lib/seedbank/seeds/foo/mounts/config");
+
+        let server = build_server(
+            MockFolder::new(),
+            folder_deleter,
+            MockFileReader::new(),
+            MockFileWriter::new(),
+        );
+
+        server
+            .purge_mounts(&name("foo"), Some(&current), &proposed)
+            .expect("should clean");
+    }
+
+    #[test]
+    fn test_clean_mounts_should_use_folder_deleter_when_a_path_changes_from_folder_to_file() {
+        let current = definition_with_mounts(mounts(vec![(
+            "config",
+            mount(HashSet::from([
+                MountContents::folder_only("dynamic").expect("valid")
+            ])),
+        )]));
+        let proposed = definition_with_mounts(mounts(vec![(
+            "config",
+            mount(HashSet::from([MountContents::file(
+                "dynamic",
+                b"now a file",
+            )
+            .expect("valid")])),
+        )]));
+
+        let mut folder_deleter = MockFolderDeleter::new();
+        folder_deleter
+            .expect_folder_to_be_deleted("/var/lib/seedbank/seeds/foo/mounts/config/dynamic");
+
+        let server = build_server(
+            MockFolder::new(),
+            folder_deleter,
+            MockFileReader::new(),
+            MockFileWriter::new(),
+        );
+
+        server
+            .purge_mounts(&name("foo"), Some(&current), &proposed)
+            .expect("should clean");
+    }
+
+    #[test]
+    fn test_clean_mounts_should_use_file_deleter_when_a_path_changes_from_file_to_folder() {
+        let current = definition_with_mounts(mounts(vec![(
+            "config",
+            mount(HashSet::from([MountContents::file(
+                "dynamic",
+                b"was a file",
+            )
+            .expect("valid")])),
+        )]));
+        let proposed = definition_with_mounts(mounts(vec![(
+            "config",
+            mount(HashSet::from([
+                MountContents::folder_only("dynamic").expect("valid")
+            ])),
+        )]));
+
+        let mut file_deleter = MockFileDeleter::new();
+        file_deleter.expect_file_to_be_deleted("/var/lib/seedbank/seeds/foo/mounts/config/dynamic");
+
+        let mut server = build_server(
+            MockFolder::new(),
+            MockFolderDeleter::new(),
+            MockFileReader::new(),
+            MockFileWriter::new(),
+        );
+        server.file_deleter = Arc::new(file_deleter);
+
+        server
+            .purge_mounts(&name("foo"), Some(&current), &proposed)
+            .expect("should clean");
+    }
+
+    #[test]
+    fn test_clean_mounts_should_not_delete_unchanged_content() {
+        let shared = definition_with_mounts(mounts(vec![(
+            "config",
+            mount(HashSet::from([
+                MountContents::file("static.yml", b"abc").expect("valid")
+            ])),
+        )]));
+
+        let server = build_server(
+            MockFolder::new(),
+            MockFolderDeleter::new(),
+            MockFileReader::new(),
+            MockFileWriter::new(),
+        );
+
+        server
+            .purge_mounts(&name("foo"), Some(&shared), &shared)
+            .expect("should clean");
+    }
+
+    #[test]
+    fn test_create_should_not_deadlock_by_locking_its_own_mutex_reentrantly() {
+        let mut folder = MockFolder::new();
+        folder.given_does_not_exist("/var/lib/seedbank/seeds/foo");
+        folder.given_folder_entries("/var/lib/seedbank/seeds", Vec::new());
+        folder.expect_create_folder_recursively_with("/var/lib/seedbank/seeds/foo");
+
+        let mut file_writer = MockFileWriter::new();
+        file_writer
+            .expect_write_to_file_with_contents(
+                "/var/lib/seedbank/seeds/foo/seedling.toml",
+                &toml::to_string(&definition()).expect("should serialize"),
+            )
+            .expect_write_to_file_with_contents("/var/lib/seedbank/seeds/foo/id", "0");
+
+        let server = Arc::new(build_server(
+            folder,
+            MockFolderDeleter::new(),
+            MockFileReader::new(),
+            file_writer,
+        ));
+
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let thread_server = Arc::clone(&server);
+        std::thread::spawn(move || {
+            let result = thread_server.create(&name("foo"), &definition());
+            let _ = sender.send(result);
+        });
+
+        let result = receiver
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("create() should not hang by locking its own mutex reentrantly");
+
+        assert!(result.is_ok());
     }
 }

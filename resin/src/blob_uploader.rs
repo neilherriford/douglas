@@ -1454,28 +1454,13 @@ mod tests {
             let expected_filename_to_delete = Uuid::max().to_string();
             folder.given_folder_entries(
                 "/tmp",
-                vec![Entry {
-                    name: "foo".to_string(),
-                    kind: file_system::EntryKind::Directory,
-                    is_link: false,
-                    size: 0,
-                }],
+                vec![Entry::create_directory("foo")],
             );
             folder.given_folder_entries(
                 "/tmp/foo/tmp",
                 vec![
-                    Entry {
-                        name: expected_filename_to_delete.clone(),
-                        kind: file_system::EntryKind::File,
-                        is_link: false,
-                        size: 123,
-                    },
-                    Entry {
-                        name: Uuid::nil().to_string(),
-                        kind: file_system::EntryKind::Directory,
-                        is_link: false,
-                        size: 0,
-                    },
+                    Entry::create_file_entry(&expected_filename_to_delete),
+                    Entry::create_directory(&Uuid::nil().to_string()),
                 ],
             );
             file_deleter.given_delete_to_fail_once_with(
@@ -1519,28 +1504,13 @@ mod tests {
             let expected_filename_to_delete = Uuid::max().to_string();
             folder.given_folder_entries(
                 "/tmp",
-                vec![Entry {
-                    name: "foo".to_string(),
-                    kind: file_system::EntryKind::Directory,
-                    is_link: false,
-                    size: 0,
-                }],
+                vec![Entry::create_directory("foo")],
             );
             folder.given_folder_entries(
                 "/tmp/foo/tmp",
                 vec![
-                    Entry {
-                        name: expected_filename_to_delete.clone(),
-                        kind: file_system::EntryKind::File,
-                        is_link: false,
-                        size: 123,
-                    },
-                    Entry {
-                        name: Uuid::nil().to_string(),
-                        kind: file_system::EntryKind::Directory,
-                        is_link: false,
-                        size: 0,
-                    },
+                    Entry::create_file_entry(&expected_filename_to_delete),
+                    Entry::create_directory(&Uuid::nil().to_string()),
                 ],
             );
             file_deleter
@@ -1587,28 +1557,13 @@ mod tests {
                 ));
             folder.given_folder_entries(
                 "/tmp",
-                vec![Entry {
-                    name: "foo".to_string(),
-                    kind: file_system::EntryKind::Directory,
-                    is_link: false,
-                    size: 0,
-                }],
+                vec![Entry::create_directory("foo")],
             );
             folder.given_folder_entries(
                 "/tmp/foo/tmp",
                 vec![
-                    Entry {
-                        name: active_uuid,
-                        kind: file_system::EntryKind::File,
-                        is_link: false,
-                        size: 123,
-                    },
-                    Entry {
-                        name: Uuid::nil().to_string(),
-                        kind: file_system::EntryKind::Directory,
-                        is_link: false,
-                        size: 0,
-                    },
+                    Entry::create_file_entry(&active_uuid),
+                    Entry::create_directory(&Uuid::nil().to_string()),
                 ],
             );
 

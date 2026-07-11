@@ -3,20 +3,86 @@ use async_trait::async_trait;
 #[cfg(feature = "mock")]
 use mockall::predicate;
 use nix::sys::stat::{Mode, stat, umask};
+use regex::Regex;
+use serde::{Deserialize, Serialize};
+use std::collections::VecDeque;
 use std::ffi::OsString;
 use std::fs::{
-    File, Metadata, Permissions as Perms, create_dir_all, metadata, read_dir, read_link,
-    read_to_string, remove_dir_all, remove_file, rename, set_permissions,
+    File, Metadata, Permissions as Perms, create_dir_all, read, read_dir, read_link,
+    read_to_string, remove_dir_all, remove_file, rename, set_permissions, symlink_metadata,
 };
 use std::fs::{OpenOptions, hard_link};
 use std::io::Write;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt, chown, symlink};
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::path::{Component, Components, Path, PathBuf};
+use std::sync::{Arc, LazyLock};
 use thiserror::Error;
 use tokio::io::AsyncRead;
 use users::{get_group_by_name, get_user_by_name};
 use utils::ClientErrorDisplay;
+
+#[derive(Debug, Error)]
+pub enum RelativePathError {
+    #[error("Name cannot be empty")]
+    CannotBeEmpty,
+    #[error("Name too long")]
+    TooLong,
+    #[error("Name is invalid")]
+    InvalidName,
+    #[error("Must be UTF-8")]
+    NotUtf8,
+    #[error("Invalid segment: '{0}'")]
+    InvalidSegment(String),
+    #[error("Not relative path")]
+    NotRelative(PathBuf),
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq, Hash)]
+pub struct RelativePath {
+    value: PathBuf,
+}
+
+impl RelativePath {
+    pub fn root() -> Self {
+        Self {
+            value: PathBuf::new(),
+        }
+    }
+}
+
+impl TryFrom<PathBuf> for RelativePath {
+    type Error = RelativePathError;
+
+    fn try_from(value: PathBuf) -> Result<Self, Self::Error> {
+        static PATTERN: LazyLock<Regex> =
+            LazyLock::new(|| Regex::new(r"^[a-zA-Z0-9]+(?:[._-][a-zA-Z0-9]+)*$").unwrap());
+
+        for component in value.components() {
+            match component {
+                std::path::Component::Normal(segment) => {
+                    let segment = segment.to_str().ok_or(RelativePathError::NotUtf8)?;
+                    if !PATTERN.is_match(segment) {
+                        return Err(RelativePathError::InvalidSegment(segment.to_string()));
+                    }
+                }
+                _ => return Err(RelativePathError::NotRelative(value)),
+            }
+        }
+        Ok(Self { value })
+    }
+}
+
+impl From<RelativePath> for PathBuf {
+    fn from(value: RelativePath) -> Self {
+        value.value
+    }
+}
+
+impl AsRef<Path> for RelativePath {
+    fn as_ref(&self) -> &Path {
+        self.value.as_ref()
+    }
+}
 
 #[derive(Error, Debug)]
 pub enum FileSystemError {
@@ -44,6 +110,12 @@ pub enum FileSystemError {
     SystemError(String),
     #[error("String not representable in UTF8: {0}")]
     NonUtfString(String),
+    #[error("Given child {child} is not a child of the root folder {root}")]
+    NotChild { root: PathBuf, child: PathBuf },
+    #[error("Expected normalized path {0}")]
+    ExpectedNormalizedPath(PathBuf),
+    #[error("Invalid path {0}")]
+    InvalidPath(PathBuf),
 }
 
 impl ClientErrorDisplay for FileSystemError {
@@ -149,6 +221,7 @@ pub enum EntryKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Entry {
     pub name: String,
+    pub path: PathBuf,
     pub kind: EntryKind,
     pub is_link: bool,
     pub size: u64,
@@ -156,6 +229,7 @@ pub struct Entry {
 
 impl Entry {
     fn try_create_entry(
+        parent: &Path,
         name: OsString,
         metadata: Result<Metadata, std::io::Error>,
     ) -> Result<Entry, FileSystemError> {
@@ -183,7 +257,11 @@ impl Entry {
             Err(err) => return Err(FileSystemError::IoError(err)),
         }
 
+        let mut path = parent.to_path_buf();
+        path.push(&entry_name);
+
         Ok(Entry {
+            path,
             name: entry_name,
             kind,
             is_link: is_symlink,
@@ -213,6 +291,7 @@ pub trait FileWriter: Send + Sync {
 #[cfg_attr(feature = "mock", mockall::automock)]
 pub trait FileReader: Send + Sync {
     fn read_all(&self, path: &Path) -> Result<String, FileSystemError>;
+    fn read_all_bytes(&self, path: &Path) -> Result<Vec<u8>, FileSystemError>;
     fn exists(&self, path: &Path) -> bool;
     fn create_reader(
         &self,
@@ -247,6 +326,22 @@ impl MockFileReader {
         let contents = contents.to_string();
 
         self.expect_read_all()
+            .with(predicate::eq(path.clone()))
+            .returning(move |_| Ok(contents.clone()));
+
+        self
+    }
+
+    pub fn given_can_read_all_bytes_with_contents(
+        &mut self,
+        path: &str,
+        contents: &[u8],
+    ) -> &mut Self {
+        let path = path.to_string();
+        let path = PathBuf::from(path);
+        let contents = contents.to_vec();
+
+        self.expect_read_all_bytes()
             .with(predicate::eq(path.clone()))
             .returning(move |_| Ok(contents.clone()));
 
@@ -481,6 +576,14 @@ impl FileReader for UnixFileReader {
             error,
         })
     }
+
+    fn read_all_bytes(&self, path: &Path) -> Result<Vec<u8>, FileSystemError> {
+        read(path).map_err(|error| FileSystemError::IoErrorAtPath {
+            path: path.to_path_buf(),
+            error,
+        })
+    }
+
     fn exists(&self, path: &Path) -> bool {
         path.exists() && !path.is_dir()
     }
@@ -922,7 +1025,10 @@ impl Inspect for UnixInspect {
                 return Err(FileSystemError::ExpectedFileError);
             }
         };
-        Entry::try_create_entry(name, metadata(path))
+        let mut parent = path.to_path_buf();
+        parent.pop();
+
+        Entry::try_create_entry(&parent, name, symlink_metadata(path))
     }
 
     fn exists(&self, path: &Path) -> bool {
@@ -933,6 +1039,11 @@ impl Inspect for UnixInspect {
 #[cfg_attr(feature = "mock", mockall::automock)]
 pub trait Folder: Send + Sync {
     fn canonicalize(&self, path: &Path) -> Result<PathBuf, FileSystemError>;
+    fn create_relative_path(
+        &self,
+        root: &Path,
+        child: &Path,
+    ) -> Result<RelativePath, FileSystemError>;
     fn create_recursively(&self, path: &Path) -> Result<PathBuf, FileSystemError>;
     fn entries(&self, path: &Path) -> Result<Vec<Entry>, FileSystemError>;
     fn exists(&self, path: &Path) -> bool;
@@ -951,6 +1062,15 @@ pub struct UnixFolder {}
 impl UnixFolder {
     pub fn new() -> Self {
         Self {}
+    }
+
+    fn assert_normalized<'a>(&self, path: &'a Path) -> Result<Components<'a>, FileSystemError> {
+        for component in path.components() {
+            if matches!(component, Component::ParentDir) || matches!(component, Component::CurDir) {
+                return Err(FileSystemError::ExpectedNormalizedPath(path.to_path_buf()));
+            }
+        }
+        Ok(path.components())
     }
 }
 
@@ -971,7 +1091,7 @@ impl Folder for UnixFolder {
         result.extend(read_dir(path)?.filter_map(|entry| {
             let entry = entry.ok()?;
 
-            Entry::try_create_entry(entry.file_name(), entry.metadata()).ok()
+            Entry::try_create_entry(path, entry.file_name(), entry.metadata()).ok()
         }));
 
         Ok(result)
@@ -1031,6 +1151,46 @@ impl Folder for UnixFolder {
         let result = OpenOptions::new().create(false).append(true).open(path)?;
         Ok(result)
     }
+
+    fn create_relative_path(
+        &self,
+        root: &Path,
+        child: &Path,
+    ) -> Result<RelativePath, FileSystemError> {
+        let root_components: Vec<std::path::Component> = self.assert_normalized(root)?.collect();
+        let mut child_components: VecDeque<std::path::Component> =
+            self.assert_normalized(child)?.collect();
+
+        if child_components.len() < root_components.len() {
+            return Err(FileSystemError::NotChild {
+                root: root.to_path_buf(),
+                child: child.to_path_buf(),
+            });
+        }
+
+        for root_component in root_components {
+            let child_component = if let Some(child_components) = child_components.pop_front() {
+                child_components
+            } else {
+                return Err(FileSystemError::InvalidPath(child.to_path_buf()));
+            };
+
+            if root_component != child_component {
+                return Err(FileSystemError::NotChild {
+                    root: root.to_path_buf(),
+                    child: child.to_path_buf(),
+                });
+            }
+        }
+
+        let mut result = PathBuf::new();
+        for child_component in child_components {
+            result.push(child_component);
+        }
+
+        RelativePath::try_from(result)
+            .map_err(|_| FileSystemError::InvalidPath(child.to_path_buf()))
+    }
 }
 
 #[cfg(feature = "mock")]
@@ -1088,6 +1248,40 @@ impl MockFolder {
         self
     }
 
+    pub fn given_relative_path_with(
+        &mut self,
+        root: &str,
+        child: &str,
+        relative: &str,
+    ) -> &mut Self {
+        let root = PathBuf::from(root);
+        let child = PathBuf::from(child);
+        let relative = RelativePath::try_from(PathBuf::from(relative))
+            .expect("expected a valid relative path");
+
+        self.expect_create_relative_path()
+            .with(predicate::eq(root), predicate::eq(child))
+            .returning(move |_, _| Ok(relative.clone()));
+
+        self
+    }
+
+    pub fn given_relative_path_to_fail_once_with(
+        &mut self,
+        root: &str,
+        child: &str,
+        error: FileSystemError,
+    ) -> &mut Self {
+        let root = PathBuf::from(root);
+        let child = PathBuf::from(child);
+
+        self.expect_create_relative_path()
+            .with(predicate::eq(root), predicate::eq(child))
+            .return_once(move |_, _| Err(error));
+
+        self
+    }
+
     pub fn given_executable_root(&mut self, path: &str) -> &mut Self {
         let path = path.to_string();
         let path = PathBuf::from(path);
@@ -1102,7 +1296,16 @@ impl MockFolder {
 #[cfg(feature = "mock")]
 impl Entry {
     pub fn create_file_entry(name: &str) -> Self {
+        Self::create_file_entry_in("", name)
+    }
+
+    pub fn create_directory(name: &str) -> Self {
+        Self::create_directory_in("", name)
+    }
+
+    pub fn create_file_entry_in(parent: &str, name: &str) -> Self {
         Self {
+            path: Path::new(parent).join(name),
             is_link: false,
             kind: EntryKind::File,
             name: name.to_string(),
@@ -1110,10 +1313,21 @@ impl Entry {
         }
     }
 
-    pub fn create_directory(name: &str) -> Self {
+    pub fn create_directory_in(parent: &str, name: &str) -> Self {
         Self {
+            path: Path::new(parent).join(name),
             is_link: false,
             kind: EntryKind::Directory,
+            name: name.to_string(),
+            size: 0,
+        }
+    }
+
+    pub fn create_symlink_in(parent: &str, name: &str) -> Self {
+        Self {
+            path: Path::new(parent).join(name),
+            is_link: true,
+            kind: EntryKind::File,
             name: name.to_string(),
             size: 0,
         }
@@ -1251,5 +1465,183 @@ impl MockFileRenamer {
             .with(predicate::eq(from.clone()), predicate::eq(to.clone()))
             .return_once(move |_, _| Err(error));
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    mod relative_path {
+        use super::*;
+
+        #[test]
+        fn test_try_from_should_accept_a_single_segment() {
+            let result = RelativePath::try_from(PathBuf::from("static.yml"));
+
+            assert!(result.is_ok());
+        }
+
+        #[test]
+        fn test_try_from_should_accept_nested_segments() {
+            let result = RelativePath::try_from(PathBuf::from("config/dynamic"));
+
+            assert!(result.is_ok());
+        }
+
+        #[test]
+        fn test_try_from_should_accept_dots_underscores_and_dashes_within_a_segment() {
+            let result = RelativePath::try_from(PathBuf::from("traefik-dynamic_v2.yml"));
+
+            assert!(result.is_ok());
+        }
+
+        #[test]
+        fn test_try_from_should_reject_parent_dir_traversal() {
+            let result = RelativePath::try_from(PathBuf::from("../../etc/passwd"));
+
+            assert!(matches!(result, Err(RelativePathError::NotRelative(_))));
+        }
+
+        #[test]
+        fn test_try_from_should_reject_absolute_paths() {
+            let result = RelativePath::try_from(PathBuf::from("/etc/passwd"));
+
+            assert!(matches!(result, Err(RelativePathError::NotRelative(_))));
+        }
+
+        #[test]
+        fn test_try_from_should_reject_a_bare_dot_segment() {
+            let result = RelativePath::try_from(PathBuf::from("./config"));
+
+            assert!(matches!(result, Err(RelativePathError::NotRelative(_))));
+        }
+
+        #[test]
+        fn test_try_from_should_reject_invalid_characters_in_a_segment() {
+            let result = RelativePath::try_from(PathBuf::from("has spaces"));
+
+            assert!(matches!(result, Err(RelativePathError::InvalidSegment(_))));
+        }
+
+        #[test]
+        fn test_try_from_should_reject_consecutive_separators_in_a_segment() {
+            let result = RelativePath::try_from(PathBuf::from("foo..bar"));
+
+            assert!(matches!(result, Err(RelativePathError::InvalidSegment(_))));
+        }
+
+        #[test]
+        fn test_root_should_produce_an_empty_relative_path() {
+            let root = RelativePath::root();
+
+            assert_eq!(PathBuf::from(root), PathBuf::new());
+        }
+
+        #[test]
+        fn test_as_ref_should_expose_the_underlying_path() {
+            let relative = RelativePath::try_from(PathBuf::from("config/static.yml"))
+                .expect("should be valid");
+
+            assert_eq!(relative.as_ref(), Path::new("config/static.yml"));
+        }
+    }
+
+    mod create_relative_path {
+        use super::*;
+
+        #[test]
+        fn test_should_strip_the_root_prefix_from_the_child() {
+            let folder = UnixFolder::new();
+
+            let result = folder
+                .create_relative_path(
+                    Path::new("/var/lib/seedbank/seeds/foo"),
+                    Path::new("/var/lib/seedbank/seeds/foo/config/static.yml"),
+                )
+                .expect("should be a child path");
+
+            assert_eq!(PathBuf::from(result), PathBuf::from("config/static.yml"));
+        }
+
+        #[test]
+        fn test_should_succeed_with_an_empty_relative_path_when_child_equals_root() {
+            let folder = UnixFolder::new();
+
+            let result = folder
+                .create_relative_path(
+                    Path::new("/var/lib/seedbank/seeds/foo"),
+                    Path::new("/var/lib/seedbank/seeds/foo"),
+                )
+                .expect("should be a child path");
+
+            assert_eq!(PathBuf::from(result), PathBuf::new());
+        }
+
+        #[test]
+        fn test_should_fail_when_child_is_not_under_root() {
+            let folder = UnixFolder::new();
+
+            let result = folder.create_relative_path(
+                Path::new("/var/lib/seedbank/seeds/foo"),
+                Path::new("/var/lib/seedbank/seeds/bar/config/static.yml"),
+            );
+
+            assert!(matches!(result, Err(FileSystemError::NotChild { .. })));
+        }
+
+        #[test]
+        fn test_should_fail_when_child_is_shorter_than_root() {
+            let folder = UnixFolder::new();
+
+            let result = folder.create_relative_path(
+                Path::new("/var/lib/seedbank/seeds/foo"),
+                Path::new("/var/lib/seedbank"),
+            );
+
+            assert!(matches!(result, Err(FileSystemError::NotChild { .. })));
+        }
+
+        #[test]
+        fn test_should_fail_when_root_is_not_normalized() {
+            let folder = UnixFolder::new();
+
+            let result = folder.create_relative_path(
+                Path::new("/var/lib/seedbank/seeds/../seeds/foo"),
+                Path::new("/var/lib/seedbank/seeds/foo/config/static.yml"),
+            );
+
+            assert!(matches!(
+                result,
+                Err(FileSystemError::ExpectedNormalizedPath(_))
+            ));
+        }
+
+        #[test]
+        fn test_should_fail_when_child_is_not_normalized() {
+            let folder = UnixFolder::new();
+
+            let result = folder.create_relative_path(
+                Path::new("/var/lib/seedbank/seeds/foo"),
+                Path::new("/var/lib/seedbank/seeds/foo/config/../static.yml"),
+            );
+
+            assert!(matches!(
+                result,
+                Err(FileSystemError::ExpectedNormalizedPath(_))
+            ));
+        }
+
+        #[test]
+        fn test_should_reject_a_child_segment_that_is_not_a_valid_relative_path_segment() {
+            let folder = UnixFolder::new();
+
+            let result = folder.create_relative_path(
+                Path::new("/var/lib/seedbank/seeds/foo"),
+                Path::new("/var/lib/seedbank/seeds/foo/has spaces/static.yml"),
+            );
+
+            assert!(matches!(result, Err(FileSystemError::InvalidPath(_))));
+        }
     }
 }

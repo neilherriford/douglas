@@ -48,7 +48,7 @@ pub enum VersionedImageNameParseError {
     InvalidVersion(String),
 }
 
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, PartialEq, Eq, Clone)]
 pub struct VersionedImageName {
     pub namespace: Option<String>,
     pub name: String,

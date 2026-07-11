@@ -865,6 +865,8 @@ dependencies = [
  "mockall",
  "nix 0.30.1",
  "percent-encoding",
+ "regex",
+ "serde",
  "thiserror 1.0.69",
  "tokio",
  "users",
