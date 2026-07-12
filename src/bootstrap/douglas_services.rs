@@ -11,10 +11,14 @@ use blueprint::{
 use command_fds::{CommandFdExt, FdMapping, FdMappingCollision};
 use config::DouglasFolders;
 use credentials::{Credentials, well_known::DOUGLAS_ADMIN_GROUP};
-use file_system::{FileSystemError, Folder, Permissions};
+use file_system::{
+    __mock_MockBindableUnixDomainSocketFile_BindableUnixDomainSocketFile, FileSystemError, Folder,
+    Permissions,
+};
 use log::{Level, Outcome, Reporter, ScopeKind, Span};
 use os::{EnvironmentVariableReader, Os};
 use os_pipe::{PipeReader, PipeWriter};
+use seedbank::Name;
 use std::{
     collections::HashMap,
     env::VarError,
@@ -500,7 +504,7 @@ fn wait_until_running(
     }
 }
 
-pub async fn cli_start(
+pub async fn bootstrap(
     reporter: Arc<dyn Reporter>,
     plan_only: bool,
     credentials: Arc<dyn Credentials>,
@@ -531,12 +535,9 @@ pub async fn cli_start(
         }
     };
 
-    let plan = match resolve_plan(guard.span(), create_plan(state)) {
-        Ok(plan) => plan,
-        Err(_) => {
-            guard.finish_with_outcome(log::Outcome::Failed);
-            return;
-        }
+    let Ok(plan) = resolve_plan(guard.span(), create_plan(state)) else {
+        guard.finish_with_outcome(log::Outcome::Failed);
+        return;
     };
 
     if plan_only {

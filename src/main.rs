@@ -389,7 +389,7 @@ async fn start(plan_only: bool) -> ExitCode {
         Box::new(cli_reporter),
     ]));
 
-    commands::cli_start(
+    bootstrap::douglas_services(
         reporter,
         plan_only,
         credentials,
