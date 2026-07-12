@@ -1,5 +1,5 @@
 mod application_definition;
-mod commands;
+mod bootstrap;
 mod config;
 mod core_applications;
 #[macro_use]
@@ -389,7 +389,7 @@ async fn start(plan_only: bool) -> ExitCode {
         Box::new(cli_reporter),
     ]));
 
-    bootstrap::douglas_services(
+    bootstrap::douglas_services::perform(
         reporter,
         plan_only,
         credentials,

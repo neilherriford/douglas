@@ -11,6 +11,7 @@ docker_types = { workspace = true }
 file_system = { workspace = true }
 log = { workspace = true, features = ["tui"] }
 os = { workspace = true }
+refined_string = { workspace = true }
 regex = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

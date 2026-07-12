@@ -11,14 +11,10 @@ use blueprint::{
 use command_fds::{CommandFdExt, FdMapping, FdMappingCollision};
 use config::DouglasFolders;
 use credentials::{Credentials, well_known::DOUGLAS_ADMIN_GROUP};
-use file_system::{
-    __mock_MockBindableUnixDomainSocketFile_BindableUnixDomainSocketFile, FileSystemError, Folder,
-    Permissions,
-};
+use file_system::{FileSystemError, Folder, Permissions};
 use log::{Level, Outcome, Reporter, ScopeKind, Span};
 use os::{EnvironmentVariableReader, Os};
 use os_pipe::{PipeReader, PipeWriter};
-use seedbank::Name;
 use std::{
     collections::HashMap,
     env::VarError,
@@ -29,7 +25,7 @@ use std::{
 use thiserror::Error;
 
 #[derive(Error, Debug)]
-pub enum CliBootstrapError {
+pub enum BootstrapError {
     #[error("Must be root to proceed")]
     MustBeRoot,
     #[error("Pipe required")]
@@ -57,18 +53,16 @@ struct DouglasService {
     definition: ServiceDefinition,
 }
 
-fn known_services(
-    douglas_folders: &DouglasFolders,
-) -> Result<Vec<DouglasService>, CliBootstrapError> {
+fn known_services(douglas_folders: &DouglasFolders) -> Result<Vec<DouglasService>, BootstrapError> {
     let bract_definition = bract::service_definition(douglas_folders);
     let Some(bract_socket) = bract_definition.owned_sockets.first() else {
-        return Err(CliBootstrapError::MissingControlSocket("bract"));
+        return Err(BootstrapError::MissingControlSocket("bract"));
     };
     let bract_liveness = LivenessCheck::UnixSocket(bract_socket.socket_path.clone());
 
     let seedbank_definition = seedbank::service_definition(douglas_folders);
     let Some(seedbank_socket) = seedbank_definition.owned_sockets.first() else {
-        return Err(CliBootstrapError::MissingControlSocket(seedbank::SEEDBANK));
+        return Err(BootstrapError::MissingControlSocket(seedbank::SEEDBANK));
     };
     let seedbank_liveness = LivenessCheck::UnixSocket(seedbank_socket.socket_path.clone());
 
@@ -159,7 +153,7 @@ impl<'a> StateObserver<'a> {
         &mut self,
         span: &Span,
         douglas_folders: &DouglasFolders,
-    ) -> Result<State, CliBootstrapError> {
+    ) -> Result<State, BootstrapError> {
         let guard = span
             .create_child(
                 "Starting douglas system, discovering current state",
@@ -250,9 +244,9 @@ impl<'a> StateObserver<'a> {
     }
 }
 
-fn create_plan<'a>(state: State) -> Result<Vec<Step<'a>>, CliBootstrapError> {
+fn create_plan<'a>(state: State) -> Result<Vec<Step<'a>>, BootstrapError> {
     if !state.is_root {
-        return Err(CliBootstrapError::MustBeRoot);
+        return Err(BootstrapError::MustBeRoot);
     }
 
     let mut result = Vec::new();
@@ -376,7 +370,7 @@ impl<'a> Command<Context<'a>> for StartService {
 
         let pipe = if self.needs_reporting_pipe {
             let Some(pipe) = context.pipes.remove(self.name) else {
-                return Err(Box::new(CliBootstrapError::PipeRequired));
+                return Err(Box::new(BootstrapError::PipeRequired));
             };
             Some(pipe)
         } else {
@@ -448,7 +442,7 @@ fn spawn_service(
                 Ok(cmd) => {
                     cmd.spawn()?;
                 }
-                Err(err) => return Err(Box::new(CliBootstrapError::SpawnError(err))),
+                Err(err) => return Err(Box::new(BootstrapError::SpawnError(err))),
             }
             forward_logs_in_background(name, pipe_reader, span.clone());
         }
@@ -498,13 +492,13 @@ fn wait_until_running(
             return Ok(());
         }
         if Instant::now() >= deadline {
-            return Err(Box::new(CliBootstrapError::StartTimeout(name.to_string())));
+            return Err(Box::new(BootstrapError::StartTimeout(name.to_string())));
         }
         std::thread::sleep(Duration::from_millis(200));
     }
 }
 
-pub async fn bootstrap(
+pub async fn perform(
     reporter: Arc<dyn Reporter>,
     plan_only: bool,
     credentials: Arc<dyn Credentials>,
@@ -564,7 +558,7 @@ pub async fn bootstrap(
 #[cfg(test)]
 mod tests {
     use super::{
-        CliBootstrapError, DouglasService, State, create_plan, tag_event_with_service,
+        BootstrapError, DouglasService, State, create_plan, tag_event_with_service,
         wait_until_running,
     };
     use blueprint::{
@@ -617,7 +611,7 @@ mod tests {
 
         let result = create_plan(state);
 
-        assert!(matches!(result, Err(CliBootstrapError::MustBeRoot)));
+        assert!(matches!(result, Err(BootstrapError::MustBeRoot)));
     }
 
     #[test]

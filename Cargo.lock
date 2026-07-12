@@ -314,6 +314,7 @@ dependencies = [
  "config",
  "credentials",
  "docker",
+ "docker_types",
  "file_system",
  "futures",
  "log 0.1.0",
@@ -708,6 +709,7 @@ dependencies = [
 name = "docker_types"
 version = "0.1.0"
 dependencies = [
+ "regex",
  "serde",
  "serde_json",
  "thiserror 1.0.69",
@@ -2057,6 +2059,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "refined_string"
+version = "0.1.0"
+dependencies = [
+ "regex",
+ "serde",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "regex"
 version = "1.12.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2171,6 +2182,7 @@ dependencies = [
  "log 0.1.0",
  "mockall",
  "os",
+ "refined_string",
  "regex",
  "serde",
  "serde_json",
