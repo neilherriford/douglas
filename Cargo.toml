@@ -46,7 +46,7 @@ members = [
     "log",
     "file_system",
     "os",
-    "bract", "config", "utils", "openbao", "blueprint", "service_library", "application_definition_repository", "resin", "seedbank", "docker_types", "refined_string",
+    "bract", "config", "utils", "openbao", "blueprint", "service_library", "application_definition_repository", "resin", "seedbank", "seedbank_types", "docker_types", "refined_string",
 ]
 
 [workspace.dependencies]
@@ -85,6 +85,7 @@ os = { path = "./os" }
 refined_string = { path = "./refined_string" }
 resin = { path = "./resin" }
 seedbank = { path = "./seedbank" }
+seedbank_types = { path = "./seedbank_types" }
 simple_rest_client = { path = "./simple_rest_client" }
 utils = { path = "./utils" }
 

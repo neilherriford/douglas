@@ -1,38 +1,5 @@
-use crate::{Error, Name, Seedbank, Seedling, SeedlingDefinition};
-use serde::{Deserialize, Serialize};
-
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(tag = "type")]
-pub enum Request {
-    List,
-    Exists {
-        name: Name,
-    },
-    Load {
-        name: Name,
-    },
-    Create {
-        name: Name,
-        definition: SeedlingDefinition,
-    },
-    Delete {
-        name: Name,
-    },
-    Update {
-        name: Name,
-        definition: SeedlingDefinition,
-    },
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(tag = "type")]
-pub enum Response {
-    Names { names: Vec<Name> },
-    Exists { exists: bool },
-    Seedling { seedling: Seedling },
-    Ok,
-    Error { message: String },
-}
+use crate::{Error, Seedbank};
+use seedbank_types::{Request, Response};
 
 pub fn handle(seedbank: &dyn Seedbank, request: Request) -> Response {
     match request {
@@ -72,7 +39,7 @@ fn error_response(err: Error) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Id, MockSeedbank};
+    use crate::{Id, MockSeedbank, Name, Seedling, SeedlingDefinition};
     use docker_types::VersionedImageName;
     use std::{collections::HashMap, str::FromStr};
 

@@ -320,6 +320,7 @@ dependencies = [
  "mockall",
  "os",
  "postcard",
+ "seedbank_types",
  "serde",
  "serde_json",
  "subtle",
@@ -2185,11 +2186,24 @@ dependencies = [
  "os",
  "refined_string",
  "regex",
+ "seedbank_types",
  "serde",
  "serde_json",
  "thiserror 1.0.69",
  "tokio",
  "toml",
+]
+
+[[package]]
+name = "seedbank_types"
+version = "0.1.0"
+dependencies = [
+ "docker_types",
+ "file_system",
+ "refined_string",
+ "regex",
+ "serde",
+ "thiserror 1.0.69",
 ]
 
 [[package]]

@@ -2,38 +2,33 @@ mod bootstrap;
 mod protocol;
 
 pub use bootstrap::{DOUGLAS_SEEDBANK_GROUP, DOUGLAS_SEEDBANK_USER, service_definition};
-pub use protocol::{Request, Response};
+pub use protocol::handle;
+pub use seedbank_types::{
+    Id, IdParseError, MAX_SEEDLINGS, Mount, MountContents, MountFile, MountType, Name,
+    NameParseError, NameRules, Request, Response, Seedling, SeedlingDefinition,
+};
 
 use blueprint::listener::SocketListenerFactory;
 use config::DouglasFolders;
 use credentials::create_credentials;
-use docker_types::VersionedImageName;
 use file_system::{
     BindableUnixDomainSocketFile, Entry, FileDeleter, FileReader, FileSystemError, FileWriter,
-    Folder, FolderDeleter, Inspect, Permissions, RelativePath, RelativePathError, UnixDomainSocket,
-    UnixFileDeleter, UnixFileReader, UnixFileWriter, UnixFolder, UnixFolderDeleter, UnixInspect,
-    UnixPermissions,
+    Folder, FolderDeleter, Inspect, Permissions, RelativePath, UnixDomainSocket, UnixFileDeleter,
+    UnixFileReader, UnixFileWriter, UnixFolder, UnixFolderDeleter, UnixInspect, UnixPermissions,
 };
 use log::{BufferedFileReporter, Reporter, ScopeKind, Span, TuiReporter};
 use os::{Os, Unix};
-use refined_string::{StringRules, Validated};
-use regex::Regex;
-use serde::{Deserialize, Serialize, Serializer};
 use std::{
     collections::{HashMap, HashSet},
-    hash::Hasher,
-    num::ParseIntError,
     path::{Path, PathBuf},
     str::FromStr,
-    sync::{Arc, LazyLock, Mutex},
+    sync::{Arc, Mutex},
 };
 use thiserror::Error;
 use tokio::sync::broadcast::{self, Sender};
 
 pub(crate) static SEEDS_ROOT_NAME: &str = "seeds";
 pub static SEEDBANK: &str = "seedbank";
-
-static MAX_SEEDLINGS: u16 = 4096;
 
 #[derive(Error, Debug)]
 pub enum Error {
@@ -62,218 +57,6 @@ pub enum Error {
     SeedlingSerializationError(#[from] toml::ser::Error),
     #[error("Seedling deserialization error: {0}")]
     SeedlingDeserializationError(#[from] toml::de::Error),
-}
-
-#[derive(Debug, Error)]
-pub enum NameParseError {
-    #[error("Name cannot be empty")]
-    CannotBeEmpty,
-    #[error("Name too long")]
-    TooLong,
-    #[error("Name is invalid")]
-    InvalidName,
-}
-
-impl From<refined_string::Error> for NameParseError {
-    fn from(err: refined_string::Error) -> Self {
-        match err {
-            refined_string::Error::CannotBeEmpty => NameParseError::CannotBeEmpty,
-            refined_string::Error::TooLong => NameParseError::TooLong,
-            refined_string::Error::InvalidName(_) => NameParseError::InvalidName,
-        }
-    }
-}
-
-pub struct NameRules;
-
-impl StringRules for NameRules {
-    type Error = NameParseError;
-
-    const MAX_LEN: usize = 16;
-
-    fn pattern() -> &'static Regex {
-        static PATTERN: LazyLock<Regex> =
-            LazyLock::new(|| Regex::new(r"^[a-z0-9]+(?:[._-][a-z0-9]+)*$").unwrap());
-        &PATTERN
-    }
-
-    fn invalid(_value: &str) -> Self::Error {
-        NameParseError::InvalidName
-    }
-}
-
-pub type Name = Validated<NameRules>;
-
-#[derive(Debug, Error)]
-pub enum IdParseError {
-    #[error("Id too large {0}")]
-    TooLarge(u16),
-    #[error("Integer parse error {0}")]
-    ParseIntError(#[from] ParseIntError),
-}
-
-#[derive(Debug, PartialEq, Eq, Clone, Hash, PartialOrd, Ord)]
-pub struct Id {
-    value: u16,
-}
-
-impl Id {
-    fn assert_is_valid(value: u16) -> Result<(), IdParseError> {
-        if value >= MAX_SEEDLINGS {
-            Err(IdParseError::TooLarge(value))
-        } else {
-            Ok(())
-        }
-    }
-}
-
-impl std::fmt::Display for Id {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.value.to_string())
-    }
-}
-
-impl FromStr for Id {
-    type Err = IdParseError;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let value: u16 = s.parse()?;
-        Self::assert_is_valid(value)?;
-        Ok(Self { value })
-    }
-}
-
-impl Serialize for Id {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        serializer.serialize_str(&self.value.to_string())
-    }
-}
-
-impl<'de> Deserialize<'de> for Id {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let value = String::deserialize(deserializer)?;
-        Id::from_str(&value).map_err(serde::de::Error::custom)
-    }
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct Seedling {
-    id: Id,
-    name: Name,
-    definition: SeedlingDefinition,
-}
-
-impl std::fmt::Display for Seedling {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.name.as_ref())
-    }
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq, Hash)]
-pub enum MountType {
-    Persisted,
-    PersistedShared(Vec<Name>),
-    InMemory,
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
-pub struct MountFile {
-    file_relative_path: RelativePath,
-    contents: Vec<u8>,
-}
-
-impl MountFile {
-    pub fn in_root(contents: Vec<u8>) -> Self {
-        Self::new(RelativePath::root(), contents)
-    }
-
-    pub fn new(file_relative_path: RelativePath, contents: Vec<u8>) -> Self {
-        Self {
-            file_relative_path,
-            contents,
-        }
-    }
-}
-
-impl std::hash::Hash for MountFile {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        self.file_relative_path.hash(state);
-    }
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq, Hash)]
-pub enum MountContents {
-    FolderOnly(RelativePath),
-    File(MountFile),
-}
-
-impl MountContents {
-    pub fn file(
-        relative_file_path: &str,
-        contents: &[u8],
-    ) -> Result<MountContents, RelativePathError> {
-        let file_relative_path = RelativePath::try_from(PathBuf::from(relative_file_path))?;
-        Ok(MountContents::File(MountFile {
-            file_relative_path,
-            contents: Vec::from(contents),
-        }))
-    }
-
-    pub fn folder_only(relative_path: &str) -> Result<MountContents, RelativePathError> {
-        let relative_path = RelativePath::try_from(PathBuf::from(relative_path))?;
-        Ok(MountContents::FolderOnly(relative_path))
-    }
-
-    pub fn relative_path(&self) -> &RelativePath {
-        match self {
-            MountContents::FolderOnly(path) => path,
-            MountContents::File(file) => &file.file_relative_path,
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Mount {
-    kind: MountType,
-    remote_path: PathBuf,
-    #[serde(skip)]
-    contents: HashSet<MountContents>,
-}
-
-impl Mount {
-    pub fn build(kind: MountType, remote_path: PathBuf, contents: HashSet<MountContents>) -> Self {
-        Self {
-            kind,
-            remote_path,
-            contents,
-        }
-    }
-
-    pub fn contents(&self) -> &HashSet<MountContents> {
-        &self.contents
-    }
-
-    pub fn contents_mut(&mut self) -> &mut HashSet<MountContents> {
-        &mut self.contents
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SeedlingDefinition {
-    pub image: VersionedImageName,
-    pub mounts: HashMap<Name, Mount>,
-}
-
-impl SeedlingDefinition {
-    pub fn new(image: VersionedImageName, mounts: HashMap<Name, Mount>) -> Self {
-        Self { image, mounts }
-    }
 }
 
 #[cfg_attr(test, mockall::automock)]
@@ -800,6 +583,7 @@ impl Seedbank for Server {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use docker_types::VersionedImageName;
     use file_system::{
         Entry, MockFileDeleter, MockFileReader, MockFileWriter, MockFolder, MockFolderDeleter,
         MockInspect,

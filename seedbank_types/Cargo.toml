@@ -1,0 +1,13 @@
+[package]
+name = "seedbank_types"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+docker_types = { workspace = true }
+file_system = { workspace = true }
+refined_string = { workspace = true }
+regex = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
