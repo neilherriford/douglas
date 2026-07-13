@@ -548,9 +548,51 @@ impl Serialize for ContainerUser {
     }
 }
 
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum ContainerNameError {
+    #[error("container name cannot be empty")]
+    CannotBeEmpty,
+    #[error("container name is too long")]
+    TooLong,
+    #[error("invalid container name '{0}'")]
+    Invalid(String),
+}
+
+impl From<refined_string::Error> for ContainerNameError {
+    fn from(err: refined_string::Error) -> Self {
+        match err {
+            refined_string::Error::CannotBeEmpty => ContainerNameError::CannotBeEmpty,
+            refined_string::Error::TooLong => ContainerNameError::TooLong,
+            refined_string::Error::InvalidName(value) => ContainerNameError::Invalid(value),
+        }
+    }
+}
+
+pub struct ContainerNameRules;
+
+impl StringRules for ContainerNameRules {
+    // Docker doesn't document a hard limit; this is a generous ceiling matching
+    // the same choice made for image path components.
+    const MAX_LEN: usize = 255;
+
+    fn pattern() -> &'static Regex {
+        static PATTERN: LazyLock<Regex> =
+            LazyLock::new(|| Regex::new(r"^[a-zA-Z0-9][a-zA-Z0-9_.-]*$").unwrap());
+        &PATTERN
+    }
+
+    type Error = ContainerNameError;
+
+    fn invalid(value: &str) -> Self::Error {
+        ContainerNameError::Invalid(value.to_string())
+    }
+}
+
+pub type ContainerName = Validated<ContainerNameRules>;
+
 #[derive(Debug, PartialEq, Clone)]
 pub struct ContainerDefinition {
-    pub name: String,
+    pub name: ContainerName,
     pub run_as: Option<ContainerUser>,
     pub command: Option<String>,
     pub environment_variables: Vec<EnvironmentVariable>,

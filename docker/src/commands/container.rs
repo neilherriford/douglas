@@ -1,9 +1,9 @@
 use super::assert_non_empty_string_argument;
 use crate::{
-    Capability, Config, ContainerDefinition, ContainerUser, DockerError, EnvironmentVariable, Id,
-    ImageIdentifier, Label, Mount, MountDefinition, Request, State, deserialize_id,
-    serialize_capabilities, serialize_environment_variables, serialize_image_identifier,
-    serialize_labels,
+    Capability, Config, ContainerDefinition, ContainerName, ContainerUser, DockerError,
+    EnvironmentVariable, Id, ImageIdentifier, Label, Mount, MountDefinition, Request, State,
+    deserialize_id, serialize_capabilities, serialize_environment_variables,
+    serialize_image_identifier, serialize_labels,
 };
 use log::{Reporter, Span};
 use serde::ser::SerializeSeq;
@@ -154,7 +154,7 @@ impl ContainerCommand {
         Ok(guard.finish(from_value(json))?)
     }
 
-    pub async fn find_by_name(&self, name: &str) -> Result<InspectedContainer, DockerError> {
+    pub async fn find_by_name(&self, name: &ContainerName) -> Result<InspectedContainer, DockerError> {
         let guard = Span::new(
             Arc::clone(&self.reporter),
             "Find container by name",
@@ -215,7 +215,7 @@ impl ContainerCommand {
         let request = Request::Post {
             path: create_path_and_query_string(
                 "/containers/create",
-                HashMap::from([("name", definition.name.as_str())]),
+                HashMap::from([("name", definition.name.as_ref())]),
             ),
             headers: vec![Header::content_type_json()],
             body: Some(serde_json::to_string(&request_body)?),
