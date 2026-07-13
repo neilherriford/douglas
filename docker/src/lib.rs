@@ -3,11 +3,11 @@ mod commands;
 pub use client::{Ping, UdsPing};
 pub use docker_types::{
     Capability, ContainerDefinition, ContainerName, ContainerUser, DockerNameError,
-    EnvironmentVariable, Id, ImageIdentifier, Label, Mount, MountDefinition, MountName, MountType,
-    NetworkName, Status, Tag, Version, VersionedImageName, VersionedImageNameParseError,
-    deserialize_environment_variables, deserialize_id, deserialize_labels,
-    serialize_capabilities, serialize_environment_variables, serialize_image_identifier,
-    serialize_labels,
+    EnvironmentVariable, EnvironmentVariableName, Id, ImageIdentifier, Label, Mount,
+    MountDefinition, MountName, MountType, NetworkName, Status, Tag, Version, VersionedImageName,
+    VersionedImageNameParseError, deserialize_environment_variables, deserialize_id,
+    deserialize_labels, serialize_capabilities, serialize_environment_variables,
+    serialize_image_identifier, serialize_labels,
 };
 use file_system::FileSystemError;
 use serde::{Deserialize, Deserializer};

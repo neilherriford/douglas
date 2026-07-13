@@ -396,16 +396,58 @@ pub struct Tag {
     pub version: String,
 }
 
-#[derive(Debug, PartialEq, Ord, PartialOrd, Eq, Clone)]
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum EnvironmentVariableNameError {
+    #[error("environment variable name cannot be empty")]
+    CannotBeEmpty,
+    #[error("environment variable name is too long")]
+    TooLong,
+    #[error("invalid environment variable name '{0}'")]
+    Invalid(String),
+}
+
+impl From<refined_string::Error> for EnvironmentVariableNameError {
+    fn from(err: refined_string::Error) -> Self {
+        match err {
+            refined_string::Error::CannotBeEmpty => EnvironmentVariableNameError::CannotBeEmpty,
+            refined_string::Error::TooLong => EnvironmentVariableNameError::TooLong,
+            refined_string::Error::InvalidName(value) => {
+                EnvironmentVariableNameError::Invalid(value)
+            }
+        }
+    }
+}
+
+pub struct EnvironmentVariableNameRules;
+
+impl StringRules for EnvironmentVariableNameRules {
+    const MAX_LEN: usize = 255;
+
+    fn pattern() -> &'static Regex {
+        static PATTERN: LazyLock<Regex> =
+            LazyLock::new(|| Regex::new(r"^[A-Za-z_][A-Za-z0-9_]*$").unwrap());
+        &PATTERN
+    }
+
+    type Error = EnvironmentVariableNameError;
+
+    fn invalid(value: &str) -> Self::Error {
+        EnvironmentVariableNameError::Invalid(value.to_string())
+    }
+}
+
+pub type EnvironmentVariableName = Validated<EnvironmentVariableNameRules>;
+
+#[derive(Debug, PartialEq, Eq, Clone)]
 pub struct EnvironmentVariable {
-    pub name: String,
+    pub name: EnvironmentVariableName,
     pub value: String,
 }
 
 impl EnvironmentVariable {
     pub fn new(name: &str, value: &str) -> Self {
         Self {
-            name: name.into(),
+            name: EnvironmentVariableName::from_str(name).expect("valid environment variable name"),
             value: value.into(),
         }
     }
@@ -425,18 +467,22 @@ where
     let result: Vec<EnvironmentVariable> = obj
         .iter()
         .map(|item| {
-            if let Some(assignment) = item.as_str() {
-                let parts: Vec<&str> = assignment.split('=').collect();
-                let (name, value) = match parts.as_slice() {
-                    [first, second] => (first.to_string(), second.to_string()),
-                    _ => (assignment.to_string(), String::new()),
-                };
-                Ok(EnvironmentVariable { name, value })
-            } else {
-                Err(serde::de::Error::custom(
+            let Some(assignment) = item.as_str() else {
+                return Err(serde::de::Error::custom(
                     "Expected assignments to be strings",
-                ))
-            }
+                ));
+            };
+
+            let parts: Vec<&str> = assignment.split('=').collect();
+            let (name, value) = match parts.as_slice() {
+                [first, second] => (*first, second.to_string()),
+                _ => (assignment, String::new()),
+            };
+
+            Ok(EnvironmentVariable {
+                name: EnvironmentVariableName::from_str(name).map_err(serde::de::Error::custom)?,
+                value,
+            })
         })
         .collect::<Result<_, D::Error>>()?;
     Ok(result)

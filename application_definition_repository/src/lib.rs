@@ -26,12 +26,6 @@ pub enum ApplicationDefinitionRepositryError {
     #[error("Unknown dependency")]
     UnknownDependency(String),
 
-    #[error("Environment variable name cannot be empty")]
-    EnvironmentVariableNameCannotBeEmpty,
-
-    #[error("Invalid environment variable name: '{0}'")]
-    InvalidEnvironmentVariableName(String),
-
     #[error("Unknown dependency in share: mount: '{mount_name}', dependency: '{dependency}'")]
     UnknownDependencyInShare {
         mount_name: String,
@@ -96,9 +90,10 @@ pub struct ApplicationDefinition {
 }
 
 mod environment_variables_serde {
-    use serde::ser::Error;
+    use docker::EnvironmentVariableName;
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
     use std::collections::BTreeMap;
+    use std::str::FromStr;
 
     pub fn serialize<S: Serializer>(
         value: &[docker::EnvironmentVariable],
@@ -107,11 +102,7 @@ mod environment_variables_serde {
         let mut map = BTreeMap::new();
 
         for environment_variable in value {
-            let name = environment_variable.name.trim();
-            if name.is_empty() {
-                return Err(S::Error::custom("Variable names cannot be empty"));
-            }
-            map.insert(name, &environment_variable.value);
+            map.insert(environment_variable.name.as_ref(), &environment_variable.value);
         }
 
         map.serialize(s)
@@ -124,11 +115,9 @@ mod environment_variables_serde {
         let mut result = Vec::new();
 
         for (name, value) in map {
-            let name = name.trim();
-            if name.is_empty() {
-                return Err(serde::de::Error::custom("Variable names cannot be empty"));
-            }
-            result.push(docker::EnvironmentVariable::new(name, &value))
+            let name = EnvironmentVariableName::from_str(name.trim())
+                .map_err(serde::de::Error::custom)?;
+            result.push(docker::EnvironmentVariable { name, value });
         }
 
         Ok(result)
@@ -191,7 +180,6 @@ impl FileApplicationDefinitionRepositry {
     ) -> Result<(), ApplicationDefinitionRepositryError> {
         self.assert_valid_name(&definition.display_name)?;
         self.assert_dependencies_exist(&definition.dependencies)?;
-        self.assert_valid_environment_variables(&definition.environment_variables)?;
         self.assert_valid_mounts(&definition.mounts)?;
         Ok(())
     }
@@ -212,28 +200,6 @@ impl FileApplicationDefinitionRepositry {
                 return Err(ApplicationDefinitionRepositryError::UnknownDependency(
                     dependency.to_string(),
                 ));
-            }
-        }
-        Ok(())
-    }
-
-    fn assert_valid_environment_variables(
-        &self,
-        environment_variables: &[docker::EnvironmentVariable],
-    ) -> Result<(), ApplicationDefinitionRepositryError> {
-        for environment_variable in environment_variables {
-            let name = environment_variable.name.trim();
-            if name.is_empty() {
-                return Err(
-                    ApplicationDefinitionRepositryError::EnvironmentVariableNameCannotBeEmpty,
-                );
-            }
-            if name.contains("=") {
-                return Err(
-                    ApplicationDefinitionRepositryError::InvalidEnvironmentVariableName(
-                        name.to_string(),
-                    ),
-                );
             }
         }
         Ok(())
