@@ -298,16 +298,56 @@ where
     Ok(Id { algorithm, hex })
 }
 
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum LabelKeyError {
+    #[error("label key cannot be empty")]
+    CannotBeEmpty,
+    #[error("label key is too long")]
+    TooLong,
+    #[error("invalid label key '{0}'")]
+    Invalid(String),
+}
+
+impl From<refined_string::Error> for LabelKeyError {
+    fn from(err: refined_string::Error) -> Self {
+        match err {
+            refined_string::Error::CannotBeEmpty => LabelKeyError::CannotBeEmpty,
+            refined_string::Error::TooLong => LabelKeyError::TooLong,
+            refined_string::Error::InvalidName(value) => LabelKeyError::Invalid(value),
+        }
+    }
+}
+
+pub struct LabelKeyRules;
+
+impl StringRules for LabelKeyRules {
+    const MAX_LEN: usize = 255;
+
+    fn pattern() -> &'static Regex {
+        static PATTERN: LazyLock<Regex> =
+            LazyLock::new(|| Regex::new(r"^[a-z0-9]+(?:(?:\.|_{1,2}|-+)[a-z0-9]+)*$").unwrap());
+        &PATTERN
+    }
+
+    type Error = LabelKeyError;
+
+    fn invalid(value: &str) -> Self::Error {
+        LabelKeyError::Invalid(value.to_string())
+    }
+}
+
+pub type LabelKey = Validated<LabelKeyRules>;
+
 #[derive(Debug, Serialize, Deserialize, PartialEq, Clone)]
 pub struct Label {
-    pub name: String,
+    pub name: LabelKey,
     pub value: String,
 }
 
 impl Label {
     pub fn new(name: &str, value: &str) -> Self {
         Self {
-            name: name.to_string(),
+            name: LabelKey::from_str(name).expect("valid label key"),
             value: value.to_string(),
         }
     }
@@ -325,14 +365,14 @@ where
     let result = obj
         .iter()
         .map(|(name, value)| {
-            if let Some(value) = value.as_str() {
-                Ok(Label {
-                    name: name.as_str().to_string(),
-                    value: value.to_string(),
-                })
-            } else {
-                Err(serde::de::Error::custom("Expected value to be a string"))
-            }
+            let Some(value) = value.as_str() else {
+                return Err(serde::de::Error::custom("Expected value to be a string"));
+            };
+
+            Ok(Label {
+                name: LabelKey::from_str(name).map_err(serde::de::Error::custom)?,
+                value: value.to_string(),
+            })
         })
         .collect::<Result<_, D::Error>>()?;
 
@@ -749,16 +789,7 @@ mod tests {
             let wrapper: Wrapper = serde_json::from_str(json).unwrap();
 
             assert_eq!(
-                vec![
-                    Label {
-                        name: "baz".to_string(),
-                        value: "qux".to_string()
-                    },
-                    Label {
-                        name: "foo".to_string(),
-                        value: "bar".to_string()
-                    },
-                ],
+                vec![Label::new("baz", "qux"), Label::new("foo", "bar")],
                 wrapper.labels
             );
         }
