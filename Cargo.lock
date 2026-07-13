@@ -314,7 +314,6 @@ dependencies = [
  "config",
  "credentials",
  "docker",
- "docker_types",
  "file_system",
  "futures",
  "log 0.1.0",

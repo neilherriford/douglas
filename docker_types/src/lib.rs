@@ -530,7 +530,7 @@ fn path_to_string(path: &Path) -> String {
 
 #[derive(Debug, PartialEq, Clone)]
 pub struct MountDefinition {
-    pub name: String,
+    pub name: MountName,
     pub host_path: PathBuf,
     pub container_path: PathBuf,
     pub writable: bool,
@@ -589,28 +589,28 @@ impl Serialize for ContainerUser {
 }
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
-pub enum ContainerNameError {
-    #[error("container name cannot be empty")]
+pub enum DockerNameError {
+    #[error("name cannot be empty")]
     CannotBeEmpty,
-    #[error("container name is too long")]
+    #[error("name is too long")]
     TooLong,
-    #[error("invalid container name '{0}'")]
+    #[error("invalid name '{0}'")]
     Invalid(String),
 }
 
-impl From<refined_string::Error> for ContainerNameError {
+impl From<refined_string::Error> for DockerNameError {
     fn from(err: refined_string::Error) -> Self {
         match err {
-            refined_string::Error::CannotBeEmpty => ContainerNameError::CannotBeEmpty,
-            refined_string::Error::TooLong => ContainerNameError::TooLong,
-            refined_string::Error::InvalidName(value) => ContainerNameError::Invalid(value),
+            refined_string::Error::CannotBeEmpty => DockerNameError::CannotBeEmpty,
+            refined_string::Error::TooLong => DockerNameError::TooLong,
+            refined_string::Error::InvalidName(value) => DockerNameError::Invalid(value),
         }
     }
 }
 
-pub struct ContainerNameRules;
+pub struct DockerNameRules;
 
-impl StringRules for ContainerNameRules {
+impl StringRules for DockerNameRules {
     // Docker doesn't document a hard limit; this is a generous ceiling matching
     // the same choice made for image path components.
     const MAX_LEN: usize = 255;
@@ -621,14 +621,15 @@ impl StringRules for ContainerNameRules {
         &PATTERN
     }
 
-    type Error = ContainerNameError;
+    type Error = DockerNameError;
 
     fn invalid(value: &str) -> Self::Error {
-        ContainerNameError::Invalid(value.to_string())
+        DockerNameError::Invalid(value.to_string())
     }
 }
 
-pub type ContainerName = Validated<ContainerNameRules>;
+pub type ContainerName = Validated<DockerNameRules>;
+pub type MountName = Validated<DockerNameRules>;
 
 #[derive(Debug, PartialEq, Clone)]
 pub struct ContainerDefinition {
