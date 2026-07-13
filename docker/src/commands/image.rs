@@ -67,7 +67,7 @@ impl ImageCommand {
             log::ScopeKind::Task,
         )
         .start_guard();
-        assert_non_empty_string_argument("name", &image_name.name)?;
+        assert_non_empty_string_argument("name", image_name.name.as_ref())?;
 
         let request = Request::Get {
             path: format!("/images/{image_name}/json"),

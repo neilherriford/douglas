@@ -87,50 +87,12 @@ pub struct HealthCheck {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ApplicationDefinition {
     pub display_name: String,
-    #[serde(with = "image_name_serde")]
     pub image_name: docker::VersionedImageName,
     pub dependencies: Vec<String>,
     #[serde(with = "environment_variables_serde")]
     pub environment_variables: Vec<docker::EnvironmentVariable>,
     pub mounts: Vec<MountDefinition>,
     pub health_check: Option<HealthCheck>,
-}
-
-mod image_name_serde {
-    use docker::VersionedImageName;
-    use serde::{Deserialize, Deserializer, Serializer};
-
-    pub fn serialize<S: Serializer>(value: &VersionedImageName, s: S) -> Result<S::Ok, S::Error> {
-        s.serialize_str(&value.to_string())
-    }
-
-    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<VersionedImageName, D::Error> {
-        let text = String::deserialize(d)?;
-
-        let (namespace, name_and_version) = text.split_once("/").unwrap_or(("", &text));
-        let (name, raw_version) = name_and_version.split_once(":").ok_or_else(|| {
-            serde::de::Error::custom(format!("expected namespace/image:version, got: {text}"))
-        })?;
-
-        let namespace = namespace.trim();
-        let name = name.trim();
-        if name.is_empty() {
-            return Err(serde::de::Error::custom(
-                "Image name cannot be blank".to_string(),
-            ));
-        }
-
-        let version: docker::Version = match raw_version.parse() {
-            Ok(version) => version,
-            Err(err) => return Err(serde::de::Error::custom(err.to_string())),
-        };
-
-        Ok(VersionedImageName {
-            namespace: (!namespace.is_empty()).then_some(namespace.to_string()),
-            name: name.to_string(),
-            version,
-        })
-    }
 }
 
 mod environment_variables_serde {

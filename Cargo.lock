@@ -709,6 +709,7 @@ dependencies = [
 name = "docker_types"
 version = "0.1.0"
 dependencies = [
+ "refined_string",
  "regex",
  "serde",
  "serde_json",

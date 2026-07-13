@@ -1,39 +1,118 @@
+use refined_string::{StringRules, Validated};
+use regex::Regex;
 use serde::ser::{SerializeMap, SerializeSeq, SerializeStruct};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::value::Value as Json;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
+use std::sync::LazyLock;
+
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum ImagePathComponentError {
+    #[error("image path component cannot be empty")]
+    CannotBeEmpty,
+    #[error("image path component is too long")]
+    TooLong,
+    #[error("invalid image path component '{0}'")]
+    Invalid(String),
+}
+
+impl From<refined_string::Error> for ImagePathComponentError {
+    fn from(err: refined_string::Error) -> Self {
+        match err {
+            refined_string::Error::CannotBeEmpty => ImagePathComponentError::CannotBeEmpty,
+            refined_string::Error::TooLong => ImagePathComponentError::TooLong,
+            refined_string::Error::InvalidName(value) => ImagePathComponentError::Invalid(value),
+        }
+    }
+}
+
+pub struct ImagePathComponentRules;
+
+impl StringRules for ImagePathComponentRules {
+    // Docker doesn't document a hard limit for an individual path component; this
+    // is a generous ceiling relative to the ~255 char limit on a whole reference.
+    const MAX_LEN: usize = 255;
+
+    fn pattern() -> &'static Regex {
+        static PATTERN: LazyLock<Regex> =
+            LazyLock::new(|| Regex::new(r"^[a-z0-9]+(?:(?:\.|_{1,2}|-+)[a-z0-9]+)*$").unwrap());
+        &PATTERN
+    }
+
+    type Error = ImagePathComponentError;
+
+    fn invalid(value: &str) -> Self::Error {
+        ImagePathComponentError::Invalid(value.to_string())
+    }
+}
+
+pub type ImagePathComponent = Validated<ImagePathComponentRules>;
+
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum VersionTagError {
+    #[error("tag cannot be empty")]
+    CannotBeEmpty,
+    #[error("tag is too long")]
+    TooLong,
+    #[error("invalid tag '{0}'")]
+    Invalid(String),
+}
+
+impl From<refined_string::Error> for VersionTagError {
+    fn from(err: refined_string::Error) -> Self {
+        match err {
+            refined_string::Error::CannotBeEmpty => VersionTagError::CannotBeEmpty,
+            refined_string::Error::TooLong => VersionTagError::TooLong,
+            refined_string::Error::InvalidName(value) => VersionTagError::Invalid(value),
+        }
+    }
+}
+
+pub struct VersionTagRules;
+
+impl StringRules for VersionTagRules {
+    const MAX_LEN: usize = 128;
+
+    fn pattern() -> &'static Regex {
+        static PATTERN: LazyLock<Regex> =
+            LazyLock::new(|| Regex::new(r"^[a-zA-Z0-9_][a-zA-Z0-9._-]*$").unwrap());
+        &PATTERN
+    }
+
+    type Error = VersionTagError;
+
+    fn invalid(value: &str) -> Self::Error {
+        VersionTagError::Invalid(value.to_string())
+    }
+}
+
+pub type VersionTag = Validated<VersionTagRules>;
 
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub enum Version {
     Latest,
-    Specific(String),
+    Specific(VersionTag),
 }
 
 impl std::fmt::Display for Version {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let formatted = match self {
-            Version::Latest => "latest".to_string(),
-            Version::Specific(version) => version.to_string(),
-        };
-
-        write!(f, "{formatted}")
+        match self {
+            Version::Latest => f.write_str("latest"),
+            Version::Specific(version) => f.write_str(version.as_ref()),
+        }
     }
 }
 
 impl FromStr for Version {
-    type Err = String;
+    type Err = VersionTagError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let s = s.trim();
-        if s.is_empty() {
-            return Err("Versions cannot be empty".to_string());
-        }
-
         if s == "latest" {
             Ok(Version::Latest)
         } else {
-            Ok(Version::Specific(s.to_string()))
+            Ok(Version::Specific(VersionTag::from_str(s)?))
         }
     }
 }
@@ -44,14 +123,18 @@ pub enum VersionedImageNameParseError {
     Invalid(String),
     #[error("image name cannot be empty")]
     EmptyName,
+    #[error("invalid namespace: {0}")]
+    InvalidNamespace(String),
+    #[error("invalid image name: {0}")]
+    InvalidName(String),
     #[error("invalid version: {0}")]
     InvalidVersion(String),
 }
 
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub struct VersionedImageName {
-    pub namespace: Option<String>,
-    pub name: String,
+    pub namespace: Option<ImagePathComponent>,
+    pub name: ImagePathComponent,
     pub version: Version,
 }
 
@@ -59,31 +142,31 @@ impl VersionedImageName {
     pub fn latest(name: &str) -> Self {
         Self {
             namespace: None,
-            name: name.to_string(),
+            name: ImagePathComponent::from_str(name).expect("valid image name"),
             version: Version::Latest,
         }
     }
     pub fn specific(name: &str, version: &str) -> Self {
         Self {
             namespace: None,
-            name: name.to_string(),
-            version: Version::Specific(version.to_string()),
+            name: ImagePathComponent::from_str(name).expect("valid image name"),
+            version: Version::Specific(VersionTag::from_str(version).expect("valid version tag")),
         }
     }
 
     pub fn namespaced_latest(namespace: &str, name: &str) -> Self {
         Self {
-            namespace: Some(namespace.to_string()),
-            name: name.to_string(),
+            namespace: Some(ImagePathComponent::from_str(namespace).expect("valid namespace")),
+            name: ImagePathComponent::from_str(name).expect("valid image name"),
             version: Version::Latest,
         }
     }
 
     pub fn namespaced_specific(namespace: &str, name: &str, version: &str) -> Self {
         Self {
-            namespace: Some(namespace.to_string()),
-            name: name.to_string(),
-            version: Version::Specific(version.to_string()),
+            namespace: Some(ImagePathComponent::from_str(namespace).expect("valid namespace")),
+            name: ImagePathComponent::from_str(name).expect("valid image name"),
+            version: Version::Specific(VersionTag::from_str(version).expect("valid version tag")),
         }
     }
 
@@ -91,7 +174,7 @@ impl VersionedImageName {
         if let Some(namespace) = &self.namespace {
             format!("{namespace}/{}", self.name)
         } else {
-            self.name.clone()
+            self.name.to_string()
         }
     }
 
@@ -121,13 +204,25 @@ impl FromStr for VersionedImageName {
             return Err(VersionedImageNameParseError::EmptyName);
         }
 
-        let version: Version = raw_version
-            .parse()
-            .map_err(VersionedImageNameParseError::InvalidVersion)?;
+        let namespace =
+            if namespace.is_empty() {
+                None
+            } else {
+                Some(ImagePathComponent::from_str(namespace).map_err(|err| {
+                    VersionedImageNameParseError::InvalidNamespace(err.to_string())
+                })?)
+            };
+
+        let name = ImagePathComponent::from_str(name)
+            .map_err(|err| VersionedImageNameParseError::InvalidName(err.to_string()))?;
+
+        let version = raw_version
+            .parse::<Version>()
+            .map_err(|err| VersionedImageNameParseError::InvalidVersion(err.to_string()))?;
 
         Ok(VersionedImageName {
-            namespace: (!namespace.is_empty()).then_some(namespace.to_string()),
-            name: name.to_string(),
+            namespace,
+            name,
             version,
         })
     }
