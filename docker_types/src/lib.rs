@@ -630,6 +630,7 @@ impl StringRules for DockerNameRules {
 
 pub type ContainerName = Validated<DockerNameRules>;
 pub type MountName = Validated<DockerNameRules>;
+pub type NetworkName = Validated<DockerNameRules>;
 
 #[derive(Debug, PartialEq, Clone)]
 pub struct ContainerDefinition {

@@ -1,5 +1,5 @@
 use super::assert_non_empty_string_argument;
-use crate::{Container, DockerError, Label, deserialize_labels, serialize_labels};
+use crate::{Container, DockerError, Label, NetworkName, deserialize_labels, serialize_labels};
 use log::{Reporter, Span};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer, Serialize};
@@ -34,7 +34,7 @@ struct ConnectedContainers {
 #[derive(Debug, Serialize, PartialEq)]
 struct CreationBody {
     #[serde(rename = "Name")]
-    pub name: String,
+    pub name: NetworkName,
     #[serde(rename = "Labels")]
     #[serde(serialize_with = "serialize_labels")]
     pub labels: Vec<Label>,
@@ -103,16 +103,15 @@ impl NetworkCommand {
         )
     }
 
-    pub async fn inspect_by_name(&mut self, name: &str) -> Result<Network, DockerError> {
+    pub async fn inspect_by_name(&mut self, name: &NetworkName) -> Result<Network, DockerError> {
         let guard = Span::new(
             Arc::clone(&self.reporter),
             "Inspect network by name",
             log::ScopeKind::Task,
         )
         .start_guard();
-        assert_non_empty_string_argument("name", name)?;
         guard.finish(
-            self.inspect_network_by_hight::<Network>(guard.span(), name)
+            self.inspect_network_by_hight::<Network>(guard.span(), name.as_ref())
                 .await,
         )
     }
@@ -136,7 +135,7 @@ impl NetworkCommand {
 
     pub async fn find_connected_containers_by_name(
         &mut self,
-        network_name: &str,
+        network_name: &NetworkName,
     ) -> Result<Vec<String>, DockerError> {
         let guard = Span::new(
             Arc::clone(&self.reporter),
@@ -144,14 +143,17 @@ impl NetworkCommand {
             log::ScopeKind::Task,
         )
         .start_guard();
-        assert_non_empty_string_argument("network_name", network_name)?;
         guard.finish(
-            self.find_connected_containers_by_hight(guard.span(), network_name)
+            self.find_connected_containers_by_hight(guard.span(), network_name.as_ref())
                 .await,
         )
     }
 
-    pub async fn create(&mut self, name: &str, labels: Vec<Label>) -> Result<Network, DockerError> {
+    pub async fn create(
+        &mut self,
+        name: &NetworkName,
+        labels: Vec<Label>,
+    ) -> Result<Network, DockerError> {
         let guard = Span::new(
             Arc::clone(&self.reporter),
             "Create network",
@@ -161,7 +163,7 @@ impl NetworkCommand {
         let req = Request::Post {
             path: "/networks/create".to_string(),
             body: Some(serde_json::to_string(&CreationBody {
-                name: name.to_string(),
+                name: name.clone(),
                 labels,
             })?),
             headers: vec![Header::content_type_json()],
