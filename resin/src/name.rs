@@ -1,3 +1,4 @@
+use refined_string::{StringRules, Validated};
 use regex::Regex;
 use std::sync::LazyLock;
 use std::{fmt, str::FromStr};
@@ -13,10 +14,40 @@ pub enum NameParseError {
     InvalidName,
 }
 
+impl From<refined_string::Error> for NameParseError {
+    fn from(err: refined_string::Error) -> Self {
+        match err {
+            refined_string::Error::CannotBeEmpty => NameParseError::CannotBeEmpty,
+            refined_string::Error::TooLong => NameParseError::TooLong,
+            refined_string::Error::InvalidName(_) => NameParseError::InvalidName,
+        }
+    }
+}
+
+struct RepositoryComponentRules;
+
+impl StringRules for RepositoryComponentRules {
+    const MAX_LEN: usize = 255;
+
+    fn pattern() -> &'static Regex {
+        static PATTERN: LazyLock<Regex> =
+            LazyLock::new(|| Regex::new(r"^[a-z0-9]+(?:[._-][a-z0-9]+)*$").unwrap());
+        &PATTERN
+    }
+
+    type Error = NameParseError;
+
+    fn invalid(_value: &str) -> Self::Error {
+        NameParseError::InvalidName
+    }
+}
+
+type RepositoryComponent = Validated<RepositoryComponentRules>;
+
 #[derive(Debug, PartialEq, Eq, Clone, Hash)]
 pub struct Name {
-    name: String,
-    namespace: Option<String>,
+    name: RepositoryComponent,
+    namespace: Option<RepositoryComponent>,
 }
 
 const ESCAPED_SEPARATOR: &str = "%2F";
@@ -24,15 +55,15 @@ const SEPARATOR: &str = "/";
 
 impl Name {
     pub fn from_namespaced(namespace: &str, name: &str) -> Result<Self, NameParseError> {
-        Name::assert_is_valid(namespace)?;
-        Name::assert_is_valid(name)?;
+        let namespace = RepositoryComponent::from_str(namespace)?;
+        let name = RepositoryComponent::from_str(name)?;
 
-        if namespace.len() + name.len() + 1 > 255 {
+        if namespace.as_ref().len() + name.as_ref().len() + 1 > 255 {
             Err(NameParseError::TooLong)
         } else {
             Ok(Name {
-                name: name.to_string(),
-                namespace: Some(namespace.to_string()),
+                name,
+                namespace: Some(namespace),
             })
         }
     }
@@ -40,22 +71,7 @@ impl Name {
     pub fn fs_safe(&self) -> String {
         match &self.namespace {
             Some(namespace) => format!("{namespace}{ESCAPED_SEPARATOR}{}", self.name),
-            None => self.name.clone(),
-        }
-    }
-
-    fn assert_is_valid(value: &str) -> Result<(), NameParseError> {
-        static PATTERN: LazyLock<Regex> =
-            LazyLock::new(|| Regex::new(r"^[a-z0-9]+(?:[._-][a-z0-9]+)*$").unwrap());
-
-        if value.is_empty() {
-            Err(NameParseError::CannotBeEmpty)
-        } else if value.len() > 255 {
-            Err(NameParseError::TooLong)
-        } else if PATTERN.is_match(value) {
-            Ok(())
-        } else {
-            Err(NameParseError::InvalidName)
+            None => self.name.to_string(),
         }
     }
 
@@ -70,7 +86,7 @@ impl fmt::Display for Name {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match &self.namespace {
             Some(namespace) => write!(f, "{namespace}{SEPARATOR}{}", self.name),
-            None => f.write_str(&self.name),
+            None => f.write_str(self.name.as_ref()),
         }
     }
 }
@@ -81,13 +97,10 @@ impl FromStr for Name {
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         match Name::split(value) {
             Some((namespace, name)) => Name::from_namespaced(namespace, name),
-            None => {
-                Name::assert_is_valid(value)?;
-                Ok(Name {
-                    name: value.to_string(),
-                    namespace: None,
-                })
-            }
+            None => Ok(Name {
+                name: RepositoryComponent::from_str(value)?,
+                namespace: None,
+            }),
         }
     }
 }

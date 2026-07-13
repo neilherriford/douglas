@@ -16,6 +16,7 @@ http-body = "1"
 log = { workspace = true, features = ["tui"] }
 mime = "0.3.17"
 os = { workspace = true }
+refined_string = { workspace = true }
 regex = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
