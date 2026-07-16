@@ -296,6 +296,7 @@ dependencies = [
 name = "blueprint"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "credentials",
  "file_system",
  "log 0.1.0",
@@ -729,6 +730,7 @@ dependencies = [
 name = "douglas"
 version = "0.0.1"
 dependencies = [
+ "async-trait",
  "blueprint",
  "bract",
  "clap",

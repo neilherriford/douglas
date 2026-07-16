@@ -8,6 +8,7 @@ use blueprint::{
         plan_service_bootstrap,
     },
 };
+use async_trait::async_trait;
 use command_fds::{CommandFdExt, FdMapping, FdMappingCollision};
 use config::DouglasFolders;
 use credentials::{Credentials, well_known::DOUGLAS_ADMIN_GROUP};
@@ -310,12 +311,13 @@ impl std::fmt::Display for CreatePipe {
     }
 }
 
+#[async_trait(?Send)]
 impl<'a> Command<Context<'a>> for CreatePipe {
     fn name(&self) -> String {
         "Create Pipe".to_string()
     }
 
-    fn run(
+    async fn run(
         &mut self,
         span: &Span,
         context: &mut Context<'a>,
@@ -354,12 +356,13 @@ impl std::fmt::Display for StartService {
     }
 }
 
+#[async_trait(?Send)]
 impl<'a> Command<Context<'a>> for StartService {
     fn name(&self) -> String {
         format!("Start {}", self.name)
     }
 
-    fn run(
+    async fn run(
         &mut self,
         span: &Span,
         context: &mut Context<'a>,
@@ -401,12 +404,13 @@ impl std::fmt::Display for WaitForServiceReady {
     }
 }
 
+#[async_trait(?Send)]
 impl<'a> Command<Context<'a>> for WaitForServiceReady {
     fn name(&self) -> String {
         format!("Wait for {}", self.name)
     }
 
-    fn run(
+    async fn run(
         &mut self,
         span: &Span,
         _context: &mut Context<'a>,
@@ -415,7 +419,7 @@ impl<'a> Command<Context<'a>> for WaitForServiceReady {
             .create_child(&format!("Waiting for {}…", self.name), ScopeKind::Step)
             .start_guard();
 
-        wait_until_running(self.name, &self.liveness, guard.span())?;
+        wait_until_running(self.name, &self.liveness, guard.span()).await?;
 
         guard.finish_with_outcome(Outcome::Ok);
         Ok(())
@@ -481,7 +485,7 @@ fn tag_event_with_service(event: &mut log::Event, service_name: &str) {
     }
 }
 
-fn wait_until_running(
+async fn wait_until_running(
     name: &str,
     liveness: &LivenessCheck,
     span: &Span,
@@ -494,7 +498,7 @@ fn wait_until_running(
         if Instant::now() >= deadline {
             return Err(Box::new(BootstrapError::StartTimeout(name.to_string())));
         }
-        std::thread::sleep(Duration::from_millis(200));
+        tokio::time::sleep(Duration::from_millis(200)).await;
     }
 }
 
@@ -547,7 +551,7 @@ pub async fn perform(
         pipes: HashMap::new(),
     };
 
-    match execute_plan(guard.span(), plan, &mut context, || ()) {
+    match execute_plan(guard.span(), plan, &mut context, || ()).await {
         Ok(()) => guard.finish_with_outcome(Outcome::Ok),
         Err(()) => {
             guard.finish_with_outcome(Outcome::Failed);
@@ -717,8 +721,8 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn test_wait_until_running_should_return_immediately_when_already_running() {
+    #[tokio::test]
+    async fn test_wait_until_running_should_return_immediately_when_already_running() {
         let Ok(listener) = std::net::TcpListener::bind("127.0.0.1:0") else {
             panic!("should bind");
         };
@@ -732,7 +736,7 @@ mod tests {
             }
         });
 
-        let result = wait_until_running("test-service", &tcp_liveness(port), &span());
+        let result = wait_until_running("test-service", &tcp_liveness(port), &span()).await;
 
         assert!(result.is_ok());
     }

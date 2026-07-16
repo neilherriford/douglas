@@ -3,6 +3,7 @@ pub mod commands;
 pub mod listener;
 pub mod service;
 
+use async_trait::async_trait;
 use credentials::Credentials;
 use file_system::{Folder, Modes, Permissions};
 use log::{Level, Span};
@@ -59,14 +60,15 @@ impl<'a> HasPermissions for StandardContext<'a> {
     }
 }
 
+#[async_trait(?Send)]
 pub trait Command<TContext>: std::fmt::Display {
     fn name(&self) -> String;
-    fn run(
+    async fn run(
         &mut self,
         span: &Span,
         context: &mut TContext,
     ) -> Result<(), Box<dyn std::error::Error>>;
-    fn rollback(
+    async fn rollback(
         &mut self,
         _span: &Span,
         _context: &mut TContext,
@@ -131,15 +133,20 @@ pub enum ExecutionResult {
     },
 }
 
+#[async_trait(?Send)]
 pub trait CommandExecutor<TContext> {
-    fn run(
+    async fn run(
         &mut self,
         span: &Span,
         context: &mut TContext,
         commands: Vec<Box<dyn Command<TContext>>>,
     ) -> ExecutionResult;
 
-    fn rollback(&mut self, span: &Span, context: &mut TContext) -> Vec<Box<dyn std::error::Error>>;
+    async fn rollback(
+        &mut self,
+        span: &Span,
+        context: &mut TContext,
+    ) -> Vec<Box<dyn std::error::Error>>;
 }
 
 pub struct JournalingExecutor<TContext> {
@@ -158,8 +165,9 @@ impl<TContext> Default for JournalingExecutor<TContext> {
     }
 }
 
+#[async_trait(?Send)]
 impl<TContext> CommandExecutor<TContext> for JournalingExecutor<TContext> {
-    fn run(
+    async fn run(
         &mut self,
         span: &Span,
         context: &mut TContext,
@@ -179,9 +187,9 @@ impl<TContext> CommandExecutor<TContext> for JournalingExecutor<TContext> {
 
             span.message(Level::Info, &format!("{command}…"));
 
-            if let Err(err) = command.run(span, context) {
+            if let Err(err) = command.run(span, context).await {
                 span.message(Level::Warn, &format!("[{step_name}] failed: {err:?}"));
-                let rollback_errors = self.rollback(span, context);
+                let rollback_errors = self.rollback(span, context).await;
                 return ExecutionResult::Failed {
                     failed_at_step: step_index,
                     failed_at_step_name: step_name,
@@ -195,11 +203,15 @@ impl<TContext> CommandExecutor<TContext> for JournalingExecutor<TContext> {
         ExecutionResult::Success
     }
 
-    fn rollback(&mut self, span: &Span, context: &mut TContext) -> Vec<Box<dyn std::error::Error>> {
+    async fn rollback(
+        &mut self,
+        span: &Span,
+        context: &mut TContext,
+    ) -> Vec<Box<dyn std::error::Error>> {
         let mut errors = Vec::new();
         for mut cmd in self.journal.drain(..).rev() {
             span.message(Level::Info, &format!("[Rolling back {}…]", cmd.name()));
-            if let Err(err) = cmd.rollback(span, context) {
+            if let Err(err) = cmd.rollback(span, context).await {
                 span.message(
                     Level::Warn,
                     &format!("[{}] rollback failed: {err}", cmd.name()),

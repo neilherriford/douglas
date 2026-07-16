@@ -1,4 +1,5 @@
 use crate::{Command, HasCredentials, HasFolder, HasPermissions};
+use async_trait::async_trait;
 use file_system::Modes;
 use log::{Outcome, ScopeKind, Span};
 use std::path::PathBuf;
@@ -16,12 +17,17 @@ impl CreateUser {
         }
     }
 }
+#[async_trait(?Send)]
 impl<C: HasCredentials> Command<C> for CreateUser {
     fn name(&self) -> String {
         "Create user".to_string()
     }
 
-    fn run(&mut self, span: &Span, context: &mut C) -> Result<(), Box<dyn std::error::Error>> {
+    async fn run(
+        &mut self,
+        span: &Span,
+        context: &mut C,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let guard = span
             .create_child(
                 &format!("Created user '{}'!", self.user_name),
@@ -64,12 +70,17 @@ impl std::fmt::Display for CreateGroup {
     }
 }
 
+#[async_trait(?Send)]
 impl<C: HasCredentials> Command<C> for CreateGroup {
     fn name(&self) -> String {
         "Create group".to_string()
     }
 
-    fn run(&mut self, span: &Span, context: &mut C) -> Result<(), Box<dyn std::error::Error>> {
+    async fn run(
+        &mut self,
+        span: &Span,
+        context: &mut C,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let guard = span
             .create_child(
                 &format!("Created group '{}'!", self.group_name),
@@ -106,12 +117,17 @@ impl std::fmt::Display for AddUserToGroup {
     }
 }
 
+#[async_trait(?Send)]
 impl<C: HasCredentials> Command<C> for AddUserToGroup {
     fn name(&self) -> String {
         "Add user to group".to_string()
     }
 
-    fn run(&mut self, span: &Span, context: &mut C) -> Result<(), Box<dyn std::error::Error>> {
+    async fn run(
+        &mut self,
+        span: &Span,
+        context: &mut C,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let guard = span
             .create_child(
                 &format!(
@@ -145,12 +161,17 @@ impl std::fmt::Display for CreateFolder {
     }
 }
 
+#[async_trait(?Send)]
 impl<C: HasFolder> Command<C> for CreateFolder {
     fn name(&self) -> String {
         "Create folder".to_string()
     }
 
-    fn run(&mut self, span: &Span, context: &mut C) -> Result<(), Box<dyn std::error::Error>> {
+    async fn run(
+        &mut self,
+        span: &Span,
+        context: &mut C,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let guard = span
             .create_child(
                 &format!("Created folder '{}'!", self.folder.display()),
@@ -191,12 +212,17 @@ impl std::fmt::Display for SetOwnership {
     }
 }
 
+#[async_trait(?Send)]
 impl<C: HasPermissions> Command<C> for SetOwnership {
     fn name(&self) -> String {
         "Set ownership".to_string()
     }
 
-    fn run(&mut self, span: &Span, context: &mut C) -> Result<(), Box<dyn std::error::Error>> {
+    async fn run(
+        &mut self,
+        span: &Span,
+        context: &mut C,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let guard = span
             .create_child(
                 &format!(
@@ -240,12 +266,17 @@ impl std::fmt::Display for SetMode {
     }
 }
 
+#[async_trait(?Send)]
 impl<C: HasPermissions> Command<C> for SetMode {
     fn name(&self) -> String {
         "Set mode".to_string()
     }
 
-    fn run(&mut self, span: &Span, context: &mut C) -> Result<(), Box<dyn std::error::Error>> {
+    async fn run(
+        &mut self,
+        span: &Span,
+        context: &mut C,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let guard = span
             .create_child(
                 &format!(

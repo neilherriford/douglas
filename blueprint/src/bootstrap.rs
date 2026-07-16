@@ -27,18 +27,21 @@ pub fn resolve_plan<TContext, E: std::fmt::Display>(
     }
 }
 
-pub fn execute_plan<TContext, E>(
+pub async fn execute_plan<TContext, E>(
     span: &Span,
     plan: Vec<Box<dyn Command<TContext>>>,
     context: &mut TContext,
     on_failed: impl FnOnce() -> E,
 ) -> Result<(), E> {
     let mut executor = JournalingExecutor::new();
-    match executor.run(
-        &span.create_child("Executing plan", ScopeKind::Phase),
-        context,
-        plan,
-    ) {
+    match executor
+        .run(
+            &span.create_child("Executing plan", ScopeKind::Phase),
+            context,
+            plan,
+        )
+        .await
+    {
         ExecutionResult::Success => Ok(()),
         ExecutionResult::Failed {
             failed_at_step,
