@@ -5,9 +5,9 @@ pub mod unix_domain_socket;
 use http_body_util::BodyExt;
 use hyper::client::conn::http1::SendRequest;
 use log::{Level, Outcome, ScopeKind, Span};
-use std::collections::HashMap;
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 use thiserror::Error;
+use tokio::io::AsyncWriteExt;
 
 #[derive(Error, Debug)]
 pub enum RestClientError {
@@ -97,6 +97,24 @@ pub enum Response {
 }
 
 #[derive(Debug, PartialEq)]
+pub enum StreamedResponse {
+    Okay {
+        headers: Vec<Header>,
+    },
+    Created {
+        headers: Vec<Header>,
+    },
+    NoContent {
+        headers: Vec<Header>,
+    },
+    Error {
+        headers: Vec<Header>,
+        status: u16,
+        body: Option<String>,
+    },
+}
+
+#[derive(Debug, PartialEq)]
 pub struct Header {
     pub name: String,
     pub value: String,
@@ -142,9 +160,15 @@ pub trait RestClient: Send + Sync {
     async fn execute(
         &mut self,
         span: &Span,
-
         request: &Request,
     ) -> Result<Response, RestClientError>;
+
+    async fn execute_streaming(
+        &mut self,
+        span: &Span,
+        request: &Request,
+        sink: &mut Box<dyn tokio::io::AsyncWrite + Unpin + Send>,
+    ) -> Result<StreamedResponse, RestClientError>;
 }
 
 /*
@@ -315,12 +339,26 @@ impl<TIo: IoStream + 'static> SimpleRestClient<TIo> {
         }
     }
 
-    async fn parse_hyper_response(
+    async fn stream_body_to_sink(
         &self,
-        span: &Span,
-        hyper_response: hyper::Response<hyper::body::Incoming>,
-    ) -> Result<(hyper::StatusCode, Vec<Header>, Option<String>), RestClientError> {
-        let status = hyper_response.status();
+        mut hyper_response: hyper::Response<hyper::body::Incoming>,
+        sink: &mut (dyn tokio::io::AsyncWrite + Unpin + Send),
+    ) -> Result<(), RestClientError> {
+        while let Some(next) = hyper_response.frame().await {
+            let frame = next?;
+            if let Some(chunk) = frame.data_ref() {
+                sink.write_all(chunk)
+                    .await
+                    .map_err(|err| RestClientError::General(err.to_string()))?;
+            }
+        }
+        sink.flush()
+            .await
+            .map_err(|err| RestClientError::General(err.to_string()))?;
+        Ok(())
+    }
+
+    fn gather_headers(hyper_response: &hyper::Response<hyper::body::Incoming>) -> Vec<Header> {
         let headers: Vec<Header> = hyper_response
             .headers()
             .iter()
@@ -329,6 +367,16 @@ impl<TIo: IoStream + 'static> SimpleRestClient<TIo> {
                 value: header_value.to_str().unwrap().to_string(),
             })
             .collect();
+        headers
+    }
+
+    async fn parse_hyper_response(
+        &self,
+        span: &Span,
+        hyper_response: hyper::Response<hyper::body::Incoming>,
+    ) -> Result<(hyper::StatusCode, Vec<Header>, Option<String>), RestClientError> {
+        let status = hyper_response.status();
+        let headers = Self::gather_headers(&hyper_response);
         let raw_body = self.read_raw_body(hyper_response).await?;
         self.log_response(span, status.as_u16(), &headers, &raw_body);
         Ok((status, headers, raw_body))
@@ -466,5 +514,47 @@ where
             .parse_hyper_response(guard.span(), hyper_response)
             .await?;
         guard.finish(self.create_response(status, headers, raw_body))
+    }
+
+    async fn execute_streaming(
+        &mut self,
+        span: &Span,
+        request: &Request,
+        sink: &mut Box<dyn tokio::io::AsyncWrite + Unpin + Send>,
+    ) -> Result<StreamedResponse, RestClientError> {
+        let guard = span
+            .create_child(
+                &format!(
+                    "Executing streaming request '{}'",
+                    request.to_short_description()
+                ),
+                ScopeKind::Task,
+            )
+            .start_guard();
+
+        self.log_request(guard.span(), request);
+        let hyper_request = self.build_hyper_request(request)?;
+
+        self.initialize_sender(guard.span()).await?;
+        let hyper_response = self.send_hyper_request(hyper_request).await?;
+        let headers = Self::gather_headers(&hyper_response);
+        let status = hyper_response.status();
+
+        if status.is_success() {
+            self.stream_body_to_sink(hyper_response, sink.as_mut())
+                .await?;
+            Ok(match status {
+                hyper::StatusCode::CREATED => StreamedResponse::Created { headers },
+                hyper::StatusCode::NO_CONTENT => StreamedResponse::NoContent { headers },
+                _ => StreamedResponse::Okay { headers },
+            })
+        } else {
+            let body = self.read_raw_body(hyper_response).await?;
+            Ok(StreamedResponse::Error {
+                headers,
+                status: status.as_u16(),
+                body,
+            })
+        }
     }
 }
