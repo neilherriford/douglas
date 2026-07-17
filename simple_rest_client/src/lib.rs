@@ -1,5 +1,6 @@
 pub mod assertions;
 pub mod parsers;
+pub mod tls_socket;
 pub mod unix_domain_socket;
 
 use http_body_util::BodyExt;
@@ -23,22 +24,16 @@ pub enum RestClientError {
 
 impl PartialEq for RestClientError {
     fn eq(&self, other: &Self) -> bool {
-        match self {
-            RestClientError::Stream(left) => {
-                if let RestClientError::Stream(right) = other {
-                    left.to_string() == right.to_string()
-                } else {
-                    false
-                }
+        match (self, other) {
+            (RestClientError::Stream(left), RestClientError::Stream(right)) => {
+                left.to_string() == right.to_string()
             }
-            RestClientError::Client(left) => {
-                if let RestClientError::Client(right) = other {
-                    left.to_string() == right.to_string()
-                } else {
-                    false
-                }
+            (RestClientError::Client(left), RestClientError::Client(right)) => {
+                left.to_string() == right.to_string()
             }
-            _ => other == self,
+            (RestClientError::IoStreamAlreadyTaken, RestClientError::IoStreamAlreadyTaken) => true,
+            (RestClientError::General(left), RestClientError::General(right)) => left == right,
+            _ => false,
         }
     }
 }

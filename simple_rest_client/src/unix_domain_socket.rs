@@ -75,15 +75,14 @@ pub enum BuilderError {
 
 impl PartialEq for BuilderError {
     fn eq(&self, other: &Self) -> bool {
-        match self {
-            BuilderError::General(left) => {
-                if let BuilderError::General(right) = other {
-                    left.to_string() == right.to_string()
-                } else {
-                    false
-                }
+        match (self, other) {
+            (BuilderError::SocketFileNotFound, BuilderError::SocketFileNotFound)
+            | (BuilderError::PermissionDenied, BuilderError::PermissionDenied)
+            | (BuilderError::ConnectionRefused, BuilderError::ConnectionRefused) => true,
+            (BuilderError::General(left), BuilderError::General(right)) => {
+                left.to_string() == right.to_string()
             }
-            _ => self == other,
+            _ => false,
         }
     }
 }
