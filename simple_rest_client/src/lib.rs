@@ -38,13 +38,17 @@ impl PartialEq for RestClientError {
     }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub enum Request {
     Delete {
         path: String,
         headers: Vec<Header>,
     },
     Get {
+        path: String,
+        headers: Vec<Header>,
+    },
+    Head {
         path: String,
         headers: Vec<Header>,
     },
@@ -65,8 +69,30 @@ impl Request {
         match self {
             Request::Delete { path, .. } => format!("DELETE {path}"),
             Request::Get { path, .. } => format!("GET {path}"),
+            Request::Head { path, .. } => format!("HEAD {path}"),
             Request::Post { path, .. } => format!("POST {path}"),
             Request::Put { path, .. } => format!("PUT {path}"),
+        }
+    }
+
+    pub fn headers(&self) -> Vec<Header> {
+        match self {
+            Request::Delete { headers, .. } => headers,
+            Request::Get { headers, .. } => headers,
+            Request::Head { headers, .. } => headers,
+            Request::Post { headers, .. } => headers,
+            Request::Put { headers, .. } => headers,
+        }
+        .to_vec()
+    }
+
+    pub fn path(&self) -> String {
+        match self {
+            Request::Delete { path, .. } => path.clone(),
+            Request::Get { path, .. } => path.clone(),
+            Request::Head { path, .. } => path.clone(),
+            Request::Post { path, .. } => path.clone(),
+            Request::Put { path, .. } => path.clone(),
         }
     }
 }
@@ -109,7 +135,7 @@ pub enum StreamedResponse {
     },
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub struct Header {
     pub name: String,
     pub value: String,
@@ -117,8 +143,19 @@ pub struct Header {
 
 impl Header {
     pub fn content_type_json() -> Header {
-        Header::new("Content-type", "application/json")
+        Header::new(
+            hyper::header::CONTENT_TYPE.as_str(),
+            mime::APPLICATION_JSON.as_ref(),
+        )
     }
+
+    pub fn authorization_bearer(token: &str) -> Header {
+        Header::new(
+            hyper::header::AUTHORIZATION.as_str(),
+            &format!("Bearer {token}"),
+        )
+    }
+
     pub fn new(name: &str, value: &str) -> Self {
         Self {
             name: name.to_string(),
@@ -171,7 +208,7 @@ pub trait RestClient: Send + Sync {
  * closes the connection (e.g. after a keep-alive timeout or a single
  * request connection)
  */
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum ServerClosedConnections {
     Ignore,
     TreatAsError,
@@ -225,6 +262,12 @@ impl<TIo: IoStream + 'static> SimpleRestClient<TIo> {
             Request::Get { path, headers } => {
                 let uri = uri_builder.path_and_query(path).build()?;
                 request_builder = request_builder.method("GET").uri(uri);
+                request_headers = headers;
+                request_body = &None;
+            }
+            Request::Head { path, headers } => {
+                let uri = uri_builder.path_and_query(path).build()?;
+                request_builder = request_builder.method("HEAD").uri(uri);
                 request_headers = headers;
                 request_body = &None;
             }
@@ -424,6 +467,12 @@ impl<TIo: IoStream + 'static> SimpleRestClient<TIo> {
                 request_headers = headers;
                 request_body = &None;
             }
+            Request::Head { path, headers } => {
+                verb = "HEAD";
+                request_path = path;
+                request_headers = headers;
+                request_body = &None;
+            }
             Request::Post {
                 path,
                 headers,
@@ -550,6 +599,162 @@ where
                 status: status.as_u16(),
                 body,
             })
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn get(path: &str) -> Request {
+        Request::Get {
+            path: path.to_string(),
+            headers: vec![],
+        }
+    }
+
+    mod create_path_and_query_string {
+        use super::*;
+
+        #[test]
+        fn test_create_path_and_query_string_should_return_bare_path_when_no_parameters() {
+            let result = create_path_and_query_string("/foo", HashMap::new());
+
+            assert_eq!(result, "/foo");
+        }
+
+        #[test]
+        fn test_create_path_and_query_string_should_append_encoded_parameters() {
+            let mut parameters = HashMap::new();
+            parameters.insert("a b", "c&d");
+
+            let result = create_path_and_query_string("/foo", parameters);
+
+            assert_eq!(result, "/foo?a%20b=c%26d");
+        }
+    }
+
+    mod header {
+        use super::*;
+
+        #[test]
+        fn test_content_type_json_should_set_the_content_type_header() {
+            let header = Header::content_type_json();
+
+            assert_eq!(header.name, "content-type");
+            assert_eq!(header.value, "application/json");
+        }
+
+        #[test]
+        fn test_authorization_bearer_should_format_the_token() {
+            let header = Header::authorization_bearer("abc123");
+
+            assert_eq!(header.name, "authorization");
+            assert_eq!(header.value, "Bearer abc123");
+        }
+    }
+
+    mod request {
+        use super::*;
+
+        #[test]
+        fn test_to_short_description_should_include_verb_and_path() {
+            let cases = vec![
+                (
+                    Request::Delete {
+                        path: "/foo".to_string(),
+                        headers: vec![],
+                    },
+                    "DELETE /foo",
+                ),
+                (get("/foo"), "GET /foo"),
+                (
+                    Request::Head {
+                        path: "/foo".to_string(),
+                        headers: vec![],
+                    },
+                    "HEAD /foo",
+                ),
+                (
+                    Request::Post {
+                        path: "/foo".to_string(),
+                        headers: vec![],
+                        body: None,
+                    },
+                    "POST /foo",
+                ),
+                (
+                    Request::Put {
+                        path: "/foo".to_string(),
+                        headers: vec![],
+                        body: None,
+                    },
+                    "PUT /foo",
+                ),
+            ];
+
+            for (request, expected) in cases {
+                assert_eq!(request.to_short_description(), expected);
+            }
+        }
+
+        #[test]
+        fn test_headers_should_return_the_requests_headers() {
+            let request = Request::Post {
+                path: "/foo".to_string(),
+                headers: vec![Header::new("x-test", "1")],
+                body: None,
+            };
+
+            assert_eq!(request.headers(), vec![Header::new("x-test", "1")]);
+        }
+
+        #[test]
+        fn test_path_should_return_the_requests_path() {
+            let request = Request::Put {
+                path: "/foo".to_string(),
+                headers: vec![],
+                body: None,
+            };
+
+            assert_eq!(request.path(), "/foo");
+        }
+    }
+
+    mod rest_client_error {
+        use super::*;
+
+        #[test]
+        fn test_eq_should_treat_same_general_errors_as_equal() {
+            let left = RestClientError::General("foo".to_string());
+            let right = RestClientError::General("foo".to_string());
+
+            assert_eq!(left, right);
+        }
+
+        #[test]
+        fn test_eq_should_treat_io_stream_already_taken_as_equal() {
+            assert_eq!(
+                RestClientError::IoStreamAlreadyTaken,
+                RestClientError::IoStreamAlreadyTaken
+            );
+        }
+
+        #[test]
+        fn test_eq_should_treat_different_variants_as_unequal() {
+            let left = RestClientError::General("oops".to_string());
+            let right = RestClientError::IoStreamAlreadyTaken;
+
+            assert_ne!(left, right);
+        }
+
+        #[test]
+        fn test_eq_should_treat_different_general_messages_as_unequal() {
+            let left = RestClientError::General("oops".to_string());
+            let right = RestClientError::General("uhoh".to_string());
+
+            assert_ne!(left, right);
         }
     }
 }

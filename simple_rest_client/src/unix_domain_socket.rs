@@ -120,3 +120,83 @@ where
 
     Ok(result)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    mod builder_error {
+        use super::*;
+
+        #[test]
+        fn test_eq_should_treat_same_named_variants_as_equal() {
+            assert_eq!(
+                BuilderError::SocketFileNotFound,
+                BuilderError::SocketFileNotFound
+            );
+            assert_eq!(
+                BuilderError::PermissionDenied,
+                BuilderError::PermissionDenied
+            );
+            assert_eq!(
+                BuilderError::ConnectionRefused,
+                BuilderError::ConnectionRefused
+            );
+        }
+
+        #[test]
+        fn test_eq_should_treat_different_variants_as_unequal() {
+            assert_ne!(
+                BuilderError::SocketFileNotFound,
+                BuilderError::PermissionDenied
+            );
+        }
+
+        #[test]
+        fn test_eq_should_compare_general_errors_by_source_message() {
+            let left = BuilderError::General(std::io::Error::other("foo"));
+            let right = BuilderError::General(std::io::Error::other("foo"));
+
+            assert_eq!(left, right);
+        }
+
+        #[test]
+        fn test_eq_should_treat_different_general_messages_as_unequal() {
+            let left = BuilderError::General(std::io::Error::other("oops"));
+            let right = BuilderError::General(std::io::Error::other("uhoh"));
+
+            assert_ne!(left, right);
+        }
+
+        #[test]
+        fn test_from_io_error_should_map_not_found_to_socket_file_not_found() {
+            let source = std::io::Error::new(std::io::ErrorKind::NotFound, "foo");
+
+            assert_eq!(BuilderError::from(source), BuilderError::SocketFileNotFound);
+        }
+
+        #[test]
+        fn test_from_io_error_should_map_permission_denied() {
+            let source = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "foo");
+
+            assert_eq!(BuilderError::from(source), BuilderError::PermissionDenied);
+        }
+
+        #[test]
+        fn test_from_io_error_should_map_connection_refused() {
+            let source = std::io::Error::new(std::io::ErrorKind::ConnectionRefused, "foo");
+
+            assert_eq!(BuilderError::from(source), BuilderError::ConnectionRefused);
+        }
+
+        #[test]
+        fn test_from_io_error_should_map_other_kinds_to_general() {
+            let source = std::io::Error::other("foo");
+
+            assert_eq!(
+                BuilderError::from(source),
+                BuilderError::General(std::io::Error::other("foo"))
+            );
+        }
+    }
+}
