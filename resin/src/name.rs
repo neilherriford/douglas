@@ -24,7 +24,7 @@ impl From<refined_string::Error> for NameParseError {
     }
 }
 
-struct RepositoryComponentRules;
+pub struct RepositoryComponentRules;
 
 impl StringRules for RepositoryComponentRules {
     const MAX_LEN: usize = 255;
@@ -42,7 +42,7 @@ impl StringRules for RepositoryComponentRules {
     }
 }
 
-type RepositoryComponent = Validated<RepositoryComponentRules>;
+pub type RepositoryComponent = Validated<RepositoryComponentRules>;
 
 #[derive(Debug, PartialEq, Eq, Clone, Hash)]
 pub struct Name {
@@ -79,6 +79,13 @@ impl Name {
         value
             .split_once(ESCAPED_SEPARATOR)
             .or_else(|| value.split_once(SEPARATOR))
+    }
+
+    pub fn name(&self) -> RepositoryComponent {
+        self.name.clone()
+    }
+    pub fn namespace(&self) -> Option<RepositoryComponent> {
+        self.namespace.clone()
     }
 }
 

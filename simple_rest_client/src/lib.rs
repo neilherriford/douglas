@@ -3,12 +3,19 @@ pub mod parsers;
 pub mod tls_socket;
 pub mod unix_domain_socket;
 
+use bytes::{Buf, Bytes};
+use http_body::Body as HttpBody;
 use http_body_util::BodyExt;
 use hyper::client::conn::http1::SendRequest;
 use log::{Level, Outcome, ScopeKind, Span};
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::HashMap,
+    pin::Pin,
+    sync::Arc,
+    task::{Context, Poll},
+};
 use thiserror::Error;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncRead, ReadBuf};
 
 #[derive(Error, Debug)]
 pub enum RestClientError {
@@ -117,13 +124,14 @@ pub enum Response {
     },
 }
 
-#[derive(Debug, PartialEq)]
 pub enum StreamedResponse {
     Okay {
         headers: Vec<Header>,
+        body: Box<dyn AsyncRead + Send + Unpin>,
     },
     Created {
         headers: Vec<Header>,
+        body: Box<dyn AsyncRead + Send + Unpin>,
     },
     NoContent {
         headers: Vec<Header>,
@@ -133,6 +141,51 @@ pub enum StreamedResponse {
         status: u16,
         body: Option<String>,
     },
+}
+
+struct BodyReader {
+    body: hyper::body::Incoming,
+    buffer: Bytes,
+}
+
+impl BodyReader {
+    fn new(body: hyper::body::Incoming) -> Self {
+        Self {
+            body,
+            buffer: Bytes::new(),
+        }
+    }
+}
+
+impl AsyncRead for BodyReader {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        let this = self.get_mut();
+
+        loop {
+            if !this.buffer.is_empty() {
+                let amount = std::cmp::min(buf.remaining(), this.buffer.len());
+                buf.put_slice(&this.buffer[..amount]);
+                this.buffer.advance(amount);
+                return Poll::Ready(Ok(()));
+            }
+
+            match Pin::new(&mut this.body).poll_frame(cx) {
+                Poll::Ready(Some(Ok(frame))) => match frame.into_data() {
+                    Ok(data) => this.buffer = data,
+                    Err(_) => continue,
+                },
+                Poll::Ready(Some(Err(err))) => {
+                    return Poll::Ready(Err(std::io::Error::other(err)));
+                }
+                Poll::Ready(None) => return Poll::Ready(Ok(())),
+                Poll::Pending => return Poll::Pending,
+            }
+        }
+    }
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -161,6 +214,26 @@ impl Header {
             name: name.to_string(),
             value: value.to_string(),
         }
+    }
+}
+
+pub mod header_predicates {
+    use crate::Header;
+
+    pub fn named(name: &'static str) -> impl Fn(&&Header) -> bool {
+        move |header| header.name.eq_ignore_ascii_case(name)
+    }
+
+    pub fn is_content_type() -> impl Fn(&&Header) -> bool {
+        named(hyper::header::CONTENT_TYPE.as_str())
+    }
+
+    pub fn is_authorization() -> impl Fn(&&Header) -> bool {
+        named(hyper::header::AUTHORIZATION.as_str())
+    }
+
+    pub fn is_content_length() -> impl Fn(&&Header) -> bool {
+        named(hyper::header::CONTENT_LENGTH.as_str())
     }
 }
 
@@ -199,7 +272,6 @@ pub trait RestClient: Send + Sync {
         &mut self,
         span: &Span,
         request: &Request,
-        sink: &mut Box<dyn tokio::io::AsyncWrite + Unpin + Send>,
     ) -> Result<StreamedResponse, RestClientError>;
 }
 
@@ -377,25 +449,6 @@ impl<TIo: IoStream + 'static> SimpleRestClient<TIo> {
         }
     }
 
-    async fn stream_body_to_sink(
-        &self,
-        mut hyper_response: hyper::Response<hyper::body::Incoming>,
-        sink: &mut (dyn tokio::io::AsyncWrite + Unpin + Send),
-    ) -> Result<(), RestClientError> {
-        while let Some(next) = hyper_response.frame().await {
-            let frame = next?;
-            if let Some(chunk) = frame.data_ref() {
-                sink.write_all(chunk)
-                    .await
-                    .map_err(|err| RestClientError::General(err.to_string()))?;
-            }
-        }
-        sink.flush()
-            .await
-            .map_err(|err| RestClientError::General(err.to_string()))?;
-        Ok(())
-    }
-
     fn gather_headers(hyper_response: &hyper::Response<hyper::body::Incoming>) -> Vec<Header> {
         let headers: Vec<Header> = hyper_response
             .headers()
@@ -564,7 +617,6 @@ where
         &mut self,
         span: &Span,
         request: &Request,
-        sink: &mut Box<dyn tokio::io::AsyncWrite + Unpin + Send>,
     ) -> Result<StreamedResponse, RestClientError> {
         let guard = span
             .create_child(
@@ -584,13 +636,17 @@ where
         let headers = Self::gather_headers(&hyper_response);
         let status = hyper_response.status();
 
+        if status == hyper::StatusCode::NO_CONTENT {
+            return Ok(StreamedResponse::NoContent { headers });
+        }
+
         if status.is_success() {
-            self.stream_body_to_sink(hyper_response, sink.as_mut())
-                .await?;
-            Ok(match status {
-                hyper::StatusCode::CREATED => StreamedResponse::Created { headers },
-                hyper::StatusCode::NO_CONTENT => StreamedResponse::NoContent { headers },
-                _ => StreamedResponse::Okay { headers },
+            let body = Box::new(BodyReader::new(hyper_response.into_body()))
+                as Box<dyn AsyncRead + Send + Unpin>;
+            Ok(if status == hyper::StatusCode::CREATED {
+                StreamedResponse::Created { headers, body }
+            } else {
+                StreamedResponse::Okay { headers, body }
             })
         } else {
             let body = self.read_raw_body(hyper_response).await?;

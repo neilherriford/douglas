@@ -9,6 +9,8 @@ use hyper::{
 };
 use hyper_util::rt::TokioIo;
 use log::Span;
+#[cfg(feature = "mock")]
+use mockall::automock;
 use std::{
     collections::HashSet,
     fmt::Formatter,
@@ -177,8 +179,9 @@ pub async fn build_client(
     ))
 }
 
+#[cfg_attr(feature = "mock", automock)]
 #[async_trait]
-pub trait RedirectFollowingClient {
+pub trait RedirectFollowingClient: Send + Sync {
     async fn execute(
         &mut self,
         span: &Span,
@@ -191,7 +194,6 @@ pub trait RedirectFollowingClient {
         span: &Span,
         initial_authority: &str,
         request: Request,
-        sink: &mut Box<dyn tokio::io::AsyncWrite + Unpin + Send>,
     ) -> Result<StreamedResponse, RestClientError>;
 }
 
@@ -265,39 +267,59 @@ impl TlsRedirectFollowingClient {
         Self::is_downgrading_redirect(status) || Self::is_preserving_redirect(status)
     }
 
+    // Don't forward auth headers when redirecting to a different authority
+    const CROSS_HOST_SENSITIVE_HEADERS: [&'static str; 3] =
+        ["authorization", "cookie", "proxy-authorization"];
+
+    fn headers_for_redirect(headers: Vec<Header>, same_host: bool) -> Vec<Header> {
+        if same_host {
+            return headers;
+        }
+
+        headers
+            .into_iter()
+            .filter(|header| {
+                !Self::CROSS_HOST_SENSITIVE_HEADERS
+                    .iter()
+                    .any(|sensitive| header.name.eq_ignore_ascii_case(sensitive))
+            })
+            .collect()
+    }
+
     fn rebuild_request_for_redirect(
         status: hyper::StatusCode,
         request: &Request,
         new_path: String,
+        same_host: bool,
     ) -> Request {
         if Self::is_downgrading_redirect(status) {
             return Request::Get {
                 path: new_path,
-                headers: request.headers(),
+                headers: Self::headers_for_redirect(request.headers(), same_host),
             };
         }
 
         match request {
             Request::Delete { headers, .. } => Request::Delete {
                 path: new_path,
-                headers: headers.clone(),
+                headers: Self::headers_for_redirect(headers.clone(), same_host),
             },
             Request::Get { headers, .. } => Request::Get {
                 path: new_path,
-                headers: headers.clone(),
+                headers: Self::headers_for_redirect(headers.clone(), same_host),
             },
             Request::Head { headers, .. } => Request::Head {
                 path: new_path,
-                headers: headers.clone(),
+                headers: Self::headers_for_redirect(headers.clone(), same_host),
             },
             Request::Post { headers, body, .. } => Request::Post {
                 path: new_path,
-                headers: headers.clone(),
+                headers: Self::headers_for_redirect(headers.clone(), same_host),
                 body: body.clone(),
             },
             Request::Put { headers, body, .. } => Request::Put {
                 path: new_path,
-                headers: headers.clone(),
+                headers: Self::headers_for_redirect(headers.clone(), same_host),
                 body: body.clone(),
             },
         }
@@ -338,8 +360,14 @@ impl RedirectFollowingClient for TlsRedirectFollowingClient {
                 if Self::is_redirect(status_code) && redirects_followed < self.max_redirects {
                     let (new_authority, new_path) =
                         Self::resolve_redirect(&authority, &request.path(), headers)?;
+                    let same_host = new_authority == authority;
                     authority = new_authority;
-                    request = Self::rebuild_request_for_redirect(status_code, &request, new_path);
+                    request = Self::rebuild_request_for_redirect(
+                        status_code,
+                        &request,
+                        new_path,
+                        same_host,
+                    );
                     redirects_followed += 1;
                     continue;
                 }
@@ -354,7 +382,6 @@ impl RedirectFollowingClient for TlsRedirectFollowingClient {
         span: &Span,
         initial_authority: &str,
         request: Request,
-        sink: &mut Box<dyn tokio::io::AsyncWrite + Unpin + Send>,
     ) -> Result<StreamedResponse, RestClientError> {
         let mut authority = initial_authority.to_string();
         let mut visited = HashSet::new();
@@ -371,7 +398,7 @@ impl RedirectFollowingClient for TlsRedirectFollowingClient {
             let mut client = build_client(&authority, self.server_closed_connections)
                 .await
                 .map_err(|err| RestClientError::General(err.to_string()))?;
-            let response = client.execute_streaming(span, &request, sink).await?;
+            let response = client.execute_streaming(span, &request).await?;
 
             if let StreamedResponse::Error {
                 status, headers, ..
@@ -382,8 +409,14 @@ impl RedirectFollowingClient for TlsRedirectFollowingClient {
                 if Self::is_redirect(status_code) && redirects_followed < self.max_redirects {
                     let (new_authority, new_path) =
                         Self::resolve_redirect(&authority, &request.path(), headers)?;
+                    let same_host = new_authority == authority;
                     authority = new_authority;
-                    request = Self::rebuild_request_for_redirect(status_code, &request, new_path);
+                    request = Self::rebuild_request_for_redirect(
+                        status_code,
+                        &request,
+                        new_path,
+                        same_host,
+                    );
                     redirects_followed += 1;
                     continue;
                 }
@@ -556,6 +589,7 @@ mod tests {
                 hyper::StatusCode::MOVED_PERMANENTLY,
                 &request,
                 "/bar".to_string(),
+                true,
             );
 
             assert_eq!(
@@ -579,6 +613,7 @@ mod tests {
                 hyper::StatusCode::TEMPORARY_REDIRECT,
                 &request,
                 "/bar".to_string(),
+                true,
             );
 
             assert_eq!(
@@ -602,6 +637,7 @@ mod tests {
                 hyper::StatusCode::FOUND,
                 &request,
                 "/bar".to_string(),
+                true,
             );
 
             assert_eq!(
@@ -609,6 +645,83 @@ mod tests {
                 Request::Get {
                     path: "/bar".to_string(),
                     headers: vec![],
+                }
+            );
+        }
+
+        #[test]
+        fn test_rebuild_request_for_redirect_should_strip_authorization_on_cross_host_redirect() {
+            let request = Request::Get {
+                path: "/foo".to_string(),
+                headers: vec![
+                    Header::new("authorization", "Bearer secret"),
+                    Header::new("x-test", "1"),
+                ],
+            };
+
+            let result = TlsRedirectFollowingClient::rebuild_request_for_redirect(
+                hyper::StatusCode::TEMPORARY_REDIRECT,
+                &request,
+                "/bar".to_string(),
+                false,
+            );
+
+            assert_eq!(
+                result,
+                Request::Get {
+                    path: "/bar".to_string(),
+                    headers: vec![Header::new("x-test", "1")],
+                }
+            );
+        }
+
+        #[test]
+        fn test_rebuild_request_for_redirect_should_strip_cookie_and_proxy_authorization_case_insensitively_on_cross_host_redirect()
+         {
+            let request = Request::Get {
+                path: "/foo".to_string(),
+                headers: vec![
+                    Header::new("Cookie", "session=abc"),
+                    Header::new("Proxy-Authorization", "Basic xyz"),
+                    Header::new("x-test", "1"),
+                ],
+            };
+
+            let result = TlsRedirectFollowingClient::rebuild_request_for_redirect(
+                hyper::StatusCode::FOUND,
+                &request,
+                "/bar".to_string(),
+                false,
+            );
+
+            assert_eq!(
+                result,
+                Request::Get {
+                    path: "/bar".to_string(),
+                    headers: vec![Header::new("x-test", "1")],
+                }
+            );
+        }
+
+        #[test]
+        fn test_rebuild_request_for_redirect_should_keep_authorization_on_same_host_redirect() {
+            let request = Request::Get {
+                path: "/foo".to_string(),
+                headers: vec![Header::new("authorization", "Bearer secret")],
+            };
+
+            let result = TlsRedirectFollowingClient::rebuild_request_for_redirect(
+                hyper::StatusCode::FOUND,
+                &request,
+                "/bar".to_string(),
+                true,
+            );
+
+            assert_eq!(
+                result,
+                Request::Get {
+                    path: "/bar".to_string(),
+                    headers: vec![Header::new("authorization", "Bearer secret")],
                 }
             );
         }

@@ -10,6 +10,8 @@ mock = ["mockall"]
 
 [dependencies]
 async-trait = { workspace = true }
+bytes = "1"
+http-body = "1"
 http-body-util = { workspace = true }
 hyper = { workspace = true }
 hyper-util = { workspace = true }
