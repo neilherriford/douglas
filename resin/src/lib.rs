@@ -184,7 +184,7 @@ struct ManifestState {
 }
 
 mod stream_logging {
-    use log::{Reporter, ScopeKind, Span};
+    use log::{Outcome, Reporter, ScopeKind, Span};
     use std::{
         pin::Pin,
         sync::Arc,
@@ -222,14 +222,16 @@ mod stream_logging {
             let result = Pin::new(&mut this.inner).poll_read(cx, buf);
 
             if let Poll::Ready(Err(err)) = &result {
-                let span = Span::new(Arc::clone(&this.reporter), "Stream error", ScopeKind::Task);
-                span.message(
+                let guard = Span::new(Arc::clone(&this.reporter), "Stream error", ScopeKind::Task)
+                    .start_guard();
+                guard.span().message(
                     log::Level::Warn,
                     &format!(
                         "{}: streaming failed after response headers were already sent: {err}",
                         this.context
                     ),
                 );
+                guard.finish_with_outcome(Outcome::Failed);
             }
 
             result
@@ -987,7 +989,7 @@ mod manifest {
         http::{HeaderMap, StatusCode},
         response::IntoResponse,
     };
-    use log::{Reporter, ScopeKind, Span};
+    use log::{Outcome, Reporter, ScopeKind, Span};
     use sha2::Sha256;
     use std::{str::FromStr, sync::Arc};
     use tokio_util::io::ReaderStream;
@@ -1268,18 +1270,21 @@ mod manifest {
         name: &Name,
         digest: &Digest,
     ) {
-        let span = Span::new(Arc::clone(reporter), "Tag cleanup", ScopeKind::Task);
+        let guard = Span::new(Arc::clone(reporter), "Tag cleanup", ScopeKind::Task).start_guard();
 
         let tags = match tag_store.list(name) {
             Ok(tags) => tags,
             Err(err) => {
-                span.message(
+                guard.span().message(
                     log::Level::Warn,
                     &format!("failed to list tags for {name} while cleaning up after deleting {digest}: {err}"),
                 );
+                guard.finish_with_outcome(Outcome::Failed);
                 return;
             }
         };
+
+        let mut had_error = false;
 
         for tag in tags {
             let points_at_deleted_digest = tag_store
@@ -1291,12 +1296,19 @@ mod manifest {
             }
 
             if let Err(err) = tag_store.delete(name, &tag) {
-                span.message(
+                had_error = true;
+                guard.span().message(
                     log::Level::Warn,
                     &format!("failed to delete stale tag {name}:{tag} pointing at {digest}: {err}"),
                 );
             }
         }
+
+        guard.finish_with_outcome(if had_error {
+            Outcome::Failed
+        } else {
+            Outcome::Ok
+        });
     }
 
     #[cfg(test)]

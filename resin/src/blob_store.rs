@@ -1609,7 +1609,9 @@ mod tests {
     }
 
     mod stats {
-        use crate::blob_store::{BlobStore, BlobStoreError, FileBlobStore, MockBlobRoot, ResourceKind};
+        use crate::blob_store::{
+            BlobStore, BlobStoreError, FileBlobStore, MockBlobRoot, ResourceKind,
+        };
         use crate::digest;
         use crate::name::Name;
         use file_system::{

@@ -6,7 +6,7 @@ use crate::{
 };
 use async_trait::async_trait;
 use bytes::{Buf, Bytes};
-use log::{Reporter, ScopeKind, Span};
+use log::{Outcome, Reporter, ScopeKind, Span};
 use simple_rest_client::{
     Header, Request, Response, ServerClosedConnections, StreamedResponse, header_predicates,
     tls_socket::{RedirectFollowingClient, TlsRedirectFollowingClient},
@@ -93,14 +93,16 @@ impl ProxyingBlobStore {
         match tokio::time::timeout(duration, future).await {
             Ok(result) => result,
             Err(_) => {
-                let span = Span::new(
+                let guard = Span::new(
                     Arc::clone(&self.reporter),
                     "Remote timeout",
                     ScopeKind::Task,
-                );
+                )
+                .start_guard();
                 let message =
                     format!("{action_description} for {reference} timed out after {duration:?}");
-                span.message(log::Level::Warn, &message);
+                guard.span().message(log::Level::Warn, &message);
+                guard.finish_with_outcome(Outcome::Failed);
                 Err(Self::failed(reference, message))
             }
         }
@@ -129,13 +131,15 @@ impl ProxyingBlobStore {
             headers: vec![Header::authorization_bearer(&token)],
         };
 
-        let span = Span::new(
+        let guard = Span::new(
             Arc::clone(&self.reporter),
             "Remote blob get",
             ScopeKind::Task,
-        );
+        )
+        .start_guard();
+        let span = guard.span().clone();
 
-        let response = self
+        let result = self
             .with_timeout("streaming GET", digest, async move {
                 self.rest_client
                     .lock()
@@ -144,7 +148,14 @@ impl ProxyingBlobStore {
                     .await
                     .map_err(|err| Self::failed(digest, err))
             })
-            .await?;
+            .await;
+
+        guard.finish_with_outcome(if result.is_ok() {
+            Outcome::Ok
+        } else {
+            Outcome::Failed
+        });
+        let response = result?;
 
         match response {
             StreamedResponse::Okay { body, headers }
@@ -189,13 +200,15 @@ impl ProxyingBlobStore {
             headers: vec![Header::authorization_bearer(&token)],
         };
 
-        let span = Span::new(
+        let guard = Span::new(
             Arc::clone(&self.reporter),
             "Remote blob exist",
             ScopeKind::Task,
-        );
+        )
+        .start_guard();
+        let span = guard.span().clone();
 
-        let response = self
+        let result = self
             .with_timeout("HEAD", digest, async move {
                 self.rest_client
                     .lock()
@@ -204,7 +217,14 @@ impl ProxyingBlobStore {
                     .await
                     .map_err(|err| Self::failed(digest, err))
             })
-            .await?;
+            .await;
+
+        guard.finish_with_outcome(if result.is_ok() {
+            Outcome::Ok
+        } else {
+            Outcome::Failed
+        });
+        let response = result?;
 
         match response {
             Response::Okay { headers, .. } => {
@@ -249,13 +269,15 @@ impl ProxyingBlobStore {
             headers: vec![Header::authorization_bearer(&token)],
         };
 
-        let span = Span::new(
+        let guard = Span::new(
             Arc::clone(&self.reporter),
             "Remote reference resolve",
             ScopeKind::Task,
-        );
+        )
+        .start_guard();
+        let span = guard.span().clone();
 
-        let response = self
+        let result = self
             .with_timeout("HEAD", reference, async move {
                 self.rest_client
                     .lock()
@@ -264,7 +286,14 @@ impl ProxyingBlobStore {
                     .await
                     .map_err(|err| Self::failed(reference, err))
             })
-            .await?;
+            .await;
+
+        guard.finish_with_outcome(if result.is_ok() {
+            Outcome::Ok
+        } else {
+            Outcome::Failed
+        });
+        let response = result?;
 
         match response {
             Response::Okay { headers, .. } => {
@@ -298,11 +327,13 @@ impl ProxyingBlobStore {
         reference: impl std::fmt::Display,
         err: &BlobStoreError,
     ) {
-        let span = Span::new(Arc::clone(&self.reporter), "Cache lookup", ScopeKind::Task);
-        span.message(
+        let guard =
+            Span::new(Arc::clone(&self.reporter), "Cache lookup", ScopeKind::Task).start_guard();
+        guard.span().message(
             log::Level::Warn,
             &format!("{operation} {name} {reference}: local lookup failed, not falling back to remote: {err}"),
         );
+        guard.finish_with_outcome(Outcome::Failed);
     }
 
     fn log_cache_decision(
@@ -312,16 +343,18 @@ impl ProxyingBlobStore {
         reference: impl std::fmt::Display,
         hit: bool,
     ) {
-        let span = Span::new(Arc::clone(&self.reporter), "Cache lookup", ScopeKind::Task);
+        let guard =
+            Span::new(Arc::clone(&self.reporter), "Cache lookup", ScopeKind::Task).start_guard();
         let outcome = if hit {
             "hit"
         } else {
             "miss, falling back to remote"
         };
-        span.message(
+        guard.span().message(
             log::Level::Info,
             &format!("{operation} {name} {reference}: local cache {outcome}"),
         );
+        guard.finish_with_outcome(Outcome::Ok);
     }
 
     fn get_header_value(
@@ -497,16 +530,25 @@ impl BlobStore for ProxyingBlobStore {
                         .save(&name, &digest, Box::new(tee), &media_type, resource_kind)
                         .await;
 
-                    let span = Span::new(Arc::clone(&reporter), "Cache write", ScopeKind::Task);
+                    let guard = Span::new(Arc::clone(&reporter), "Cache write", ScopeKind::Task)
+                        .start_guard();
                     match &result {
-                        Ok(()) => span.message(
-                            log::Level::Info,
-                            &format!("cached {name} {digest} ({resource_kind:?})"),
-                        ),
-                        Err(err) => span.message(
-                            log::Level::Warn,
-                            &format!("failed to cache {name} {digest} ({resource_kind:?}): {err}"),
-                        ),
+                        Ok(()) => {
+                            guard.span().message(
+                                log::Level::Info,
+                                &format!("cached {name} {digest} ({resource_kind:?})"),
+                            );
+                            guard.finish_with_outcome(Outcome::Ok);
+                        }
+                        Err(err) => {
+                            guard.span().message(
+                                log::Level::Warn,
+                                &format!(
+                                    "failed to cache {name} {digest} ({resource_kind:?}): {err}"
+                                ),
+                            );
+                            guard.finish_with_outcome(Outcome::Failed);
+                        }
                     }
 
                     let _ = done_tx.send(result);

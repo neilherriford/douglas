@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use docker_types::{ImagePathComponent, ImagePathComponentError};
-use log::{Reporter, ScopeKind, Span};
+use log::{Outcome, Reporter, ScopeKind, Span};
 use serde::Deserialize;
 use simple_rest_client::{
     Request, RestClient, RestClientError, ServerClosedConnections,
@@ -65,11 +65,12 @@ impl TokenExchange for DockerHubTokenExchange {
     async fn fetch_token(&self, name: &Name) -> Result<String, TokenExchangeError> {
         let repository_name = Self::repository_name(name)?;
 
-        let span = Span::new(
+        let guard = Span::new(
             Arc::clone(&self.reporter),
             "Fetching token",
             ScopeKind::Task,
-        );
+        )
+        .start_guard();
         let request = Request::Get {
             path: format!(
                 "/token?service=registry.docker.io&scope=repository:{repository_name}:pull"
@@ -77,15 +78,26 @@ impl TokenExchange for DockerHubTokenExchange {
             headers: vec![],
         };
 
-        let mut rest_client = Box::new(
-            tls_socket::build_client("auth.docker.io", ServerClosedConnections::Ignore).await?,
-        );
+        let result: Result<String, TokenExchangeError> = async {
+            let mut rest_client = Box::new(
+                tls_socket::build_client("auth.docker.io", ServerClosedConnections::Ignore).await?,
+            );
 
-        let response = rest_client.execute(&span, &request).await?;
-        let body = assert_okay_with_body(response)?;
-        let parsed: TokenResponse = serde_json::from_str(&body)?;
+            let response = rest_client.execute(guard.span(), &request).await?;
+            let body = assert_okay_with_body(response)?;
+            let parsed: TokenResponse = serde_json::from_str(&body)?;
 
-        Ok(parsed.token)
+            Ok(parsed.token)
+        }
+        .await;
+
+        guard.finish_with_outcome(if result.is_ok() {
+            Outcome::Ok
+        } else {
+            Outcome::Failed
+        });
+
+        result
     }
 }
 
