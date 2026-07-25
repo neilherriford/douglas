@@ -48,6 +48,7 @@ members = [
     "file_system",
     "os",
     "bract", "config", "utils", "openbao", "blueprint", "service_library", "application_definition_repository", "resin", "seedbank", "seedbank_types", "docker_types", "refined_string",
+    "seedbank_client",
 ]
 
 [workspace.dependencies]
@@ -59,6 +60,7 @@ humantime = "2.3.0"
 hyper = { version = "1.6.0", features = ["client"] }
 hyper-util = { version = "0.1.11", features = ["full"] }
 crossterm = "0.29.0"
+mime = "0.3.17"
 mockall = "0.13.1"
 nix = { version = "0.30.1", features = ["fs", "user"] }
 ratatui = "0.30.0"
@@ -86,6 +88,7 @@ os = { path = "./os" }
 refined_string = { path = "./refined_string" }
 resin = { path = "./resin" }
 seedbank = { path = "./seedbank" }
+seedbank_client = { path = "./seedbank_client" }
 seedbank_types = { path = "./seedbank_types" }
 simple_rest_client = { path = "./simple_rest_client" }
 utils = { path = "./utils" }

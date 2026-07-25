@@ -55,6 +55,15 @@ impl StringRules for NameRules {
 
 pub type Name = Validated<NameRules>;
 
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct Version(u16);
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct VersionedName {
+    pub name: Name,
+    pub version: Version,
+}
+
 #[derive(Debug, Error)]
 pub enum IdParseError {
     #[error("Id too large {0}")]

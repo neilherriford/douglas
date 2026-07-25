@@ -1,0 +1,14 @@
+[package]
+name = "seedbank_client"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+async-trait = { workspace = true }
+config = { workspace = true }
+log = { workspace = true }
+seedbank_types = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
