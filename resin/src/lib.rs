@@ -557,32 +557,6 @@ fn error_chain(error: &dyn std::error::Error) -> String {
     chain
 }
 
-#[cfg(test)]
-mod panic_message_tests {
-    use super::panic_message;
-
-    #[test]
-    fn test_panic_message_should_extract_a_static_str_payload() {
-        let payload: Box<dyn std::any::Any + Send> = Box::new("boom");
-
-        assert_eq!(panic_message(payload), "boom");
-    }
-
-    #[test]
-    fn test_panic_message_should_extract_a_string_payload() {
-        let payload: Box<dyn std::any::Any + Send> = Box::new("boom".to_string());
-
-        assert_eq!(panic_message(payload), "boom");
-    }
-
-    #[test]
-    fn test_panic_message_should_fall_back_for_an_unknown_payload_type() {
-        let payload: Box<dyn std::any::Any + Send> = Box::new(42);
-
-        assert_eq!(panic_message(payload), "unknown panic payload");
-    }
-}
-
 impl From<DigestError> for ServerError {
     fn from(value: DigestError) -> Self {
         ServerError::BadRequest(value.to_string())
@@ -673,3 +647,28 @@ impl IntoResponse for BlobUploaderError {
     }
 }
 
+#[cfg(test)]
+mod panic_message_tests {
+    use super::panic_message;
+
+    #[test]
+    fn test_panic_message_should_extract_a_static_str_payload() {
+        let payload: Box<dyn std::any::Any + Send> = Box::new("boom");
+
+        assert_eq!(panic_message(payload), "boom");
+    }
+
+    #[test]
+    fn test_panic_message_should_extract_a_string_payload() {
+        let payload: Box<dyn std::any::Any + Send> = Box::new("boom".to_string());
+
+        assert_eq!(panic_message(payload), "boom");
+    }
+
+    #[test]
+    fn test_panic_message_should_fall_back_for_an_unknown_payload_type() {
+        let payload: Box<dyn std::any::Any + Send> = Box::new(42);
+
+        assert_eq!(panic_message(payload), "unknown panic payload");
+    }
+}
