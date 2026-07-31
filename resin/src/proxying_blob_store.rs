@@ -1,12 +1,12 @@
 use crate::{
     blob_store::{BlobStore, BlobStoreError, ResourceKind, Stats},
     digest::Digest,
-    name::Name,
     token_exchange::{DockerHubTokenExchange, TokenExchange},
 };
 use async_trait::async_trait;
 use bytes::{Buf, Bytes};
 use log::{Outcome, Reporter, ScopeKind, Span};
+use resin_types::Name;
 use simple_rest_client::{
     Header, Request, Response, ServerClosedConnections, StreamedResponse, header_predicates,
     tls_socket::{RedirectFollowingClient, TlsRedirectFollowingClient},

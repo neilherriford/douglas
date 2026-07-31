@@ -2337,6 +2337,7 @@ dependencies = [
  "os",
  "refined_string",
  "regex",
+ "resin_types",
  "serde",
  "serde_json",
  "sha2 0.11.0",
@@ -2346,6 +2347,30 @@ dependencies = [
  "tokio-util",
  "tower",
  "uuid",
+]
+
+[[package]]
+name = "resin_client"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "docker_types",
+ "log 0.1.0",
+ "mockall",
+ "resin_types",
+ "simple_rest_client",
+ "thiserror 1.0.69",
+ "tokio",
+]
+
+[[package]]
+name = "resin_types"
+version = "0.1.0"
+dependencies = [
+ "refined_string",
+ "regex",
+ "serde",
+ "thiserror 1.0.69",
 ]
 
 [[package]]

@@ -1,9 +1,9 @@
 use crate::{
     digest::{Digest, DigestError},
-    name::Name,
     tag_store::TagStoreError::UnknownRepository,
 };
 use file_system::{EntryKind, FileDeleter, FileReader, FileSystemError, FileWriter, Folder};
+use resin_types::Name;
 use std::{path::PathBuf, sync::Arc};
 use thiserror::Error;
 
@@ -150,11 +150,9 @@ impl TagStore for FileTagStore {
 #[cfg(test)]
 mod tests {
     mod list {
-        use crate::{
-            name::Name,
-            tag_store::{FileTagStore, TagStore, TagStoreError},
-        };
+        use crate::tag_store::{FileTagStore, TagStore, TagStoreError};
         use file_system::{Entry, MockFileDeleter, MockFileReader, MockFileWriter, MockFolder};
+        use resin_types::Name;
         use std::{path::PathBuf, str::FromStr, sync::Arc};
 
         #[test]
@@ -299,10 +297,10 @@ mod tests {
     mod read {
         use crate::{
             digest::DigestError,
-            name::Name,
             tag_store::{FileTagStore, TagStore, TagStoreError},
         };
         use file_system::{MockFileDeleter, MockFileReader, MockFileWriter, MockFolder};
+        use resin_types::Name;
         use std::{path::PathBuf, str::FromStr, sync::Arc};
 
         #[test]
@@ -474,10 +472,10 @@ mod tests {
     mod write {
         use crate::{
             digest::Digest,
-            name::Name,
             tag_store::{FileTagStore, TagStore, TagStoreError},
         };
         use file_system::{MockFileDeleter, MockFileReader, MockFileWriter, MockFolder};
+        use resin_types::Name;
         use std::{path::PathBuf, str::FromStr, sync::Arc};
 
         #[test]
@@ -610,11 +608,9 @@ mod tests {
     }
 
     mod delete {
-        use crate::{
-            name::Name,
-            tag_store::{FileTagStore, TagStore, TagStoreError},
-        };
+        use crate::tag_store::{FileTagStore, TagStore, TagStoreError};
         use file_system::{MockFileDeleter, MockFileReader, MockFileWriter, MockFolder};
+        use resin_types::Name;
         use std::{path::PathBuf, str::FromStr, sync::Arc};
 
         #[test]

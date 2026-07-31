@@ -1,7 +1,6 @@
-use crate::{
-    blob_paths::BlobFilePaths, digest::Digest, name::Name, repository_store::RepositoryStore,
-};
+use crate::{blob_paths::BlobFilePaths, digest::Digest, repository_store::RepositoryStore};
 use file_system::{FileDeleter, FileSystemError, Folder, Inspect, Links};
+use resin_types::Name;
 use std::{path::PathBuf, sync::Arc};
 
 #[cfg_attr(test, mockall::automock)]
@@ -128,13 +127,13 @@ mod tests {
         use crate::{
             blob_mounter::{BlobMounter, FileBlobMounter},
             digest::Digest,
-            name::Name,
             repository_store::MockRepositoryStore,
         };
         use file_system::{
             FileDeleter, Folder, Inspect, Links, MockFileDeleter, MockFolder, MockInspect,
             MockLinks,
         };
+        use resin_types::Name;
         use std::{path::PathBuf, str::FromStr, sync::Arc};
 
         const HEX: &str = "1b96011418a3675a82b529695daac30914827d65d2ff3e0bc6873526a1beefcf";

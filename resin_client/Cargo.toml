@@ -1,0 +1,17 @@
+[package]
+name = "resin_client"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+async-trait = { workspace = true }
+log = { workspace = true, features = ["tui"] }
+resin_types = { workspace = true }
+docker_types = { workspace = true }
+simple_rest_client = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+mockall = { workspace = true }
+simple_rest_client = { workspace = true, features = ["mock"] }
+tokio = { workspace = true, features = ["macros", "rt"] }

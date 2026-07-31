@@ -1,7 +1,6 @@
 use crate::{
     blob_paths::{BlobCommit, BlobFilePaths},
     digest,
-    name::Name,
 };
 use async_trait::async_trait;
 use file_system::{
@@ -9,6 +8,7 @@ use file_system::{
 };
 #[cfg(test)]
 use mockall::automock;
+use resin_types::Name;
 use serde::Deserialize;
 use sha2::Sha256;
 use std::{
@@ -455,7 +455,8 @@ mod tests {
                 BlobStore, BlobStoreError, FileBlobStore, MockBlobRoot, ResourceKind,
             };
             use crate::digest;
-            use crate::name::Name;
+            use resin_types::Name;
+
             use file_system::{
                 FileSystemError, MockBufferedFileWiter, MockFileDeleter, MockFileReader,
                 MockFileRenamer, MockFileWriter, MockFolder, MockInspect,
@@ -879,7 +880,8 @@ mod tests {
         mod exists {
             use crate::blob_store::{BlobStore, FileBlobStore, MockBlobRoot, ResourceKind};
             use crate::digest;
-            use crate::name::Name;
+            use resin_types::Name;
+
             use file_system::{
                 MockFileDeleter, MockFileReader, MockFileRenamer, MockFileWriter, MockFolder,
                 MockInspect,
@@ -967,7 +969,8 @@ mod tests {
                 BlobStore, BlobStoreError, FileBlobStore, MockBlobRoot, ResourceKind,
             };
             use crate::digest;
-            use crate::name::Name;
+            use resin_types::Name;
+
             use file_system::{
                 FileSystemError, MockFileDeleter, MockFileReader, MockFileRenamer, MockFileWriter,
                 MockFolder, MockInspect,
@@ -1106,7 +1109,8 @@ mod tests {
                 BlobStore, BlobStoreError, FileBlobStore, MockBlobRoot, ResourceKind,
             };
             use crate::digest;
-            use crate::name::Name;
+            use resin_types::Name;
+
             use file_system::{
                 Entry, FileSystemError, MockFileDeleter, MockFileReader, MockFileRenamer,
                 MockFileWriter, MockFolder, MockInspect,
@@ -1286,7 +1290,8 @@ mod tests {
         mod resolve_reference {
             use crate::blob_store::ResourceKind;
             use crate::blob_store::{BlobStore, BlobStoreError, FileBlobStore, MockBlobRoot};
-            use crate::name::Name;
+            use resin_types::Name;
+
             use file_system::{
                 MockFileDeleter, MockFileReader, MockFileRenamer, MockFileWriter, MockFolder,
                 MockInspect,
@@ -1339,7 +1344,8 @@ mod tests {
         mod round_trip {
             use crate::blob_store::{BlobRoot, BlobStore, FileBlobStore, ResourceKind};
             use crate::digest;
-            use crate::name::Name;
+            use resin_types::Name;
+
             use file_system::{
                 BufferedFileWiter, Entry, EntryKind, FileDeleter, FileReader, FileRenamer,
                 FileSystemError, FileWriter, Folder, Inspect, RelativePath,
@@ -1613,7 +1619,8 @@ mod tests {
             BlobStore, BlobStoreError, FileBlobStore, MockBlobRoot, ResourceKind,
         };
         use crate::digest;
-        use crate::name::Name;
+        use resin_types::Name;
+
         use file_system::{
             Entry, MockFileDeleter, MockFileReader, MockFileRenamer, MockFileWriter, MockFolder,
             MockInspect,

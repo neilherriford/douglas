@@ -27,6 +27,7 @@ os = { workspace = true }
 os_pipe = "1.2.3"
 ratatui = { workspace = true }
 resin = { workspace = true }
+resin_types = { workspace = true }
 seedbank = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -48,7 +49,7 @@ members = [
     "file_system",
     "os",
     "bract", "config", "utils", "openbao", "blueprint", "service_library", "application_definition_repository", "resin", "seedbank", "seedbank_types", "docker_types", "refined_string",
-    "seedbank_client",
+    "seedbank_client", "resin_client", "resin_types",
 ]
 
 [workspace.dependencies]
@@ -87,6 +88,8 @@ openbao = { path = "./openbao" }
 os = { path = "./os" }
 refined_string = { path = "./refined_string" }
 resin = { path = "./resin" }
+resin_client = { path = "./resin_client" }
+resin_types = { path = "./resin_types" }
 seedbank = { path = "./seedbank" }
 seedbank_client = { path = "./seedbank_client" }
 seedbank_types = { path = "./seedbank_types" }

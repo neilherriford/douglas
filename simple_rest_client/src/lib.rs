@@ -1,5 +1,6 @@
 pub mod assertions;
 pub mod parsers;
+pub mod tcp_socket;
 pub mod tls_socket;
 pub mod unix_domain_socket;
 
@@ -122,6 +123,17 @@ pub enum Response {
         status: u16,
         body: Option<String>,
     },
+}
+
+impl std::fmt::Display for Response {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Response::Okay { .. } => f.write_str("Okay"),
+            Response::Created { .. } => f.write_str("Created"),
+            Response::NoContent { .. } => f.write_str("No content"),
+            Response::Error { status, .. } => f.write_str(&format!("Error: {status}")),
+        }
+    }
 }
 
 pub enum StreamedResponse {

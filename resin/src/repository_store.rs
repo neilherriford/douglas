@@ -1,5 +1,5 @@
-use crate::name::Name;
 use file_system::{EntryKind, FileSystemError, Folder};
+use resin_types::Name;
 use std::{path::PathBuf, str::FromStr, sync::Arc};
 
 #[cfg_attr(test, mockall::automock)]

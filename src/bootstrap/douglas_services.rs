@@ -81,7 +81,7 @@ fn known_services(douglas_folders: &DouglasFolders) -> Result<Vec<DouglasService
             bootstrap_reporting: resin_definition.bootstrap_reporting,
             liveness: LivenessCheck::TcpPort {
                 host: "127.0.0.1".to_string(),
-                port: resin::DEFAULT_PORT,
+                port: resin_types::DEFAULT_PORT,
             },
             definition: resin_definition,
         },

@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 use docker_types::{ImagePathComponent, ImagePathComponentError};
 use log::{Outcome, Reporter, ScopeKind, Span};
+use resin_types::Name;
 use serde::Deserialize;
 use simple_rest_client::{
     Request, RestClient, RestClientError, ServerClosedConnections,
@@ -9,8 +10,6 @@ use simple_rest_client::{
 };
 use std::sync::Arc;
 use thiserror::Error;
-
-use crate::name::Name;
 
 #[derive(Error, Debug)]
 pub enum TokenExchangeError {

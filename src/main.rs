@@ -285,7 +285,7 @@ fn start_resin(reporting_fd: i32) -> ExitCode {
 }
 
 async fn run_resin_server(reporting_fd: i32) -> ExitCode {
-    let Ok(server) = resin::Server::build(Some(reporting_fd), resin::DEFAULT_PORT).await else {
+    let Ok(server) = resin::Server::build(Some(reporting_fd), resin_types::DEFAULT_PORT).await else {
         return ExitCode::from(1);
     };
 
@@ -351,7 +351,7 @@ async fn seedbank_debug_mode() -> ExitCode {
 }
 
 async fn resin_debug_mode() -> ExitCode {
-    let server = match resin::Server::build(None, resin::DEFAULT_PORT).await {
+    let server = match resin::Server::build(None, resin_types::DEFAULT_PORT).await {
         Ok(s) => s,
         Err(e) => {
             eprintln!("resin: failed to start: {e}");

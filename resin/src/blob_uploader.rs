@@ -1,11 +1,11 @@
 use crate::{
     blob_paths::{BlobCommit, BlobFilePaths},
     digest::{Digest, DigestError},
-    name::{Name, NameParseError},
 };
 use file_system::{
     EntryKind, FileAppender, FileDeleter, FileRenamer, FileSystemError, FileWriter, Folder,
 };
+use resin_types::{Name, NameParseError};
 use sha2::Sha256;
 use std::{
     collections::HashMap,
@@ -417,15 +417,15 @@ mod tests {
     }
 
     mod start {
-        use crate::{
-            blob_uploader::{BlobUploader, BlobUploaderError, FileBlobUploader, PartialUpload},
-            name::Name,
+        use crate::blob_uploader::{
+            BlobUploader, BlobUploaderError, FileBlobUploader, PartialUpload,
         };
         use file_system::{
             FileAppender, FileDeleter, FileRenamer, FileSystemError, FileWriter, Folder,
             MockFileAppender, MockFileDeleter, MockFileRenamer, MockFileWriter, MockFolder,
         };
         use mockall::predicate;
+        use resin_types::Name;
         use std::{
             collections::HashMap,
             path::PathBuf,
@@ -510,14 +510,14 @@ mod tests {
     }
 
     mod write_chunk {
-        use crate::{
-            blob_uploader::{BlobUploader, BlobUploaderError, FileBlobUploader, PartialUpload},
-            name::Name,
+        use crate::blob_uploader::{
+            BlobUploader, BlobUploaderError, FileBlobUploader, PartialUpload,
         };
         use file_system::{
             FileAppender, FileDeleter, FileRenamer, FileSystemError, FileWriter, Folder,
             MockFileAppender, MockFileDeleter, MockFileRenamer, MockFileWriter, MockFolder,
         };
+        use resin_types::Name;
         use std::{
             collections::HashMap,
             io::Cursor,
@@ -719,12 +719,12 @@ mod tests {
         use crate::{
             blob_uploader::{BlobUploader, BlobUploaderError, FileBlobUploader, PartialUpload},
             digest::Digest,
-            name::Name,
         };
         use file_system::{
             FileAppender, FileDeleter, FileRenamer, FileSystemError, FileWriter, Folder,
             MockFileAppender, MockFileDeleter, MockFileRenamer, MockFileWriter, MockFolder,
         };
+        use resin_types::Name;
         use std::{
             collections::HashMap,
             io::Cursor,
@@ -1208,14 +1208,14 @@ mod tests {
     }
 
     mod abort {
-        use crate::{
-            blob_uploader::{BlobUploader, BlobUploaderError, FileBlobUploader, PartialUpload},
-            name::Name,
+        use crate::blob_uploader::{
+            BlobUploader, BlobUploaderError, FileBlobUploader, PartialUpload,
         };
         use file_system::{
             FileAppender, FileDeleter, FileRenamer, FileWriter, Folder, MockFileAppender,
             MockFileDeleter, MockFileRenamer, MockFileWriter, MockFolder,
         };
+        use resin_types::Name;
         use std::{
             collections::HashMap,
             path::PathBuf,
@@ -1423,12 +1423,12 @@ mod tests {
         use crate::{
             blob_uploader::{BlobUploader, BlobUploaderError, FileBlobUploader, PartialUpload},
             digest::Digest,
-            name::Name,
         };
         use file_system::{
             Entry, FileAppender, FileDeleter, FileRenamer, FileSystemError, FileWriter, Folder,
             MockFileAppender, MockFileDeleter, MockFileRenamer, MockFileWriter, MockFolder,
         };
+        use resin_types::Name;
         use std::{
             collections::HashMap,
             io::Cursor,
@@ -1452,10 +1452,7 @@ mod tests {
             ));
             let uuid_factory = Arc::new(Uuid::max);
             let expected_filename_to_delete = Uuid::max().to_string();
-            folder.given_folder_entries(
-                "/tmp",
-                vec![Entry::create_directory("foo")],
-            );
+            folder.given_folder_entries("/tmp", vec![Entry::create_directory("foo")]);
             folder.given_folder_entries(
                 "/tmp/foo/tmp",
                 vec![
@@ -1502,10 +1499,7 @@ mod tests {
             ));
             let uuid_factory = Arc::new(Uuid::max);
             let expected_filename_to_delete = Uuid::max().to_string();
-            folder.given_folder_entries(
-                "/tmp",
-                vec![Entry::create_directory("foo")],
-            );
+            folder.given_folder_entries("/tmp", vec![Entry::create_directory("foo")]);
             folder.given_folder_entries(
                 "/tmp/foo/tmp",
                 vec![
@@ -1555,10 +1549,7 @@ mod tests {
                 .expect_create_folder_recursively_with(&format!(
                     "/tmp/foo/blobs/sha256/{prefix}/{actual_sha}"
                 ));
-            folder.given_folder_entries(
-                "/tmp",
-                vec![Entry::create_directory("foo")],
-            );
+            folder.given_folder_entries("/tmp", vec![Entry::create_directory("foo")]);
             folder.given_folder_entries(
                 "/tmp/foo/tmp",
                 vec![
@@ -1604,14 +1595,14 @@ mod tests {
     }
 
     mod status {
-        use crate::{
-            blob_uploader::{BlobUploader, BlobUploaderError, FileBlobUploader, PartialUpload},
-            name::Name,
+        use crate::blob_uploader::{
+            BlobUploader, BlobUploaderError, FileBlobUploader, PartialUpload,
         };
         use file_system::{
             FileAppender, FileDeleter, FileRenamer, FileWriter, Folder, MockFileAppender,
             MockFileDeleter, MockFileRenamer, MockFileWriter, MockFolder,
         };
+        use resin_types::Name;
         use std::{
             collections::HashMap,
             io::Cursor,
