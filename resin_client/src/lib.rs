@@ -3,6 +3,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use docker_types::VersionedImageName;
 use log::{Reporter, Span};
+#[cfg(feature = "mock")]
+use mockall::automock;
 use simple_rest_client::{Request, Response, RestClient, RestClientError, tcp_socket};
 use thiserror::Error;
 
@@ -16,9 +18,26 @@ pub enum Error {
     UnexpectedResponse(Response),
 }
 
+#[cfg_attr(feature = "mock", automock)]
 #[async_trait]
 pub trait Client: Send + Sync {
-    async fn image_exists(&mut self, image: VersionedImageName) -> Result<bool, Error>;
+    async fn image_exists(&mut self, name: &VersionedImageName) -> Result<bool, Error>;
+}
+
+#[cfg_attr(feature = "mock", automock)]
+#[async_trait]
+pub trait ClientBuilder {
+    async fn build(&self, reporter: Arc<dyn Reporter>) -> Result<Box<dyn Client>, Error>;
+}
+
+#[derive(Debug, Default)]
+pub struct LocalhostClientBuilder;
+
+#[async_trait]
+impl ClientBuilder for LocalhostClientBuilder {
+    async fn build(&self, reporter: Arc<dyn Reporter>) -> Result<Box<dyn Client>, Error> {
+        Ok(Box::new(HttpClient::build_for_localhost(reporter).await?))
+    }
 }
 
 pub struct HttpClient {
@@ -41,8 +60,8 @@ impl HttpClient {
         })
     }
 
-    fn manifest_path(image: VersionedImageName) -> String {
-        match image.namespace {
+    fn manifest_path(image: &VersionedImageName) -> String {
+        match &image.namespace {
             Some(namespace) => {
                 format!("/v2/{namespace}/{}/manifests/{}", image.name, image.version)
             }
@@ -53,7 +72,7 @@ impl HttpClient {
 
 #[async_trait]
 impl Client for HttpClient {
-    async fn image_exists(&mut self, image: VersionedImageName) -> Result<bool, Error> {
+    async fn image_exists(&mut self, image: &VersionedImageName) -> Result<bool, Error> {
         let guard = Span::new(
             Arc::clone(&self.reporter),
             &format!("Checking image existence for {image}"),
@@ -100,7 +119,10 @@ mod tests {
         fn test_should_omit_namespace_segment_when_absent() {
             let image = VersionedImageName::specific("nginx", "1.27");
 
-            assert_eq!(HttpClient::manifest_path(image), "/v2/nginx/manifests/1.27");
+            assert_eq!(
+                HttpClient::manifest_path(&image),
+                "/v2/nginx/manifests/1.27"
+            );
         }
 
         #[test]
@@ -108,7 +130,7 @@ mod tests {
             let image = VersionedImageName::namespaced_specific("openbao", "openbao", "2.4.3");
 
             assert_eq!(
-                HttpClient::manifest_path(image),
+                HttpClient::manifest_path(&image),
                 "/v2/openbao/openbao/manifests/2.4.3"
             );
         }
@@ -118,7 +140,7 @@ mod tests {
             let image = VersionedImageName::latest("nginx");
 
             assert_eq!(
-                HttpClient::manifest_path(image),
+                HttpClient::manifest_path(&image),
                 "/v2/nginx/manifests/latest"
             );
         }
@@ -147,7 +169,7 @@ mod tests {
 
             assert!(
                 client
-                    .image_exists(image)
+                    .image_exists(&image)
                     .await
                     .expect("should check existence")
             );
@@ -169,7 +191,7 @@ mod tests {
 
             assert!(
                 !client
-                    .image_exists(image)
+                    .image_exists(&image)
                     .await
                     .expect("should check existence")
             );
@@ -189,7 +211,7 @@ mod tests {
             let mut client = client(rest_client);
             let image = VersionedImageName::specific("nginx", "1.27");
 
-            let result = client.image_exists(image).await;
+            let result = client.image_exists(&image).await;
 
             assert!(matches!(result, Err(Error::UnexpectedResponse(_))));
         }
@@ -204,7 +226,7 @@ mod tests {
             let mut client = client(rest_client);
             let image = VersionedImageName::specific("nginx", "1.27");
 
-            let result = client.image_exists(image).await;
+            let result = client.image_exists(&image).await;
 
             assert!(matches!(result, Err(Error::RestError(_))));
         }

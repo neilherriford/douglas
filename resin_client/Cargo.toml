@@ -3,11 +3,16 @@ name = "resin_client"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+default = []
+mock = ["mockall"]
+
 [dependencies]
 async-trait = { workspace = true }
 log = { workspace = true, features = ["tui"] }
 resin_types = { workspace = true }
 docker_types = { workspace = true }
+mockall = { workspace = true, optional = true }
 simple_rest_client = { workspace = true }
 thiserror = { workspace = true }
 
