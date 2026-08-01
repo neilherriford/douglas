@@ -50,6 +50,12 @@ impl RelativePath {
     }
 }
 
+impl std::fmt::Display for RelativePath {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.value.display())
+    }
+}
+
 impl TryFrom<PathBuf> for RelativePath {
     type Error = RelativePathError;
 
