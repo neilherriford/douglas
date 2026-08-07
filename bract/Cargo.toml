@@ -4,27 +4,29 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-application_definition_repository = { workspace = true }
 async-trait = { workspace = true }
 blueprint = { workspace = true }
+bract_types = { workspace = true }
 colored = { workspace = true }
 config = { workspace = true }
 credentials = { workspace = true }
 docker = { workspace = true }
+docker_types = { workspace = true }
 file_system = { workspace = true }
-futures = "0.3.31"
 log = { workspace = true }
 mockall = { workspace = true }
 os = { workspace = true }
 postcard = { version = "1.1.3", features = ["alloc"] }
+resin_client = { workspace = true }
+resin_types = { workspace = true }
+seedbank_client = { workspace = true }
 seedbank_types = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+sha2 = "0.11.0"
 subtle = "2.6.1"
 thiserror = { workspace = true }
 tokio = { workspace = true }
-tokio-serde = { version = "0.9.0", features = ["json"] }
-tokio-util = { version = "0.7.15", features = ["codec"] }
 uuid = { workspace = true }
 utils = { workspace = true }
 
@@ -33,3 +35,5 @@ log = { workspace = true, features = ["mock"] }
 file_system = { workspace = true, features = ["mock"] }
 os = { workspace = true, features = ["mock"] }
 credentials = { workspace = true, features = ["mock"] }
+docker = { workspace = true, features = ["mock"] }
+resin_client = { workspace = true, features = ["mock"] }

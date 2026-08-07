@@ -10,8 +10,9 @@ use blueprint::{
 };
 use config::DouglasFolders;
 use credentials::{Credentials, well_known::DOUGLAS_ADMIN_GROUP};
+use docker::client::ClientBuilder;
 use file_system::{Folder, Modes, Permissions};
-use log::{Level, ScopeKind, Span};
+use log::{Level, Reporter, ScopeKind, Span};
 use std::sync::Arc;
 
 pub async fn bootstrap(
@@ -20,34 +21,51 @@ pub async fn bootstrap(
     folder: &dyn Folder,
     permissions: &dyn Permissions,
     douglas_folders: &DouglasFolders,
+    docker_client_builder: &dyn ClientBuilder,
 ) -> Result<(), BootstrapError> {
     let boot_reporter = build_boot_reporter(
         douglas_folders.service_log_file("bract"),
         Some(reporting_fd),
     );
 
+    bootstrap_with_reporter(
+        boot_reporter,
+        credentials,
+        folder,
+        permissions,
+        douglas_folders,
+        docker_client_builder,
+    )
+    .await
+}
+
+async fn bootstrap_with_reporter(
+    boot_reporter: Arc<dyn Reporter>,
+    credentials: &dyn Credentials,
+    folder: &dyn Folder,
+    permissions: &dyn Permissions,
+    douglas_folders: &DouglasFolders,
+    docker_client_builder: &dyn ClientBuilder,
+) -> Result<(), BootstrapError> {
     let guard = Span::new(
         Arc::clone(&boot_reporter),
         "Bootstrapping douglas-bract system",
         log::ScopeKind::Group,
     )
     .start_guard();
-
-    let mut docker_ping: Box<dyn docker::Ping> =
-        match docker::UdsPing::build_with_default_socket_path().await {
-            Ok(client) => Box::new(client),
-            Err(err) => {
-                let message = format!("Failed to connect to Docker: {err}");
-                eprintln!("{message}");
-                guard.span().message(Level::Warn, &message);
-                return guard.finish(Err(BootstrapError::MustHaveRunningDocker));
-            }
-        };
-
     let definition = service_definition(douglas_folders);
+    let mut docker_client = match docker_client_builder
+        .build(Arc::clone(&boot_reporter))
+        .await
+    {
+        Ok(docker_client) => docker_client,
+        Err(err) => {
+            return guard.finish(Err(BootstrapError::FailedBoostrap(vec![err.to_string()])));
+        }
+    };
 
     let state = {
-        let mut state_observer = StateObserver::new(credentials, &mut *docker_ping);
+        let mut state_observer = StateObserver::new(credentials, docker_client.as_mut());
         state_observer
             .discover(guard.span(), &definition, credentials, folder, permissions)
             .await?
@@ -69,8 +87,8 @@ pub async fn bootstrap(
     };
 
     let mut context = Context::new(credentials, folder, permissions);
-    let result = execute_plan(guard.span(), plan, &mut context, || {
-        BootstrapError::FailedBoostrap(Vec::new())
+    let result = execute_plan(guard.span(), plan, &mut context, |reason| {
+        BootstrapError::FailedBoostrap(vec![reason])
     })
     .await;
 
@@ -107,6 +125,10 @@ pub fn service_definition(douglas_folders: &DouglasFolders) -> ServiceDefinition
                 Modes::InheritedOwnerReadWriteExecuteGroupReadWriteExecute,
             ),
             (
+                douglas_folders.rolodex.clone(),
+                Modes::InheritedOwnerReadWriteExecuteGroupReadWriteExecute,
+            ),
+            (
                 douglas_folders.socket_dir("bract"),
                 Modes::OwnerReadWriteExecuteGroupReadWriteExecute,
             ),
@@ -138,14 +160,17 @@ struct State {
 
 struct StateObserver<'a> {
     credentials: &'a dyn Credentials,
-    docker_ping: &'a mut dyn docker::Ping,
+    docker_client: &'a mut dyn docker::client::Client,
 }
 
 impl<'a> StateObserver<'a> {
-    pub fn new(credentials: &'a dyn Credentials, docker_ping: &'a mut dyn docker::Ping) -> Self {
+    pub fn new(
+        credentials: &'a dyn Credentials,
+        docker_client: &'a mut dyn docker::client::Client,
+    ) -> Self {
         Self {
             credentials,
-            docker_ping,
+            docker_client,
         }
     }
 
@@ -195,7 +220,7 @@ impl<'a> StateObserver<'a> {
     }
 
     async fn check_docker_running_status(&mut self, span: &Span) -> RunningStatus {
-        match self.docker_ping.execute(span).await {
+        match self.docker_client.ping().await {
             Ok(()) => RunningStatus::Running,
             Err(err) => {
                 span.message(Level::Warn, &format!("Docker ping failed: '{err}'"));
@@ -224,4 +249,75 @@ fn create_plan<'a>(
     }
 
     Ok(plan_service_bootstrap(definition, &state.service))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::bootstrap_with_reporter;
+    use crate::BootstrapError;
+    use config::DouglasFolders;
+    use credentials::MockCredentials;
+    use docker::{DockerError, MockClient, client::Client, client::MockClientBuilder};
+    use file_system::{MockFolder, MockPermissions};
+    use log::{Event, Reporter};
+    use std::sync::Arc;
+
+    struct NullReporter;
+
+    impl Reporter for NullReporter {
+        fn emit(&self, _event: Event) {}
+    }
+
+    fn client_builder_returning(client: MockClient) -> MockClientBuilder {
+        let mut builder = MockClientBuilder::new();
+        builder
+            .expect_build()
+            .return_once(move |_reporter| Ok(Box::new(client) as Box<dyn Client>));
+        builder
+    }
+
+    #[tokio::test]
+    async fn test_bootstrap_should_fail_when_not_root() {
+        let mut credentials = MockCredentials::new();
+        credentials.expect_is_root().returning(|| false);
+
+        let docker_client_builder = client_builder_returning(MockClient::new());
+
+        let result = bootstrap_with_reporter(
+            Arc::new(NullReporter),
+            &credentials,
+            &MockFolder::new(),
+            &MockPermissions::new(),
+            &DouglasFolders::new(),
+            &docker_client_builder,
+        )
+        .await;
+
+        assert!(matches!(result, Err(BootstrapError::MustBeRoot)));
+    }
+
+    #[tokio::test]
+    async fn test_bootstrap_should_fail_when_docker_is_not_running() {
+        let mut credentials = MockCredentials::new();
+        credentials.expect_is_root().returning(|| true);
+
+        let mut client = MockClient::new();
+        client
+            .expect_ping()
+            .returning(|| Err(DockerError::PingFailed("connection refused".to_string())));
+
+        let docker_client_builder = client_builder_returning(client);
+
+        let result = bootstrap_with_reporter(
+            Arc::new(NullReporter),
+            &credentials,
+            &MockFolder::new(),
+            &MockPermissions::new(),
+            &DouglasFolders::new(),
+            &docker_client_builder,
+        )
+        .await;
+
+        assert!(matches!(result, Err(BootstrapError::MustHaveRunningDocker)));
+    }
 }

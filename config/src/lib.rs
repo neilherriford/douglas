@@ -1,4 +1,6 @@
 use std::path::PathBuf;
+
+#[derive(Debug, Clone)]
 pub struct DouglasFolders {
     pub logs: PathBuf,
     pub transients: PathBuf,
@@ -6,6 +8,7 @@ pub struct DouglasFolders {
     pub application_services: PathBuf,
     pub application_mounts: PathBuf,
     pub configs: PathBuf,
+    pub rolodex: PathBuf,
     services_root: PathBuf,
 }
 
@@ -64,6 +67,7 @@ impl DouglasFolders {
             application_services: PathBuf::from("/Library/Application Support/douglas/services/"),
             application_mounts: PathBuf::from("/Library/Application Support/douglas/mounts/"),
             configs: PathBuf::from("/Library/Preferences/douglas/"),
+            rolodex: PathBuf::from("/Library/Application Support/douglas/rolodex/"),
             services_root: PathBuf::from("/Library/Application Support/douglas/"),
         }
     }
@@ -80,6 +84,7 @@ impl DouglasFolders {
             application_services: PathBuf::from("/var/lib/douglas/services/"),
             application_mounts: PathBuf::from("/var/lib/douglas/mounts/"),
             configs: PathBuf::from("/etc/douglas/"),
+            rolodex: PathBuf::from("/var/lib/douglas/rolodex/"),
             services_root: PathBuf::from("/var/lib/douglas/"),
         }
     }
@@ -98,6 +103,7 @@ mod tests {
             application_services: PathBuf::from("/var/lib/douglas/services/"),
             application_mounts: PathBuf::from("/var/lib/douglas/mounts/"),
             configs: PathBuf::from("/etc/douglas/"),
+            rolodex: PathBuf::from("/var/lib/douglas/rolodex/"),
             services_root: PathBuf::from("/var/lib/douglas/"),
         }
     }

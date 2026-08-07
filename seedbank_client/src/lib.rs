@@ -1,7 +1,9 @@
 use async_trait::async_trait;
 use config::DouglasFolders;
 use log::{Reporter, ScopeKind, Span};
-use seedbank_types::{Name, Request, Response, Seedling, SeedlingDefinition};
+use seedbank_types::{
+    Name, Request, Response, Seedling, SeedlingDefinition, SeedlingStatus, Version,
+};
 use std::path::PathBuf;
 use std::sync::Arc;
 use thiserror::Error;
@@ -27,13 +29,24 @@ pub enum Error {
 }
 
 #[async_trait]
-pub trait Client {
+pub trait Client: Send + Sync {
     async fn list(&self) -> Result<Vec<Name>, Error>;
+    async fn status(&self, name: &Name) -> Result<SeedlingStatus, Error>;
     async fn exists(&self, name: &Name) -> Result<bool, Error>;
     async fn load(&self, name: &Name) -> Result<Seedling, Error>;
-    async fn create(&self, name: &Name, definition: &SeedlingDefinition) -> Result<(), Error>;
+    async fn create(
+        &self,
+        name: &Name,
+        version: &Version,
+        definition: &SeedlingDefinition,
+    ) -> Result<(), Error>;
     async fn delete(&self, name: &Name) -> Result<(), Error>;
-    async fn update(&self, name: &Name, definition: &SeedlingDefinition) -> Result<(), Error>;
+    async fn update(
+        &self,
+        name: &Name,
+        version: &Version,
+        definition: &SeedlingDefinition,
+    ) -> Result<(), Error>;
 }
 
 pub struct UdsClient {
@@ -93,6 +106,26 @@ impl Client for UdsClient {
         })
     }
 
+    async fn status(&self, name: &Name) -> Result<SeedlingStatus, Error> {
+        let guard = Span::new(
+            Arc::clone(&self.reporter),
+            "Checking seedling status",
+            ScopeKind::Task,
+        )
+        .start_guard();
+
+        let response = match self.request(Request::Status { name: name.clone() }).await {
+            Ok(response) => response,
+            Err(err) => return guard.finish(Err(err)),
+        };
+
+        guard.finish(match response {
+            Response::Status { status } => Ok(status),
+            Response::Error { message } => Err(Error::ServerError(message)),
+            _ => Err(Error::UnexpectedResponse),
+        })
+    }
+
     async fn exists(&self, name: &Name) -> Result<bool, Error> {
         let guard = Span::new(
             Arc::clone(&self.reporter),
@@ -133,7 +166,12 @@ impl Client for UdsClient {
         })
     }
 
-    async fn create(&self, name: &Name, definition: &SeedlingDefinition) -> Result<(), Error> {
+    async fn create(
+        &self,
+        name: &Name,
+        version: &Version,
+        definition: &SeedlingDefinition,
+    ) -> Result<(), Error> {
         let guard = Span::new(
             Arc::clone(&self.reporter),
             "Creating seedling",
@@ -144,6 +182,7 @@ impl Client for UdsClient {
         let response = match self
             .request(Request::Create {
                 name: name.clone(),
+                version: version.clone(),
                 definition: definition.clone(),
             })
             .await
@@ -179,7 +218,12 @@ impl Client for UdsClient {
         })
     }
 
-    async fn update(&self, name: &Name, definition: &SeedlingDefinition) -> Result<(), Error> {
+    async fn update(
+        &self,
+        name: &Name,
+        version: &Version,
+        definition: &SeedlingDefinition,
+    ) -> Result<(), Error> {
         let guard = Span::new(
             Arc::clone(&self.reporter),
             "Updating seedling",
@@ -190,6 +234,7 @@ impl Client for UdsClient {
         let response = match self
             .request(Request::Update {
                 name: name.clone(),
+                version: version.clone(),
                 definition: definition.clone(),
             })
             .await

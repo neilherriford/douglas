@@ -7,7 +7,7 @@ use std::{
     collections::{HashMap, HashSet},
     hash::Hasher,
     num::ParseIntError,
-    path::PathBuf,
+    path::{Path, PathBuf},
     str::FromStr,
     sync::LazyLock,
 };
@@ -35,6 +35,12 @@ impl From<refined_string::Error> for NameParseError {
     }
 }
 
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum SeedlingStatus {
+    Defined(Version),
+    Unknown,
+}
+
 pub struct NameRules;
 
 impl StringRules for NameRules {
@@ -55,8 +61,22 @@ impl StringRules for NameRules {
 
 pub type Name = Validated<NameRules>;
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct Version(u16);
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Version(pub u16);
+
+impl FromStr for Version {
+    type Err = ParseIntError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(Version(s.parse()?))
+    }
+}
+
+impl std::fmt::Display for Version {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0.to_string())
+    }
+}
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct VersionedName {
@@ -126,6 +146,7 @@ impl<'de> Deserialize<'de> for Id {
 pub struct Seedling {
     pub id: Id,
     pub name: Name,
+    pub version: Version,
     pub definition: SeedlingDefinition,
 }
 
@@ -204,13 +225,26 @@ pub struct Mount {
     remote_path: PathBuf,
     #[serde(skip)]
     contents: HashSet<MountContents>,
+    access_mode: AccessMode,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AccessMode {
+    ReadOnly,
+    Writable,
 }
 
 impl Mount {
-    pub fn build(kind: MountType, remote_path: PathBuf, contents: HashSet<MountContents>) -> Self {
+    pub fn build(
+        kind: MountType,
+        remote_path: PathBuf,
+        access_mode: AccessMode,
+        contents: HashSet<MountContents>,
+    ) -> Self {
         Self {
             kind,
             remote_path,
+            access_mode,
             contents,
         }
     }
@@ -219,8 +253,20 @@ impl Mount {
         &self.contents
     }
 
+    pub fn remote_path(&self) -> &Path {
+        &self.remote_path
+    }
+
+    pub fn kind(&self) -> &MountType {
+        &self.kind
+    }
+
     pub fn contents_mut(&mut self) -> &mut HashSet<MountContents> {
         &mut self.contents
+    }
+
+    pub fn access_mode(&self) -> &AccessMode {
+        &self.access_mode
     }
 }
 
@@ -243,11 +289,15 @@ pub enum Request {
     Exists {
         name: Name,
     },
+    Status {
+        name: Name,
+    },
     Load {
         name: Name,
     },
     Create {
         name: Name,
+        version: Version,
         definition: SeedlingDefinition,
     },
     Delete {
@@ -255,6 +305,7 @@ pub enum Request {
     },
     Update {
         name: Name,
+        version: Version,
         definition: SeedlingDefinition,
     },
 }
@@ -264,6 +315,7 @@ pub enum Request {
 pub enum Response {
     Names { names: Vec<Name> },
     Exists { exists: bool },
+    Status { status: SeedlingStatus },
     Seedling { seedling: Seedling },
     Ok,
     Error { message: String },

@@ -132,15 +132,64 @@ impl ClientErrorDisplay for FileSystemError {
 
 impl PartialEq for FileSystemError {
     fn eq(&self, other: &Self) -> bool {
-        match self {
-            FileSystemError::IoError(left) => {
-                if let FileSystemError::IoError(right) = other {
-                    left.to_string() == right.to_string()
-                } else {
-                    false
-                }
+        match (self, other) {
+            (
+                FileSystemError::ParentNotFoundError(left),
+                FileSystemError::ParentNotFoundError(right),
+            ) => left == right,
+            (FileSystemError::IoError(left), FileSystemError::IoError(right)) => {
+                left.to_string() == right.to_string()
             }
-            _ => self == other,
+            (
+                FileSystemError::IoErrorAtPath {
+                    path: left_path,
+                    error: left_error,
+                },
+                FileSystemError::IoErrorAtPath {
+                    path: right_path,
+                    error: right_error,
+                },
+            ) => left_path == right_path && left_error.to_string() == right_error.to_string(),
+            (FileSystemError::NotFoundError(left), FileSystemError::NotFoundError(right)) => {
+                left == right
+            }
+            (
+                FileSystemError::GroupNotFoundError(left),
+                FileSystemError::GroupNotFoundError(right),
+            ) => left == right,
+            (
+                FileSystemError::UserNotFoundError(left),
+                FileSystemError::UserNotFoundError(right),
+            ) => left == right,
+            (
+                FileSystemError::InvalidFileNameError(left),
+                FileSystemError::InvalidFileNameError(right),
+            ) => left == right,
+            (FileSystemError::ExpectedFileError, FileSystemError::ExpectedFileError) => true,
+            (FileSystemError::SystemError(left), FileSystemError::SystemError(right)) => {
+                left == right
+            }
+            (FileSystemError::NonUtfString(left), FileSystemError::NonUtfString(right)) => {
+                left == right
+            }
+            (
+                FileSystemError::NotChild {
+                    root: left_root,
+                    child: left_child,
+                },
+                FileSystemError::NotChild {
+                    root: right_root,
+                    child: right_child,
+                },
+            ) => left_root == right_root && left_child == right_child,
+            (
+                FileSystemError::ExpectedNormalizedPath(left),
+                FileSystemError::ExpectedNormalizedPath(right),
+            ) => left == right,
+            (FileSystemError::InvalidPath(left), FileSystemError::InvalidPath(right)) => {
+                left == right
+            }
+            _ => false,
         }
     }
 }
