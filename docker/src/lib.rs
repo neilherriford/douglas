@@ -1,56 +1,29 @@
-mod client;
+pub mod client;
 mod commands;
-pub use client::{Ping, UdsPing};
-pub use docker_types::{
-    Capability, ContainerDefinition, ContainerName, ContainerUser, DockerNameError,
-    EnvironmentVariable, EnvironmentVariableName, Id, ImageIdentifier, Label, Mount,
-    MountDefinition, MountName, MountType, NetworkName, Status, Tag, Version, VersionedImageName,
-    VersionedImageNameParseError, deserialize_environment_variables, deserialize_id,
-    deserialize_labels, serialize_capabilities, serialize_environment_variables,
-    serialize_image_identifier, serialize_labels,
+
+use docker_types::{
+    ContainerUser, EnvironmentVariable, HealthStatus, Id, Label, Mount, Status, Tag,
+    deserialize_environment_variables, deserialize_id, deserialize_labels, deserialize_tags,
 };
-use file_system::FileSystemError;
 use serde::{Deserialize, Deserializer};
+use simple_rest_client::Request;
 use simple_rest_client::assertions::AssertionError;
-use simple_rest_client::unix_domain_socket::BuilderError;
-use simple_rest_client::{Request, RestClientError};
 use std::collections::HashSet;
-use std::path::PathBuf;
 use thiserror::Error;
 
-#[derive(Error, Debug)]
+#[cfg(feature = "mock")]
+pub use client::MockClient;
+
+#[derive(Error, Debug, PartialEq, Eq)]
 pub enum DockerError {
+    #[error("Ping failed: {0}")]
+    FailedToCreateClient(String),
+
     #[error("Ping failed: {0}")]
     PingFailed(String),
 
-    #[error("Client error: {0}")]
-    ClientError(#[from] RestClientError),
-
-    #[error("Client response error: {status}, {message}")]
-    ResponseError {
-        status: u16,
-        body: Option<String>,
-        message: String,
-    },
-
-    #[error("Client response conntent error: {0}")]
-    ClientResponseContentError(String),
-
-    #[error("Init error: {0}")]
-    InitError(#[from] BuilderError),
-
-    #[error("Ambiguous match")]
-    AmbiguousMatchError,
-
-    #[error("Parse Error")]
-    ParseError {
-        line: usize,
-        column: usize,
-        message: String,
-    },
-
-    #[error("API error {0}")]
-    ApiError(String),
+    #[error("Resource not found")]
+    ResourceNotFound,
 
     #[error("Invalid argument, '{name}: {given}' {message}")]
     InvalidArgumentError {
@@ -59,60 +32,32 @@ pub enum DockerError {
         message: String,
     },
 
-    #[error("IO Error: {0}")]
-    IoError(#[from] std::io::Error),
+    #[error("Ambiguous match")]
+    AmbiguousMatchError,
 
-    #[error("File system error: {0}")]
-    FileSystemError(#[from] FileSystemError),
+    #[error("Invalid name '{name}': {description}")]
+    InvalidName { name: String, description: String },
 
-    #[error("Invalid path")]
-    PathError { path: PathBuf, message: String },
+    #[error("Unknown mount at container path '{}'", .0.display())]
+    UnknownMount(std::path::PathBuf),
 
-    #[error("Resource not found")]
-    ResourceNotFound,
+    #[error("General error {0}")]
+    GeneralError(String),
+}
+
+fn to_general_error<TError>(error: TError) -> DockerError
+where
+    TError: std::fmt::Display,
+{
+    DockerError::GeneralError(error.to_string())
 }
 
 impl From<AssertionError> for DockerError {
     fn from(value: AssertionError) -> Self {
-        match value {
-            AssertionError::UnexpectedResponseError {
-                status,
-                body,
-                message,
-            } => DockerError::ResponseError {
-                status,
-                body,
-                message,
-            },
-            AssertionError::MissingBody => {
-                DockerError::ClientResponseContentError("Missing body".into())
-            }
-            AssertionError::NotFoundError => DockerError::ResourceNotFound,
-        }
-    }
-}
-
-impl PartialEq for DockerError {
-    fn eq(&self, other: &Self) -> bool {
-        match self {
-            DockerError::IoError(left) => {
-                if let DockerError::IoError(right) = other {
-                    left.to_string() == right.to_string()
-                } else {
-                    false
-                }
-            }
-            _ => self == other,
-        }
-    }
-}
-
-impl From<serde_json::Error> for DockerError {
-    fn from(err: serde_json::Error) -> DockerError {
-        DockerError::ParseError {
-            line: err.line(),
-            column: err.column(),
-            message: err.to_string(),
+        if let AssertionError::NotFoundError = value {
+            DockerError::ResourceNotFound
+        } else {
+            to_general_error(value)
         }
     }
 }
@@ -132,10 +77,31 @@ pub struct Container {
 struct State {
     #[serde(rename = "Status")]
     pub status: Status,
+
+    #[serde(rename = "StartedAt")]
+    #[serde(deserialize_with = "deserialize_started_at")]
+    pub started_at: time::OffsetDateTime,
+
+    #[serde(rename = "Health")]
+    pub health: Option<Health>,
+}
+
+#[derive(Debug, Deserialize, PartialEq)]
+struct Health {
+    #[serde(rename = "Status")]
+    pub status: HealthStatus,
 }
 
 #[derive(Debug, Deserialize, PartialEq)]
 struct Config {
+    #[serde(rename = "User")]
+    #[serde(deserialize_with = "deserialize_run_as")]
+    pub run_as: Option<ContainerUser>,
+
+    #[serde(rename = "Cmd")]
+    #[serde(deserialize_with = "deserialize_container_command")]
+    pub command: Option<String>,
+
     #[serde(rename = "Env")]
     #[serde(deserialize_with = "deserialize_environment_variables")]
     pub env: Vec<EnvironmentVariable>,
@@ -143,6 +109,46 @@ struct Config {
     #[serde(rename = "Labels")]
     #[serde(deserialize_with = "deserialize_labels")]
     pub labels: Vec<Label>,
+}
+
+fn deserialize_started_at<'de, D>(deserializer: D) -> Result<time::OffsetDateTime, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = String::deserialize(deserializer)?;
+    time::OffsetDateTime::parse(&value, &time::format_description::well_known::Rfc3339)
+        .map_err(serde::de::Error::custom)
+}
+
+fn deserialize_run_as<'de, D>(deserializer: D) -> Result<Option<ContainerUser>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = String::deserialize(deserializer)?;
+    if value.is_empty() {
+        return Ok(None);
+    }
+
+    let (user_id, group_id) = value
+        .split_once(':')
+        .ok_or_else(|| serde::de::Error::custom(format!("invalid user '{value}'")))?;
+
+    Ok(Some(ContainerUser {
+        user_id: user_id.parse().map_err(serde::de::Error::custom)?,
+        group_id: group_id.parse().map_err(serde::de::Error::custom)?,
+    }))
+}
+
+fn deserialize_container_command<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let tokens: Option<Vec<String>> = Option::deserialize(deserializer)?;
+    tokens
+        .map(|tokens| {
+            shlex::try_join(tokens.iter().map(String::as_str)).map_err(serde::de::Error::custom)
+        })
+        .transpose()
 }
 
 #[derive(Debug, Deserialize, Clone, PartialEq)]
@@ -154,25 +160,4 @@ pub struct Image {
     #[serde(rename = "RepoTags")]
     #[serde(deserialize_with = "deserialize_tags")]
     pub tags: HashSet<Tag>,
-}
-
-fn deserialize_tags<'de, D>(deserializer: D) -> Result<HashSet<Tag>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    let raw_strings: Vec<String> = Deserialize::deserialize(deserializer)?;
-
-    let tags = raw_strings
-        .into_iter()
-        .map(|raw_tag| {
-            let parts: Vec<&str> = raw_tag.split(':').collect();
-            let (name, version) = match parts.as_slice() {
-                [first, second] => (first.to_string(), second.to_string()),
-                _ => (raw_tag, String::from("")),
-            };
-            Tag { name, version }
-        })
-        .collect();
-
-    Ok(tags)
 }

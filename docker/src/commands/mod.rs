@@ -1,8 +1,7 @@
 pub(crate) mod container;
 pub(crate) mod image;
 pub(crate) mod json_parser;
-pub(crate) mod network;
-pub(crate) mod ping;
+pub(crate) mod system;
 
 use crate::DockerError;
 use serde_json::Value as Json;
@@ -30,7 +29,7 @@ fn assert_no_docker_errors(responses: Vec<Json>) -> Result<(), DockerError> {
                 None => message.to_string(),
             };
 
-            return Err(DockerError::ApiError(msg));
+            return Err(DockerError::GeneralError(msg));
         }
     }
 
