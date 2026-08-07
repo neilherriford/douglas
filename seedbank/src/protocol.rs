@@ -15,7 +15,11 @@ pub fn handle(seedbank: &dyn Seedbank, request: Request) -> Response {
             Ok(seedling) => Response::Seedling { seedling },
             Err(err) => error_response(err),
         },
-        Request::Create { name, definition } => match seedbank.create(&name, &definition) {
+        Request::Create {
+            name,
+            version,
+            definition,
+        } => match seedbank.create(&name, &version, &definition) {
             Ok(()) => Response::Ok,
             Err(err) => error_response(err),
         },
@@ -23,8 +27,16 @@ pub fn handle(seedbank: &dyn Seedbank, request: Request) -> Response {
             Ok(()) => Response::Ok,
             Err(err) => error_response(err),
         },
-        Request::Update { name, definition } => match seedbank.update(&name, &definition) {
+        Request::Update {
+            name,
+            version,
+            definition,
+        } => match seedbank.update(&name, &version, &definition) {
             Ok(()) => Response::Ok,
+            Err(err) => error_response(err),
+        },
+        Request::Status { name } => match seedbank.status(&name) {
+            Ok(status) => Response::Status { status },
             Err(err) => error_response(err),
         },
     }
@@ -41,6 +53,7 @@ mod tests {
     use super::*;
     use crate::{Id, MockSeedbank, Name, Seedling, SeedlingDefinition};
     use docker_types::VersionedImageName;
+    use seedbank_types::Version;
     use std::{collections::HashMap, str::FromStr};
 
     fn name(value: &str) -> Name {
@@ -49,6 +62,10 @@ mod tests {
 
     fn id(value: u16) -> Id {
         Id { value }
+    }
+
+    fn version(value: u16) -> Version {
+        Version::from_str(&value.to_string()).expect("valid version")
     }
 
     fn definition() -> SeedlingDefinition {
@@ -100,6 +117,7 @@ mod tests {
                 Ok(Seedling {
                     id: id(0),
                     name: name.clone(),
+                    version: version(0),
                     definition: definition(),
                 })
             });
@@ -117,13 +135,14 @@ mod tests {
         let mut seedbank = MockSeedbank::new();
         seedbank
             .expect_create()
-            .withf(|created, _definition| created == &name("foo"))
-            .returning(|_, _| Ok(()));
+            .withf(|created, _version, _definition| created == &name("foo"))
+            .returning(|_, _, _| Ok(()));
 
         let response = handle(
             &seedbank,
             Request::Create {
                 name: name("foo"),
+                version: version(0),
                 definition: definition(),
             },
         );
@@ -149,17 +168,48 @@ mod tests {
         let mut seedbank = MockSeedbank::new();
         seedbank
             .expect_update()
-            .withf(|updated, _definition| updated == &name("foo"))
-            .returning(|_, _| Ok(()));
+            .withf(|updated, _version, _definition| updated == &name("foo"))
+            .returning(|_, _, _| Ok(()));
 
         let response = handle(
             &seedbank,
             Request::Update {
                 name: name("foo"),
+                version: version(1),
                 definition: definition(),
             },
         );
 
         assert!(matches!(response, Response::Ok));
+    }
+
+    #[test]
+    fn test_status_should_dispatch_with_name_and_wrap_status() {
+        let mut seedbank = MockSeedbank::new();
+        seedbank
+            .expect_status()
+            .withf(|checked| checked == &name("foo"))
+            .returning(|_| Ok(seedbank_types::SeedlingStatus::Defined(version(2))));
+
+        let response = handle(&seedbank, Request::Status { name: name("foo") });
+
+        assert!(matches!(
+            response,
+            Response::Status {
+                status: seedbank_types::SeedlingStatus::Defined(returned)
+            } if returned == version(2)
+        ));
+    }
+
+    #[test]
+    fn test_status_should_wrap_failure_in_error() {
+        let mut seedbank = MockSeedbank::new();
+        seedbank
+            .expect_status()
+            .returning(|_| Err(Error::CannotBeRoot));
+
+        let response = handle(&seedbank, Request::Status { name: name("foo") });
+
+        assert!(matches!(response, Response::Error { .. }));
     }
 }

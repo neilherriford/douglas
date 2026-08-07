@@ -7,6 +7,7 @@ pub use seedbank_types::{
     Id, IdParseError, MAX_SEEDLINGS, Mount, MountContents, MountFile, MountType, Name,
     NameParseError, NameRules, Request, Response, Seedling, SeedlingDefinition,
 };
+use seedbank_types::{SeedlingStatus, Version};
 
 use blueprint::listener::SocketListenerFactory;
 use config::DouglasFolders;
@@ -36,12 +37,14 @@ pub enum Error {
     CannotBeRoot,
     #[error("Missing be root path")]
     MissingRootPath,
-    #[error("Failed to bootstrap")]
+    #[error("Failed to bootstrap: {0:?}")]
     FailedBoostrap(Vec<String>),
     #[error("Seedling already exists {0}")]
     AlreadyExists(Name),
     #[error("Seedling does not exist {0}")]
     NotFound(Name),
+    #[error("Updating version must be greater than the current version")]
+    InvalidVersion,
     #[error("Seedling limit reached")]
     TooManySeedlings,
 
@@ -53,6 +56,8 @@ pub enum Error {
     NameParseError(#[from] NameParseError),
     #[error("Id parse error: {0}")]
     IdParseError(#[from] IdParseError),
+    #[error("Version parse error: {0}")]
+    VersionParseError(#[from] std::num::ParseIntError),
     #[error("Seedling serialization error: {0}")]
     SeedlingSerializationError(#[from] toml::ser::Error),
     #[error("Seedling deserialization error: {0}")]
@@ -63,10 +68,21 @@ pub enum Error {
 pub trait Seedbank {
     fn list(&self) -> Result<Vec<Name>, Error>;
     fn exists(&self, name: &Name) -> Result<bool, Error>;
+    fn status(&self, name: &Name) -> Result<SeedlingStatus, Error>;
     fn load(&self, name: &Name) -> Result<Seedling, Error>;
-    fn create(&self, name: &Name, definition: &SeedlingDefinition) -> Result<(), Error>;
+    fn create(
+        &self,
+        name: &Name,
+        version: &Version,
+        definition: &SeedlingDefinition,
+    ) -> Result<(), Error>;
     fn delete(&self, name: &Name) -> Result<(), Error>;
-    fn update(&self, name: &Name, definition: &SeedlingDefinition) -> Result<(), Error>;
+    fn update(
+        &self,
+        name: &Name,
+        version: &Version,
+        definition: &SeedlingDefinition,
+    ) -> Result<(), Error>;
 }
 
 pub struct Server {
@@ -163,6 +179,13 @@ impl Server {
         path.push("id");
         path
     }
+
+    fn version_path(&self, name: &Name) -> PathBuf {
+        let mut path = self.create_seedling_path(name);
+        path.push("version");
+        path
+    }
+
     fn mounts_root(&self, seedling_name: &Name) -> PathBuf {
         let mut path = self.create_seedling_path(seedling_name);
         path.push("mounts");
@@ -193,6 +216,7 @@ impl Server {
     fn write_definition(
         &self,
         seedling_name: &Name,
+        version: &Version,
         current: Option<&SeedlingDefinition>,
         proposed: &SeedlingDefinition,
     ) -> Result<(), Error> {
@@ -202,7 +226,7 @@ impl Server {
         self.write_mounts(seedling_name, &proposed.mounts)?;
         self.file_writer
             .write_all(&self.definition_path(seedling_name), &contents)?;
-
+        self.write_version(seedling_name, version)?;
         Ok(())
     }
 
@@ -248,6 +272,12 @@ impl Server {
     fn write_id(&self, name: &Name, id: &Id) -> Result<(), Error> {
         self.file_writer
             .write_all(&self.id_path(name), &id.to_string())?;
+        Ok(())
+    }
+
+    fn write_version(&self, name: &Name, version: &Version) -> Result<(), Error> {
+        self.file_writer
+            .write_all(&self.version_path(name), &version.to_string())?;
         Ok(())
     }
 
@@ -342,6 +372,15 @@ impl Server {
         Ok(self.folder.exists(&expected_path))
     }
 
+    fn seedling_status(&self, name: &Name) -> Result<SeedlingStatus, Error> {
+        let expected_path = self.create_seedling_path(name);
+        if self.folder.exists(&expected_path) {
+            Ok(SeedlingStatus::Defined(self.load_version(name)?))
+        } else {
+            Ok(SeedlingStatus::Unknown)
+        }
+    }
+
     fn get_next_id(&self) -> Result<Id, Error> {
         let used_ids: HashSet<u16> = self
             .list_seedlings()?
@@ -367,13 +406,28 @@ impl Server {
         }
     }
 
+    fn load_version(&self, name: &Name) -> Result<Version, Error> {
+        match self.file_reader.read_all(&self.version_path(name)) {
+            Ok(raw) => Ok(Version::from_str(raw.trim())?),
+            Err(FileSystemError::IoErrorAtPath { error, .. })
+                if error.kind() == std::io::ErrorKind::NotFound =>
+            {
+                Err(Error::NotFound(name.clone()))
+            }
+            Err(err) => Err(err.into()),
+        }
+    }
+
     fn load_seedling(&self, name: &Name) -> Result<Seedling, Error> {
         let definition = self.load_definition(name)?;
         let id = self.load_id(name)?;
+        let version = self.load_version(name)?;
+
         Ok(Seedling {
             id,
             name: name.clone(),
             definition,
+            version,
         })
     }
 
@@ -498,7 +552,17 @@ impl Seedbank for Server {
         self.seedling_exists(name)
     }
 
-    fn create(&self, name: &Name, definition: &SeedlingDefinition) -> Result<(), Error> {
+    fn status(&self, name: &Name) -> Result<SeedlingStatus, Error> {
+        let _lock = self.global_lock.lock().expect("seedbank lock poisoned");
+        self.seedling_status(name)
+    }
+
+    fn create(
+        &self,
+        name: &Name,
+        version: &Version,
+        definition: &SeedlingDefinition,
+    ) -> Result<(), Error> {
         let guard = Span::new(
             Arc::clone(&self.reporter),
             &format!("Creating seedling {name}…"),
@@ -525,7 +589,7 @@ impl Seedbank for Server {
             return guard.finish(Err(err));
         }
 
-        guard.finish(self.write_definition(name, None, definition))
+        guard.finish(self.write_definition(name, version, None, definition))
     }
 
     fn load(&self, name: &Name) -> Result<Seedling, Error> {
@@ -558,7 +622,12 @@ impl Seedbank for Server {
         guard.finish(Ok(()))
     }
 
-    fn update(&self, name: &Name, definition: &SeedlingDefinition) -> Result<(), Error> {
+    fn update(
+        &self,
+        name: &Name,
+        version: &Version,
+        definition: &SeedlingDefinition,
+    ) -> Result<(), Error> {
         let guard = Span::new(
             Arc::clone(&self.reporter),
             &format!("Updating seedling {name}…"),
@@ -567,16 +636,20 @@ impl Seedbank for Server {
         .start_guard();
         let _lock = self.global_lock.lock().expect("seedbank lock poisoned");
 
-        if !self.seedling_exists(name)? {
-            return guard.finish(Err(Error::NotFound(name.clone())));
+        match self.seedling_status(name)? {
+            SeedlingStatus::Defined(current_version) => {
+                if *version > current_version {
+                    let current = match self.load_definition(name) {
+                        Ok(current) => current,
+                        Err(err) => return guard.finish(Err(err)),
+                    };
+                    guard.finish(self.write_definition(name, version, Some(&current), definition))
+                } else {
+                    guard.finish(Err(Error::InvalidVersion))
+                }
+            }
+            SeedlingStatus::Unknown => guard.finish(Err(Error::NotFound(name.clone()))),
         }
-
-        let current = match self.load_definition(name) {
-            Ok(current) => current,
-            Err(err) => return guard.finish(Err(err)),
-        };
-
-        guard.finish(self.write_definition(name, Some(&current), definition))
     }
 }
 
@@ -604,6 +677,10 @@ mod tests {
         Id { value }
     }
 
+    fn version(value: u16) -> Version {
+        Version::from_str(&value.to_string()).expect("valid version")
+    }
+
     fn definition() -> SeedlingDefinition {
         SeedlingDefinition::new(VersionedImageName::latest("test"), HashMap::new())
     }
@@ -620,6 +697,7 @@ mod tests {
         Mount::build(
             MountType::Persisted,
             PathBuf::from("/etc/traefik"),
+            seedbank_types::AccessMode::Writable,
             contents,
         )
     }
@@ -701,6 +779,43 @@ mod tests {
     }
 
     #[test]
+    fn test_status_should_return_defined_with_version_when_present() {
+        let mut folder = MockFolder::new();
+        folder.given_exists("/var/lib/seedbank/seeds/foo");
+
+        let mut file_reader = MockFileReader::new();
+        file_reader.given_can_read_all_with_contents("/var/lib/seedbank/seeds/foo/version", "3");
+
+        let server = build_server(
+            folder,
+            MockFolderDeleter::new(),
+            file_reader,
+            MockFileWriter::new(),
+        );
+
+        let status = server.status(&name("foo")).expect("should check status");
+
+        assert_eq!(status, SeedlingStatus::Defined(version(3)));
+    }
+
+    #[test]
+    fn test_status_should_return_unknown_when_missing() {
+        let mut folder = MockFolder::new();
+        folder.given_does_not_exist("/var/lib/seedbank/seeds/foo");
+
+        let server = build_server(
+            folder,
+            MockFolderDeleter::new(),
+            MockFileReader::new(),
+            MockFileWriter::new(),
+        );
+
+        let status = server.status(&name("foo")).expect("should check status");
+
+        assert_eq!(status, SeedlingStatus::Unknown);
+    }
+
+    #[test]
     fn test_create_should_assign_next_id_and_write_seedling_manifest() {
         let mut folder = MockFolder::new();
         folder.given_does_not_exist("/var/lib/seedbank/seeds/foo");
@@ -713,7 +828,8 @@ mod tests {
                 "/var/lib/seedbank/seeds/foo/seedling.toml",
                 &toml::to_string(&definition()).expect("should serialize"),
             )
-            .expect_write_to_file_with_contents("/var/lib/seedbank/seeds/foo/id", "0");
+            .expect_write_to_file_with_contents("/var/lib/seedbank/seeds/foo/id", "0")
+            .expect_write_to_file_with_contents("/var/lib/seedbank/seeds/foo/version", "0");
 
         let server = build_server(
             folder,
@@ -722,7 +838,11 @@ mod tests {
             file_writer,
         );
 
-        assert!(server.create(&name("foo"), &definition()).is_ok());
+        assert!(
+            server
+                .create(&name("foo"), &version(0), &definition())
+                .is_ok()
+        );
     }
 
     #[test]
@@ -737,7 +857,7 @@ mod tests {
             MockFileWriter::new(),
         );
 
-        let result = server.create(&name("foo"), &definition());
+        let result = server.create(&name("foo"), &version(0), &definition());
 
         assert!(matches!(result, Err(Error::AlreadyExists(_))));
     }
@@ -750,7 +870,8 @@ mod tests {
                 "/var/lib/seedbank/seeds/foo/seedling.toml",
                 &toml::to_string(&definition()).expect("should serialize"),
             )
-            .given_can_read_all_with_contents("/var/lib/seedbank/seeds/foo/id", "0");
+            .given_can_read_all_with_contents("/var/lib/seedbank/seeds/foo/id", "0")
+            .given_can_read_all_with_contents("/var/lib/seedbank/seeds/foo/version", "0");
 
         let server = build_server(
             MockFolder::new(),
@@ -763,6 +884,7 @@ mod tests {
 
         assert_eq!(seedling.name, name("foo"));
         assert_eq!(seedling.id, id(0));
+        assert_eq!(seedling.version, version(0));
     }
 
     #[test]
@@ -828,20 +950,28 @@ mod tests {
         folder.given_exists("/var/lib/seedbank/seeds/foo");
 
         let mut file_reader = MockFileReader::new();
-        file_reader.given_can_read_all_with_contents(
-            "/var/lib/seedbank/seeds/foo/seedling.toml",
-            &toml::to_string(&definition()).expect("should serialize"),
-        );
+        file_reader
+            .given_can_read_all_with_contents(
+                "/var/lib/seedbank/seeds/foo/seedling.toml",
+                &toml::to_string(&definition()).expect("should serialize"),
+            )
+            .given_can_read_all_with_contents("/var/lib/seedbank/seeds/foo/version", "0");
 
         let mut file_writer = MockFileWriter::new();
-        file_writer.expect_write_to_file_with_contents(
-            "/var/lib/seedbank/seeds/foo/seedling.toml",
-            &toml::to_string(&definition()).expect("should serialize"),
-        );
+        file_writer
+            .expect_write_to_file_with_contents(
+                "/var/lib/seedbank/seeds/foo/seedling.toml",
+                &toml::to_string(&definition()).expect("should serialize"),
+            )
+            .expect_write_to_file_with_contents("/var/lib/seedbank/seeds/foo/version", "1");
 
         let server = build_server(folder, MockFolderDeleter::new(), file_reader, file_writer);
 
-        assert!(server.update(&name("foo"), &definition()).is_ok());
+        assert!(
+            server
+                .update(&name("foo"), &version(1), &definition())
+                .is_ok()
+        );
     }
 
     #[test]
@@ -856,9 +986,49 @@ mod tests {
             MockFileWriter::new(),
         );
 
-        let result = server.update(&name("foo"), &definition());
+        let result = server.update(&name("foo"), &version(1), &definition());
 
         assert!(matches!(result, Err(Error::NotFound(_))));
+    }
+
+    #[test]
+    fn test_update_should_fail_when_version_is_not_newer() {
+        let mut folder = MockFolder::new();
+        folder.given_exists("/var/lib/seedbank/seeds/foo");
+
+        let mut file_reader = MockFileReader::new();
+        file_reader.given_can_read_all_with_contents("/var/lib/seedbank/seeds/foo/version", "1");
+
+        let server = build_server(
+            folder,
+            MockFolderDeleter::new(),
+            file_reader,
+            MockFileWriter::new(),
+        );
+
+        let result = server.update(&name("foo"), &version(1), &definition());
+
+        assert!(matches!(result, Err(Error::InvalidVersion)));
+    }
+
+    #[test]
+    fn test_update_should_fail_when_version_is_older() {
+        let mut folder = MockFolder::new();
+        folder.given_exists("/var/lib/seedbank/seeds/foo");
+
+        let mut file_reader = MockFileReader::new();
+        file_reader.given_can_read_all_with_contents("/var/lib/seedbank/seeds/foo/version", "2");
+
+        let server = build_server(
+            folder,
+            MockFolderDeleter::new(),
+            file_reader,
+            MockFileWriter::new(),
+        );
+
+        let result = server.update(&name("foo"), &version(1), &definition());
+
+        assert!(matches!(result, Err(Error::InvalidVersion)));
     }
 
     #[test]
@@ -1328,7 +1498,8 @@ mod tests {
                 "/var/lib/seedbank/seeds/foo/seedling.toml",
                 &toml::to_string(&definition()).expect("should serialize"),
             )
-            .expect_write_to_file_with_contents("/var/lib/seedbank/seeds/foo/id", "0");
+            .expect_write_to_file_with_contents("/var/lib/seedbank/seeds/foo/id", "0")
+            .expect_write_to_file_with_contents("/var/lib/seedbank/seeds/foo/version", "0");
 
         let server = Arc::new(build_server(
             folder,
@@ -1340,7 +1511,7 @@ mod tests {
         let (sender, receiver) = std::sync::mpsc::channel();
         let thread_server = Arc::clone(&server);
         std::thread::spawn(move || {
-            let result = thread_server.create(&name("foo"), &definition());
+            let result = thread_server.create(&name("foo"), &version(0), &definition());
             let _ = sender.send(result);
         });
 

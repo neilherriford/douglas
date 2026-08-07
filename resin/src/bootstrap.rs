@@ -57,8 +57,8 @@ pub async fn bootstrap(
     };
 
     let mut context = Context::new(credentials, folder, permissions);
-    let result = execute_plan(guard.span(), plan, &mut context, || {
-        Error::FailedBoostrap(Vec::new())
+    let result = execute_plan(guard.span(), plan, &mut context, |reason| {
+        Error::FailedBoostrap(vec![reason])
     })
     .await;
 

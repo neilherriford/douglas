@@ -64,7 +64,7 @@ pub enum Error {
     IoError(#[from] std::io::Error),
     #[error("File system error {0}")]
     FileSystemError(#[from] FileSystemError),
-    #[error("Failed to bootstrap")]
+    #[error("Failed to bootstrap: {0:?}")]
     FailedBoostrap(Vec<String>),
 }
 

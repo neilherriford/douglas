@@ -358,7 +358,7 @@ impl ProxyingBlobStore {
     }
 
     fn get_header_value(
-        headers: &Vec<Header>,
+        headers: &[Header],
         predicate: impl Fn(&&Header) -> bool,
         create_error: impl Fn() -> BlobStoreError,
     ) -> Result<String, BlobStoreError> {
@@ -369,10 +369,7 @@ impl ProxyingBlobStore {
             .ok_or_else(create_error)
     }
 
-    fn get_media_type<'a>(
-        headers: &Vec<Header>,
-        digest: &'a Digest,
-    ) -> Result<String, BlobStoreError> {
+    fn get_media_type(headers: &[Header], digest: &Digest) -> Result<String, BlobStoreError> {
         Self::get_header_value(headers, header_predicates::is_content_type(), || {
             Self::failed(digest, "Response did not include media type")
         })
@@ -814,7 +811,7 @@ mod tests {
         fn test_get_media_type_should_error_when_missing() {
             let digest = test_digest();
 
-            let result = ProxyingBlobStore::get_media_type(&vec![], &digest);
+            let result = ProxyingBlobStore::get_media_type(&Vec::new(), &digest);
 
             assert!(result.is_err());
         }

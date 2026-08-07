@@ -42,8 +42,6 @@ async fn manifest_info(
     name: Name,
     reference: String,
 ) -> Result<impl IntoResponse, ServerError> {
-    // let manifest_blob_root = state.paths.manifest_blob_root(&name)?;
-
     let digest = get_digest_from_reference(
         Arc::clone(&state.blob_store),
         &name,
@@ -275,9 +273,7 @@ async fn delete_manifest(
         .delete(&name, &digest, ResourceKind::Manifest)
         .await
         .map_err(|err| match err {
-            BlobStoreError::DigestNotFound(_) => {
-                ServerError::ManifestUnknown(digest.to_string())
-            }
+            BlobStoreError::DigestNotFound(_) => ServerError::ManifestUnknown(digest.to_string()),
             other => ServerError::Internal(Box::new(other)),
         })?;
 
@@ -548,9 +544,7 @@ mod tests {
     }
 
     mod remove_tags_pointing_to {
-        use crate::{
-            digest::Digest, manifest::remove_tags_pointing_to, tag_store::MockTagStore,
-        };
+        use crate::{digest::Digest, manifest::remove_tags_pointing_to, tag_store::MockTagStore};
         use log::{Event, Reporter};
         use resin_types::Name;
         use std::{str::FromStr, sync::Arc};
