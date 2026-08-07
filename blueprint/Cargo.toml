@@ -14,3 +14,4 @@ thiserror = { workspace = true }
 credentials = { workspace = true, features = ["mock"] }
 file_system = { workspace = true, features = ["mock"] }
 mockall = { workspace = true }
+tokio = { workspace = true }

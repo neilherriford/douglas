@@ -26,7 +26,7 @@ pub trait Client: Send + Sync {
 
 #[cfg_attr(feature = "mock", automock)]
 #[async_trait]
-pub trait ClientBuilder {
+pub trait ClientBuilder: Send + Sync {
     async fn build(&self, reporter: Arc<dyn Reporter>) -> Result<Box<dyn Client>, Error>;
 }
 

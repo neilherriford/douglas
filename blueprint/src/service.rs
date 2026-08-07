@@ -218,7 +218,7 @@ pub fn plan_service_bootstrap<C>(
     state: &ServiceState,
 ) -> Vec<Box<dyn Command<C>>>
 where
-    C: HasCredentials + HasFolder + HasPermissions,
+    C: HasCredentials + HasFolder + HasPermissions + Send,
 {
     let mut steps: Vec<Box<dyn Command<C>>> = Vec::new();
 

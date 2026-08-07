@@ -60,19 +60,19 @@ impl<'a> HasPermissions for StandardContext<'a> {
     }
 }
 
-#[async_trait(?Send)]
-pub trait Command<TContext>: std::fmt::Display {
+#[async_trait]
+pub trait Command<TContext>: std::fmt::Display + Send {
     fn name(&self) -> String;
     async fn run(
         &mut self,
         span: &Span,
         context: &mut TContext,
-    ) -> Result<(), Box<dyn std::error::Error>>;
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
     async fn rollback(
         &mut self,
         _span: &Span,
         _context: &mut TContext,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         Ok(())
     }
     fn skip(&self, _context: &TContext) -> bool {
@@ -128,13 +128,13 @@ pub enum ExecutionResult {
     Failed {
         failed_at_step: usize,
         failed_at_step_name: String,
-        perform_error: Box<dyn std::error::Error>,
-        rollback_errors: Vec<Box<dyn std::error::Error>>,
+        perform_error: Box<dyn std::error::Error + Send + Sync>,
+        rollback_errors: Vec<Box<dyn std::error::Error + Send + Sync>>,
     },
 }
 
-#[async_trait(?Send)]
-pub trait CommandExecutor<TContext> {
+#[async_trait]
+pub trait CommandExecutor<TContext: Send> {
     async fn run(
         &mut self,
         span: &Span,
@@ -146,7 +146,7 @@ pub trait CommandExecutor<TContext> {
         &mut self,
         span: &Span,
         context: &mut TContext,
-    ) -> Vec<Box<dyn std::error::Error>>;
+    ) -> Vec<Box<dyn std::error::Error + Send + Sync>>;
 }
 
 pub struct JournalingExecutor<TContext> {
@@ -165,8 +165,8 @@ impl<TContext> Default for JournalingExecutor<TContext> {
     }
 }
 
-#[async_trait(?Send)]
-impl<TContext> CommandExecutor<TContext> for JournalingExecutor<TContext> {
+#[async_trait]
+impl<TContext: Send> CommandExecutor<TContext> for JournalingExecutor<TContext> {
     async fn run(
         &mut self,
         span: &Span,
@@ -207,7 +207,7 @@ impl<TContext> CommandExecutor<TContext> for JournalingExecutor<TContext> {
         &mut self,
         span: &Span,
         context: &mut TContext,
-    ) -> Vec<Box<dyn std::error::Error>> {
+    ) -> Vec<Box<dyn std::error::Error + Send + Sync>> {
         let mut errors = Vec::new();
         for mut cmd in self.journal.drain(..).rev() {
             span.message(Level::Info, &format!("[Rolling back {}…]", cmd.name()));
