@@ -3,7 +3,7 @@ use log::{Reporter, Span};
 use serde::{Deserialize, Serialize};
 use serde_json::from_value;
 use simple_rest_client::{
-    Request, RestClient,
+    Header, Request, RestClient,
     assertions::assert_okay_with_body,
     parsers::{Parser, json::JsonParser},
 };
@@ -117,7 +117,7 @@ impl<'a> InitCommand<'a> {
     async fn initialize(&mut self, span: &Span) -> Result<Secrets, OpenBaoError> {
         let req = Request::Post {
             path: "/v1/sys/init".to_string(),
-            headers: vec![],
+            headers: vec![Header::content_type_json()],
             body: Some(serde_json::to_string(&self.config)?),
         };
 

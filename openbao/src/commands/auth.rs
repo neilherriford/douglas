@@ -4,7 +4,7 @@ use crate::{AuthType, OpenBaoError, Period, RoleId, commands::utils::headers::va
 use log::{Reporter, Span};
 use serde::{Deserialize, Serialize};
 use simple_rest_client::{
-    Request, RestClient,
+    Header, Request, RestClient,
     assertions::{assert_no_content, assert_okay_with_body},
     parsers::{Parser, json::JsonParser},
 };
@@ -132,7 +132,7 @@ impl<'a> InstallAuthCommand<'a> {
 
         let req = Request::Post {
             path: format!("/v1/sys/auth/{}", self.auth_type.mount_name()),
-            headers: vec![vault_token(self.token)],
+            headers: vec![vault_token(self.token), Header::content_type_json()],
             body: Some(serde_json::to_string(&AuthRequest {
                 auth_type: self.auth_type.clone(),
                 description: self.description.to_string(),
@@ -282,7 +282,7 @@ impl<'a> CreateRole<'a> {
                 self.auth_type.mount_name(),
                 self.name
             ),
-            headers: vec![vault_token(self.token)],
+            headers: vec![vault_token(self.token), Header::content_type_json()],
             body: Some(serde_json::to_string(&CreateRoleBody {
                 policies: self.policies.clone(),
                 token_ttl: Period::Hours(1),
@@ -461,7 +461,7 @@ impl<'a> Login<'a> {
 
         let req = Request::Post {
             path: format!("/v1/auth/{}/login", self.auth_type.mount_name()),
-            headers: vec![],
+            headers: vec![Header::content_type_json()],
             body: Some(serde_json::to_string(&LoginRequest {
                 role_id: self.name.into(),
                 secret_id: self.secret.into(),

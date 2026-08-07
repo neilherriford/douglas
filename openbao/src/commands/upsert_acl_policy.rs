@@ -116,7 +116,10 @@ impl<'a> UpsertAclPolicy<'a> {
         .start_guard();
         let req = Request::Post {
             path: format!("/v1/sys/policies/acl/{}", self.name),
-            headers: vec![Header::new("X-Vault-Token", self.vault_token)],
+            headers: vec![
+                Header::new("X-Vault-Token", self.vault_token),
+                Header::content_type_json(),
+            ],
             body: Some(serde_json::to_string(&Body {
                 policy: &PolicyList(self.polices),
             })?),

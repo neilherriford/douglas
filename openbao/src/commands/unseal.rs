@@ -4,7 +4,7 @@ use rand::prelude::*;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::from_value;
 use simple_rest_client::{
-    Request, RestClient,
+    Header, Request, RestClient,
     assertions::assert_okay_with_body,
     parsers::{Parser, json::JsonParser},
 };
@@ -89,7 +89,7 @@ impl<'a> UnsealCommand<'a> {
         let req = Request::Post {
             path: "/v1/sys/unseal".to_string(),
             body: Some(serde_json::to_string(&UnsealRequest { key })?),
-            headers: vec![],
+            headers: vec![Header::content_type_json()],
         };
 
         let resposne = self.rest_client.execute(span, &req).await?;
