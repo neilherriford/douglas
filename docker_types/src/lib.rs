@@ -3,6 +3,7 @@ use regex::Regex;
 use serde::ser::{SerializeMap, SerializeSeq, SerializeStruct};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::value::Value as Json;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::LazyLock;
@@ -272,6 +273,22 @@ where
     seq.end()
 }
 
+pub fn deserialize_capabilities<'de, D>(deserializer: D) -> Result<Vec<Capability>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let raw: Vec<String> = Vec::deserialize(deserializer)?;
+    raw.iter()
+        .map(|text| match text.as_str() {
+            "IPC_LOCK" => Ok(Capability::IpcLock),
+            "CAP_CHOWN" => Ok(Capability::Chown),
+            other => Err(serde::de::Error::custom(format!(
+                "invalid capability '{other}'"
+            ))),
+        })
+        .collect()
+}
+
 #[derive(Debug, Deserialize, Clone, PartialEq)]
 pub struct Id {
     pub algorithm: String,
@@ -296,6 +313,22 @@ where
     };
 
     Ok(Id { algorithm, hex })
+}
+
+impl<'de> Deserialize<'de> for ContainerUser {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        let (user_id, group_id) = value
+            .split_once(':')
+            .ok_or_else(|| serde::de::Error::custom(format!("invalid user '{value}'")))?;
+        Ok(ContainerUser {
+            user_id: user_id.parse().map_err(serde::de::Error::custom)?,
+            group_id: group_id.parse().map_err(serde::de::Error::custom)?,
+        })
+    }
 }
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -396,6 +429,30 @@ pub struct Tag {
     pub version: String,
 }
 
+pub fn deserialize_tags<'de, D>(deserializer: D) -> Result<HashSet<Tag>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let raw_strings: Vec<String> = Deserialize::deserialize(deserializer)?;
+
+    let tags = raw_strings
+        .into_iter()
+        .map(|raw_tag| {
+            let tag_separator = raw_tag
+                .rfind(':')
+                .filter(|&idx| !raw_tag[idx..].contains('/'));
+
+            let (name, version) = match tag_separator {
+                Some(idx) => (raw_tag[..idx].to_string(), raw_tag[idx + 1..].to_string()),
+                None => (raw_tag, String::new()),
+            };
+            Tag { name, version }
+        })
+        .collect();
+
+    Ok(tags)
+}
+
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum EnvironmentVariableNameError {
     #[error("environment variable name cannot be empty")]
@@ -438,7 +495,7 @@ impl StringRules for EnvironmentVariableNameRules {
 
 pub type EnvironmentVariableName = Validated<EnvironmentVariableNameRules>;
 
-#[derive(Debug, PartialEq, Eq, Clone)]
+#[derive(Debug, PartialEq, Eq, Clone, Deserialize)]
 pub struct EnvironmentVariable {
     pub name: EnvironmentVariableName,
     pub value: String,
@@ -543,7 +600,7 @@ pub struct Mount {
     pub writable: bool,
 }
 
-#[derive(Debug, Deserialize, PartialEq)]
+#[derive(Debug, Deserialize, PartialEq, Clone)]
 #[serde(rename_all = "lowercase")]
 pub enum Status {
     Created,
@@ -553,6 +610,15 @@ pub enum Status {
     Removing,
     Exited,
     Dead,
+}
+
+#[derive(Debug, Deserialize, PartialEq, Clone)]
+#[serde(rename_all = "lowercase")]
+pub enum HealthStatus {
+    Starting,
+    Healthy,
+    Unhealthy,
+    None,
 }
 
 impl std::fmt::Display for Status {
@@ -597,6 +663,18 @@ impl Serialize for MountDefinition {
 
         state.end()
     }
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub struct NewContainer {
+    pub name: ContainerName,
+    pub image: VersionedImageName,
+    pub run_as: Option<ContainerUser>,
+    pub command: Option<String>,
+    pub environment_variables: Vec<EnvironmentVariable>,
+    pub mounts: Vec<MountDefinition>,
+    pub added_capabilities: Vec<Capability>,
+    pub labels: Vec<Label>,
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -675,8 +753,225 @@ impl StringRules for DockerNameRules {
 }
 
 pub type ContainerName = Validated<DockerNameRules>;
+pub type ImageName = Validated<DockerNameRules>;
 pub type MountName = Validated<DockerNameRules>;
 pub type NetworkName = Validated<DockerNameRules>;
+
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum RegistryError {
+    #[error("registry cannot be empty")]
+    CannotBeEmpty,
+    #[error("registry is too long")]
+    TooLong,
+    #[error("invalid registry '{0}'")]
+    Invalid(String),
+}
+
+impl From<refined_string::Error> for RegistryError {
+    fn from(err: refined_string::Error) -> Self {
+        match err {
+            refined_string::Error::CannotBeEmpty => RegistryError::CannotBeEmpty,
+            refined_string::Error::TooLong => RegistryError::TooLong,
+            refined_string::Error::InvalidName(value) => RegistryError::Invalid(value),
+        }
+    }
+}
+
+pub struct RegistryRules;
+
+impl StringRules for RegistryRules {
+    // Matches a Docker registry host, e.g. "localhost:7376" or "registry.example.com:5000".
+    const MAX_LEN: usize = 255;
+
+    fn pattern() -> &'static Regex {
+        static PATTERN: LazyLock<Regex> = LazyLock::new(|| {
+            Regex::new(r"^[a-zA-Z0-9]([a-zA-Z0-9.-]*[a-zA-Z0-9])?(:[0-9]{1,5})?$").unwrap()
+        });
+        &PATTERN
+    }
+
+    type Error = RegistryError;
+
+    fn invalid(value: &str) -> Self::Error {
+        RegistryError::Invalid(value.to_string())
+    }
+}
+
+pub type Registry = Validated<RegistryRules>;
+
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum ContainerIdError {
+    #[error("container id cannot be empty")]
+    CannotBeEmpty,
+    #[error("container id is too long")]
+    TooLong,
+    #[error("invalid container id '{0}'")]
+    Invalid(String),
+}
+
+impl From<refined_string::Error> for ContainerIdError {
+    fn from(err: refined_string::Error) -> Self {
+        match err {
+            refined_string::Error::CannotBeEmpty => ContainerIdError::CannotBeEmpty,
+            refined_string::Error::TooLong => ContainerIdError::TooLong,
+            refined_string::Error::InvalidName(value) => ContainerIdError::Invalid(value),
+        }
+    }
+}
+
+pub struct FullContainerIdRules;
+
+impl StringRules for FullContainerIdRules {
+    const MAX_LEN: usize = 64;
+
+    fn pattern() -> &'static Regex {
+        static PATTERN: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^[0-9a-f]{64}$").unwrap());
+        &PATTERN
+    }
+
+    type Error = ContainerIdError;
+
+    fn invalid(value: &str) -> Self::Error {
+        ContainerIdError::Invalid(value.to_string())
+    }
+}
+
+pub struct ShortContainerIdRules;
+
+impl StringRules for ShortContainerIdRules {
+    const MAX_LEN: usize = 12;
+
+    fn pattern() -> &'static Regex {
+        static PATTERN: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^[0-9a-f]{12}$").unwrap());
+        &PATTERN
+    }
+
+    type Error = ContainerIdError;
+
+    fn invalid(value: &str) -> Self::Error {
+        ContainerIdError::Invalid(value.to_string())
+    }
+}
+
+pub type FullContainerId = Validated<FullContainerIdRules>;
+pub type ShortContainerId = Validated<ShortContainerIdRules>;
+
+#[derive(Debug, PartialEq, Eq, Clone)]
+pub enum ContainerId {
+    Full(FullContainerId),
+    Short(ShortContainerId),
+}
+
+impl std::fmt::Display for ContainerId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ContainerId::Full(id) => write!(f, "{id}"),
+            ContainerId::Short(id) => write!(f, "{id}"),
+        }
+    }
+}
+
+impl FromStr for ContainerId {
+    type Err = ContainerIdError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.len() {
+            64 => FullContainerId::from_str(s).map(ContainerId::Full),
+            12 => ShortContainerId::from_str(s).map(ContainerId::Short),
+            _ => Err(ContainerIdError::Invalid(s.to_string())),
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq, Clone)]
+pub struct IdentifiedContainerName {
+    pub name: ContainerName,
+    pub id: FullContainerId,
+}
+
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum ImageIdError {
+    #[error("image id cannot be empty")]
+    CannotBeEmpty,
+    #[error("image id is too long")]
+    TooLong,
+    #[error("invalid image id '{0}'")]
+    Invalid(String),
+}
+
+impl From<refined_string::Error> for ImageIdError {
+    fn from(err: refined_string::Error) -> Self {
+        match err {
+            refined_string::Error::CannotBeEmpty => ImageIdError::CannotBeEmpty,
+            refined_string::Error::TooLong => ImageIdError::TooLong,
+            refined_string::Error::InvalidName(value) => ImageIdError::Invalid(value),
+        }
+    }
+}
+
+pub struct FullImageIdRules;
+
+impl StringRules for FullImageIdRules {
+    const MAX_LEN: usize = 64;
+
+    fn pattern() -> &'static Regex {
+        static PATTERN: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^[0-9a-f]{64}$").unwrap());
+        &PATTERN
+    }
+
+    type Error = ImageIdError;
+
+    fn invalid(value: &str) -> Self::Error {
+        ImageIdError::Invalid(value.to_string())
+    }
+}
+
+pub struct ShortImageIdRules;
+
+impl StringRules for ShortImageIdRules {
+    const MAX_LEN: usize = 12;
+
+    fn pattern() -> &'static Regex {
+        static PATTERN: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^[0-9a-f]{12}$").unwrap());
+        &PATTERN
+    }
+
+    type Error = ImageIdError;
+
+    fn invalid(value: &str) -> Self::Error {
+        ImageIdError::Invalid(value.to_string())
+    }
+}
+
+pub type FullImageId = Validated<FullImageIdRules>;
+pub type ShortImageId = Validated<ShortImageIdRules>;
+
+#[derive(Debug, PartialEq, Eq, Clone)]
+pub enum ImageId {
+    Full(FullImageId),
+    Short(ShortImageId),
+}
+
+impl std::fmt::Display for ImageId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ImageId::Full(id) => write!(f, "{id}"),
+            ImageId::Short(id) => write!(f, "{id}"),
+        }
+    }
+}
+
+impl FromStr for ImageId {
+    type Err = ImageIdError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.len() {
+            64 => FullImageId::from_str(s).map(ImageId::Full),
+            12 => ShortImageId::from_str(s).map(ImageId::Short),
+            _ => Err(ImageIdError::Invalid(s.to_string())),
+        }
+    }
+}
 
 #[derive(Debug, PartialEq, Clone)]
 pub struct ContainerDefinition {
@@ -684,9 +979,56 @@ pub struct ContainerDefinition {
     pub run_as: Option<ContainerUser>,
     pub command: Option<String>,
     pub environment_variables: Vec<EnvironmentVariable>,
-    pub image_name: ImageIdentifier,
+    pub image: ImageDefinition,
     pub mounts: Vec<MountDefinition>,
     pub added_capabilities: Vec<Capability>,
+    pub labels: Vec<Label>,
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub struct ContainerRuntimeState {
+    pub status: Status,
+    pub started_at: time::OffsetDateTime,
+    pub health_status: Option<HealthStatus>,
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub struct ContainerSnapshot {
+    pub definition: ContainerDefinition,
+    pub runtime_state: ContainerRuntimeState,
+}
+
+#[derive(Debug, Deserialize, PartialEq, Clone)]
+pub struct Healthcheck {
+    #[serde(rename = "Test")]
+    pub test: Vec<String>,
+
+    #[serde(rename = "Interval")]
+    pub interval: i64,
+
+    #[serde(rename = "Timeout")]
+    pub timeout: i64,
+
+    #[serde(rename = "Retries")]
+    pub retries: i64,
+
+    #[serde(rename = "StartPeriod")]
+    pub start_period: i64,
+}
+
+#[derive(Debug, PartialEq, Clone, Deserialize)]
+pub struct ImageDefinition {
+    pub id: Id,
+    pub created: String,
+    pub architecture: String,
+    pub run_as: Option<ContainerUser>,
+    pub exposed_ports: Vec<String>,
+    pub environment_variables: Vec<EnvironmentVariable>,
+    pub command: Option<String>,
+    pub health_check: Option<Healthcheck>,
+    pub volumes: Vec<PathBuf>,
+    pub working_dir: String,
+    pub entrypoint: Option<String>,
     pub labels: Vec<Label>,
 }
 
@@ -789,6 +1131,62 @@ mod tests {
         }
     }
 
+    mod tags_deserializer {
+        use super::super::*;
+        use serde::Deserialize;
+
+        #[derive(Debug, Deserialize)]
+        struct Wrapper {
+            #[serde(deserialize_with = "deserialize_tags")]
+            tags: HashSet<Tag>,
+        }
+
+        fn tags_for(json_array: &str) -> HashSet<Tag> {
+            let json = format!(r#"{{ "tags": {json_array} }}"#);
+            let wrapper: Wrapper = serde_json::from_str(&json).unwrap();
+            wrapper.tags
+        }
+
+        #[test]
+        fn should_split_a_plain_repo_tag_on_its_colon() {
+            let tags = tags_for(r#"["nginx:latest"]"#);
+
+            assert_eq!(
+                tags,
+                HashSet::from([Tag {
+                    name: "nginx".to_string(),
+                    version: "latest".to_string(),
+                }])
+            );
+        }
+
+        #[test]
+        fn should_treat_a_registry_host_port_as_part_of_the_name_not_the_tag() {
+            let tags = tags_for(r#"["myregistry.example.com:5000/nginx:1.0"]"#);
+
+            assert_eq!(
+                tags,
+                HashSet::from([Tag {
+                    name: "myregistry.example.com:5000/nginx".to_string(),
+                    version: "1.0".to_string(),
+                }])
+            );
+        }
+
+        #[test]
+        fn should_leave_version_empty_when_a_registry_host_port_has_no_tag() {
+            let tags = tags_for(r#"["myregistry.example.com:5000/nginx"]"#);
+
+            assert_eq!(
+                tags,
+                HashSet::from([Tag {
+                    name: "myregistry.example.com:5000/nginx".to_string(),
+                    version: String::new(),
+                }])
+            );
+        }
+    }
+
     mod labels_deserializer {
         use super::super::*;
         use serde::Deserialize;
@@ -867,6 +1265,190 @@ mod tests {
                     "foo": "bar",
                     "baz": "qux"
                 }
+            });
+
+            let actual: Value = serde_json::from_str(&json_str).unwrap();
+            assert_eq!(expected, actual);
+        }
+    }
+
+    mod container_id {
+        use super::super::*;
+
+        #[test]
+        fn test_from_str_should_parse_a_full_id() {
+            let hex = "f".repeat(64);
+
+            let parsed: ContainerId = hex.parse().expect("should parse");
+
+            assert_eq!(
+                parsed,
+                ContainerId::Full(FullContainerId::from_str(&hex).unwrap())
+            );
+        }
+
+        #[test]
+        fn test_from_str_should_parse_a_short_id() {
+            let hex = "f".repeat(12);
+
+            let parsed: ContainerId = hex.parse().expect("should parse");
+
+            assert_eq!(
+                parsed,
+                ContainerId::Short(ShortContainerId::from_str(&hex).unwrap())
+            );
+        }
+
+        #[test]
+        fn test_from_str_should_reject_an_arbitrary_length_prefix() {
+            let result = "01b0cea9029".parse::<ContainerId>();
+
+            assert!(matches!(result, Err(ContainerIdError::Invalid(_))));
+        }
+
+        #[test]
+        fn test_from_str_should_reject_non_hex_characters() {
+            let result = "g".repeat(12).parse::<ContainerId>();
+
+            assert!(matches!(result, Err(ContainerIdError::Invalid(_))));
+        }
+
+        #[test]
+        fn test_from_str_should_reject_an_empty_string() {
+            let result = "".parse::<ContainerId>();
+
+            assert!(matches!(result, Err(ContainerIdError::Invalid(_))));
+        }
+
+        #[test]
+        fn test_display_should_round_trip_through_from_str() {
+            let hex = "a".repeat(64);
+            let parsed: ContainerId = hex.parse().unwrap();
+
+            assert_eq!(parsed.to_string(), hex);
+        }
+    }
+
+    mod image_id {
+        use super::super::*;
+
+        #[test]
+        fn test_from_str_should_parse_a_full_id() {
+            let hex = "f".repeat(64);
+
+            let parsed: ImageId = hex.parse().expect("should parse");
+
+            assert_eq!(parsed, ImageId::Full(FullImageId::from_str(&hex).unwrap()));
+        }
+
+        #[test]
+        fn test_from_str_should_parse_a_short_id() {
+            let hex = "f".repeat(12);
+
+            let parsed: ImageId = hex.parse().expect("should parse");
+
+            assert_eq!(
+                parsed,
+                ImageId::Short(ShortImageId::from_str(&hex).unwrap())
+            );
+        }
+
+        #[test]
+        fn test_from_str_should_reject_an_arbitrary_length_prefix() {
+            let result = "01b0cea9029".parse::<ImageId>();
+
+            assert!(matches!(result, Err(ImageIdError::Invalid(_))));
+        }
+
+        #[test]
+        fn test_from_str_should_reject_non_hex_characters() {
+            let result = "g".repeat(12).parse::<ImageId>();
+
+            assert!(matches!(result, Err(ImageIdError::Invalid(_))));
+        }
+
+        #[test]
+        fn test_from_str_should_reject_an_empty_string() {
+            let result = "".parse::<ImageId>();
+
+            assert!(matches!(result, Err(ImageIdError::Invalid(_))));
+        }
+
+        #[test]
+        fn test_display_should_round_trip_through_from_str() {
+            let hex = "a".repeat(64);
+            let parsed: ImageId = hex.parse().unwrap();
+
+            assert_eq!(parsed.to_string(), hex);
+        }
+    }
+
+    mod registry {
+        use super::super::*;
+
+        #[test]
+        fn test_from_str_should_parse_a_host_and_port() {
+            let parsed: Registry = "localhost:7376".parse().expect("should parse");
+
+            assert_eq!(parsed.as_ref(), "localhost:7376");
+        }
+
+        #[test]
+        fn test_from_str_should_parse_a_dotted_host_without_a_port() {
+            let parsed: Registry = "registry.example.com".parse().expect("should parse");
+
+            assert_eq!(parsed.as_ref(), "registry.example.com");
+        }
+
+        #[test]
+        fn test_from_str_should_reject_an_empty_string() {
+            let result = "".parse::<Registry>();
+
+            assert!(matches!(result, Err(RegistryError::CannotBeEmpty)));
+        }
+
+        #[test]
+        fn test_from_str_should_reject_a_trailing_slash() {
+            let result = "localhost:7376/".parse::<Registry>();
+
+            assert!(matches!(result, Err(RegistryError::Invalid(_))));
+        }
+
+        #[test]
+        fn test_from_str_should_reject_embedded_whitespace() {
+            let result = "local host:7376".parse::<Registry>();
+
+            assert!(matches!(result, Err(RegistryError::Invalid(_))));
+        }
+
+        #[test]
+        fn test_display_should_round_trip_through_from_str() {
+            let parsed: Registry = "localhost:7376".parse().unwrap();
+
+            assert_eq!(parsed.to_string(), "localhost:7376");
+        }
+    }
+
+    mod mount_definition_serializer {
+        use super::super::*;
+        use serde_json::{Value, json};
+
+        #[test]
+        fn should_serialize_as_a_docker_bind_mount() {
+            let mount = MountDefinition {
+                name: "shared".parse().unwrap(),
+                host_path: PathBuf::from("/var/lib/douglas/mounts/traefik/shared"),
+                container_path: PathBuf::from("/etc/traefik"),
+                writable: false,
+            };
+
+            let json_str = serde_json::to_string(&mount).unwrap();
+            let expected = json!({
+                "Type": "bind",
+                "Name": "shared",
+                "Source": "/var/lib/douglas/mounts/traefik/shared",
+                "Target": "/etc/traefik",
+                "RW": false
             });
 
             let actual: Value = serde_json::from_str(&json_str).unwrap();
