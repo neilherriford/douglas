@@ -1,7 +1,5 @@
-mod application_definition;
 mod bootstrap;
 mod config;
-mod core_applications;
 #[macro_use]
 pub(crate) mod macros;
 mod cli_reporter;
@@ -249,7 +247,7 @@ fn start_bract(reporting_fd: i32) -> ExitCode {
 
 async fn run_bract_server(reporting_fd: i32) -> ExitCode {
     let bract = match bract::Bract::build(reporting_fd).await {
-        Ok(bract) => bract,
+        Ok(bract) => Arc::new(bract),
         Err(err) => {
             eprintln!("Failed to start bract: {err:?}");
             return ExitCode::from(1);
@@ -285,7 +283,8 @@ fn start_resin(reporting_fd: i32) -> ExitCode {
 }
 
 async fn run_resin_server(reporting_fd: i32) -> ExitCode {
-    let Ok(server) = resin::Server::build(Some(reporting_fd), resin_types::DEFAULT_PORT).await else {
+    let Ok(server) = resin::Server::build(Some(reporting_fd), resin_types::DEFAULT_PORT).await
+    else {
         return ExitCode::from(1);
     };
 
@@ -389,17 +388,39 @@ async fn start(plan_only: bool) -> ExitCode {
         Box::new(cli_reporter),
     ]));
 
-    bootstrap::douglas_services::perform(
-        reporter,
+    let succeeded = bootstrap::system::perform(
+        Arc::clone(&reporter),
         plan_only,
         credentials,
         permissions,
         environment_variable_reader,
         folder,
         os,
-        douglas_folders,
+        douglas_folders.clone(),
     )
     .await;
+
+    if !succeeded {
+        return ExitCode::from(1);
+    }
+
+    if plan_only {
+        eprintln!(
+            "System plan only: skipping seedling reconciliation, which requires bract to be running."
+        );
+        return ExitCode::from(0);
+    }
+
+    let bract_client: Arc<dyn bract_client::Client> = Arc::new(bract_client::UdsClient::new(
+        Arc::clone(&reporter),
+        &douglas_folders,
+    ));
+
+    let succeeded = bootstrap::seedlings::perform(reporter, bract_client).await;
+
+    if !succeeded {
+        return ExitCode::from(1);
+    }
 
     ExitCode::from(0)
 }

@@ -1,3 +1,4 @@
+use async_trait::async_trait;
 use blueprint::{
     Command, GroupMembershipRequirement, HasCredentials, HasFolder, HasPermissions, RunningStatus,
     bootstrap::{execute_plan, resolve_plan},
@@ -8,7 +9,6 @@ use blueprint::{
         plan_service_bootstrap,
     },
 };
-use async_trait::async_trait;
 use command_fds::{CommandFdExt, FdMapping, FdMappingCollision};
 use config::DouglasFolders;
 use credentials::{Credentials, well_known::DOUGLAS_ADMIN_GROUP};
@@ -311,7 +311,7 @@ impl std::fmt::Display for CreatePipe {
     }
 }
 
-#[async_trait(?Send)]
+#[async_trait]
 impl<'a> Command<Context<'a>> for CreatePipe {
     fn name(&self) -> String {
         "Create Pipe".to_string()
@@ -321,7 +321,7 @@ impl<'a> Command<Context<'a>> for CreatePipe {
         &mut self,
         span: &Span,
         context: &mut Context<'a>,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let guard = span
             .create_child("Creating pipe…", ScopeKind::Step)
             .start_guard();
@@ -356,7 +356,7 @@ impl std::fmt::Display for StartService {
     }
 }
 
-#[async_trait(?Send)]
+#[async_trait]
 impl<'a> Command<Context<'a>> for StartService {
     fn name(&self) -> String {
         format!("Start {}", self.name)
@@ -366,7 +366,7 @@ impl<'a> Command<Context<'a>> for StartService {
         &mut self,
         span: &Span,
         context: &mut Context<'a>,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let guard = span
             .create_child(&format!("Starting {}…", self.name), ScopeKind::Step)
             .start_guard();
@@ -404,7 +404,7 @@ impl std::fmt::Display for WaitForServiceReady {
     }
 }
 
-#[async_trait(?Send)]
+#[async_trait]
 impl<'a> Command<Context<'a>> for WaitForServiceReady {
     fn name(&self) -> String {
         format!("Wait for {}", self.name)
@@ -414,7 +414,7 @@ impl<'a> Command<Context<'a>> for WaitForServiceReady {
         &mut self,
         span: &Span,
         _context: &mut Context<'a>,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let guard = span
             .create_child(&format!("Waiting for {}…", self.name), ScopeKind::Step)
             .start_guard();
@@ -431,7 +431,7 @@ fn spawn_service(
     pipe: Option<(PipeReader, PipeWriter)>,
     os: &dyn Os,
     span: &Span,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut command = std::process::Command::new(os.current_executable()?);
     command.args(["service", name]);
 
@@ -489,7 +489,7 @@ async fn wait_until_running(
     name: &str,
     liveness: &LivenessCheck,
     span: &Span,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let deadline = Instant::now() + Duration::from_mins(5);
     loop {
         if check_liveness(span, liveness) == RunningStatus::Running {
@@ -511,7 +511,7 @@ pub async fn perform(
     folder: Arc<dyn Folder>,
     os: Arc<dyn Os>,
     douglas_folders: DouglasFolders,
-) {
+) -> bool {
     let guard = Span::new(
         Arc::clone(&reporter),
         "Starting douglas system",
@@ -529,18 +529,18 @@ pub async fn perform(
         Ok(state) => state,
         Err(err) => {
             guard.span().message(Level::Warn, &err.to_string());
-            return;
+            return false;
         }
     };
 
     let Ok(plan) = resolve_plan(guard.span(), create_plan(state)) else {
         guard.finish_with_outcome(log::Outcome::Failed);
-        return;
+        return false;
     };
 
     if plan_only {
         guard.finish_with_outcome(log::Outcome::Ok);
-        return;
+        return true;
     }
 
     let mut context = Context {
@@ -551,11 +551,12 @@ pub async fn perform(
         pipes: HashMap::new(),
     };
 
-    match execute_plan(guard.span(), plan, &mut context, || ()).await {
-        Ok(()) => guard.finish_with_outcome(Outcome::Ok),
-        Err(()) => {
-            guard.finish_with_outcome(Outcome::Failed);
-        }
+    if let Ok(()) = execute_plan(guard.span(), plan, &mut context, |_reason| ()).await {
+        guard.finish_with_outcome(Outcome::Ok);
+        true
+    } else {
+        guard.finish_with_outcome(Outcome::Failed);
+        false
     }
 }
 

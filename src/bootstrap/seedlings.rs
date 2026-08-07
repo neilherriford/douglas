@@ -1,9 +1,12 @@
 use async_trait::async_trait;
-use blueprint::Command;
-use config::DouglasFolders;
+use blueprint::{
+    Command,
+    bootstrap::{execute_plan, resolve_plan},
+};
 use file_system::RelativePathError;
-use log::{Outcome, Reporter, ScopeKind, Span};
+use log::{Level, Outcome, Reporter, ScopeKind, Span};
 use seedbank::{Name, NameParseError, SeedlingDefinition};
+use seedbank_types::Version;
 use std::sync::Arc;
 use thiserror::Error;
 
@@ -11,6 +14,8 @@ use thiserror::Error;
 pub enum BootstrapError {
     #[error("Bract error: {0}")]
     BractError(#[from] bract_client::Error),
+    #[error("Seedbank error: {0}")]
+    SeedbankError(#[from] seedbank_client::Error),
     #[error("Relative path error")]
     RelativePathError(#[from] RelativePathError),
     #[error("Name parse error")]
@@ -29,149 +34,176 @@ struct Context<'a> {
 
 #[derive(Default)]
 struct State {
-    core_seedlings_missing: Vec<(Name, SeedlingDefinition)>,
-    core_seedlings_needing_start: Vec<Name>,
+    core_seedlings: Vec<(Name, Version, SeedlingDefinition)>,
 }
 
-struct StateObserver<'a> {
+struct StateObserver {
     reporter: Arc<dyn Reporter>,
-    bract_client: &'a dyn bract_client::Client,
 }
 
-impl<'a> StateObserver<'a> {
-    pub fn new(reporter: Arc<dyn Reporter>, bract_client: &'a dyn bract_client::Client) -> Self {
-        Self {
-            reporter,
-            bract_client,
-        }
+impl StateObserver {
+    pub fn new(reporter: Arc<dyn Reporter>) -> Self {
+        Self { reporter }
     }
 
-    pub async fn discover(&mut self, span: &Span) -> Result<State, BootstrapError> {
-        todo!()
-        // let guard = span
-        //     .create_child(
-        //         "Loading douglas system, discovering current seedling state",
-        //         ScopeKind::Phase,
-        //     )
-        //     .start_guard();
+    pub fn discover(&mut self, span: &Span) -> Result<State, BootstrapError> {
+        let guard = span
+            .create_child(
+                "Loading douglas system, discovering current seedling state",
+                ScopeKind::Phase,
+            )
+            .start_guard();
 
-        // let mut result = State::default();
+        let mut result = State::default();
 
-        // match self
-        //     .bract_client
-        //     .status(&core_seedling_definitions::TRAEFIK)
-        //     .await?
-        // {
-        //     bract::SeedlingStatus::Running => (),
-        //     bract::SeedlingStatus::Defined => result
-        //         .core_seedlings_needing_start
-        //         .push(core_seedling_definitions::TRAEFIK.clone()),
-        //     bract::SeedlingStatus::Unknown => {
-        //         result.core_seedlings_missing.push((
-        //             core_seedling_definitions::TRAEFIK.clone(),
-        //             core_seedling_definitions::traefik()?,
-        //         ));
-        //         result
-        //             .core_seedlings_needing_start
-        //             .push(core_seedling_definitions::TRAEFIK.clone());
-        //     }
-        // }
+        for (name, version, seedling_definition) in core_seedlings::all()? {
+            result.core_seedlings.push((
+                name.clone(),
+                version.clone(),
+                seedling_definition.clone(),
+            ));
+        }
 
-        // guard.finish_with_outcome(log::Outcome::Ok);
-        // Ok(result)
+        guard.finish(Ok(result))
     }
 }
 
 fn create_plan<'a>(mut state: State) -> Result<Vec<Step<'a>>, BootstrapError> {
     let mut result = Vec::new();
 
-    for (name, seedling) in state.core_seedlings_missing.drain(std::ops::RangeFull) {
-        push_step(&mut result, CreateSeedling::new(name, seedling));
+    for (name, version, definition) in state.core_seedlings.drain(std::ops::RangeFull) {
+        push_step(
+            &mut result,
+            ReconcileSeedling::new(name, version, definition),
+        );
     }
 
-    todo!();
+    Ok(result)
 }
 
-pub async fn perform(reporter: Arc<dyn Reporter>) {}
+pub async fn perform(
+    reporter: Arc<dyn Reporter>,
+    bract_client: Arc<dyn bract_client::Client>,
+) -> bool {
+    let guard = Span::new(
+        Arc::clone(&reporter),
+        "Bootstraping core seedlings",
+        log::ScopeKind::Group,
+    )
+    .start_guard();
 
-struct CreateSeedling {
+    let mut state_observer = StateObserver::new(Arc::clone(&reporter));
+    let state = match state_observer.discover(guard.span()) {
+        Ok(state) => state,
+        Err(err) => {
+            guard.span().message(Level::Warn, &err.to_string());
+            return false;
+        }
+    };
+
+    let Ok(plan) = resolve_plan(guard.span(), create_plan(state)) else {
+        guard.finish_with_outcome(log::Outcome::Failed);
+        return false;
+    };
+
+    let mut context = Context {
+        bract_client: bract_client.as_ref(),
+    };
+
+    if let Ok(()) = execute_plan(guard.span(), plan, &mut context, |_reason| ()).await {
+        guard.finish_with_outcome(Outcome::Ok);
+        true
+    } else {
+        guard.finish_with_outcome(Outcome::Failed);
+        false
+    }
+}
+
+struct ReconcileSeedling {
     name: Name,
-    seedling: SeedlingDefinition,
+    version: Version,
+    definition: SeedlingDefinition,
 }
 
-impl CreateSeedling {
-    pub fn new(name: Name, seedling: SeedlingDefinition) -> Self {
-        Self { name, seedling }
+impl ReconcileSeedling {
+    pub fn new(name: Name, version: Version, definition: SeedlingDefinition) -> Self {
+        Self {
+            name,
+            version,
+            definition,
+        }
     }
 }
 
-impl std::fmt::Display for CreateSeedling {
+impl std::fmt::Display for ReconcileSeedling {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Create seedling '{}' ", self.name)
+        write!(f, "Reconcile seedling definition '{}' ", self.name)
     }
 }
 
-#[async_trait(?Send)]
-impl<'a> Command<Context<'a>> for CreateSeedling {
+#[async_trait]
+impl<'a> Command<Context<'a>> for ReconcileSeedling {
     fn name(&self) -> String {
-        "Create Seedling".to_string()
+        "Reconcile Seedling Definition".to_string()
     }
 
     async fn run(
         &mut self,
         span: &Span,
         context: &mut Context<'a>,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let guard = span
             .create_child(
-                &format!("Created seedling '{}'!", self.name),
+                &format!("Reconcile seedling definition '{}'!", self.name),
                 ScopeKind::Step,
             )
             .start_guard();
         context
             .bract_client
-            .create_seedling(&self.name, &self.seedling)
+            .reconcile_seedling(&self.name, &self.version, &self.definition)
             .await?;
         guard.finish_with_outcome(Outcome::Ok);
         Ok(())
     }
 }
 
-pub mod core_seedling_definitions {
+pub mod core_seedlings {
     use crate::bootstrap::seedlings::BootstrapError;
     use docker_types::VersionedImageName;
     use seedbank::{Mount, MountContents, MountType, Name, SeedlingDefinition};
+    use seedbank_types::Version;
     use std::str::FromStr;
-    use std::sync::LazyLock;
     use std::{
         collections::{HashMap, HashSet},
         path::PathBuf,
     };
 
-    #[allow(
-        clippy::expect_used,
-        reason = "TRAEFIK is a hardcoded literal, known valid at compile time"
-    )]
-    pub static TRAEFIK: LazyLock<Name> =
-        LazyLock::new(|| Name::from_str("traefik").expect("valid name"));
+    pub fn all() -> Result<Vec<(Name, Version, SeedlingDefinition)>, BootstrapError> {
+        Ok(vec![traefik()?])
+    }
 
-    pub fn traefik() -> Result<SeedlingDefinition, BootstrapError> {
+    fn traefik() -> Result<(Name, Version, SeedlingDefinition), BootstrapError> {
+        let name = Name::from_str("traefik")?;
+        let version = Version(2);
         let mount_name: Name = "config".parse()?;
 
-        Ok(SeedlingDefinition::new(
-            VersionedImageName::specific(TRAEFIK.as_ref(), "v3.7.7"),
+        let definition = SeedlingDefinition::new(
+            VersionedImageName::specific(name.as_ref(), "v3.7.7"),
             HashMap::from([(
                 mount_name,
                 Mount::build(
                     MountType::Persisted,
                     PathBuf::from("/etc/traefik"),
+                    seedbank_types::AccessMode::Writable,
                     HashSet::from([
                         MountContents::file("traefik.yml", generate_default_static_definition())?,
                         MountContents::folder_only("dynamic")?,
                     ]),
                 ),
             )]),
-        ))
+        );
+
+        Ok((name, version, definition))
     }
 
     fn generate_default_static_definition() -> &'static [u8] {

@@ -59,7 +59,7 @@ impl std::fmt::Display for ScopeId {
     }
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Event {
     pub timestamp: SystemTime,
     pub scope_id: ScopeId,
@@ -254,6 +254,28 @@ impl Drop for ScopedReporter<'_> {
 
 pub trait Reporter: Send + Sync {
     fn emit(&self, event: Event);
+}
+
+impl Reporter for Arc<dyn Reporter> {
+    fn emit(&self, event: Event) {
+        self.as_ref().emit(event);
+    }
+}
+
+pub struct ChannelReporter {
+    sender: tokio::sync::mpsc::UnboundedSender<Event>,
+}
+
+impl ChannelReporter {
+    pub fn new(sender: tokio::sync::mpsc::UnboundedSender<Event>) -> Self {
+        Self { sender }
+    }
+}
+
+impl Reporter for ChannelReporter {
+    fn emit(&self, event: Event) {
+        let _ = self.sender.send(event);
+    }
 }
 
 impl dyn Reporter {

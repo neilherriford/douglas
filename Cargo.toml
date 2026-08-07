@@ -9,6 +9,8 @@ license = "MIT"
 async-trait = { workspace = true }
 blueprint = { workspace = true }
 bract = { workspace = true }
+bract_client = { workspace = true }
+bract_types = { workspace = true }
 clap = { version = "4.5.32", features = ["derive"] }
 colored = { workspace = true }
 command-fds = "0.3.3"
@@ -16,7 +18,7 @@ config = { workspace = true }
 credentials = { workspace = true }
 crossterm = { workspace = true }
 daemonize = "0.5.0"
-docker = { workspace = true }
+docker_types = { workspace = true }
 file_system = { workspace = true }
 humantime = { workspace = true }
 log = { workspace = true }
@@ -29,6 +31,8 @@ ratatui = { workspace = true }
 resin = { workspace = true }
 resin_types = { workspace = true }
 seedbank = { workspace = true }
+seedbank_client = { workspace = true }
+seedbank_types = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 simple_rest_client = { workspace = true }
@@ -48,13 +52,14 @@ members = [
     "log",
     "file_system",
     "os",
-    "bract", "config", "utils", "openbao", "blueprint", "service_library", "application_definition_repository", "resin", "seedbank", "seedbank_types", "docker_types", "refined_string",
+    "bract", "bract_types", "bract_client", "config", "utils", "openbao", "blueprint", "service_library",  "resin", "seedbank", "seedbank_types", "docker_types", "refined_string",
     "seedbank_client", "resin_client", "resin_types",
 ]
 
 [workspace.dependencies]
 # External
 async-trait = "0.1"
+time = { version = "0.3", features = ["parsing", "formatting"] }
 colored = "3"
 http-body-util = "0.1"
 humantime = "2.3.0"
@@ -75,9 +80,10 @@ toml = "1.1.2"
 users = "=0.11"
 uuid = { version = "1.23.1", features = ["v7", "serde"] }
 # Internal
-application_definition_repository = { path = "./application_definition_repository" }
 blueprint = { path = "./blueprint" }
 bract = { path = "./bract" }
+bract_client = { path = "./bract_client" }
+bract_types = { path = "./bract_types" }
 config = { path = "./config" }
 credentials = { path = "./credentials" }
 docker = { path = "./docker" }
