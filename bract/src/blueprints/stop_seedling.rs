@@ -1,4 +1,5 @@
 use crate::blueprints::container_name;
+use crate::labels;
 use async_trait::async_trait;
 use blueprint::{
     Command,
@@ -20,6 +21,8 @@ pub enum StopSeedlingError {
     DockerNameError(#[from] DockerNameError),
     #[error("Cannot stop seedling {0}")]
     CannotStopSeedling(String),
+    #[error("Cannot stop seedling {0}: it is a core seedling managed by douglas")]
+    CoreSeedling(String),
 }
 
 struct Context<'a> {
@@ -32,6 +35,7 @@ struct State {
     container_is_running: bool,
     container_name: docker_types::ContainerName,
     version: Option<seedbank_types::Version>,
+    origin: Option<labels::Origin>,
 }
 
 pub async fn execute(
@@ -104,6 +108,7 @@ impl<'a> StateObserver<'a> {
             container_is_running: false,
             container_name: container_name(name)?,
             version: None,
+            origin: None,
         };
 
         if !self
@@ -121,11 +126,12 @@ impl<'a> StateObserver<'a> {
             .await?
             == docker_types::Status::Running;
 
-        let labels = self
+        let container_labels = self
             .docker_client
             .container_labels(ContainerRef::FullName(result.container_name.clone()))
             .await?;
-        result.version = crate::labels::get_version(labels).ok();
+        result.origin = labels::get_origin(&container_labels);
+        result.version = labels::get_version(&container_labels).ok();
 
         guard.finish(Ok(result))
     }
@@ -148,6 +154,9 @@ fn create_plan<'a>(
             "Seedling not started".to_string(),
         ));
     }
+    if state.origin == Some(labels::Origin::Core) {
+        return Err(StopSeedlingError::CoreSeedling(name.to_string()));
+    }
     if !state.container_is_running {
         return Err(StopSeedlingError::CannotStopSeedling(
             "Seedling is not running".to_string(),
@@ -160,6 +169,61 @@ fn create_plan<'a>(
     );
 
     Ok(steps)
+}
+
+struct StopSeedling {
+    seedling_name: seedbank_types::Name,
+    container_name: docker_types::ContainerName,
+    version: Option<seedbank_types::Version>,
+}
+
+impl StopSeedling {
+    pub fn new(
+        seedling_name: seedbank_types::Name,
+        container_name: docker_types::ContainerName,
+        version: Option<seedbank_types::Version>,
+    ) -> Self {
+        Self {
+            seedling_name,
+            container_name,
+            version,
+        }
+    }
+}
+
+impl std::fmt::Display for StopSeedling {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.version {
+            Some(version) => write!(f, "Stopping seedling '{}' (v{version})", self.seedling_name),
+            None => write!(f, "Stopping seedling '{}'", self.seedling_name),
+        }
+    }
+}
+
+#[async_trait]
+impl<'a> Command<Context<'a>> for StopSeedling {
+    fn name(&self) -> String {
+        "Stopping seedling".to_string()
+    }
+
+    async fn run(
+        &mut self,
+        span: &Span,
+        context: &mut Context<'a>,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let message = match &self.version {
+            Some(version) => format!("Stopping seedling '{}' (v{version})…", self.seedling_name),
+            None => format!("Stopping seedling '{}'…", self.seedling_name),
+        };
+        let guard = span.create_child(&message, ScopeKind::Step).start_guard();
+
+        context
+            .docker_client
+            .stop_container(ContainerRef::FullName(self.container_name.clone()))
+            .await?;
+
+        guard.finish(Ok(()))
+    }
 }
 
 #[cfg(test)]
@@ -176,6 +240,7 @@ mod tests {
             container_is_running: true,
             container_name: container_name(&name()).unwrap(),
             version: Some(seedbank_types::Version(1)),
+            origin: Some(labels::Origin::User),
         }
     }
 
@@ -241,62 +306,17 @@ mod tests {
             Err(StopSeedlingError::CannotStopSeedling(_))
         ));
     }
-}
 
-struct StopSeedling {
-    seedling_name: seedbank_types::Name,
-    container_name: docker_types::ContainerName,
-    version: Option<seedbank_types::Version>,
-}
+    #[test]
+    fn test_create_plan_should_refuse_to_stop_a_core_seedling() {
+        let result = create_plan(
+            &name(),
+            State {
+                origin: Some(labels::Origin::Core),
+                ..stoppable_state()
+            },
+        );
 
-impl StopSeedling {
-    pub fn new(
-        seedling_name: seedbank_types::Name,
-        container_name: docker_types::ContainerName,
-        version: Option<seedbank_types::Version>,
-    ) -> Self {
-        Self {
-            seedling_name,
-            container_name,
-            version,
-        }
-    }
-}
-
-impl std::fmt::Display for StopSeedling {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match &self.version {
-            Some(version) => write!(f, "Stopping seedling '{}' (v{version})", self.seedling_name),
-            None => write!(f, "Stopping seedling '{}'", self.seedling_name),
-        }
-    }
-}
-
-#[async_trait]
-impl<'a> Command<Context<'a>> for StopSeedling {
-    fn name(&self) -> String {
-        "Stopping seedling".to_string()
-    }
-
-    async fn run(
-        &mut self,
-        span: &Span,
-        context: &mut Context<'a>,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let message = match &self.version {
-            Some(version) => format!(
-                "Stopping seedling '{}' (v{version})…",
-                self.seedling_name
-            ),
-            None => format!("Stopping seedling '{}'…", self.seedling_name),
-        };
-        let guard = span.create_child(&message, ScopeKind::Step).start_guard();
-
-        context
-            .docker_client
-            .stop_container(ContainerRef::FullName(self.container_name.clone()))
-            .await?;
-
-        guard.finish(Ok(()))
+        assert!(matches!(result, Err(StopSeedlingError::CoreSeedling(_))));
     }
 }

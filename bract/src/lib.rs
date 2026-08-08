@@ -336,7 +336,7 @@ impl Bract {
         container: docker_types::ContainerSnapshot,
         version: &seedbank_types::Version,
     ) -> Result<SeedlingStatus, Error> {
-        let actual_version = labels::get_version(container.definition.labels)?;
+        let actual_version = labels::get_version(&container.definition.labels)?;
 
         let definition_status = match actual_version.cmp(version) {
             Ordering::Equal => bract_types::DefinitionStatus::Current,
@@ -433,6 +433,7 @@ impl Server for Bract {
             name,
             version,
             seedling_definition,
+            labels::Origin::Core,
         )
         .await
         .map_err(Error::from)

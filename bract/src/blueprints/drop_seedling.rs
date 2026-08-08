@@ -1,4 +1,5 @@
 use crate::blueprints::container_name;
+use crate::labels;
 use async_trait::async_trait;
 use blueprint::{
     Command,
@@ -20,6 +21,8 @@ pub enum DropSeedlingError {
     DockerNameError(#[from] DockerNameError),
     #[error("Cannot drop seedling {0}")]
     CannotDropSeedling(String),
+    #[error("Cannot drop seedling {0}: it is a core seedling managed by douglas")]
+    CoreSeedling(String),
 }
 
 struct Context<'a> {
@@ -32,6 +35,7 @@ struct State {
     container_is_stopped: bool,
     container_name: docker_types::ContainerName,
     version: Option<seedbank_types::Version>,
+    origin: Option<labels::Origin>,
 }
 
 pub async fn execute(
@@ -104,6 +108,7 @@ impl<'a> StateObserver<'a> {
             container_is_stopped: false,
             container_name: container_name(name)?,
             version: None,
+            origin: None,
         };
 
         if !self
@@ -123,11 +128,12 @@ impl<'a> StateObserver<'a> {
                 | docker_types::Status::Dead
         );
 
-        let labels = self
+        let container_labels = self
             .docker_client
             .container_labels(ContainerRef::FullName(result.container_name.clone()))
             .await?;
-        result.version = crate::labels::get_version(labels).ok();
+        result.origin = labels::get_origin(&container_labels);
+        result.version = labels::get_version(&container_labels).ok();
 
         guard.finish(Ok(result))
     }
@@ -149,6 +155,9 @@ fn create_plan<'a>(
         return Err(DropSeedlingError::CannotDropSeedling(
             "Seedling not started".to_string(),
         ));
+    }
+    if state.origin == Some(labels::Origin::Core) {
+        return Err(DropSeedlingError::CoreSeedling(name.to_string()));
     }
     if !state.container_is_stopped {
         return Err(DropSeedlingError::CannotDropSeedling(
@@ -178,6 +187,7 @@ mod tests {
             container_is_stopped: true,
             container_name: container_name(&name()).unwrap(),
             version: Some(seedbank_types::Version(1)),
+            origin: Some(labels::Origin::User),
         }
     }
 
@@ -242,6 +252,19 @@ mod tests {
             result,
             Err(DropSeedlingError::CannotDropSeedling(_))
         ));
+    }
+
+    #[test]
+    fn test_create_plan_should_refuse_to_drop_a_core_seedling() {
+        let result = create_plan(
+            &name(),
+            State {
+                origin: Some(labels::Origin::Core),
+                ..droppable_state()
+            },
+        );
+
+        assert!(matches!(result, Err(DropSeedlingError::CoreSeedling(_))));
     }
 }
 

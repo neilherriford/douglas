@@ -1,5 +1,6 @@
 use crate::{
     blueprints::{EXPECTED_MOUNT_MODE, container_name, seedling_mount_path},
+    labels,
     rolodex::{Rolodex, RolodexError},
 };
 use async_trait::async_trait;
@@ -34,6 +35,8 @@ pub enum StartSeedlingError {
     SeedbankError(#[from] seedbank_client::Error),
     #[error("Cannot start seedling {0}")]
     CannotStartSeedling(String),
+    #[error("Cannot start seedling {0}: it is a core seedling managed by douglas")]
+    CoreSeedling(String),
 }
 
 struct Context<'a> {
@@ -50,6 +53,7 @@ struct State {
     container_is_startable: bool,
     container_name: Option<docker_types::ContainerName>,
     version: Option<seedbank_types::Version>,
+    origin: Option<labels::Origin>,
 }
 
 pub async fn execute(
@@ -196,6 +200,12 @@ impl<'a> StateObserver<'a> {
         }
         result.container_exists = true;
 
+        let container_labels = self
+            .docker_client
+            .container_labels(ContainerRef::FullName(derived_container_name.clone()))
+            .await?;
+        result.origin = labels::get_origin(&container_labels);
+
         for (mount_name, mount_definition) in seedling.definition.mounts {
             let expected = seedling_mount_path(self.douglas_folders, &seedling.name, &mount_name);
 
@@ -284,6 +294,9 @@ fn create_plan<'a>(
             "Docker instance not initialized".to_string(),
         ));
     }
+    if state.origin == Some(labels::Origin::Core) {
+        return Err(StartSeedlingError::CoreSeedling(name.to_string()));
+    }
     if !state.mounts_initialized {
         return Err(StartSeedlingError::CannotStartSeedling(
             "Could not initialize".to_string(),
@@ -333,6 +346,7 @@ mod tests {
             container_is_startable: true,
             container_name: Some(container_name(&name()).unwrap()),
             version: Some(seedbank_types::Version(1)),
+            origin: Some(labels::Origin::User),
         }
     }
 
@@ -413,6 +427,19 @@ mod tests {
             Err(StartSeedlingError::CannotStartSeedling(_))
         ));
     }
+
+    #[test]
+    fn test_create_plan_should_refuse_to_start_a_core_seedling() {
+        let result = create_plan(
+            &name(),
+            State {
+                origin: Some(labels::Origin::Core),
+                ..startable_state()
+            },
+        );
+
+        assert!(matches!(result, Err(StartSeedlingError::CoreSeedling(_))));
+    }
 }
 
 struct StartSeedling {
@@ -458,7 +485,10 @@ impl<'a> Command<Context<'a>> for StartSeedling {
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let guard = span
             .create_child(
-                &format!("Starting seedling '{}' (v{})", self.seedling_name, self.version),
+                &format!(
+                    "Starting seedling '{}' (v{})",
+                    self.seedling_name, self.version
+                ),
                 ScopeKind::Step,
             )
             .start_guard();

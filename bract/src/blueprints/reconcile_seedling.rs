@@ -72,6 +72,7 @@ struct Context<'a> {
     file_writer: &'a dyn FileWriter,
     permissions: &'a dyn Permissions,
     registry: &'a docker_types::Registry,
+    origin: labels::Origin,
 }
 
 #[derive(Debug)]
@@ -123,6 +124,7 @@ pub async fn execute(
     name: &seedbank_types::Name,
     version: &seedbank_types::Version,
     seedling_definition: &seedbank_types::SeedlingDefinition,
+    origin: labels::Origin,
 ) -> Result<(), ReconcileSeedlingError> {
     let guard = Span::new(
         Arc::clone(&reporter),
@@ -188,6 +190,7 @@ pub async fn execute(
             permissions,
             file_writer,
             registry,
+            origin,
         };
         execute_plan(guard.span(), plan, &mut context, |reason| {
             ReconcileSeedlingError::FailedBoostrap(vec![reason])
@@ -471,7 +474,7 @@ impl<'a> StateObserver<'a> {
             .await
         {
             Ok(labels) => {
-                let actual_version = labels::get_version(labels)?;
+                let actual_version = labels::get_version(&labels)?;
 
                 let comparison = match version.cmp(&actual_version) {
                     Ordering::Less => VersionComparison::Newer,
@@ -628,7 +631,10 @@ fn create_plan<'a>(
 
     match state.container_status {
         VersionComparison::Missing => {
-            push_step(&mut steps, BuildContainer::new(name.clone(), version.clone()));
+            push_step(
+                &mut steps,
+                BuildContainer::new(name.clone(), version.clone()),
+            );
             push_step(
                 &mut steps,
                 StartContainer::new(container_name, version.clone()),
@@ -657,7 +663,10 @@ fn create_plan<'a>(
                 &mut steps,
                 DropContainer::new(container_name.clone(), current_version),
             );
-            push_step(&mut steps, BuildContainer::new(name.clone(), version.clone()));
+            push_step(
+                &mut steps,
+                BuildContainer::new(name.clone(), version.clone()),
+            );
             push_step(
                 &mut steps,
                 StartContainer::new(container_name, version.clone()),
@@ -1257,7 +1266,10 @@ impl<'a> Command<Context<'a>> for BuildContainer {
             image: context.seedling_definition.image.clone(),
             mounts,
             added_capabilities: Vec::new(),
-            labels: vec![labels::create_version_label(context.version)],
+            labels: vec![
+                labels::create_version_label(context.version),
+                labels::create_origin_label(context.origin),
+            ],
         };
 
         context
@@ -1393,8 +1405,14 @@ mod tests {
 
     #[test]
     fn test_create_plan_should_do_nothing_when_everything_is_current() {
-        let steps = create_plan(&name(), &seedbank_types::Version(1), &seedling_definition(), state(), &registry())
-            .expect("should produce a plan");
+        let steps = create_plan(
+            &name(),
+            &seedbank_types::Version(1),
+            &seedling_definition(),
+            state(),
+            &registry(),
+        )
+        .expect("should produce a plan");
 
         assert!(step_descriptions(steps).is_empty());
     }
