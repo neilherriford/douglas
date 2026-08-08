@@ -228,6 +228,7 @@ pub async fn find(
 
     let name = buffer
         .name
+        .trim_start_matches('/')
         .parse()
         .map_err(
             |err: docker_types::DockerNameError| DockerError::InvalidName {

@@ -11,20 +11,14 @@ pub fn build_boot_reporter(log_path: PathBuf, reporting_fd: Option<i32>) -> Arc<
     Arc::new(TeeReporter::new(sinks))
 }
 
-pub fn resolve_plan<TContext, E: std::fmt::Display>(
+pub fn resolve_plan<TContext, E>(
     span: &Span,
     plan: Result<Vec<Box<dyn Command<TContext>>>, E>,
 ) -> Result<Vec<Box<dyn Command<TContext>>>, E> {
-    match plan {
-        Ok(plan) => {
-            span.plan_hint(plan.iter().map(std::string::ToString::to_string).collect());
-            Ok(plan)
-        }
-        Err(err) => {
-            span.message(Level::Warn, &err.to_string());
-            Err(err)
-        }
+    if let Ok(plan) = &plan {
+        span.plan_hint(plan.iter().map(std::string::ToString::to_string).collect());
     }
+    plan
 }
 
 pub async fn execute_plan<TContext: Send, E>(

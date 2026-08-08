@@ -533,9 +533,13 @@ pub async fn perform(
         }
     };
 
-    let Ok(plan) = resolve_plan(guard.span(), create_plan(state)) else {
-        guard.finish_with_outcome(log::Outcome::Failed);
-        return false;
+    let plan = match resolve_plan(guard.span(), create_plan(state)) {
+        Ok(plan) => plan,
+        Err(err) => {
+            guard.span().message(Level::Warn, &err.to_string());
+            guard.finish_with_outcome(log::Outcome::Failed);
+            return false;
+        }
     };
 
     if plan_only {

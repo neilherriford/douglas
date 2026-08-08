@@ -365,6 +365,9 @@ pub struct ScopeGuard {
 }
 
 impl ScopeGuard {
+    pub fn reporter(&self) -> Arc<dyn Reporter> {
+        Arc::clone(&self.span.reporter)
+    }
     pub fn finish_with_outcome(&self, outcome: Outcome) {
         if !self.closed.swap(true, Ordering::SeqCst) {
             self.span

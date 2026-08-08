@@ -19,6 +19,7 @@ pub enum SeedlingStatus {
     Running(DefinitionStatus),
     Defined(DefinitionStatus),
     Missing,
+    Unknown,
 }
 
 impl std::fmt::Display for SeedlingStatus {
@@ -31,6 +32,7 @@ impl std::fmt::Display for SeedlingStatus {
                 f.write_str(&format!("defined: {definition_status}"))
             }
             SeedlingStatus::Missing => f.write_str("missing"),
+            SeedlingStatus::Unknown => f.write_str("unknown seedling"),
         }
     }
 }

@@ -152,9 +152,7 @@ fn create_plan<'a>(
     let mut steps: Vec<Box<dyn Command<Context>>> = Vec::new();
 
     if !state.container_exists {
-        return Err(DropSeedlingError::CannotDropSeedling(
-            "Seedling not started".to_string(),
-        ));
+        return Ok(steps);
     }
     if state.origin == Some(labels::Origin::Core) {
         return Err(DropSeedlingError::CoreSeedling(name.to_string()));
@@ -223,19 +221,17 @@ mod tests {
     }
 
     #[test]
-    fn test_create_plan_should_refuse_when_the_container_does_not_exist() {
-        let result = create_plan(
+    fn test_create_plan_should_be_a_no_op_when_the_container_does_not_exist() {
+        let steps = create_plan(
             &name(),
             State {
                 container_exists: false,
                 ..droppable_state()
             },
-        );
+        )
+        .expect("should produce a plan");
 
-        assert!(matches!(
-            result,
-            Err(DropSeedlingError::CannotDropSeedling(_))
-        ));
+        assert!(step_descriptions(steps).is_empty());
     }
 
     #[test]

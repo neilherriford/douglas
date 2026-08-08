@@ -383,7 +383,11 @@ impl Server for Bract {
     ) -> Result<SeedlingStatus, Error> {
         let guard = Span::new(reporter, "Fetching seedling status", ScopeKind::Task).start_guard();
 
-        let seedling = self.load_seedling(name).await?;
+        let seedling = match self.load_seedling(name).await {
+            Ok(seedling) => seedling,
+            Err(Error::UnknownSeedling) => return guard.finish(Ok(SeedlingStatus::Unknown)),
+            Err(err) => return guard.finish(Err(err)),
+        };
         let container_name: ContainerName = blueprints::container_name(&seedling.name)?;
 
         let mount_names = seedling
