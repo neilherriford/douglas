@@ -1,5 +1,5 @@
 use crate::{
-    Header, Request, Response, RestClient, RestClientError, ServerClosedConnections,
+    Header, Reconnect, Request, Response, RestClient, RestClientError, ServerClosedConnections,
     SimpleRestClient, StreamedResponse,
 };
 use async_trait::async_trait;
@@ -136,6 +136,30 @@ static TLS_CONFIG: LazyLock<Arc<ClientConfig>> = LazyLock::new(|| {
     )
 });
 
+struct TlsSocketReconnect {
+    host: String,
+    port: u16,
+    authority: String,
+}
+
+#[async_trait::async_trait]
+impl Reconnect<IoStream> for TlsSocketReconnect {
+    async fn connect(&self) -> std::io::Result<IoStream> {
+        let tcp_stream = TcpStream::connect((self.host.as_str(), self.port)).await?;
+
+        let server_name = ServerName::try_from(self.host.clone())
+            .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidInput, err))?;
+
+        let connector = TlsConnector::from(Arc::clone(&TLS_CONFIG));
+        let tls_stream = connector.connect(server_name, tcp_stream).await?;
+
+        Ok(IoStream {
+            stream: TokioIo::new(tls_stream),
+            authority: self.authority.clone(),
+        })
+    }
+}
+
 pub async fn build_client(
     authority: &str,
     server_closed_connections: ServerClosedConnections,
@@ -169,11 +193,17 @@ pub async fn build_client(
         stream: TokioIo::new(tls_stream),
         authority: authority.to_string(),
     };
+    let reconnect = Arc::new(TlsSocketReconnect {
+        host: host.to_string(),
+        port,
+        authority: authority.to_string(),
+    });
 
     Ok(SimpleRestClient::new(
         "https",
         authority,
         io_stream,
+        reconnect,
         vec![Header::new("host", host)],
         server_closed_connections,
     ))

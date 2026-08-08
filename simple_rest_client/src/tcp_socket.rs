@@ -1,6 +1,7 @@
-use crate::{Header, RestClient, ServerClosedConnections, SimpleRestClient};
+use crate::{Header, Reconnect, RestClient, ServerClosedConnections, SimpleRestClient};
 use hyper_util::rt::TokioIo;
 use std::fmt::Formatter;
+use std::sync::Arc;
 use thiserror::Error;
 
 use hyper::rt::{Read, ReadBufCursor, Write};
@@ -85,6 +86,23 @@ impl PartialEq for BuilderError {
     }
 }
 
+struct TcpSocketReconnect {
+    host: String,
+    port: u16,
+    authority: String,
+}
+
+#[async_trait::async_trait]
+impl Reconnect<IoStream> for TcpSocketReconnect {
+    async fn connect(&self) -> std::io::Result<IoStream> {
+        let tcp_stream = TcpStream::connect((self.host.as_str(), self.port)).await?;
+        Ok(IoStream {
+            stream: TokioIo::new(tcp_stream),
+            authority: self.authority.clone(),
+        })
+    }
+}
+
 pub async fn build_client(
     host: &str,
     port: u16,
@@ -103,11 +121,17 @@ pub async fn build_client(
         stream: TokioIo::new(tcp_stream),
         authority: authority.clone(),
     };
+    let reconnect = Arc::new(TcpSocketReconnect {
+        host: host.to_string(),
+        port,
+        authority: authority.clone(),
+    });
 
     Ok(SimpleRestClient::new(
         "http",
         &authority,
         io_stream,
+        reconnect,
         vec![Header::new("host", host)],
         server_closed_connections,
     ))

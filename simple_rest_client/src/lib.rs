@@ -24,8 +24,8 @@ pub enum RestClientError {
     Stream(#[from] hyper::http::Error),
     #[error("Client error: {0}")]
     Client(#[from] hyper::Error),
-    #[error("IO stream already taken")]
-    IoStreamAlreadyTaken,
+    #[error("Connection error: {0}")]
+    ConnectionError(std::io::Error),
     #[error("General error: {0}")]
     General(String),
 }
@@ -39,11 +39,18 @@ impl PartialEq for RestClientError {
             (RestClientError::Client(left), RestClientError::Client(right)) => {
                 left.to_string() == right.to_string()
             }
-            (RestClientError::IoStreamAlreadyTaken, RestClientError::IoStreamAlreadyTaken) => true,
+            (RestClientError::ConnectionError(left), RestClientError::ConnectionError(right)) => {
+                left.to_string() == right.to_string()
+            }
             (RestClientError::General(left), RestClientError::General(right)) => left == right,
             _ => false,
         }
     }
+}
+
+#[async_trait::async_trait]
+pub trait Reconnect<TIo>: Send + Sync {
+    async fn connect(&self) -> std::io::Result<TIo>;
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -302,6 +309,7 @@ pub struct SimpleRestClient<TIo: IoStream> {
     scheme: String,
     authority: String,
     io_stream: Option<TIo>,
+    reconnect: Arc<dyn Reconnect<TIo>>,
     sender: Option<SendRequest<String>>,
     default_headers: Vec<Header>,
     server_closed_connections: ServerClosedConnections,
@@ -312,6 +320,7 @@ impl<TIo: IoStream + 'static> SimpleRestClient<TIo> {
         scheme: &str,
         authority: &str,
         io_stream: TIo,
+        reconnect: Arc<dyn Reconnect<TIo>>,
         default_headers: Vec<Header>,
         server_closed_connections: ServerClosedConnections,
     ) -> Self {
@@ -319,6 +328,7 @@ impl<TIo: IoStream + 'static> SimpleRestClient<TIo> {
             scheme: scheme.into(),
             authority: authority.into(),
             io_stream: Some(io_stream),
+            reconnect,
             sender: None,
             default_headers,
             server_closed_connections,
@@ -403,10 +413,14 @@ impl<TIo: IoStream + 'static> SimpleRestClient<TIo> {
                 .create_child("Initialize sender", ScopeKind::Task)
                 .start_guard();
 
-            let io = self
-                .io_stream
-                .take()
-                .ok_or(RestClientError::IoStreamAlreadyTaken)?;
+            let io = match self.io_stream.take() {
+                Some(io) => io,
+                None => self
+                    .reconnect
+                    .connect()
+                    .await
+                    .map_err(RestClientError::ConnectionError)?,
+            };
 
             let (sender, conn) = hyper::client::conn::http1::handshake::<TIo, String>(io).await?;
 
@@ -574,6 +588,31 @@ impl<TIo: IoStream + 'static> SimpleRestClient<TIo> {
         span.message(Level::Info, &result);
     }
 
+    async fn send_with_reconnect(
+        &mut self,
+        span: &Span,
+        request: &Request,
+    ) -> Result<hyper::Response<hyper::body::Incoming>, RestClientError> {
+        let reused_existing_connection = self.sender.is_some();
+        self.initialize_sender(span).await?;
+        let hyper_request = self.build_hyper_request(request)?;
+
+        match self.send_hyper_request(hyper_request).await {
+            Ok(response) => Ok(response),
+            Err(_) if reused_existing_connection => {
+                span.message(
+                    Level::Warn,
+                    "Cached connection appears dead, reconnecting and retrying once",
+                );
+                self.sender = None;
+                self.initialize_sender(span).await?;
+                let retry_request = self.build_hyper_request(request)?;
+                Ok(self.send_hyper_request(retry_request).await?)
+            }
+            Err(err) => Err(err.into()),
+        }
+    }
+
     fn log_response(
         &self,
         span: &Span,
@@ -614,10 +653,7 @@ where
             .start_guard();
 
         self.log_request(guard.span(), request);
-        let hyper_request = self.build_hyper_request(request)?;
-
-        self.initialize_sender(guard.span()).await?;
-        let hyper_response = self.send_hyper_request(hyper_request).await?;
+        let hyper_response = self.send_with_reconnect(guard.span(), request).await?;
 
         let (status, headers, raw_body) = self
             .parse_hyper_response(guard.span(), hyper_response)
@@ -641,10 +677,7 @@ where
             .start_guard();
 
         self.log_request(guard.span(), request);
-        let hyper_request = self.build_hyper_request(request)?;
-
-        self.initialize_sender(guard.span()).await?;
-        let hyper_response = self.send_hyper_request(hyper_request).await?;
+        let hyper_response = self.send_with_reconnect(guard.span(), request).await?;
         let headers = Self::gather_headers(&hyper_response);
         let status = hyper_response.status();
 
@@ -802,17 +835,17 @@ mod tests {
         }
 
         #[test]
-        fn test_eq_should_treat_io_stream_already_taken_as_equal() {
-            assert_eq!(
-                RestClientError::IoStreamAlreadyTaken,
-                RestClientError::IoStreamAlreadyTaken
-            );
+        fn test_eq_should_treat_same_connection_errors_as_equal() {
+            let left = RestClientError::ConnectionError(std::io::Error::other("boom"));
+            let right = RestClientError::ConnectionError(std::io::Error::other("boom"));
+
+            assert_eq!(left, right);
         }
 
         #[test]
         fn test_eq_should_treat_different_variants_as_unequal() {
             let left = RestClientError::General("oops".to_string());
-            let right = RestClientError::IoStreamAlreadyTaken;
+            let right = RestClientError::ConnectionError(std::io::Error::other("boom"));
 
             assert_ne!(left, right);
         }
@@ -823,6 +856,133 @@ mod tests {
             let right = RestClientError::General("uhoh".to_string());
 
             assert_ne!(left, right);
+        }
+    }
+
+    mod reconnect_behavior {
+        use super::*;
+        use hyper::rt::{Read as HyperRead, ReadBufCursor, Write as HyperWrite};
+        use hyper_util::rt::TokioIo;
+        use log::Event;
+        use std::time::Duration;
+        use tokio::io::DuplexStream;
+
+        struct NullReporter;
+
+        impl log::Reporter for NullReporter {
+            fn emit(&self, _event: Event) {}
+        }
+
+        struct TestIoStream {
+            stream: TokioIo<DuplexStream>,
+        }
+
+        impl HyperRead for TestIoStream {
+            fn poll_read(
+                mut self: Pin<&mut Self>,
+                cx: &mut Context<'_>,
+                buf: ReadBufCursor<'_>,
+            ) -> Poll<std::io::Result<()>> {
+                Pin::new(&mut self.stream).poll_read(cx, buf)
+            }
+        }
+
+        impl HyperWrite for TestIoStream {
+            fn poll_write(
+                mut self: Pin<&mut Self>,
+                cx: &mut Context<'_>,
+                buf: &[u8],
+            ) -> Poll<std::io::Result<usize>> {
+                Pin::new(&mut self.stream).poll_write(cx, buf)
+            }
+
+            fn poll_flush(
+                mut self: Pin<&mut Self>,
+                cx: &mut Context<'_>,
+            ) -> Poll<std::io::Result<()>> {
+                Pin::new(&mut self.stream).poll_flush(cx)
+            }
+
+            fn poll_shutdown(
+                mut self: Pin<&mut Self>,
+                cx: &mut Context<'_>,
+            ) -> Poll<std::io::Result<()>> {
+                Pin::new(&mut self.stream).poll_shutdown(cx)
+            }
+        }
+
+        impl IoStream for TestIoStream {}
+
+        struct TestReconnect {
+            connect_count: Arc<std::sync::atomic::AtomicUsize>,
+        }
+
+        #[async_trait::async_trait]
+        impl Reconnect<TestIoStream> for TestReconnect {
+            async fn connect(&self) -> std::io::Result<TestIoStream> {
+                self.connect_count
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let (client_end, server_end) = tokio::io::duplex(4096);
+
+                tokio::spawn(async move {
+                    let service = hyper::service::service_fn(|_req| async {
+                        Ok::<_, std::convert::Infallible>(
+                            hyper::Response::builder()
+                                .header("connection", "close")
+                                .body(http_body_util::Full::new(bytes::Bytes::from("ok")))
+                                .unwrap(),
+                        )
+                    });
+                    let _ = hyper::server::conn::http1::Builder::new()
+                        .serve_connection(TokioIo::new(server_end), service)
+                        .await;
+                });
+
+                Ok(TestIoStream {
+                    stream: TokioIo::new(client_end),
+                })
+            }
+        }
+
+        #[tokio::test]
+        async fn test_execute_should_reconnect_and_retry_after_the_server_closes_a_cached_connection()
+         {
+            let connect_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let reconnect = Arc::new(TestReconnect {
+                connect_count: Arc::clone(&connect_count),
+            });
+            let first_io = reconnect
+                .connect()
+                .await
+                .expect("initial connect should succeed");
+
+            let mut client = SimpleRestClient::new(
+                "http",
+                "localhost",
+                first_io,
+                reconnect,
+                vec![],
+                ServerClosedConnections::Ignore,
+            );
+
+            let span = Span::new(Arc::new(NullReporter), "test", ScopeKind::Group);
+            let request = get("/foo");
+
+            let first = client
+                .execute(&span, &request)
+                .await
+                .expect("first request should succeed");
+            assert!(matches!(first, Response::Okay { .. }));
+
+            tokio::time::sleep(Duration::from_millis(50)).await;
+
+            let second = client
+                .execute(&span, &request)
+                .await
+                .expect("second request should succeed via reconnect");
+            assert!(matches!(second, Response::Okay { .. }));
+
+            assert_eq!(connect_count.load(std::sync::atomic::Ordering::SeqCst), 2);
         }
     }
 }

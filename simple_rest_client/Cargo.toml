@@ -31,3 +31,4 @@ webpki-roots = "0.26"
 fake = "4.3.0"
 tokio-test = "0.4"
 log = { workspace = true, features = ["mock"] }
+hyper = { workspace = true, features = ["server"] }

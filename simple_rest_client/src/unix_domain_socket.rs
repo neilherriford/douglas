@@ -1,7 +1,8 @@
-use crate::{Header, RestClient, ServerClosedConnections, SimpleRestClient};
+use crate::{Header, Reconnect, RestClient, ServerClosedConnections, SimpleRestClient};
 use hyper_util::rt::TokioIo;
 use std::fmt::Formatter;
 use std::path::PathBuf;
+use std::sync::Arc;
 use thiserror::Error;
 
 use hyper::rt::{Read, ReadBufCursor, Write};
@@ -98,6 +99,21 @@ impl From<std::io::Error> for BuilderError {
     }
 }
 
+struct UnixSocketReconnect {
+    socket_file_path: PathBuf,
+}
+
+#[async_trait::async_trait]
+impl Reconnect<IoStream> for UnixSocketReconnect {
+    async fn connect(&self) -> std::io::Result<IoStream> {
+        let unix_stream = UnixStream::connect(&self.socket_file_path).await?;
+        Ok(IoStream {
+            stream: TokioIo::new(unix_stream),
+            socket_file_path: self.socket_file_path.clone(),
+        })
+    }
+}
+
 pub async fn build_client(
     socket_file_path: PathBuf,
     server_closed_connections: ServerClosedConnections,
@@ -107,13 +123,15 @@ where
     let unix_stream = UnixStream::connect(socket_file_path.as_path()).await?;
     let io_stream = IoStream {
         stream: TokioIo::new(unix_stream),
-        socket_file_path,
+        socket_file_path: socket_file_path.clone(),
     };
+    let reconnect = Arc::new(UnixSocketReconnect { socket_file_path });
 
     let result = SimpleRestClient::new(
         "http",
         "localhost",
         io_stream,
+        reconnect,
         vec![Header::new("host", "localhost")],
         server_closed_connections,
     );
