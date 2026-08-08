@@ -593,23 +593,21 @@ impl<TIo: IoStream + 'static> SimpleRestClient<TIo> {
         span: &Span,
         request: &Request,
     ) -> Result<hyper::Response<hyper::body::Incoming>, RestClientError> {
-        let reused_existing_connection = self.sender.is_some();
         self.initialize_sender(span).await?;
         let hyper_request = self.build_hyper_request(request)?;
 
         match self.send_hyper_request(hyper_request).await {
             Ok(response) => Ok(response),
-            Err(_) if reused_existing_connection => {
+            Err(_) => {
                 span.message(
                     Level::Warn,
-                    "Cached connection appears dead, reconnecting and retrying once",
+                    "Connection appears dead, reconnecting and retrying once",
                 );
                 self.sender = None;
                 self.initialize_sender(span).await?;
                 let retry_request = self.build_hyper_request(request)?;
                 Ok(self.send_hyper_request(retry_request).await?)
             }
-            Err(err) => Err(err.into()),
         }
     }
 
@@ -981,6 +979,74 @@ mod tests {
                 .await
                 .expect("second request should succeed via reconnect");
             assert!(matches!(second, Response::Okay { .. }));
+
+            assert_eq!(connect_count.load(std::sync::atomic::Ordering::SeqCst), 2);
+        }
+
+        struct FlakyFirstConnectionReconnect {
+            connect_count: Arc<std::sync::atomic::AtomicUsize>,
+        }
+
+        #[async_trait::async_trait]
+        impl Reconnect<TestIoStream> for FlakyFirstConnectionReconnect {
+            async fn connect(&self) -> std::io::Result<TestIoStream> {
+                let attempt = self
+                    .connect_count
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let (client_end, mut server_end) = tokio::io::duplex(4096);
+
+                if attempt == 0 {
+                    tokio::spawn(async move {
+                        let mut buf = [0u8; 1];
+                        let _ = tokio::io::AsyncReadExt::read(&mut server_end, &mut buf).await;
+                    });
+                } else {
+                    tokio::spawn(async move {
+                        let service = hyper::service::service_fn(|_req| async {
+                            Ok::<_, std::convert::Infallible>(hyper::Response::new(
+                                http_body_util::Full::new(bytes::Bytes::from("ok")),
+                            ))
+                        });
+                        let _ = hyper::server::conn::http1::Builder::new()
+                            .serve_connection(TokioIo::new(server_end), service)
+                            .await;
+                    });
+                }
+
+                Ok(TestIoStream {
+                    stream: TokioIo::new(client_end),
+                })
+            }
+        }
+
+        #[tokio::test]
+        async fn test_execute_should_retry_when_the_very_first_connection_is_dead_on_arrival() {
+            let connect_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let reconnect = Arc::new(FlakyFirstConnectionReconnect {
+                connect_count: Arc::clone(&connect_count),
+            });
+            let first_io = reconnect
+                .connect()
+                .await
+                .expect("initial connect should succeed");
+
+            let mut client = SimpleRestClient::new(
+                "http",
+                "localhost",
+                first_io,
+                reconnect,
+                vec![],
+                ServerClosedConnections::Ignore,
+            );
+
+            let span = Span::new(Arc::new(NullReporter), "test", ScopeKind::Group);
+            let request = get("/foo");
+
+            let response = client
+                .execute(&span, &request)
+                .await
+                .expect("should recover via a retry on the very first request");
+            assert!(matches!(response, Response::Okay { .. }));
 
             assert_eq!(connect_count.load(std::sync::atomic::Ordering::SeqCst), 2);
         }
