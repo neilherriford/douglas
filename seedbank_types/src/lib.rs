@@ -282,6 +282,17 @@ impl SeedlingDefinition {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SeedlingSpec {
+    pub mounts: HashMap<Name, Mount>,
+}
+
+impl SeedlingSpec {
+    pub fn new(mounts: HashMap<Name, Mount>) -> Self {
+        Self { mounts }
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum Request {

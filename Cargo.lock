@@ -835,6 +835,7 @@ dependencies = [
  "simple_rest_client",
  "thiserror 1.0.69",
  "tokio",
+ "toml",
  "users",
  "utils",
 ]

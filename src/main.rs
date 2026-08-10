@@ -15,9 +15,10 @@ use file_system::{Folder, Permissions, UnixFolder, UnixPermissions};
 use log::{BufferedFileReporter, Event, Reporter, Span, TeeReporter};
 use os::{EnvironmentVariableReader, Os, Unix, UnixEnvironmentVariableReader};
 use std::{
+    collections::{HashMap, HashSet},
     fmt::{Debug, Display},
     io,
-    path::Path,
+    path::{Path, PathBuf},
     process::ExitCode,
     sync::Arc,
 };
@@ -74,6 +75,7 @@ enum Commands {
         #[command(subcommand)]
         service: ServiceCommand,
     },
+    #[command(about = "Seedling commands")]
     Seedling {
         #[command(subcommand)]
         seedling: SeedlingCommand,
@@ -118,22 +120,28 @@ enum ServiceCommand {
 
 #[derive(Subcommand, Debug)]
 enum SeedlingCommand {
+    #[command(about = "Query seedling status")]
     Status {
         #[arg(long, help = "The seedling to to query")]
         name: String,
     },
+    #[command(about = "Stop a running seedling")]
     Stop {
         #[arg(long, help = "The seedling to to stop")]
         name: String,
     },
+    #[command(about = "Delete a stopped seedling")]
     Drop {
         #[arg(long, help = "The seedling to to drop")]
         name: String,
     },
+    #[command(about = "Start a seedling")]
     Start {
         #[arg(long, help = "The seedling to to start")]
         name: String,
     },
+    #[command(about = "Create a blank template for a seedling")]
+    CreateTemplate,
 }
 
 impl Display for Commands {
@@ -162,6 +170,9 @@ impl Display for Commands {
             Commands::Seedling {
                 seedling: SeedlingCommand::Drop { .. },
             } => f.write_str("drop seedling"),
+            Commands::Seedling {
+                seedling: SeedlingCommand::CreateTemplate,
+            } => f.write_str("create seedling template"),
         }
     }
 }
@@ -204,14 +215,94 @@ fn main() -> ExitCode {
         } => run_with_tokio(get_seedling_status(&name, output_style)),
         Commands::Seedling {
             seedling: SeedlingCommand::Start { name },
-        } => run_with_tokio(run_seedling_action(&name, output_style, SeedlingAction::Start)),
+        } => run_with_tokio(run_seedling_action(
+            &name,
+            output_style,
+            SeedlingAction::Start,
+        )),
         Commands::Seedling {
             seedling: SeedlingCommand::Stop { name },
-        } => run_with_tokio(run_seedling_action(&name, output_style, SeedlingAction::Stop)),
+        } => run_with_tokio(run_seedling_action(
+            &name,
+            output_style,
+            SeedlingAction::Stop,
+        )),
         Commands::Seedling {
             seedling: SeedlingCommand::Drop { name },
-        } => run_with_tokio(run_seedling_action(&name, output_style, SeedlingAction::Drop)),
+        } => run_with_tokio(run_seedling_action(
+            &name,
+            output_style,
+            SeedlingAction::Drop,
+        )),
+        Commands::Seedling {
+            seedling: SeedlingCommand::CreateTemplate,
+        } => create_seedling_template(output_style),
     }
+}
+
+fn example_seedling_spec() -> seedbank_types::SeedlingSpec {
+    let mut mounts = HashMap::new();
+
+    mounts.insert(
+        "config".parse().expect("valid name"),
+        seedbank_types::Mount::build(
+            seedbank_types::MountType::Persisted,
+            PathBuf::from("/etc/example/config"),
+            seedbank_types::AccessMode::ReadOnly,
+            HashSet::new(),
+        ),
+    );
+
+    mounts.insert(
+        "cache".parse().expect("valid name"),
+        seedbank_types::Mount::build(
+            seedbank_types::MountType::InMemory,
+            PathBuf::from("/var/cache/example"),
+            seedbank_types::AccessMode::Writable,
+            HashSet::new(),
+        ),
+    );
+
+    mounts.insert(
+        "shared-assets".parse().expect("valid name"),
+        seedbank_types::Mount::build(
+            seedbank_types::MountType::PersistedShared(vec![
+                "sibling-a".parse().expect("valid name"),
+                "sibling-b".parse().expect("valid name"),
+            ]),
+            PathBuf::from("/var/lib/example/shared"),
+            seedbank_types::AccessMode::Writable,
+            HashSet::new(),
+        ),
+    );
+
+    seedbank_types::SeedlingSpec::new(mounts)
+}
+
+fn create_seedling_template(output_style: OutputStyle) -> ExitCode {
+    let toml = match toml::to_string_pretty(&example_seedling_spec()) {
+        Ok(toml) => toml,
+        Err(err) => {
+            eprintln!("{}", format!("Could not render template: {err}").red());
+            return ExitCode::from(1);
+        }
+    };
+
+    match output_style {
+        OutputStyle::Plain => println!("{toml}"),
+        OutputStyle::Json => match serde_json::to_string(&serde_json::json!({ "toml": toml })) {
+            Ok(json) => println!("{json}"),
+            Err(err) => {
+                eprintln!(
+                    "{}",
+                    format!("Could not serialize template as JSON: {err}").red()
+                );
+                return ExitCode::from(1);
+            }
+        },
+    }
+
+    ExitCode::from(0)
 }
 
 // Daemonize redirects stdout/stderr to `/dev/null` by default, lets
