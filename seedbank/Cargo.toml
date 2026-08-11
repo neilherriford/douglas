@@ -14,6 +14,7 @@ os = { workspace = true }
 refined_string = { workspace = true }
 regex = { workspace = true }
 seedbank_types = { workspace = true }
+seedling_registration_types = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

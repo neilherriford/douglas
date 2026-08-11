@@ -82,16 +82,28 @@ pub fn service_definition(douglas_folders: &DouglasFolders) -> ServiceDefinition
                 Modes::OwnerReadWriteExecuteGroupReadWriteExecuteOtherExecute,
             ),
             (
+                douglas_folders.socket_dir(seedling_registration_types::SOCKET_NAME),
+                Modes::OwnerReadWriteExecuteGroupReadWriteExecuteOtherExecute,
+            ),
+            (
                 douglas_folders.log_dir(SEEDBANK),
                 Modes::OwnerReadWriteExecuteGroupReadWriteExecute,
             ),
         ],
-        vec![ListenerDefinition::new(
-            &douglas_folders.socket_file(SEEDBANK),
-            DOUGLAS_SEEDBANK_USER,
-            well_known::DOUGLAS_RESIN_SEEDBANK_GROUP,
-            Modes::OwnerReadWriteGroupReadWrite,
-        )],
+        vec![
+            ListenerDefinition::new(
+                &douglas_folders.socket_file(SEEDBANK),
+                DOUGLAS_SEEDBANK_USER,
+                well_known::DOUGLAS_RESIN_SEEDBANK_GROUP,
+                Modes::OwnerReadWriteGroupReadWrite,
+            ),
+            ListenerDefinition::new(
+                &douglas_folders.socket_file(seedling_registration_types::SOCKET_NAME),
+                DOUGLAS_SEEDBANK_USER,
+                well_known::DOUGLAS_RESIN_SEEDBANK_GROUP,
+                Modes::OwnerReadWriteGroupReadWrite,
+            ),
+        ],
         &[well_known::DOUGLAS_RESIN_SEEDBANK_GROUP],
         BootstrapReporting::Pipe,
     )

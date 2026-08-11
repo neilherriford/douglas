@@ -1,5 +1,6 @@
 mod bootstrap;
 mod protocol;
+mod registration_protocol;
 
 pub use bootstrap::{DOUGLAS_SEEDBANK_GROUP, DOUGLAS_SEEDBANK_USER, service_definition};
 pub use protocol::handle;
@@ -94,7 +95,8 @@ pub struct Server {
     file_writer: Arc<dyn FileWriter>,
     inspect: Arc<dyn Inspect>,
     seeds: PathBuf,
-    listener_factories: Vec<SocketListenerFactory>,
+    listener_factory: SocketListenerFactory,
+    registration_listener_factory: SocketListenerFactory,
     shutdown_sender: Sender<()>,
     global_lock: Mutex<()>,
 }
@@ -134,18 +136,23 @@ impl Server {
         let mut seeds = douglas_folders.service_root(SEEDBANK);
         seeds.push(SEEDS_ROOT_NAME);
 
-        let listener_factories = service_definition(&douglas_folders)
-            .owned_sockets
-            .into_iter()
-            .map(|socket_definition| {
-                SocketListenerFactory::new(
-                    socket_definition,
-                    Arc::clone(&file_deleter),
-                    Arc::clone(&permissions),
-                    Arc::clone(&unix_domain_socket),
-                )
-            })
-            .collect();
+        let mut owned_sockets = service_definition(&douglas_folders).owned_sockets.into_iter();
+        let listener_factory = SocketListenerFactory::new(
+            owned_sockets
+                .next()
+                .expect("seedbank always defines its main control socket"),
+            Arc::clone(&file_deleter),
+            Arc::clone(&permissions),
+            Arc::clone(&unix_domain_socket),
+        );
+        let registration_listener_factory = SocketListenerFactory::new(
+            owned_sockets
+                .next()
+                .expect("seedbank always defines its registration socket"),
+            Arc::clone(&file_deleter),
+            Arc::clone(&permissions),
+            Arc::clone(&unix_domain_socket),
+        );
 
         Ok(Self {
             reporter,
@@ -156,7 +163,8 @@ impl Server {
             file_writer,
             inspect,
             seeds,
-            listener_factories,
+            listener_factory,
+            registration_listener_factory,
             shutdown_sender,
             global_lock: Mutex::new(()),
         })
@@ -290,24 +298,23 @@ impl Server {
 
         let mut shutdown = self.shutdown_sender.subscribe();
 
-        let listeners: Vec<_> = self
-            .listener_factories
-            .iter()
-            .map(|factory| factory.create(&span))
-            .collect::<Result<_, _>>()?;
+        let listener = self.listener_factory.create(&span)?;
+        let registration_listener = self.registration_listener_factory.create(&span)?;
 
         let accept_loops = async {
-            let tasks: Vec<_> = listeners
-                .into_iter()
-                .map(|listener| {
-                    let server = Arc::clone(&self);
-                    tokio::spawn(async move { Self::accept_loop(listener, server).await })
+            let main_task = {
+                let server = Arc::clone(&self);
+                tokio::spawn(async move { Self::accept_loop(listener, server).await })
+            };
+            let registration_task = {
+                let server = Arc::clone(&self);
+                tokio::spawn(async move {
+                    Self::accept_registration_loop(registration_listener, server).await
                 })
-                .collect();
+            };
 
-            for task in tasks {
-                task.await.map_err(std::io::Error::other)??;
-            }
+            main_task.await.map_err(std::io::Error::other)??;
+            registration_task.await.map_err(std::io::Error::other)??;
             Ok::<_, Error>(())
         };
 
@@ -348,6 +355,46 @@ impl Server {
             Err(err) => Response::Error {
                 message: err.to_string(),
             },
+        };
+
+        let Ok(mut serialized) = serde_json::to_string(&response) else {
+            return;
+        };
+        serialized.push('\n');
+
+        let _ = writer.write_all(serialized.as_bytes()).await;
+    }
+
+    async fn accept_registration_loop(
+        listener: Box<dyn file_system::Listener + Send + Sync + 'static>,
+        server: Arc<Self>,
+    ) -> Result<(), Error> {
+        loop {
+            let (stream, _addr) = listener.accept().await?;
+            let server = Arc::clone(&server);
+            tokio::spawn(async move {
+                Self::handle_registration_connection(stream, server).await;
+            });
+        }
+    }
+
+    async fn handle_registration_connection(mut stream: tokio::net::UnixStream, server: Arc<Self>) {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+        let (reader, mut writer) = stream.split();
+        let mut lines = BufReader::new(reader).lines();
+
+        let Ok(Some(line)) = lines.next_line().await else {
+            return;
+        };
+
+        let Ok(request) = serde_json::from_str::<seedling_registration_types::Request>(&line)
+        else {
+            return;
+        };
+
+        let Ok(response) = registration_protocol::handle(server.as_ref(), request) else {
+            return;
         };
 
         let Ok(mut serialized) = serde_json::to_string(&response) else {
@@ -657,9 +704,10 @@ impl Seedbank for Server {
 mod tests {
     use super::*;
     use docker_types::VersionedImageName;
+    use blueprint::listener::ListenerDefinition;
     use file_system::{
-        Entry, MockFileDeleter, MockFileReader, MockFileWriter, MockFolder, MockFolderDeleter,
-        MockInspect,
+        Entry, MockBindableUnixDomainSocketFile, MockFileDeleter, MockFileReader, MockFileWriter,
+        MockFolder, MockFolderDeleter, MockInspect, MockPermissions, Modes,
     };
     use log::Event;
 
@@ -702,6 +750,20 @@ mod tests {
         )
     }
 
+    fn dummy_listener_factory(socket_name: &str) -> SocketListenerFactory {
+        SocketListenerFactory::new(
+            ListenerDefinition::new(
+                &PathBuf::from(format!("/tmp/{socket_name}.sock")),
+                "douglas-seedbank",
+                "douglas-seedbank",
+                Modes::OwnerReadWriteGroupReadWrite,
+            ),
+            Arc::new(MockFileDeleter::new()),
+            Arc::new(MockPermissions::new()),
+            Arc::new(MockBindableUnixDomainSocketFile::new()),
+        )
+    }
+
     fn build_server(
         folder: MockFolder,
         folder_deleter: MockFolderDeleter,
@@ -719,7 +781,8 @@ mod tests {
             file_writer: Arc::new(file_writer),
             inspect: Arc::new(MockInspect::new()),
             seeds: PathBuf::from("/var/lib/seedbank/seeds"),
-            listener_factories: Vec::new(),
+            listener_factory: dummy_listener_factory("seedbank"),
+            registration_listener_factory: dummy_listener_factory("seedbank-registration"),
             shutdown_sender,
             global_lock: std::sync::Mutex::new(()),
         }
