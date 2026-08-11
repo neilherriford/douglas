@@ -2261,6 +2261,8 @@ dependencies = [
  "refined_string",
  "regex",
  "resin_types",
+ "seedling_registration_client",
+ "seedling_registration_types",
  "serde",
  "serde_json",
  "sha2 0.11.0",
@@ -2407,6 +2409,7 @@ dependencies = [
  "refined_string",
  "regex",
  "seedbank_types",
+ "seedling_registration_types",
  "serde",
  "serde_json",
  "thiserror 1.0.69",
@@ -2437,6 +2440,27 @@ dependencies = [
  "regex",
  "serde",
  "thiserror 1.0.69",
+]
+
+[[package]]
+name = "seedling_registration_client"
+version = "0.0.1"
+dependencies = [
+ "async-trait",
+ "config",
+ "log 0.1.0",
+ "mockall",
+ "seedling_registration_types",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+]
+
+[[package]]
+name = "seedling_registration_types"
+version = "0.0.1"
+dependencies = [
+ "serde",
 ]
 
 [[package]]

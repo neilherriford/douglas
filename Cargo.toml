@@ -55,6 +55,7 @@ members = [
     "os",
     "bract", "bract_types", "bract_client", "config", "utils", "openbao", "blueprint", "service_library",  "resin", "seedbank", "seedbank_types", "docker_types", "refined_string",
     "seedbank_client", "resin_client", "resin_types",
+    "seedling_registration_types", "seedling_registration_client",
 ]
 
 [workspace.dependencies]
@@ -100,6 +101,8 @@ resin_types = { path = "./resin_types" }
 seedbank = { path = "./seedbank" }
 seedbank_client = { path = "./seedbank_client" }
 seedbank_types = { path = "./seedbank_types" }
+seedling_registration_client = { path = "./seedling_registration_client" }
+seedling_registration_types = { path = "./seedling_registration_types" }
 simple_rest_client = { path = "./simple_rest_client" }
 utils = { path = "./utils" }
 
