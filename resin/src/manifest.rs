@@ -30,13 +30,6 @@ pub(crate) async fn info(
     manifest_info(state, Name::from_str(&name)?, reference).await
 }
 
-pub(crate) async fn namespaced_info(
-    State(state): State<ManifestState>,
-    Path((namespace, name, reference)): Path<(String, String, String)>,
-) -> Result<impl IntoResponse, ServerError> {
-    manifest_info(state, Name::from_namespaced(&namespace, &name)?, reference).await
-}
-
 async fn manifest_info(
     state: ManifestState,
     name: Name,
@@ -102,13 +95,6 @@ pub(crate) async fn read(
     read_manifest(state, Name::from_str(&name)?, reference).await
 }
 
-pub(crate) async fn namespaced_read(
-    State(state): State<ManifestState>,
-    Path((namespace, name, reference)): Path<(String, String, String)>,
-) -> Result<impl IntoResponse, ServerError> {
-    read_manifest(state, Name::from_namespaced(&namespace, &name)?, reference).await
-}
-
 async fn read_manifest(
     state: ManifestState,
     name: Name,
@@ -162,20 +148,19 @@ pub(crate) async fn write(
     write_manifest(state, Name::from_str(&name)?, reference, headers, body).await
 }
 
-pub(crate) async fn namespaced_write(
-    State(state): State<ManifestState>,
-    Path((namespace, name, reference)): Path<(String, String, String)>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> Result<impl IntoResponse, ServerError> {
-    write_manifest(
-        state,
-        Name::from_namespaced(&namespace, &name)?,
-        reference,
-        headers,
-        body,
-    )
-    .await
+async fn assert_seedling_registered(
+    client: &dyn seedling_registration_client::Client,
+    name: &Name,
+) -> Result<(), ServerError> {
+    match client.seedling_registered(&name.to_string()).await? {
+        seedling_registration_types::Response::Registered => Ok(()),
+        seedling_registration_types::Response::NotRegistered => {
+            Err(ServerError::SeedlingNotRegistered(name.to_string()))
+        }
+        seedling_registration_types::Response::InvalidName => Err(ServerError::InvalidName(
+            format!("invalid seedling name '{name}'"),
+        )),
+    }
 }
 
 async fn write_manifest(
@@ -185,6 +170,8 @@ async fn write_manifest(
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<impl IntoResponse, ServerError> {
+    assert_seedling_registered(state.seedling_registration_client.as_ref(), &name).await?;
+
     // let manifest_blob_root = state.paths.manifest_blob_root(&name)?;
     let media_type = headers
         .get("Content-Type")
@@ -247,13 +234,6 @@ pub(crate) async fn delete(
     Path((name, reference)): Path<(String, String)>,
 ) -> Result<impl IntoResponse, ServerError> {
     delete_manifest(state, Name::from_str(&name)?, reference).await
-}
-
-pub(crate) async fn namespaced_delete(
-    State(state): State<ManifestState>,
-    Path((namespace, name, reference)): Path<(String, String, String)>,
-) -> Result<impl IntoResponse, ServerError> {
-    delete_manifest(state, Name::from_namespaced(&namespace, &name)?, reference).await
 }
 
 async fn delete_manifest(
@@ -540,6 +520,66 @@ mod tests {
             let claimed = Digest(format!("sha256:{}", "00".repeat(32)));
 
             assert!(assert_hashes_equal(&computed, &claimed).is_err());
+        }
+    }
+
+    mod assert_seedling_registered {
+        use crate::{ServerError, manifest::assert_seedling_registered};
+        use resin_types::Name;
+        use seedling_registration_client::MockClient;
+        use seedling_registration_types::Response;
+        use std::str::FromStr;
+
+        fn name() -> Name {
+            Name::from_str("traefik").unwrap()
+        }
+
+        #[tokio::test]
+        async fn test_should_succeed_when_the_seedling_is_registered() {
+            let mut client = MockClient::new();
+            client
+                .expect_seedling_registered()
+                .returning(|_| Ok(Response::Registered));
+
+            let result = assert_seedling_registered(&client, &name()).await;
+
+            assert!(result.is_ok());
+        }
+
+        #[tokio::test]
+        async fn test_should_reject_when_the_seedling_is_not_registered() {
+            let mut client = MockClient::new();
+            client
+                .expect_seedling_registered()
+                .returning(|_| Ok(Response::NotRegistered));
+
+            let result = assert_seedling_registered(&client, &name()).await;
+
+            assert!(matches!(result, Err(ServerError::SeedlingNotRegistered(_))));
+        }
+
+        #[tokio::test]
+        async fn test_should_reject_when_the_name_is_invalid() {
+            let mut client = MockClient::new();
+            client
+                .expect_seedling_registered()
+                .returning(|_| Ok(Response::InvalidName));
+
+            let result = assert_seedling_registered(&client, &name()).await;
+
+            assert!(matches!(result, Err(ServerError::InvalidName(_))));
+        }
+
+        #[tokio::test]
+        async fn test_should_bubble_up_transport_errors() {
+            let mut client = MockClient::new();
+            client
+                .expect_seedling_registered()
+                .returning(|_| Err(seedling_registration_client::Error::ConnectionRefused));
+
+            let result = assert_seedling_registered(&client, &name()).await;
+
+            assert!(matches!(result, Err(ServerError::Internal(_))));
         }
     }
 

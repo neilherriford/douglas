@@ -84,6 +84,7 @@ enum ServerError {
     },
     RepositoryUnknown(String),
     InvalidName(String),
+    SeedlingNotRegistered(String),
 }
 
 impl From<serde_json::Error> for ServerError {
@@ -112,6 +113,12 @@ impl From<NameParseError> for ServerError {
 
 impl From<FileSystemError> for ServerError {
     fn from(err: FileSystemError) -> ServerError {
+        ServerError::Internal(Box::new(err))
+    }
+}
+
+impl From<seedling_registration_client::Error> for ServerError {
+    fn from(err: seedling_registration_client::Error) -> ServerError {
         ServerError::Internal(Box::new(err))
     }
 }
@@ -157,6 +164,11 @@ impl IntoResponse for ServerError {
                 error_code::NAME_INVALID,
                 description,
             ),
+            ServerError::SeedlingNotRegistered(name) => (
+                StatusCode::BAD_REQUEST,
+                error_code::SEEDLING_NOT_REGISTERED,
+                format!("seedling '{name}' is not registered"),
+            ),
         };
         let mut response = (
             status,
@@ -166,6 +178,10 @@ impl IntoResponse for ServerError {
         response.extensions_mut().insert(ErrorDetail(message));
         response
     }
+}
+
+async fn reject_namespaced() -> ServerError {
+    ServerError::BadRequest("namespaced seedlings are not supported".to_string())
 }
 
 #[derive(Clone)]
@@ -185,6 +201,7 @@ struct ManifestState {
     blob_store: Arc<dyn BlobStore>,
     tag_store: Arc<dyn TagStore>,
     reporter: Arc<dyn Reporter>,
+    seedling_registration_client: Arc<dyn seedling_registration_client::Client>,
 }
 
 struct LocalBlobRoot {
@@ -229,6 +246,7 @@ pub struct Server {
     blob_mounter: Arc<dyn BlobMounter>,
     tag_store: Arc<dyn TagStore>,
     repository_store: Arc<dyn RepositoryStore>,
+    seedling_registration_client: Arc<dyn seedling_registration_client::Client>,
 }
 
 impl Server {
@@ -326,6 +344,12 @@ impl Server {
             repositories_root.clone(),
         ));
 
+        let seedling_registration_client: Arc<dyn seedling_registration_client::Client> =
+            Arc::new(seedling_registration_client::UdsClient::new(
+                Arc::clone(&reporter),
+                &douglas_folders,
+            ));
+
         Ok(Self {
             reporter,
             port,
@@ -334,6 +358,7 @@ impl Server {
             blob_mounter,
             tag_store,
             repository_store,
+            seedling_registration_client,
         })
     }
 
@@ -355,11 +380,11 @@ impl Server {
             .route("/v2/{name}/blobs/uploads/", post(upload::start)) // Docker sends trailing slash
             .route(
                 "/v2/{namespace}/{name}/blobs/uploads",
-                post(upload::namespaced_start),
+                post(reject_namespaced),
             )
             .route(
                 "/v2/{namespace}/{name}/blobs/uploads/",
-                post(upload::namespaced_start),
+                post(reject_namespaced),
             )
             .route(
                 "/v2/{name}/blobs/uploads/{uuid}",
@@ -370,10 +395,10 @@ impl Server {
             )
             .route(
                 "/v2/{namespace}/{name}/blobs/uploads/{uuid}",
-                get(upload::namespaced_status)
-                    .patch(upload::namespaced_write_chunk)
-                    .put(upload::namespaced_complete)
-                    .delete(upload::namespaced_abort),
+                get(reject_namespaced)
+                    .patch(reject_namespaced)
+                    .put(reject_namespaced)
+                    .delete(reject_namespaced),
             )
             .with_state(upload_state);
 
@@ -389,9 +414,9 @@ impl Server {
             )
             .route(
                 "/v2/{namespace}/{name}/blobs/{digest}",
-                head(blobs::namespaced_info)
-                    .get(blobs::namespaced_blob)
-                    .delete(blobs::namespaced_delete),
+                head(reject_namespaced)
+                    .get(reject_namespaced)
+                    .delete(reject_namespaced),
             )
             .with_state(blob_state);
 
@@ -399,6 +424,7 @@ impl Server {
             blob_store: Arc::clone(&self.blob_store),
             tag_store: Arc::clone(&self.tag_store),
             reporter: Arc::clone(&self.reporter),
+            seedling_registration_client: Arc::clone(&self.seedling_registration_client),
         };
 
         let manifest_routes = Router::new()
@@ -411,19 +437,16 @@ impl Server {
             )
             .route(
                 "/v2/{namespace}/{name}/manifests/{ref}",
-                head(manifest::namespaced_info)
-                    .get(manifest::namespaced_read)
-                    .put(manifest::namespaced_write)
-                    .delete(manifest::namespaced_delete),
+                head(reject_namespaced)
+                    .get(reject_namespaced)
+                    .put(reject_namespaced)
+                    .delete(reject_namespaced),
             )
             .with_state(manifest_state);
 
         let tags_routes = Router::new()
             .route("/v2/{name}/tags/list", get(tags::list))
-            .route(
-                "/v2/{namespace}/{name}/tags/list",
-                get(tags::namespaced_list),
-            )
+            .route("/v2/{namespace}/{name}/tags/list", get(reject_namespaced))
             .with_state(Arc::clone(&self.tag_store));
 
         let system_routes = Router::new()

@@ -9,3 +9,4 @@ pub(crate) const BLOB_UPLOAD_UNKNOWN: &str = "BLOB_UPLOAD_UNKNOWN";
 pub(crate) const DIGEST_INVALID: &str = "DIGEST_INVALID";
 pub(crate) const MANIFEST_UNKNOWN: &str = "MANIFEST_UNKNOWN";
 pub(crate) const UNSUPPORTED: &str = "UNSUPPORTED";
+pub(crate) const SEEDLING_NOT_REGISTERED: &str = "SEEDLING_NOT_REGISTERED";

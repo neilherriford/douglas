@@ -27,13 +27,6 @@ pub(crate) async fn info(
     read_blob_info(state, Name::from_str(&name)?, raw_digest).await
 }
 
-pub(crate) async fn namespaced_info(
-    State(state): State<BlobState>,
-    Path((namespace, name, raw_digest)): Path<(String, String, String)>,
-) -> Result<impl IntoResponse, ServerError> {
-    read_blob_info(state, Name::from_namespaced(&namespace, &name)?, raw_digest).await
-}
-
 async fn read_blob_info(
     state: BlobState,
     name: Name,
@@ -63,13 +56,6 @@ pub(crate) async fn blob(
     Path((name, raw_digest)): Path<(String, String)>,
 ) -> Result<impl IntoResponse, ServerError> {
     read_blob(state, Name::from_str(&name)?, raw_digest).await
-}
-
-pub(crate) async fn namespaced_blob(
-    State(state): State<BlobState>,
-    Path((namespace, name, raw_digest)): Path<(String, String, String)>,
-) -> Result<impl IntoResponse, ServerError> {
-    read_blob(state, Name::from_namespaced(&namespace, &name)?, raw_digest).await
 }
 
 async fn read_blob(
@@ -118,13 +104,6 @@ pub(crate) async fn delete(
     Path((name, raw_digest)): Path<(String, String)>,
 ) -> Result<impl IntoResponse, ServerError> {
     delete_blob(state, Name::from_str(&name)?, raw_digest).await
-}
-
-pub(crate) async fn namespaced_delete(
-    State(state): State<BlobState>,
-    Path((namespace, name, raw_digest)): Path<(String, String, String)>,
-) -> Result<impl IntoResponse, ServerError> {
-    delete_blob(state, Name::from_namespaced(&namespace, &name)?, raw_digest).await
 }
 
 async fn delete_blob(

@@ -34,14 +34,6 @@ pub(crate) async fn start(
     start_upload(state, Name::from_str(&name)?, params)
 }
 
-pub(crate) async fn namespaced_start(
-    State(state): State<UploadState>,
-    Path((namespace, name)): Path<(String, String)>,
-    Query(params): Query<StartParams>,
-) -> Result<impl IntoResponse, ServerError> {
-    start_upload(state, Name::from_namespaced(&namespace, &name)?, params)
-}
-
 fn start_upload(
     state: UploadState,
     name: Name,
@@ -82,13 +74,6 @@ pub(crate) async fn status(
     get_status(state, uuid, Name::from_str(&name)?)
 }
 
-pub(crate) async fn namespaced_status(
-    State(state): State<UploadState>,
-    Path((namespace, name, uuid)): Path<(String, String, Uuid)>,
-) -> Result<impl IntoResponse, ServerError> {
-    get_status(state, uuid, Name::from_namespaced(&namespace, &name)?)
-}
-
 fn get_status(
     state: UploadState,
     uuid: Uuid,
@@ -113,23 +98,6 @@ pub(crate) async fn write_chunk(
 ) -> Result<impl IntoResponse, ServerError> {
     let range_start = parse_range_start(&headers)?;
     write(state, Name::from_str(&name)?, uuid, range_start, body).await
-}
-
-pub(crate) async fn namespaced_write_chunk(
-    State(state): State<UploadState>,
-    Path((namespace, name, uuid)): Path<(String, String, Uuid)>,
-    headers: HeaderMap,
-    body: axum::body::Body,
-) -> Result<impl IntoResponse, ServerError> {
-    let range_start = parse_range_start(&headers)?;
-    write(
-        state,
-        Name::from_namespaced(&namespace, &name)?,
-        uuid,
-        range_start,
-        body,
-    )
-    .await
 }
 
 async fn write(
@@ -224,21 +192,6 @@ pub(crate) async fn complete(
     complete_upload(state, uuid, params, Name::from_str(&name)?, headers)
 }
 
-pub(crate) async fn namespaced_complete(
-    State(state): State<UploadState>,
-    Path((namespace, name, uuid)): Path<(String, String, Uuid)>,
-    Query(params): Query<CompleteParams>,
-    headers: HeaderMap,
-) -> Result<impl IntoResponse, ServerError> {
-    complete_upload(
-        state,
-        uuid,
-        params,
-        Name::from_namespaced(&namespace, &name)?,
-        headers,
-    )
-}
-
 fn complete_upload(
     state: UploadState,
     uuid: Uuid,
@@ -269,13 +222,6 @@ pub(crate) async fn abort(
     Path((name, uuid)): Path<(String, Uuid)>,
 ) -> Result<impl IntoResponse, ServerError> {
     abort_upload(state, Name::from_str(&name)?, uuid)
-}
-
-pub(crate) async fn namespaced_abort(
-    State(state): State<UploadState>,
-    Path((namespace, name, uuid)): Path<(String, String, Uuid)>,
-) -> Result<impl IntoResponse, ServerError> {
-    abort_upload(state, Name::from_namespaced(&namespace, &name)?, uuid)
 }
 
 fn abort_upload(

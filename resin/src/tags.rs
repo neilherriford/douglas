@@ -35,13 +35,6 @@ pub(crate) async fn list(
     get_tag_list(tag_store, Name::from_str(&name)?, params).await
 }
 
-pub(crate) async fn namespaced_list(
-    State(tag_store): State<Arc<dyn TagStore>>,
-    Path((namespace, name)): Path<(String, String)>,
-    Query(params): Query<TagListParams>,
-) -> Result<impl IntoResponse, ServerError> {
-    get_tag_list(tag_store, Name::from_namespaced(&namespace, &name)?, params).await
-}
 
 fn paginate_tags<'a>(
     tags: &'a [String],
