@@ -51,6 +51,8 @@ pub enum ReconcileSeedlingError {
     MissingImage,
     #[error("Service account missing")]
     MissingServiceAccount,
+    #[error("Share group missing")]
+    MissingShareGroup,
     #[error("Invalid mount path {0}")]
     InvalidMountPath(RelativePath),
     #[error("Seedbank error {0}")]
@@ -84,8 +86,9 @@ struct State {
     container_version: Option<seedbank_types::Version>,
     container_is_running: bool,
     missing_service_credentials: bool,
+    missing_share_groups: Vec<(seedbank_types::Name, Vec<String>)>,
     missing_mount_folders: Vec<PathBuf>,
-    needs_mount_ownership: Vec<PathBuf>,
+    needs_mount_ownership: Vec<(PathBuf, seedbank_types::Name, seedbank_types::MountType)>,
     missing_mount_mode: Vec<(PathBuf, Modes)>,
     missing_mount_files: Vec<(PathBuf, String, Vec<u8>)>,
 }
@@ -263,6 +266,7 @@ impl<'a> StateObserver<'a> {
             container_version: None,
             container_is_running: false,
             missing_service_credentials: true,
+            missing_share_groups: Vec::new(),
             missing_mount_folders: Vec::new(),
             needs_mount_ownership: Vec::new(),
             missing_mount_mode: Vec::new(),
@@ -335,6 +339,18 @@ impl<'a> StateObserver<'a> {
         name: &seedbank_types::Name,
         mount: &seedbank_types::Mount,
     ) -> Result<(), ReconcileSeedlingError> {
+        if let seedbank_types::MountType::PersistedShared(siblings) = mount.kind()
+            && self
+                .rolodex
+                .find_share_group(seedling_name.as_ref(), name.as_ref())?
+                .is_none()
+        {
+            result.missing_share_groups.push((
+                name.clone(),
+                siblings.iter().map(std::string::ToString::to_string).collect(),
+            ));
+        }
+
         let root_mount_path = self.mount_path(seedling_name, name);
         if self.folder.exists(&root_mount_path) {
             match self.expected_mount_group_name(seedling_name, name, mount)? {
@@ -343,11 +359,19 @@ impl<'a> StateObserver<'a> {
                         .permissions
                         .get_user_and_group_ownership(&root_mount_path)?;
                     if actual_group != expected_group {
-                        result.needs_mount_ownership.push(root_mount_path.clone());
+                        result.needs_mount_ownership.push((
+                            root_mount_path.clone(),
+                            name.clone(),
+                            mount.kind().clone(),
+                        ));
                     }
                 }
                 None => {
-                    result.needs_mount_ownership.push(root_mount_path.clone());
+                    result.needs_mount_ownership.push((
+                        root_mount_path.clone(),
+                        name.clone(),
+                        mount.kind().clone(),
+                    ));
                 }
             }
             let actual_mode = self.permissions.get_mode(&root_mount_path)?;
@@ -358,7 +382,7 @@ impl<'a> StateObserver<'a> {
             }
             self.discover_missing_mount_contents(result, mount, &root_mount_path)?;
         } else {
-            self.add_missing_mount(result, mount, &root_mount_path)?;
+            self.add_missing_mount(result, name, mount, &root_mount_path)?;
         }
         Ok(())
     }
@@ -499,15 +523,18 @@ impl<'a> StateObserver<'a> {
     fn add_missing_mount(
         &self,
         result: &mut State,
+        name: &seedbank_types::Name,
         mount: &seedbank_types::Mount,
         root_mount_path: &Path,
     ) -> Result<(), ReconcileSeedlingError> {
         result
             .missing_mount_folders
             .push(root_mount_path.to_path_buf());
-        result
-            .needs_mount_ownership
-            .push(root_mount_path.to_path_buf());
+        result.needs_mount_ownership.push((
+            root_mount_path.to_path_buf(),
+            name.clone(),
+            mount.kind().clone(),
+        ));
         result
             .missing_mount_mode
             .push((root_mount_path.to_path_buf(), EXPECTED_MOUNT_MODE));
@@ -598,12 +625,22 @@ fn create_plan<'a>(
         push_step(&mut steps, CreateServiceAccount::new(name.clone()));
     }
 
+    for (mount_name, guest_names) in state.missing_share_groups {
+        push_step(
+            &mut steps,
+            CreateShareGroup::new(name.clone(), mount_name, guest_names),
+        );
+    }
+
     for missing_mount_folder in state.missing_mount_folders {
         push_step(&mut steps, CreateMountFolder::new(missing_mount_folder));
     }
 
-    for path in state.needs_mount_ownership {
-        push_step(&mut steps, SetMountOwnership::new(path));
+    for (path, mount_name, kind) in state.needs_mount_ownership {
+        push_step(
+            &mut steps,
+            SetMountOwnership::new(path, mount_name, kind),
+        );
     }
 
     for (path, mode) in state.missing_mount_mode {
@@ -892,11 +929,17 @@ impl<'a> Command<Context<'a>> for CreateMountFolder {
 
 struct SetMountOwnership {
     path: PathBuf,
+    mount_name: seedbank_types::Name,
+    kind: seedbank_types::MountType,
 }
 
 impl SetMountOwnership {
-    pub fn new(path: PathBuf) -> Self {
-        Self { path }
+    pub fn new(path: PathBuf, mount_name: seedbank_types::Name, kind: seedbank_types::MountType) -> Self {
+        Self {
+            path,
+            mount_name,
+            kind,
+        }
     }
 }
 
@@ -936,10 +979,88 @@ impl<'a> Command<Context<'a>> for SetMountOwnership {
             return Err(Box::new(ReconcileSeedlingError::MissingServiceAccount));
         };
 
+        let group_system_name = match &self.kind {
+            seedbank_types::MountType::PersistedShared(_) => {
+                let Some(credential) = context
+                    .rolodex
+                    .find_share_group(context.name.as_ref(), self.mount_name.as_ref())?
+                else {
+                    guard.finish_with_outcome(log::Outcome::Failed);
+                    return Err(Box::new(ReconcileSeedlingError::MissingShareGroup));
+                };
+                credential.system_name
+            }
+            seedbank_types::MountType::Persisted | seedbank_types::MountType::InMemory => {
+                service_account.group.system_name.clone()
+            }
+        };
+
         context.permissions.change_user_and_group_ownership(
             &self.path,
             &service_account.user.system_name,
-            &service_account.group.system_name,
+            &group_system_name,
+        )?;
+
+        guard.finish_with_outcome(log::Outcome::Ok);
+        Ok(())
+    }
+}
+
+struct CreateShareGroup {
+    seedling_name: seedbank_types::Name,
+    mount_name: seedbank_types::Name,
+    guest_names: Vec<String>,
+}
+
+impl CreateShareGroup {
+    pub fn new(
+        seedling_name: seedbank_types::Name,
+        mount_name: seedbank_types::Name,
+        guest_names: Vec<String>,
+    ) -> Self {
+        Self {
+            seedling_name,
+            mount_name,
+            guest_names,
+        }
+    }
+}
+
+impl std::fmt::Display for CreateShareGroup {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Creating share group '{}' for '{}'",
+            self.mount_name, self.seedling_name
+        )
+    }
+}
+
+#[async_trait]
+impl<'a> Command<Context<'a>> for CreateShareGroup {
+    fn name(&self) -> String {
+        "Creating share group".to_string()
+    }
+
+    async fn run(
+        &mut self,
+        span: &Span,
+        context: &mut Context<'a>,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let guard = span
+            .create_child(
+                &format!(
+                    "Creating share group '{}' for '{}'…",
+                    self.mount_name, self.seedling_name
+                ),
+                ScopeKind::Step,
+            )
+            .start_guard();
+
+        context.rolodex.create_share_group(
+            self.seedling_name.as_ref(),
+            self.mount_name.as_ref(),
+            &self.guest_names,
         )?;
 
         guard.finish_with_outcome(log::Outcome::Ok);
@@ -1356,6 +1477,7 @@ mod tests {
             container_version: Some(seedbank_types::Version(1)),
             container_is_running: true,
             missing_service_credentials: false,
+            missing_share_groups: Vec::new(),
             missing_mount_folders: Vec::new(),
             needs_mount_ownership: Vec::new(),
             missing_mount_mode: Vec::new(),
@@ -1415,6 +1537,55 @@ mod tests {
         .expect("should produce a plan");
 
         assert!(step_descriptions(steps).is_empty());
+    }
+
+    #[test]
+    fn test_create_plan_should_create_a_missing_share_group() {
+        let mount_name: seedbank_types::Name = "config".parse().unwrap();
+
+        let steps = create_plan(
+            &name(),
+            &seedbank_types::Version(1),
+            &seedling_definition(),
+            State {
+                missing_share_groups: vec![(mount_name, vec!["openbao".to_string()])],
+                ..state()
+            },
+            &registry(),
+        )
+        .expect("should produce a plan");
+
+        assert_eq!(
+            step_descriptions(steps),
+            vec!["Creating share group 'config' for 'traefik'"]
+        );
+    }
+
+    #[test]
+    fn test_create_plan_should_set_ownership_for_a_persisted_shared_mount() {
+        let mount_name: seedbank_types::Name = "config".parse().unwrap();
+        let path = PathBuf::from("/var/lib/douglas/mounts/traefik/config");
+
+        let steps = create_plan(
+            &name(),
+            &seedbank_types::Version(1),
+            &seedling_definition(),
+            State {
+                needs_mount_ownership: vec![(
+                    path.clone(),
+                    mount_name,
+                    seedbank_types::MountType::PersistedShared(vec![]),
+                )],
+                ..state()
+            },
+            &registry(),
+        )
+        .expect("should produce a plan");
+
+        assert_eq!(
+            step_descriptions(steps),
+            vec![format!("Setting mount ownership '{}'", path_to_string(&path))]
+        );
     }
 
     #[test]
