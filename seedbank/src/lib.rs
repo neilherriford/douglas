@@ -357,12 +357,22 @@ impl Server {
             },
         };
 
-        let Ok(mut serialized) = serde_json::to_string(&response) else {
-            return;
+        let serialized = match serde_json::to_string(&response) {
+            Ok(serialized) => serialized,
+            Err(err) => {
+                Self::log_connection_error(&server, "Failed to serialize response", &err);
+                return;
+            }
         };
-        serialized.push('\n');
 
-        let _ = writer.write_all(serialized.as_bytes()).await;
+        if let Err(err) = writer.write_all(format!("{serialized}\n").as_bytes()).await {
+            Self::log_connection_error(&server, "Failed to write response", &err);
+        }
+    }
+
+    fn log_connection_error(server: &Arc<Self>, label: &str, err: &impl std::fmt::Display) {
+        Span::new(Arc::clone(&server.reporter), "Handling connection", ScopeKind::Task)
+            .message(log::Level::Warn, &format!("{label}: {err}"));
     }
 
     async fn accept_registration_loop(
@@ -393,16 +403,25 @@ impl Server {
             return;
         };
 
-        let Ok(response) = registration_protocol::handle(server.as_ref(), request) else {
-            return;
+        let response = match registration_protocol::handle(server.as_ref(), request) {
+            Ok(response) => response,
+            Err(err) => {
+                Self::log_connection_error(&server, "Failed to handle registration request", &err);
+                return;
+            }
         };
 
-        let Ok(mut serialized) = serde_json::to_string(&response) else {
-            return;
+        let serialized = match serde_json::to_string(&response) {
+            Ok(serialized) => serialized,
+            Err(err) => {
+                Self::log_connection_error(&server, "Failed to serialize response", &err);
+                return;
+            }
         };
-        serialized.push('\n');
 
-        let _ = writer.write_all(serialized.as_bytes()).await;
+        if let Err(err) = writer.write_all(format!("{serialized}\n").as_bytes()).await {
+            Self::log_connection_error(&server, "Failed to write response", &err);
+        }
     }
 
     fn list_seedlings(&self) -> Result<Vec<Name>, Error> {
@@ -432,7 +451,14 @@ impl Server {
         let used_ids: HashSet<u16> = self
             .list_seedlings()?
             .iter()
-            .filter_map(|name| self.load_id(name).ok().map(|id| id.value))
+            .map(|name| match self.load_id(name) {
+                Ok(id) => Ok(Some(id.value)),
+                Err(Error::NotFound(_)) => Ok(None),
+                Err(err) => Err(err),
+            })
+            .collect::<Result<Vec<Option<u16>>, Error>>()?
+            .into_iter()
+            .flatten()
             .collect();
 
         (0..MAX_SEEDLINGS)
@@ -1167,6 +1193,34 @@ mod tests {
         let next = server.get_next_id().expect("should allocate");
 
         assert_eq!(next, id(0));
+    }
+
+    #[test]
+    fn test_get_next_id_should_propagate_a_genuine_id_read_error_rather_than_skip_it() {
+        let mut folder = MockFolder::new();
+        folder.given_folder_entries(
+            "/var/lib/seedbank/seeds",
+            vec![Entry::create_directory("corrupted")],
+        );
+
+        let mut file_reader = MockFileReader::new();
+        file_reader.expect_read_all().returning(|path| {
+            Err(FileSystemError::IoErrorAtPath {
+                path: path.to_path_buf(),
+                error: std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+            })
+        });
+
+        let server = build_server(
+            folder,
+            MockFolderDeleter::new(),
+            file_reader,
+            MockFileWriter::new(),
+        );
+
+        let result = server.get_next_id();
+
+        assert!(result.is_err());
     }
 
     #[test]

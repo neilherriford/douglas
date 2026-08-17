@@ -300,13 +300,15 @@ impl Bract {
             tokio::select! {
                 biased;
                 Some(event) = event_receiver.recv() => {
-                    if Self::write_message(&mut writer, &ServerMessage::Event(event)).await.is_err() {
+                    if let Err(err) = Self::write_message(&mut writer, &ServerMessage::Event(event)).await {
+                        Self::log_connection_error(&server, "Failed to write event message", &err);
                         return;
                     }
                 }
                 response = &mut handler => {
                     while let Some(event) = event_receiver.recv().await {
-                        if Self::write_message(&mut writer, &ServerMessage::Event(event)).await.is_err() {
+                        if let Err(err) = Self::write_message(&mut writer, &ServerMessage::Event(event)).await {
+                            Self::log_connection_error(&server, "Failed to write event message", &err);
                             return;
                         }
                     }
@@ -315,7 +317,14 @@ impl Bract {
             }
         };
 
-        let _ = Self::write_message(&mut writer, &ServerMessage::Response(response)).await;
+        if let Err(err) = Self::write_message(&mut writer, &ServerMessage::Response(response)).await {
+            Self::log_connection_error(&server, "Failed to write response message", &err);
+        }
+    }
+
+    fn log_connection_error(server: &Arc<Self>, label: &str, err: &impl std::fmt::Display) {
+        Span::new(Arc::clone(&server.reporter), "Handling connection", ScopeKind::Task)
+            .message(log::Level::Warn, &format!("{label}: {err}"));
     }
 
     async fn write_message(
@@ -324,9 +333,8 @@ impl Bract {
     ) -> std::io::Result<()> {
         use tokio::io::AsyncWriteExt;
 
-        let Ok(mut serialized) = serde_json::to_string(message) else {
-            return Ok(());
-        };
+        let mut serialized = serde_json::to_string(message)
+            .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?;
         serialized.push('\n');
         writer.write_all(serialized.as_bytes()).await
     }

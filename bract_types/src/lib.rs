@@ -80,7 +80,7 @@ pub enum Request {
 #[serde(tag = "type")]
 pub enum Response {
     SeedlingStatus(SeedlingStatus),
-    Created,
+    Created { message: String },
     Updated,
     Started,
     Stopped,
@@ -94,7 +94,7 @@ impl std::fmt::Display for Response {
             Response::SeedlingStatus(seedling_status) => {
                 f.write_str(&format!("status: '{seedling_status}'"))
             }
-            Response::Created => f.write_str("created"),
+            Response::Created { .. } => f.write_str("created"),
             Response::Updated => f.write_str("updated"),
             Response::Started => f.write_str("started"),
             Response::Stopped => f.write_str("stopped"),
@@ -144,6 +144,27 @@ mod tests {
         match deserialized {
             ServerMessage::Response(Response::Error { message }) => assert_eq!(message, "boom"),
             other => panic!("expected an Error response, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_created_response_should_round_trip() {
+        let message = ServerMessage::Response(Response::Created {
+            message: "Ready. Push your image to localhost:7376/hello-world to deploy it."
+                .to_string(),
+        });
+
+        let serialized = serde_json::to_string(&message).unwrap();
+        let deserialized: ServerMessage = serde_json::from_str(&serialized).unwrap();
+
+        match deserialized {
+            ServerMessage::Response(Response::Created { message }) => {
+                assert_eq!(
+                    message,
+                    "Ready. Push your image to localhost:7376/hello-world to deploy it."
+                );
+            }
+            other => panic!("expected a Created response, got {other:?}"),
         }
     }
 
