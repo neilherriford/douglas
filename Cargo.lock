@@ -2252,6 +2252,7 @@ dependencies = [
  "credentials",
  "docker_types",
  "file_system",
+ "futures-util",
  "hex",
  "http-body",
  "log 0.1.0",

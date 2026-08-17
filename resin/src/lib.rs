@@ -41,6 +41,7 @@ use axum::{
 };
 use config::DouglasFolders;
 use credentials::create_credentials;
+use futures_util::FutureExt;
 use file_system::{
     FileAppender, FileDeleter, FileReader, FileRenamer, FileSystemError, FileWriter, Folder,
     Inspect, Links, Permissions, UnixFileAppender, UnixFileDeleter, UnixFileReader,
@@ -519,14 +520,19 @@ async fn log_request(
     }
     guard.span().message(log::Level::Info, &text);
 
-    let response = match tokio::spawn(next.run(req)).await {
+    // Deliberately run `next.run(req)` in place (not `tokio::spawn`ed) — HTTP/1.1
+    // request bodies are streamed cooperatively with the connection's own task,
+    // and moving the service future onto a different task desyncs body delivery
+    // (observed as every chunked upload failing with "error reading a body from
+    // connection"). `catch_unwind` still lets us turn a handler panic into a
+    // clean 500 instead of taking down the connection.
+    let response = match std::panic::AssertUnwindSafe(next.run(req))
+        .catch_unwind()
+        .await
+    {
         Ok(response) => response,
-        Err(join_err) => {
-            let details = if join_err.is_panic() {
-                panic_message(join_err.into_panic())
-            } else {
-                "request handling was cancelled".to_string()
-            };
+        Err(payload) => {
+            let details = panic_message(payload);
             guard.span().message(
                 log::Level::Warn,
                 &format!("request handler panicked: {details}"),
@@ -570,7 +576,7 @@ fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
     }
 }
 
-fn error_chain(error: &dyn std::error::Error) -> String {
+pub(crate) fn error_chain(error: &dyn std::error::Error) -> String {
     let mut chain = error.to_string();
     let mut source = error.source();
     while let Some(cause) = source {
