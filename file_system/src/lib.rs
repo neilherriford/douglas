@@ -589,7 +589,7 @@ impl FileAppender for UnixFileAppender {
 
     fn append_all_bytes(&self, path: &Path, bytes: &[u8]) -> Result<(), FileSystemError> {
         if let Some(parent) = path.parent()
-            && !self.exists(parent)
+            && !parent.is_dir()
         {
             return Err(FileSystemError::ParentNotFoundError(parent.to_path_buf()));
         }
@@ -1697,6 +1697,56 @@ mod tests {
             );
 
             assert!(matches!(result, Err(FileSystemError::InvalidPath(_))));
+        }
+    }
+
+    mod unix_file_appender {
+        use super::*;
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        fn unique_temp_dir() -> PathBuf {
+            static COUNTER: AtomicU64 = AtomicU64::new(0);
+            let mut dir = std::env::temp_dir();
+            dir.push(format!(
+                "douglas-file-appender-test-{}-{}",
+                std::process::id(),
+                COUNTER.fetch_add(1, Ordering::Relaxed)
+            ));
+            dir
+        }
+
+        #[test]
+        fn test_append_all_bytes_should_write_when_the_parent_directory_exists() {
+            let dir = unique_temp_dir();
+            std::fs::create_dir_all(&dir).expect("should create temp dir");
+            let mut file_path = dir.clone();
+            file_path.push("blob");
+
+            let appender = UnixFileAppender::new();
+            let result = appender.append_all_bytes(&file_path, b"hello");
+
+            assert!(result.is_ok());
+            assert_eq!(
+                std::fs::read(&file_path).expect("should read back written bytes"),
+                b"hello"
+            );
+
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn test_append_all_bytes_should_fail_when_the_parent_directory_is_missing() {
+            let dir = unique_temp_dir();
+            let mut file_path = dir.clone();
+            file_path.push("blob");
+
+            let appender = UnixFileAppender::new();
+            let result = appender.append_all_bytes(&file_path, b"hello");
+
+            assert!(matches!(
+                result,
+                Err(FileSystemError::ParentNotFoundError(parent)) if parent == dir
+            ));
         }
     }
 }
