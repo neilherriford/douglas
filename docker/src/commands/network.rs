@@ -1,16 +1,15 @@
-use super::assert_non_empty_string_argument;
-use crate::{Container, DockerError, Label, NetworkName, deserialize_labels, serialize_labels};
+use crate::{DockerError, Label, to_general_error};
+use docker_types::{NetworkName, serialize_labels};
 use log::{Reporter, Span};
-use serde::de::DeserializeOwned;
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Serialize};
 use serde_json::from_value;
 use serde_json::value::Value as Json;
 use simple_rest_client::assertions::{
-    assert_created_with_body, assert_okay, assert_okay_with_body,
+    assert_created_with_body, assert_no_content, assert_okay, assert_okay_with_body,
 };
 use simple_rest_client::parsers::Parser;
 use simple_rest_client::parsers::json::JsonParserError;
-use simple_rest_client::{Header, Request, Response, RestClient};
+use simple_rest_client::{Header, Request, RestClient};
 use std::sync::Arc;
 
 #[derive(Debug, Deserialize, PartialEq)]
@@ -19,16 +18,6 @@ pub struct Network {
     pub id: String,
     #[serde(rename = "Name")]
     pub name: String,
-    #[serde(rename = "Labels")]
-    #[serde(deserialize_with = "deserialize_labels")]
-    pub labels: Vec<Label>,
-}
-
-#[derive(Debug, Deserialize, PartialEq)]
-struct ConnectedContainers {
-    #[serde(rename = "Containers")]
-    #[serde(deserialize_with = "deserialize_keys")]
-    pub container_ids: Vec<String>,
 }
 
 #[derive(Debug, Serialize, PartialEq)]
@@ -38,12 +27,6 @@ struct CreationBody {
     #[serde(rename = "Labels")]
     #[serde(serialize_with = "serialize_labels")]
     pub labels: Vec<Label>,
-}
-
-#[derive(Debug, Deserialize, PartialEq)]
-struct CreationResponse {
-    #[serde(rename = "Id")]
-    id: String,
 }
 
 #[derive(Debug, Serialize, PartialEq)]
@@ -57,233 +40,288 @@ struct ConnectionError {
     message: String,
 }
 
-pub(crate) fn deserialize_keys<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    let json: Json = Json::deserialize(deserializer)?;
-    let obj = json
-        .as_object()
-        .ok_or_else(|| serde::de::Error::custom("Expected Containers to be an object"))?;
-
-    Ok(obj.keys().map(|key| key.as_str().to_string()).collect())
+#[derive(Debug, Deserialize, PartialEq)]
+struct CreationResponse {
+    #[serde(rename = "Id")]
+    id: String,
 }
 
-pub struct NetworkCommand {
+pub async fn inspect_by_name(
     reporter: Arc<dyn Reporter>,
-    rest_client: Arc<tokio::sync::Mutex<dyn RestClient + Send + Sync + 'static>>,
+    rest_client: &tokio::sync::Mutex<dyn RestClient + Send + Sync + 'static>,
     parser: Arc<dyn Parser<Json, ParseError = JsonParserError>>,
+    name: &NetworkName,
+) -> Result<Network, DockerError> {
+    let guard = Span::new(
+        Arc::clone(&reporter),
+        "Inspect network by name",
+        log::ScopeKind::Task,
+    )
+    .start_guard();
+
+    let request = Request::Get {
+        path: format!("/networks/{}", name.as_ref()),
+        headers: vec![],
+    };
+
+    let response = {
+        let mut rest_client = rest_client.lock().await;
+        rest_client
+            .execute(guard.span(), &request)
+            .await
+            .map_err(to_general_error)?
+    };
+    let body = assert_okay_with_body(response)?;
+    let json = parser.parse(body).map_err(to_general_error)?;
+
+    guard.finish(Ok(from_value(json).map_err(to_general_error)?))
 }
 
-impl NetworkCommand {
-    pub fn new(
-        reporter: Arc<dyn Reporter>,
-        rest_client: Arc<tokio::sync::Mutex<dyn RestClient + Send + Sync + 'static>>,
-        parser: Arc<dyn Parser<Json, ParseError = JsonParserError>>,
-    ) -> Self {
-        Self {
-            reporter,
-            rest_client,
-            parser,
-        }
+pub async fn list(
+    reporter: Arc<dyn Reporter>,
+    rest_client: &tokio::sync::Mutex<dyn RestClient + Send + Sync + 'static>,
+    parser: Arc<dyn Parser<Json, ParseError = JsonParserError>>,
+) -> Result<Vec<Network>, DockerError> {
+    let guard = Span::new(
+        Arc::clone(&reporter),
+        "Listing networks",
+        log::ScopeKind::Task,
+    )
+    .start_guard();
+
+    let request = Request::Get {
+        path: "/networks".to_string(),
+        headers: vec![],
+    };
+
+    let response = {
+        let mut rest_client = rest_client.lock().await;
+        rest_client
+            .execute(guard.span(), &request)
+            .await
+            .map_err(to_general_error)?
+    };
+    let body = assert_okay_with_body(response)?;
+    let json = parser.parse(body).map_err(to_general_error)?;
+
+    guard.finish(Ok(from_value(json).map_err(to_general_error)?))
+}
+
+pub async fn delete(
+    reporter: Arc<dyn Reporter>,
+    rest_client: &tokio::sync::Mutex<dyn RestClient + Send + Sync + 'static>,
+    network_id: &str,
+) -> Result<(), DockerError> {
+    let guard = Span::new(
+        Arc::clone(&reporter),
+        "Deleting network",
+        log::ScopeKind::Task,
+    )
+    .start_guard();
+
+    let request = Request::Delete {
+        path: format!("/networks/{network_id}"),
+        headers: vec![],
+    };
+
+    let response = {
+        let mut rest_client = rest_client.lock().await;
+        rest_client
+            .execute(guard.span(), &request)
+            .await
+            .map_err(to_general_error)?
+    };
+    assert_no_content(response)?;
+
+    guard.finish(Ok(()))
+}
+
+pub async fn exists(
+    reporter: Arc<dyn Reporter>,
+    rest_client: &tokio::sync::Mutex<dyn RestClient + Send + Sync + 'static>,
+    parser: Arc<dyn Parser<Json, ParseError = JsonParserError>>,
+    name: &NetworkName,
+) -> Result<bool, DockerError> {
+    match inspect_by_name(reporter, rest_client, parser, name).await {
+        Ok(_) => Ok(true),
+        Err(DockerError::ResourceNotFound) => Ok(false),
+        Err(err) => Err(err),
     }
+}
 
-    pub async fn inspect_by_id(&mut self, id: &str) -> Result<Network, DockerError> {
-        let guard = Span::new(
-            Arc::clone(&self.reporter),
-            "Inspect network by id",
-            log::ScopeKind::Task,
-        )
-        .start_guard();
+pub async fn create(
+    reporter: Arc<dyn Reporter>,
+    rest_client: &tokio::sync::Mutex<dyn RestClient + Send + Sync + 'static>,
+    parser: Arc<dyn Parser<Json, ParseError = JsonParserError>>,
+    name: &NetworkName,
+    labels: Vec<Label>,
+) -> Result<String, DockerError> {
+    let guard = Span::new(
+        Arc::clone(&reporter),
+        "Create network",
+        log::ScopeKind::Task,
+    )
+    .start_guard();
 
-        assert_non_empty_string_argument("id", id)?;
-        guard.finish(
-            self.inspect_network_by_hight::<Network>(guard.span(), id)
-                .await,
-        )
-    }
-
-    pub async fn inspect_by_name(&mut self, name: &NetworkName) -> Result<Network, DockerError> {
-        let guard = Span::new(
-            Arc::clone(&self.reporter),
-            "Inspect network by name",
-            log::ScopeKind::Task,
-        )
-        .start_guard();
-        guard.finish(
-            self.inspect_network_by_hight::<Network>(guard.span(), name.as_ref())
-                .await,
-        )
-    }
-
-    pub async fn find_connected_containers_by_id(
-        &mut self,
-        network_id: &str,
-    ) -> Result<Vec<String>, DockerError> {
-        let guard = Span::new(
-            Arc::clone(&self.reporter),
-            "Find connected networks by id",
-            log::ScopeKind::Task,
-        )
-        .start_guard();
-        assert_non_empty_string_argument("network_id", network_id)?;
-        guard.finish(
-            self.find_connected_containers_by_hight(guard.span(), network_id)
-                .await,
-        )
-    }
-
-    pub async fn find_connected_containers_by_name(
-        &mut self,
-        network_name: &NetworkName,
-    ) -> Result<Vec<String>, DockerError> {
-        let guard = Span::new(
-            Arc::clone(&self.reporter),
-            "Find connected containers by name",
-            log::ScopeKind::Task,
-        )
-        .start_guard();
-        guard.finish(
-            self.find_connected_containers_by_hight(guard.span(), network_name.as_ref())
-                .await,
-        )
-    }
-
-    pub async fn create(
-        &mut self,
-        name: &NetworkName,
-        labels: Vec<Label>,
-    ) -> Result<Network, DockerError> {
-        let guard = Span::new(
-            Arc::clone(&self.reporter),
-            "Create network",
-            log::ScopeKind::Task,
-        )
-        .start_guard();
-        let req = Request::Post {
-            path: "/networks/create".to_string(),
-            body: Some(serde_json::to_string(&CreationBody {
+    let req = Request::Post {
+        path: "/networks/create".to_string(),
+        body: Some(
+            serde_json::to_string(&CreationBody {
                 name: name.clone(),
                 labels,
-            })?),
-            headers: vec![Header::content_type_json()],
-        };
+            })
+            .map_err(to_general_error)?,
+        ),
+        headers: vec![Header::content_type_json()],
+    };
 
-        let response = {
-            let mut rest_client = self.rest_client.lock().await;
-            rest_client.execute(guard.span(), &req).await?
-        };
+    let response = {
+        let mut rest_client = rest_client.lock().await;
+        rest_client
+            .execute(guard.span(), &req)
+            .await
+            .map_err(to_general_error)?
+    };
 
-        let body = assert_created_with_body(response)?;
-        let json = self.parser.parse(body)?;
-        let result: CreationResponse = from_value(json)?;
+    let body = assert_created_with_body(response)?;
+    let json = parser.parse(body).map_err(to_general_error)?;
+    let creation_response: CreationResponse = from_value(json).map_err(to_general_error)?;
 
-        guard.finish(
-            self.inspect_network_by_hight(guard.span(), &result.id)
-                .await,
-        )
+    guard.finish(Ok(creation_response.id))
+}
+
+pub async fn connect(
+    reporter: Arc<dyn Reporter>,
+    rest_client: &tokio::sync::Mutex<dyn RestClient + Send + Sync + 'static>,
+    network_id: &str,
+    container_id: &str,
+) -> Result<(), DockerError> {
+    let guard = Span::new(
+        Arc::clone(&reporter),
+        "Connect to network",
+        log::ScopeKind::Task,
+    )
+    .start_guard();
+
+    let req = Request::Post {
+        path: format!("/networks/{network_id}/connect"),
+        body: Some(
+            serde_json::to_string(&ConnectionBody {
+                container_id: container_id.to_string(),
+            })
+            .map_err(to_general_error)?,
+        ),
+        headers: vec![Header::content_type_json()],
+    };
+
+    let response = {
+        let mut rest_client = rest_client.lock().await;
+        rest_client
+            .execute(guard.span(), &req)
+            .await
+            .map_err(to_general_error)?
+    };
+
+    guard.finish(assert_okay(response).map(|_| ()).map_err(DockerError::from))
+}
+
+pub async fn disconnect(
+    reporter: Arc<dyn Reporter>,
+    rest_client: &tokio::sync::Mutex<dyn RestClient + Send + Sync + 'static>,
+    parser: Arc<dyn Parser<Json, ParseError = JsonParserError>>,
+    network_id: &str,
+    container_id: &str,
+) -> Result<(), DockerError> {
+    let guard = Span::new(
+        Arc::clone(&reporter),
+        "Disconnect container",
+        log::ScopeKind::Task,
+    )
+    .start_guard();
+
+    let req = Request::Post {
+        path: format!("/networks/{network_id}/disconnect"),
+        body: Some(
+            serde_json::to_string(&ConnectionBody {
+                container_id: container_id.to_string(),
+            })
+            .map_err(to_general_error)?,
+        ),
+        headers: vec![Header::content_type_json()],
+    };
+
+    let response = {
+        let mut rest_client = rest_client.lock().await;
+        rest_client
+            .execute(guard.span(), &req)
+            .await
+            .map_err(to_general_error)?
+    };
+
+    if is_already_disconnected(&parser, &response) {
+        return guard.finish(Ok(()));
     }
 
-    pub async fn connect(
-        &mut self,
-        network: &Network,
-        container: &Container,
-    ) -> Result<(), DockerError> {
-        let guard = Span::new(
-            Arc::clone(&self.reporter),
-            "Connect to network",
-            log::ScopeKind::Task,
-        )
-        .start_guard();
-        let req = Request::Post {
-            path: format!("/networks/{}/connect", network.id),
-            body: Some(serde_json::to_string(&ConnectionBody {
-                container_id: container.id.to_string(),
-            })?),
-            headers: vec![Header::content_type_json()],
-        };
+    guard.finish(assert_okay(response).map(|_| ()).map_err(DockerError::from))
+}
 
-        let mut rest_client = self.rest_client.lock().await;
-        let response = rest_client.execute(guard.span(), &req).await?;
-        guard.finish(assert_okay(response))?;
-        Ok(())
-    }
-
-    pub async fn disconnect(
-        &mut self,
-        network: &Network,
-        container: &Container,
-    ) -> Result<(), DockerError> {
-        let guard = Span::new(
-            Arc::clone(&self.reporter),
-            "Disconnect container",
-            log::ScopeKind::Task,
-        )
-        .start_guard();
-        let req = Request::Post {
-            path: format!("/networks/{}/disconnect", network.id),
-            body: Some(serde_json::to_string(&ConnectionBody {
-                container_id: container.id.to_string(),
-            })?),
-            headers: vec![Header::content_type_json()],
-        };
-
-        let response = {
-            let mut rest_client = self.rest_client.lock().await;
-            rest_client.execute(guard.span(), &req).await?
-        };
-
-        if !self.is_already_disconnected(&response) {
-            assert_okay(response)?;
-        }
-        guard.finish(Ok(()))
-    }
-
-    async fn inspect_network_by_hight<T>(
-        &mut self,
-        span: &Span,
-        hight: &str,
-    ) -> Result<T, DockerError>
-    where
-        T: DeserializeOwned,
+fn is_already_disconnected(
+    parser: &Arc<dyn Parser<Json, ParseError = JsonParserError>>,
+    response: &simple_rest_client::Response,
+) -> bool {
+    if let simple_rest_client::Response::Error {
+        status: 500,
+        body: Some(body),
+        ..
+    } = response
+        && let Ok(json) = parser.parse(body.to_string())
+        && let Ok(connection_error) = from_value::<ConnectionError>(json)
     {
-        let request = Request::Get {
-            path: format!("/networks/{}", hight),
-            headers: vec![],
+        return connection_error.message.contains("not connected");
+    }
+
+    false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use simple_rest_client::{Response, parsers::json::JsonParser};
+
+    fn parser() -> Arc<dyn Parser<Json, ParseError = JsonParserError>> {
+        Arc::new(JsonParser::new())
+    }
+
+    #[test]
+    fn test_is_already_disconnected_should_be_true_for_a_not_connected_error() {
+        let response = Response::Error {
+            status: 500,
+            headers: Vec::new(),
+            body: Some(r#"{"message": "container is not connected to network"}"#.to_string()),
         };
 
-        let mut rest_client = self.rest_client.lock().await;
-        let response = rest_client.execute(span, &request).await?;
-        let body = assert_okay_with_body(response)?;
-        let json = self.parser.parse(body)?;
-
-        Ok(from_value(json)?)
+        assert!(is_already_disconnected(&parser(), &response));
     }
 
-    async fn find_connected_containers_by_hight(
-        &mut self,
-        span: &Span,
-        hight: &str,
-    ) -> Result<Vec<String>, DockerError> {
-        let network = self
-            .inspect_network_by_hight::<ConnectedContainers>(span, hight)
-            .await?;
-
-        Ok(network.container_ids)
-    }
-
-    fn is_already_disconnected(&mut self, response: &Response) -> bool {
-        if let Response::Error {
+    #[test]
+    fn test_is_already_disconnected_should_be_false_for_an_unrelated_error() {
+        let response = Response::Error {
             status: 500,
-            body: Some(body),
-            ..
-        } = response
-            && let Ok(json) = self.parser.parse(body.to_string())
-            && let Ok(connection_error) = from_value::<ConnectionError>(json)
-        {
-            return connection_error.message.contains("not connected");
-        }
+            headers: Vec::new(),
+            body: Some(r#"{"message": "something else went wrong"}"#.to_string()),
+        };
 
-        false
+        assert!(!is_already_disconnected(&parser(), &response));
+    }
+
+    #[test]
+    fn test_is_already_disconnected_should_be_false_for_a_non_500_error() {
+        let response = Response::Error {
+            status: 404,
+            headers: Vec::new(),
+            body: Some(r#"{"message": "container is not connected to network"}"#.to_string()),
+        };
+
+        assert!(!is_already_disconnected(&parser(), &response));
     }
 }

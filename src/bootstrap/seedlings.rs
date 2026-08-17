@@ -188,7 +188,7 @@ pub mod core_seedlings {
 
     fn traefik() -> Result<(Name, Version, SeedlingDefinition), BootstrapError> {
         let name = Name::from_str("traefik")?;
-        let version = Version(2);
+        let version = Version(3);
         let mount_name: Name = "config".parse()?;
 
         let definition = SeedlingDefinition::new(
@@ -205,11 +205,22 @@ pub mod core_seedlings {
                     ]),
                 ),
             )]),
-        );
+            seedbank_types::Routing::None,
+        )
+        .with_published_ports(vec![seedbank_types::PortMapping {
+            external: 80,
+            internal: 80,
+        }]);
 
         Ok((name, version, definition))
     }
 
+    // Do not add an `api:`/dashboard block here. Traefik's container is attached to
+    // every routed seedling's isolated network (so it can reach them), which means
+    // anything Traefik listens on is reachable from those seedlings too. Leaving the
+    // API/dashboard disabled (the default) keeps the only thing seedlings can reach on
+    // that interface to the HTTP router itself — no different from what an external
+    // client hitting the domain could already do.
     fn generate_default_static_definition() -> &'static [u8] {
         r#"entryPoints:
   web:

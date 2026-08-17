@@ -1,11 +1,11 @@
 use crate::{
     DockerError,
-    commands::{container, image, json_parser::ChunkedJsonParser, system},
+    commands::{container, image, json_parser::ChunkedJsonParser, network, system},
 };
 use async_trait::async_trait;
 use docker_types::{
     ContainerId, ContainerName, ContainerSnapshot, ImageDefinition, ImageId, Label, MountName,
-    NewContainer, Registry, Status, VersionedImageName,
+    NetworkName, NewContainer, Registry, Status, VersionedImageName,
 };
 use log::Reporter;
 #[cfg(feature = "mock")]
@@ -59,6 +59,27 @@ pub trait Client: Send + Sync {
         registry: &Registry,
         new_container: &NewContainer,
     ) -> Result<(), DockerError>;
+    async fn network_exists(&self, name: &NetworkName) -> Result<bool, DockerError>;
+    async fn create_network(&self, name: &NetworkName) -> Result<(), DockerError>;
+    async fn connect_network(
+        &self,
+        network: &NetworkName,
+        container_ref: ContainerRef,
+    ) -> Result<(), DockerError>;
+    async fn disconnect_network(
+        &self,
+        network: &NetworkName,
+        container_ref: ContainerRef,
+    ) -> Result<(), DockerError>;
+    async fn list_containers(&self) -> Result<Vec<ContainerName>, DockerError>;
+    async fn list_networks(&self) -> Result<Vec<NetworkSummary>, DockerError>;
+    async fn delete_network(&self, network: &NetworkName) -> Result<(), DockerError>;
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub struct NetworkSummary {
+    pub id: String,
+    pub name: NetworkName,
 }
 
 pub struct UdsClient {
@@ -253,6 +274,132 @@ impl Client for UdsClient {
             Arc::clone(&self.parser),
             registry,
             image_ref,
+        )
+        .await
+    }
+
+    async fn network_exists(&self, name: &NetworkName) -> Result<bool, DockerError> {
+        network::exists(
+            Arc::clone(&self.reporter),
+            &*self.rest_client,
+            Arc::clone(&self.parser),
+            name,
+        )
+        .await
+    }
+
+    async fn create_network(&self, name: &NetworkName) -> Result<(), DockerError> {
+        network::create(
+            Arc::clone(&self.reporter),
+            &*self.rest_client,
+            Arc::clone(&self.parser),
+            name,
+            Vec::new(),
+        )
+        .await
+        .map(|_| ())
+    }
+
+    async fn connect_network(
+        &self,
+        network_name: &NetworkName,
+        container_ref: ContainerRef,
+    ) -> Result<(), DockerError> {
+        let target_network = network::inspect_by_name(
+            Arc::clone(&self.reporter),
+            &*self.rest_client,
+            Arc::clone(&self.parser),
+            network_name,
+        )
+        .await?;
+        let container_id = container::find_id(
+            Arc::clone(&self.reporter),
+            &*self.rest_client,
+            Arc::clone(&self.parser),
+            container_ref,
+        )
+        .await?;
+
+        network::connect(
+            Arc::clone(&self.reporter),
+            &*self.rest_client,
+            &target_network.id,
+            &container_id,
+        )
+        .await
+    }
+
+    async fn disconnect_network(
+        &self,
+        network_name: &NetworkName,
+        container_ref: ContainerRef,
+    ) -> Result<(), DockerError> {
+        let target_network = network::inspect_by_name(
+            Arc::clone(&self.reporter),
+            &*self.rest_client,
+            Arc::clone(&self.parser),
+            network_name,
+        )
+        .await?;
+        let container_id = container::find_id(
+            Arc::clone(&self.reporter),
+            &*self.rest_client,
+            Arc::clone(&self.parser),
+            container_ref,
+        )
+        .await?;
+
+        network::disconnect(
+            Arc::clone(&self.reporter),
+            &*self.rest_client,
+            Arc::clone(&self.parser),
+            &target_network.id,
+            &container_id,
+        )
+        .await
+    }
+
+    async fn list_containers(&self) -> Result<Vec<ContainerName>, DockerError> {
+        container::list(
+            Arc::clone(&self.reporter),
+            &*self.rest_client,
+            Arc::clone(&self.parser),
+        )
+        .await
+    }
+
+    async fn list_networks(&self) -> Result<Vec<NetworkSummary>, DockerError> {
+        let networks = network::list(
+            Arc::clone(&self.reporter),
+            &*self.rest_client,
+            Arc::clone(&self.parser),
+        )
+        .await?;
+
+        Ok(networks
+            .into_iter()
+            .filter_map(|network| {
+                network.name.parse().ok().map(|name| NetworkSummary {
+                    id: network.id,
+                    name,
+                })
+            })
+            .collect())
+    }
+
+    async fn delete_network(&self, network: &NetworkName) -> Result<(), DockerError> {
+        let target_network = network::inspect_by_name(
+            Arc::clone(&self.reporter),
+            &*self.rest_client,
+            Arc::clone(&self.parser),
+            network,
+        )
+        .await?;
+
+        network::delete(
+            Arc::clone(&self.reporter),
+            &*self.rest_client,
+            &target_network.id,
         )
         .await
     }

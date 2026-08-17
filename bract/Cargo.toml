@@ -17,12 +17,14 @@ log = { workspace = true }
 mockall = { workspace = true }
 os = { workspace = true }
 postcard = { version = "1.1.3", features = ["alloc"] }
+reconcile_trigger_types = { workspace = true }
 resin_client = { workspace = true }
 resin_types = { workspace = true }
 seedbank_client = { workspace = true }
 seedbank_types = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+serde_yaml_ng = { workspace = true }
 sha2 = "0.11.0"
 subtle = "2.6.1"
 thiserror = { workspace = true }

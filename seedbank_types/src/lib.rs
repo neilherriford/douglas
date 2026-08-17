@@ -271,25 +271,61 @@ impl Mount {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RouteSpec {
+    Root,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PortMapping {
+    pub external: u16,
+    pub internal: u16,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PortSpec {
+    pub public: u16,
+    pub additional: Vec<PortMapping>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Routing {
+    None,
+    Routed { route: RouteSpec, ports: PortSpec },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SeedlingDefinition {
     pub image: VersionedImageName,
     pub mounts: HashMap<Name, Mount>,
+    pub routing: Routing,
+    pub published_ports: Vec<PortMapping>,
 }
 
 impl SeedlingDefinition {
-    pub fn new(image: VersionedImageName, mounts: HashMap<Name, Mount>) -> Self {
-        Self { image, mounts }
+    pub fn new(image: VersionedImageName, mounts: HashMap<Name, Mount>, routing: Routing) -> Self {
+        Self {
+            image,
+            mounts,
+            routing,
+            published_ports: Vec::new(),
+        }
+    }
+
+    pub fn with_published_ports(mut self, published_ports: Vec<PortMapping>) -> Self {
+        self.published_ports = published_ports;
+        self
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SeedlingSpec {
     pub mounts: HashMap<Name, Mount>,
+    pub ports: PortSpec,
 }
 
 impl SeedlingSpec {
-    pub fn new(mounts: HashMap<Name, Mount>) -> Self {
-        Self { mounts }
+    pub fn new(mounts: HashMap<Name, Mount>, ports: PortSpec) -> Self {
+        Self { mounts, ports }
     }
 }
 

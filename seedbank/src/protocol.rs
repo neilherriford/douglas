@@ -69,7 +69,11 @@ mod tests {
     }
 
     fn definition() -> SeedlingDefinition {
-        SeedlingDefinition::new(VersionedImageName::latest("test"), HashMap::new())
+        SeedlingDefinition::new(
+            VersionedImageName::latest("test"),
+            HashMap::new(),
+            seedbank_types::Routing::None,
+        )
     }
 
     #[test]

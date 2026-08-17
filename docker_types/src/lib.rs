@@ -675,6 +675,13 @@ pub struct NewContainer {
     pub mounts: Vec<MountDefinition>,
     pub added_capabilities: Vec<Capability>,
     pub labels: Vec<Label>,
+    pub published_ports: Vec<PortMapping>,
+}
+
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub struct PortMapping {
+    pub host_port: u16,
+    pub container_port: u16,
 }
 
 #[derive(Debug, PartialEq, Clone)]

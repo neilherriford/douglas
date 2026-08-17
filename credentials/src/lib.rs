@@ -42,6 +42,7 @@ pub mod well_known {
     pub static DOUGLAS_ADMIN_GROUP: &str = "douglas-admin";
     pub static DOUGLAS_APP_GROUP: &str = "douglas-app";
     pub static DOUGLAS_RESIN_SEEDBANK_GROUP: &str = "douglas-resin-seedbank";
+    pub static DOUGLAS_RESIN_BRACT_GROUP: &str = "douglas-resin-bract";
 }
 
 #[cfg_attr(feature = "mock", automock)]

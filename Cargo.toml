@@ -56,6 +56,7 @@ members = [
     "bract", "bract_types", "bract_client", "config", "utils", "openbao", "blueprint", "service_library",  "resin", "seedbank", "seedbank_types", "docker_types", "refined_string",
     "seedbank_client", "resin_client", "resin_types",
     "seedling_registration_types", "seedling_registration_client",
+    "reconcile_trigger_types", "reconcile_trigger_client",
 ]
 
 [workspace.dependencies]
@@ -75,6 +76,7 @@ ratatui = "0.30.0"
 regex = "1.12.4"
 serde = { version = "1.0.219", features = ["derive"] }
 serde_json = "1.0.140"
+serde_yaml_ng = "0.10.0"
 thiserror = "1"
 tokio = { version = "1.44.1", features = ["full"] }
 tokio-util = { version = "0.7", features = ["io"] }
@@ -89,6 +91,8 @@ bract_types = { path = "./bract_types" }
 config = { path = "./config" }
 credentials = { path = "./credentials" }
 docker = { path = "./docker" }
+reconcile_trigger_client = { path = "./reconcile_trigger_client" }
+reconcile_trigger_types = { path = "./reconcile_trigger_types" }
 docker_types = { path = "./docker_types" }
 file_system = { path = "./file_system" }
 log = { path = "./log" }

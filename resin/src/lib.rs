@@ -41,12 +41,12 @@ use axum::{
 };
 use config::DouglasFolders;
 use credentials::create_credentials;
-use futures_util::FutureExt;
 use file_system::{
     FileAppender, FileDeleter, FileReader, FileRenamer, FileSystemError, FileWriter, Folder,
     Inspect, Links, Permissions, UnixFileAppender, UnixFileDeleter, UnixFileReader,
     UnixFileRenamer, UnixFileWriter, UnixFolder, UnixInspect, UnixLinks, UnixPermissions,
 };
+use futures_util::FutureExt;
 use log::{BufferedFileReporter, Outcome, Reporter, ScopeKind, Span, TuiReporter};
 use os::{Os, Unix};
 use resin_types::{Name, NameParseError};
@@ -203,6 +203,7 @@ struct ManifestState {
     tag_store: Arc<dyn TagStore>,
     reporter: Arc<dyn Reporter>,
     seedling_registration_client: Arc<dyn seedling_registration_client::Client>,
+    reconcile_trigger_client: Arc<dyn reconcile_trigger_client::Client>,
 }
 
 struct LocalBlobRoot {
@@ -248,6 +249,7 @@ pub struct Server {
     tag_store: Arc<dyn TagStore>,
     repository_store: Arc<dyn RepositoryStore>,
     seedling_registration_client: Arc<dyn seedling_registration_client::Client>,
+    reconcile_trigger_client: Arc<dyn reconcile_trigger_client::Client>,
 }
 
 impl Server {
@@ -345,11 +347,13 @@ impl Server {
             repositories_root.clone(),
         ));
 
-        let seedling_registration_client: Arc<dyn seedling_registration_client::Client> =
-            Arc::new(seedling_registration_client::UdsClient::new(
-                Arc::clone(&reporter),
-                &douglas_folders,
-            ));
+        let seedling_registration_client: Arc<dyn seedling_registration_client::Client> = Arc::new(
+            seedling_registration_client::UdsClient::new(Arc::clone(&reporter), &douglas_folders),
+        );
+
+        let reconcile_trigger_client: Arc<dyn reconcile_trigger_client::Client> = Arc::new(
+            reconcile_trigger_client::UdsClient::new(Arc::clone(&reporter), &douglas_folders),
+        );
 
         Ok(Self {
             reporter,
@@ -360,6 +364,7 @@ impl Server {
             tag_store,
             repository_store,
             seedling_registration_client,
+            reconcile_trigger_client,
         })
     }
 
@@ -426,6 +431,7 @@ impl Server {
             tag_store: Arc::clone(&self.tag_store),
             reporter: Arc::clone(&self.reporter),
             seedling_registration_client: Arc::clone(&self.seedling_registration_client),
+            reconcile_trigger_client: Arc::clone(&self.reconcile_trigger_client),
         };
 
         let manifest_routes = Router::new()

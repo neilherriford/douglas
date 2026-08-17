@@ -5,12 +5,12 @@ use crate::{
 };
 use docker_types::{
     Capability, ContainerDefinition, ContainerId, ContainerRuntimeState, ContainerSnapshot,
-    ContainerUser, MountDefinition, MountName, NewContainer, Registry, Status,
+    ContainerUser, MountDefinition, MountName, NewContainer, PortMapping, Registry, Status,
     deserialize_capabilities, deserialize_labels, serialize_capabilities,
     serialize_environment_variables, serialize_labels,
 };
 use log::{Reporter, Span};
-use serde::ser::SerializeSeq;
+use serde::ser::{SerializeMap, SerializeSeq};
 use serde::{Deserialize, Serialize, Serializer};
 use serde_json::from_value;
 use serde_json::value::Value as Json;
@@ -36,6 +36,8 @@ struct CreateContainerHostConfig {
     mounts: Vec<MountDefinition>,
     #[serde(rename = "CapAdd", serialize_with = "serialize_capabilities")]
     added_capabilities: Vec<Capability>,
+    #[serde(rename = "PortBindings", serialize_with = "serialize_port_bindings")]
+    published_ports: Vec<PortMapping>,
 }
 
 #[derive(Debug, Serialize)]
@@ -54,6 +56,8 @@ struct CreateContainerRequest {
     labels: Vec<Label>,
     #[serde(rename = "User", skip_serializing_if = "Option::is_none")]
     run_as: Option<ContainerUser>,
+    #[serde(rename = "ExposedPorts", serialize_with = "serialize_exposed_ports")]
+    published_ports: Vec<PortMapping>,
     #[serde(rename = "HostConfig")]
     host_config: CreateContainerHostConfig,
 }
@@ -69,12 +73,59 @@ impl CreateContainerRequest {
             environment_variables: new_container.environment_variables.clone(),
             labels: new_container.labels.clone(),
             run_as: new_container.run_as.clone(),
+            published_ports: new_container.published_ports.clone(),
             host_config: CreateContainerHostConfig {
                 mounts: new_container.mounts.clone(),
                 added_capabilities: new_container.added_capabilities.clone(),
+                published_ports: new_container.published_ports.clone(),
             },
         }
     }
+}
+
+fn serialize_exposed_ports<S>(
+    published_ports: &[PortMapping],
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    let mut map = serializer.serialize_map(Some(published_ports.len()))?;
+    for port in published_ports {
+        map.serialize_entry(
+            &format!("{}/tcp", port.container_port),
+            &Json::Object(serde_json::Map::new()),
+        )?;
+    }
+    map.end()
+}
+
+fn serialize_port_bindings<S>(
+    published_ports: &[PortMapping],
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    let mut map = serializer.serialize_map(Some(published_ports.len()))?;
+    for port in published_ports {
+        map.serialize_entry(
+            &format!("{}/tcp", port.container_port),
+            &[HostPortBinding {
+                host_ip: "127.0.0.1",
+                host_port: port.host_port.to_string(),
+            }],
+        )?;
+    }
+    map.end()
+}
+
+#[derive(Debug, Serialize)]
+struct HostPortBinding {
+    #[serde(rename = "HostIp")]
+    host_ip: &'static str,
+    #[serde(rename = "HostPort")]
+    host_port: String,
 }
 
 pub(crate) fn serialize_container_command<S>(
@@ -209,6 +260,66 @@ pub async fn labels(
     guard.finish(Ok(buffer.config.labels))
 }
 
+#[derive(Debug, Deserialize)]
+struct ContainerListEntry {
+    #[serde(rename = "Names")]
+    names: Vec<String>,
+}
+
+pub async fn list(
+    reporter: Arc<dyn Reporter>,
+    rest_client: &tokio::sync::Mutex<dyn RestClient + Send + Sync + 'static>,
+    parser: Arc<dyn Parser<Json, ParseError = JsonParserError>>,
+) -> Result<Vec<docker_types::ContainerName>, DockerError> {
+    let guard = Span::new(
+        Arc::clone(&reporter),
+        "Listing containers",
+        log::ScopeKind::Task,
+    )
+    .start_guard();
+
+    let request = Request::Get {
+        path: create_path_and_query_string("/containers/json", HashMap::from([("all", "true")])),
+        headers: vec![],
+    };
+
+    let response = {
+        let mut rest_client = rest_client.lock().await;
+        rest_client
+            .execute(guard.span(), &request)
+            .await
+            .map_err(to_general_error)?
+    };
+    let body = assert_okay_with_body(response)?;
+    let json = parser.parse(body).map_err(to_general_error)?;
+    let entries: Vec<ContainerListEntry> = from_value(json).map_err(to_general_error)?;
+
+    guard.finish(Ok(entries
+        .into_iter()
+        .filter_map(|entry| entry.names.into_iter().next())
+        .filter_map(|name| name.trim_start_matches('/').parse().ok())
+        .collect()))
+}
+
+pub async fn find_id(
+    reporter: Arc<dyn Reporter>,
+    rest_client: &tokio::sync::Mutex<dyn RestClient + Send + Sync + 'static>,
+    parser: Arc<dyn Parser<Json, ParseError = JsonParserError>>,
+    container_ref: ContainerRef,
+) -> Result<String, DockerError> {
+    let guard = Span::new(
+        Arc::clone(&reporter),
+        "Find container id",
+        log::ScopeKind::Task,
+    )
+    .start_guard();
+
+    let json = inspect_container(rest_client, &parser, &container_ref, &guard).await?;
+    let buffer: InspectedContainer = from_value(json).map_err(to_general_error)?;
+
+    guard.finish(Ok(buffer.id))
+}
+
 pub async fn find(
     reporter: Arc<dyn Reporter>,
     rest_client: &tokio::sync::Mutex<dyn RestClient + Send + Sync + 'static>,
@@ -226,18 +337,15 @@ pub async fn find(
     let json = inspect_container(rest_client, &parser, &container_ref, &guard).await?;
     let buffer: InspectedContainer = from_value(json).map_err(to_general_error)?;
 
-    let name = buffer
-        .name
-        .trim_start_matches('/')
-        .parse()
-        .map_err(
-            |err: docker_types::DockerNameError| DockerError::InvalidName {
-                name: buffer.name.clone(),
-                description: err.to_string(),
-            },
-        )?;
-    let image = commands::image::inspect(Arc::clone(&reporter), rest_client, parser, buffer.image_id)
-        .await?;
+    let name = buffer.name.trim_start_matches('/').parse().map_err(
+        |err: docker_types::DockerNameError| DockerError::InvalidName {
+            name: buffer.name.clone(),
+            description: err.to_string(),
+        },
+    )?;
+    let image =
+        commands::image::inspect(Arc::clone(&reporter), rest_client, parser, buffer.image_id)
+            .await?;
     let mounts = buffer
         .mounts
         .into_iter()
@@ -490,6 +598,7 @@ mod tests {
             mounts: Vec::new(),
             added_capabilities: Vec::new(),
             labels: Vec::new(),
+            published_ports: Vec::new(),
         }
     }
 
@@ -506,21 +615,54 @@ mod tests {
     fn test_build_should_serialize_the_registry_qualified_image_as_the_image_field() {
         let registry: Registry = "localhost:7376".parse().unwrap();
 
-        let json_str = serde_json::to_string(&CreateContainerRequest::build(
-            &registry,
-            &new_container(),
-        ))
-        .unwrap();
+        let json_str =
+            serde_json::to_string(&CreateContainerRequest::build(&registry, &new_container()))
+                .unwrap();
         let actual: Value = serde_json::from_str(&json_str).unwrap();
 
         assert_eq!(actual["Image"], json!("localhost:7376/traefik:v3.7.7"));
     }
 
     #[test]
+    fn test_build_should_omit_exposed_ports_and_bindings_when_no_ports_are_published() {
+        let registry: Registry = "localhost:7376".parse().unwrap();
+
+        let json_str =
+            serde_json::to_string(&CreateContainerRequest::build(&registry, &new_container()))
+                .unwrap();
+        let actual: Value = serde_json::from_str(&json_str).unwrap();
+
+        assert_eq!(actual["ExposedPorts"], json!({}));
+        assert_eq!(actual["HostConfig"]["PortBindings"], json!({}));
+    }
+
+    #[test]
+    fn test_build_should_expose_and_bind_published_ports_to_localhost() {
+        let registry: Registry = "localhost:7376".parse().unwrap();
+        let mut container = new_container();
+        container.published_ports = vec![PortMapping {
+            host_port: 80,
+            container_port: 80,
+        }];
+
+        let json_str =
+            serde_json::to_string(&CreateContainerRequest::build(&registry, &container)).unwrap();
+        let actual: Value = serde_json::from_str(&json_str).unwrap();
+
+        assert_eq!(actual["ExposedPorts"], json!({"80/tcp": {}}));
+        assert_eq!(
+            actual["HostConfig"]["PortBindings"],
+            json!({"80/tcp": [{"HostIp": "127.0.0.1", "HostPort": "80"}]})
+        );
+    }
+
+    #[test]
     fn test_to_mount_definition_should_resolve_the_configured_mount_name() {
         let container_path = PathBuf::from("/etc/traefik");
-        let mount_names =
-            HashMap::from([(container_path.clone(), "shared".parse::<MountName>().unwrap())]);
+        let mount_names = HashMap::from([(
+            container_path.clone(),
+            "shared".parse::<MountName>().unwrap(),
+        )]);
         let mount = Mount {
             mount_type: docker_types::MountType::Bind,
             source: "/var/lib/douglas/mounts/traefik/shared".to_string(),

@@ -1,0 +1,22 @@
+[package]
+name = "reconcile_trigger_client"
+version = "0.0.1"
+edition = "2024"
+publish = false
+
+[features]
+default = []
+mock = ["mockall"]
+
+[dependencies]
+async-trait = { workspace = true }
+config = { workspace = true }
+log = { workspace = true }
+mockall = { workspace = true, optional = true }
+reconcile_trigger_types = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+
+[dev-dependencies]
+mockall = { workspace = true }

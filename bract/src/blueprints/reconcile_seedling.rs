@@ -1,5 +1,8 @@
 use crate::{
-    blueprints::{EXPECTED_MOUNT_MODE, container_name, seedling_mount_path},
+    blueprints::{
+        EXPECTED_MOUNT_MODE, SYSTEM_NETWORK_NAME, container_name, seedling_mount_path,
+        seedling_network_name,
+    },
     labels::{self},
     rolodex::{Rolodex, RolodexError},
 };
@@ -347,7 +350,10 @@ impl<'a> StateObserver<'a> {
         {
             result.missing_share_groups.push((
                 name.clone(),
-                siblings.iter().map(std::string::ToString::to_string).collect(),
+                siblings
+                    .iter()
+                    .map(std::string::ToString::to_string)
+                    .collect(),
             ));
         }
 
@@ -637,10 +643,7 @@ fn create_plan<'a>(
     }
 
     for (path, mount_name, kind) in state.needs_mount_ownership {
-        push_step(
-            &mut steps,
-            SetMountOwnership::new(path, mount_name, kind),
-        );
+        push_step(&mut steps, SetMountOwnership::new(path, mount_name, kind));
     }
 
     for (path, mode) in state.missing_mount_mode {
@@ -934,7 +937,11 @@ struct SetMountOwnership {
 }
 
 impl SetMountOwnership {
-    pub fn new(path: PathBuf, mount_name: seedbank_types::Name, kind: seedbank_types::MountType) -> Self {
+    pub fn new(
+        path: PathBuf,
+        mount_name: seedbank_types::Name,
+        kind: seedbank_types::MountType,
+    ) -> Self {
         Self {
             path,
             mount_name,
@@ -1309,6 +1316,25 @@ impl<'a> Command<Context<'a>> for DropContainer {
     }
 }
 
+fn published_ports_for(
+    seedling_definition: &seedbank_types::SeedlingDefinition,
+) -> Vec<docker_types::PortMapping> {
+    let routed_additional_ports = match &seedling_definition.routing {
+        seedbank_types::Routing::Routed { ports, .. } => ports.additional.as_slice(),
+        seedbank_types::Routing::None => &[],
+    };
+
+    seedling_definition
+        .published_ports
+        .iter()
+        .chain(routed_additional_ports)
+        .map(|port| docker_types::PortMapping {
+            host_port: port.external,
+            container_port: port.internal,
+        })
+        .collect()
+}
+
 struct BuildContainer {
     name: seedbank_types::Name,
     version: seedbank_types::Version,
@@ -1391,12 +1417,42 @@ impl<'a> Command<Context<'a>> for BuildContainer {
                 labels::create_version_label(context.version),
                 labels::create_origin_label(context.origin),
             ],
+            published_ports: published_ports_for(context.seedling_definition),
         };
 
         context
             .docker_client
             .create_container(context.registry, &new_container)
             .await?;
+
+        let seedling_network = seedling_network_name(&self.name)?;
+        if !context
+            .docker_client
+            .network_exists(&seedling_network)
+            .await?
+        {
+            context
+                .docker_client
+                .create_network(&seedling_network)
+                .await?;
+        }
+        context
+            .docker_client
+            .connect_network(
+                &seedling_network,
+                ContainerRef::FullName(new_container.name.clone()),
+            )
+            .await?;
+
+        if context.origin == labels::Origin::Core {
+            let system_network: docker_types::NetworkName = SYSTEM_NETWORK_NAME
+                .parse()
+                .expect("SYSTEM_NETWORK_NAME is a valid network name");
+            context
+                .docker_client
+                .connect_network(&system_network, ContainerRef::FullName(new_container.name))
+                .await?;
+        }
 
         guard.finish_with_outcome(log::Outcome::Ok);
         Ok(())
@@ -1465,6 +1521,7 @@ mod tests {
         seedbank_types::SeedlingDefinition::new(
             VersionedImageName::specific("traefik", "v3.7.7"),
             HashMap::new(),
+            seedbank_types::Routing::None,
         )
     }
 
@@ -1584,7 +1641,10 @@ mod tests {
 
         assert_eq!(
             step_descriptions(steps),
-            vec![format!("Setting mount ownership '{}'", path_to_string(&path))]
+            vec![format!(
+                "Setting mount ownership '{}'",
+                path_to_string(&path)
+            )]
         );
     }
 
@@ -1664,5 +1724,109 @@ mod tests {
                 "Starting container 'doug.traefik' (v2)",
             ]
         );
+    }
+
+    #[test]
+    fn test_published_ports_for_should_be_empty_when_no_ports_are_declared() {
+        let definition = seedling_definition();
+
+        let result = published_ports_for(&definition);
+
+        assert_eq!(result, Vec::new());
+    }
+
+    #[test]
+    fn test_published_ports_for_should_include_explicitly_published_ports() {
+        let definition =
+            seedling_definition().with_published_ports(vec![seedbank_types::PortMapping {
+                external: 80,
+                internal: 80,
+            }]);
+
+        let result = published_ports_for(&definition);
+
+        assert_eq!(
+            result,
+            vec![docker_types::PortMapping {
+                host_port: 80,
+                container_port: 80,
+            }]
+        );
+    }
+
+    #[test]
+    fn test_published_ports_for_should_include_a_routed_seedlings_additional_ports() {
+        let mut definition = seedling_definition();
+        definition.routing = seedbank_types::Routing::Routed {
+            route: seedbank_types::RouteSpec::Root,
+            ports: seedbank_types::PortSpec {
+                public: 8080,
+                additional: vec![seedbank_types::PortMapping {
+                    external: 1234,
+                    internal: 4321,
+                }],
+            },
+        };
+
+        let result = published_ports_for(&definition);
+
+        assert_eq!(
+            result,
+            vec![docker_types::PortMapping {
+                host_port: 1234,
+                container_port: 4321,
+            }]
+        );
+    }
+
+    #[test]
+    fn test_published_ports_for_should_merge_explicit_and_routed_additional_ports() {
+        let mut definition =
+            seedling_definition().with_published_ports(vec![seedbank_types::PortMapping {
+                external: 80,
+                internal: 80,
+            }]);
+        definition.routing = seedbank_types::Routing::Routed {
+            route: seedbank_types::RouteSpec::Root,
+            ports: seedbank_types::PortSpec {
+                public: 8080,
+                additional: vec![seedbank_types::PortMapping {
+                    external: 1234,
+                    internal: 4321,
+                }],
+            },
+        };
+
+        let result = published_ports_for(&definition);
+
+        assert_eq!(
+            result,
+            vec![
+                docker_types::PortMapping {
+                    host_port: 80,
+                    container_port: 80,
+                },
+                docker_types::PortMapping {
+                    host_port: 1234,
+                    container_port: 4321,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn test_published_ports_for_should_not_publish_the_routed_public_port_by_itself() {
+        let mut definition = seedling_definition();
+        definition.routing = seedbank_types::Routing::Routed {
+            route: seedbank_types::RouteSpec::Root,
+            ports: seedbank_types::PortSpec {
+                public: 8080,
+                additional: Vec::new(),
+            },
+        };
+
+        let result = published_ports_for(&definition);
+
+        assert_eq!(result, Vec::new());
     }
 }

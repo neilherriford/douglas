@@ -276,7 +276,16 @@ fn example_seedling_spec() -> seedbank_types::SeedlingSpec {
         ),
     );
 
-    seedbank_types::SeedlingSpec::new(mounts)
+    seedbank_types::SeedlingSpec::new(
+        mounts,
+        seedbank_types::PortSpec {
+            public: 8080,
+            additional: vec![seedbank_types::PortMapping {
+                external: 1234,
+                internal: 4321,
+            }],
+        },
+    )
 }
 
 fn create_seedling_template(output_style: OutputStyle) -> ExitCode {

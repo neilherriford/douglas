@@ -8,7 +8,10 @@ use blueprint::{
     },
 };
 use config::DouglasFolders;
-use credentials::{Credentials, well_known::DOUGLAS_RESIN_SEEDBANK_GROUP};
+use credentials::{
+    Credentials,
+    well_known::{DOUGLAS_RESIN_BRACT_GROUP, DOUGLAS_RESIN_SEEDBANK_GROUP},
+};
 use file_system::{Folder, Modes, Permissions};
 use log::{ScopeKind, Span};
 use std::{path::Path, sync::Arc};
@@ -24,8 +27,7 @@ pub async fn bootstrap(
     permissions: &dyn Permissions,
     douglas_folders: &DouglasFolders,
 ) -> Result<(), Error> {
-    let boot_reporter =
-        build_boot_reporter(douglas_folders.service_log_file(RESIN), reporting_fd);
+    let boot_reporter = build_boot_reporter(douglas_folders.service_log_file(RESIN), reporting_fd);
 
     let guard = Span::new(
         Arc::clone(&boot_reporter),
@@ -83,7 +85,7 @@ pub fn service_definition(douglas_folders: &DouglasFolders) -> ServiceDefinition
             ),
         ],
         Vec::new(),
-        &[DOUGLAS_RESIN_SEEDBANK_GROUP],
+        &[DOUGLAS_RESIN_SEEDBANK_GROUP, DOUGLAS_RESIN_BRACT_GROUP],
         BootstrapReporting::Pipe,
     )
 }

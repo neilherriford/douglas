@@ -136,7 +136,9 @@ impl Server {
         let mut seeds = douglas_folders.service_root(SEEDBANK);
         seeds.push(SEEDS_ROOT_NAME);
 
-        let mut owned_sockets = service_definition(&douglas_folders).owned_sockets.into_iter();
+        let mut owned_sockets = service_definition(&douglas_folders)
+            .owned_sockets
+            .into_iter();
         let listener_factory = SocketListenerFactory::new(
             owned_sockets
                 .next()
@@ -371,8 +373,12 @@ impl Server {
     }
 
     fn log_connection_error(server: &Arc<Self>, label: &str, err: &impl std::fmt::Display) {
-        Span::new(Arc::clone(&server.reporter), "Handling connection", ScopeKind::Task)
-            .message(log::Level::Warn, &format!("{label}: {err}"));
+        Span::new(
+            Arc::clone(&server.reporter),
+            "Handling connection",
+            ScopeKind::Task,
+        )
+        .message(log::Level::Warn, &format!("{label}: {err}"));
     }
 
     async fn accept_registration_loop(
@@ -729,8 +735,8 @@ impl Seedbank for Server {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use docker_types::VersionedImageName;
     use blueprint::listener::ListenerDefinition;
+    use docker_types::VersionedImageName;
     use file_system::{
         Entry, MockBindableUnixDomainSocketFile, MockFileDeleter, MockFileReader, MockFileWriter,
         MockFolder, MockFolderDeleter, MockInspect, MockPermissions, Modes,
@@ -756,11 +762,19 @@ mod tests {
     }
 
     fn definition() -> SeedlingDefinition {
-        SeedlingDefinition::new(VersionedImageName::latest("test"), HashMap::new())
+        SeedlingDefinition::new(
+            VersionedImageName::latest("test"),
+            HashMap::new(),
+            seedbank_types::Routing::None,
+        )
     }
 
     fn definition_with_mounts(mounts: HashMap<Name, Mount>) -> SeedlingDefinition {
-        SeedlingDefinition::new(VersionedImageName::latest("test"), mounts)
+        SeedlingDefinition::new(
+            VersionedImageName::latest("test"),
+            mounts,
+            seedbank_types::Routing::None,
+        )
     }
 
     fn mounts(pairs: Vec<(&str, Mount)>) -> HashMap<Name, Mount> {

@@ -201,6 +201,13 @@ async fn write_manifest(
         }
     };
 
+    notify_reconcile_trigger(
+        state.reconcile_trigger_client.as_ref(),
+        &state.reporter,
+        &name,
+    )
+    .await;
+
     Ok((
         StatusCode::CREATED,
         [
@@ -209,6 +216,39 @@ async fn write_manifest(
         ],
     )
         .into_response())
+}
+
+async fn notify_reconcile_trigger(
+    client: &dyn reconcile_trigger_client::Client,
+    reporter: &Arc<dyn Reporter>,
+    name: &Name,
+) {
+    let guard = Span::new(
+        Arc::clone(reporter),
+        "Notifying bract of push",
+        ScopeKind::Task,
+    )
+    .start_guard();
+
+    match client.notify_pushed(&name.to_string()).await {
+        Ok(reconcile_trigger_types::Response::Accepted) => {
+            guard.finish_with_outcome(Outcome::Ok);
+        }
+        Ok(reconcile_trigger_types::Response::InvalidName) => {
+            guard.span().message(
+                log::Level::Warn,
+                &format!("bract rejected '{name}' as an invalid name"),
+            );
+            guard.finish_with_outcome(Outcome::Failed);
+        }
+        Err(err) => {
+            guard.span().message(
+                log::Level::Warn,
+                &format!("could not notify bract that '{name}' was pushed: {err}"),
+            );
+            guard.finish_with_outcome(Outcome::Failed);
+        }
+    }
 }
 
 fn assert_hashes_equal(computed: &Digest, claimed: &Digest) -> Result<(), ServerError> {
@@ -580,6 +620,60 @@ mod tests {
             let result = assert_seedling_registered(&client, &name()).await;
 
             assert!(matches!(result, Err(ServerError::Internal(_))));
+        }
+    }
+
+    mod notify_reconcile_trigger {
+        use crate::manifest::notify_reconcile_trigger;
+        use log::{Event, Reporter};
+        use reconcile_trigger_client::MockClient;
+        use reconcile_trigger_types::Response;
+        use resin_types::Name;
+        use std::{str::FromStr, sync::Arc};
+
+        struct NullReporter;
+
+        impl Reporter for NullReporter {
+            fn emit(&self, _event: Event) {}
+        }
+
+        fn name() -> Name {
+            Name::from_str("traefik").unwrap()
+        }
+
+        #[tokio::test]
+        async fn test_should_notify_with_the_bare_repository_name() {
+            let mut client = MockClient::new();
+            client
+                .expect_notify_pushed()
+                .withf(|pushed| pushed == "traefik")
+                .times(1)
+                .returning(|_| Ok(Response::Accepted));
+            let reporter: Arc<dyn Reporter> = Arc::new(NullReporter);
+
+            notify_reconcile_trigger(&client, &reporter, &name()).await;
+        }
+
+        #[tokio::test]
+        async fn test_should_not_panic_when_bract_rejects_the_name() {
+            let mut client = MockClient::new();
+            client
+                .expect_notify_pushed()
+                .returning(|_| Ok(Response::InvalidName));
+            let reporter: Arc<dyn Reporter> = Arc::new(NullReporter);
+
+            notify_reconcile_trigger(&client, &reporter, &name()).await;
+        }
+
+        #[tokio::test]
+        async fn test_should_not_panic_on_a_transport_error() {
+            let mut client = MockClient::new();
+            client
+                .expect_notify_pushed()
+                .returning(|_| Err(reconcile_trigger_client::Error::ConnectionRefused));
+            let reporter: Arc<dyn Reporter> = Arc::new(NullReporter);
+
+            notify_reconcile_trigger(&client, &reporter, &name()).await;
         }
     }
 

@@ -66,6 +66,8 @@ pub enum Error {
     StopSeedlingError(#[from] blueprints::stop_seedling::StopSeedlingError),
     #[error("Failed to drop seedling: {0}")]
     DropSeedlingError(#[from] blueprints::drop_seedling::DropSeedlingError),
+    #[error("Failed to write traefik routes: {0}")]
+    WriteTraefikRoutesError(#[from] blueprints::write_traefik_routes::WriteTraefikRoutesError),
 }
 
 #[derive(Error, Debug)]
@@ -103,7 +105,8 @@ pub trait Server: Send + Sync {
 }
 
 pub struct Bract {
-    listener_factories: Vec<SocketListenerFactory>,
+    listener_factory: SocketListenerFactory,
+    trigger_listener_factory: SocketListenerFactory,
     shutdown_sender: Sender<()>,
     reporter: Arc<dyn Reporter>,
     docker_client: Arc<dyn docker::client::Client>,
@@ -145,18 +148,25 @@ impl Bract {
 
         let permissions: Arc<dyn Permissions> = Arc::from(*permissions);
 
-        let listener_factories = blueprints::bootstrap::service_definition(&douglas_folders)
+        let mut owned_sockets = blueprints::bootstrap::service_definition(&douglas_folders)
             .owned_sockets
-            .into_iter()
-            .map(|socket_definition| {
-                SocketListenerFactory::new(
-                    socket_definition,
-                    Arc::clone(&file_deleter),
-                    Arc::clone(&permissions),
-                    Arc::clone(&unix_domain_socket),
-                )
-            })
-            .collect();
+            .into_iter();
+        let listener_factory = SocketListenerFactory::new(
+            owned_sockets
+                .next()
+                .expect("bract always defines its main control socket"),
+            Arc::clone(&file_deleter),
+            Arc::clone(&permissions),
+            Arc::clone(&unix_domain_socket),
+        );
+        let trigger_listener_factory = SocketListenerFactory::new(
+            owned_sockets
+                .next()
+                .expect("bract always defines its trigger socket"),
+            Arc::clone(&file_deleter),
+            Arc::clone(&permissions),
+            Arc::clone(&unix_domain_socket),
+        );
 
         let reporter: Arc<dyn Reporter> = Arc::new(BufferedFileReporter::new(
             douglas_folders.service_log_file("bract"),
@@ -189,7 +199,8 @@ impl Bract {
         ));
 
         Ok(Self {
-            listener_factories,
+            listener_factory,
+            trigger_listener_factory,
             shutdown_sender,
             reporter,
             docker_client,
@@ -219,24 +230,41 @@ impl Bract {
 
         let mut shutdown = self.shutdown_sender.subscribe();
 
-        let listeners: Vec<_> = self
-            .listener_factories
-            .iter()
-            .map(|f| f.create(&span))
-            .collect::<Result<_, _>>()?;
+        if let Err(err) = blueprints::write_traefik_routes::execute(
+            Arc::clone(&self.reporter),
+            self.seedbank_client.as_ref(),
+            self.docker_client.as_ref(),
+            self.folder.as_ref(),
+            self.file_writer.as_ref(),
+            &*self.permissions,
+            &*self.rolodex,
+            &self.douglas_folders,
+        )
+        .await
+        {
+            span.message(
+                log::Level::Warn,
+                &format!("Could not reconstruct traefik routes at startup: {err}"),
+            );
+        }
+
+        let listener = self.listener_factory.create(&span)?;
+        let trigger_listener = self.trigger_listener_factory.create(&span)?;
 
         let accept_loops = async move {
-            let tasks: Vec<_> = listeners
-                .into_iter()
-                .map(|listener| {
-                    let server = Arc::clone(&self);
-                    tokio::spawn(async move { Self::accept_loop(listener, server).await })
-                })
-                .collect();
+            let main_task = {
+                let server = Arc::clone(&self);
+                tokio::spawn(async move { Self::accept_loop(listener, server).await })
+            };
+            let trigger_task = {
+                let server = Arc::clone(&self);
+                tokio::spawn(
+                    async move { Self::accept_trigger_loop(trigger_listener, server).await },
+                )
+            };
 
-            for task in tasks {
-                task.await.map_err(std::io::Error::other)??;
-            }
+            main_task.await.map_err(std::io::Error::other)??;
+            trigger_task.await.map_err(std::io::Error::other)??;
             Ok::<_, Error>(())
         };
 
@@ -317,14 +345,143 @@ impl Bract {
             }
         };
 
-        if let Err(err) = Self::write_message(&mut writer, &ServerMessage::Response(response)).await {
+        if let Err(err) = Self::write_message(&mut writer, &ServerMessage::Response(response)).await
+        {
             Self::log_connection_error(&server, "Failed to write response message", &err);
         }
     }
 
     fn log_connection_error(server: &Arc<Self>, label: &str, err: &impl std::fmt::Display) {
-        Span::new(Arc::clone(&server.reporter), "Handling connection", ScopeKind::Task)
-            .message(log::Level::Warn, &format!("{label}: {err}"));
+        Span::new(
+            Arc::clone(&server.reporter),
+            "Handling connection",
+            ScopeKind::Task,
+        )
+        .message(log::Level::Warn, &format!("{label}: {err}"));
+    }
+
+    async fn accept_trigger_loop(
+        listener: Box<dyn file_system::Listener + Send + Sync + 'static>,
+        server: Arc<Self>,
+    ) -> Result<(), Error> {
+        loop {
+            let (stream, _addr) = listener.accept().await?;
+            let server = Arc::clone(&server);
+
+            tokio::spawn(async move {
+                Self::handle_trigger_connection(stream, server).await;
+            });
+        }
+    }
+
+    async fn handle_trigger_connection(mut stream: tokio::net::UnixStream, server: Arc<Self>) {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+        let (reader, mut writer) = stream.split();
+        let mut lines = BufReader::new(reader).lines();
+
+        let Ok(Some(line)) = lines.next_line().await else {
+            return;
+        };
+
+        let Ok(request) = serde_json::from_str::<reconcile_trigger_types::Request>(&line) else {
+            return;
+        };
+
+        let response = match request.name.parse::<seedbank_types::Name>() {
+            Ok(name) => {
+                let server = Arc::clone(&server);
+                tokio::spawn(async move { server.trigger_reconcile(name).await });
+                reconcile_trigger_types::Response::Accepted
+            }
+            Err(_) => reconcile_trigger_types::Response::InvalidName,
+        };
+
+        let serialized = match serde_json::to_string(&response) {
+            Ok(serialized) => serialized,
+            Err(err) => {
+                Self::log_connection_error(&server, "Failed to serialize trigger response", &err);
+                return;
+            }
+        };
+
+        if let Err(err) = writer.write_all(format!("{serialized}\n").as_bytes()).await {
+            Self::log_connection_error(&server, "Failed to write trigger response", &err);
+        }
+    }
+
+    async fn trigger_reconcile(self: Arc<Self>, name: seedbank_types::Name) {
+        let guard = Span::new(
+            Arc::clone(&self.reporter),
+            &format!("Triggered reconcile for '{name}'"),
+            ScopeKind::Task,
+        )
+        .start_guard();
+
+        let seedling = match self.seedbank_client.load(&name).await {
+            Ok(seedling) => seedling,
+            Err(err) => {
+                guard.span().message(
+                    log::Level::Warn,
+                    &format!("Could not load '{name}' for triggered reconcile: {err}"),
+                );
+                guard.finish_with_outcome(log::Outcome::Failed);
+                return;
+            }
+        };
+
+        let result = blueprints::reconcile_seedling::execute(
+            Arc::clone(&self.reporter),
+            &*self.credentials,
+            &*self.inspect,
+            &*self.folder,
+            &*self.file_reader,
+            &*self.file_writer,
+            &*self.permissions,
+            &self.douglas_folders,
+            &*self.docker_client_builder,
+            &*self.resin_client_builder,
+            self.seedbank_client.as_ref(),
+            &self.registry,
+            &*self.rolodex,
+            &name,
+            &seedling.version,
+            &seedling.definition,
+            labels::Origin::User,
+        )
+        .await;
+
+        match result {
+            Ok(()) => {
+                if let Err(err) = blueprints::write_traefik_routes::execute(
+                    Arc::clone(&self.reporter),
+                    self.seedbank_client.as_ref(),
+                    self.docker_client.as_ref(),
+                    self.folder.as_ref(),
+                    self.file_writer.as_ref(),
+                    &*self.permissions,
+                    &*self.rolodex,
+                    &self.douglas_folders,
+                )
+                .await
+                {
+                    guard.span().message(
+                        log::Level::Warn,
+                        &format!(
+                            "Could not write traefik routes after reconciling '{name}': {err}"
+                        ),
+                    );
+                }
+                guard.finish_with_outcome(log::Outcome::Ok);
+            }
+            Err(err) => {
+                guard.span().message(
+                    log::Level::Warn,
+                    &format!("Triggered reconcile for '{name}' failed: {err}"),
+                );
+                guard.finish_with_outcome(log::Outcome::Failed);
+            }
+        }
     }
 
     async fn write_message(
@@ -429,7 +586,7 @@ impl Server for Bract {
         seedling_definition: &seedbank_types::SeedlingDefinition,
     ) -> Result<(), Error> {
         blueprints::reconcile_seedling::execute(
-            reporter,
+            Arc::clone(&reporter),
             &*self.credentials,
             &*self.inspect,
             &*self.folder,
@@ -446,6 +603,19 @@ impl Server for Bract {
             version,
             seedling_definition,
             labels::Origin::Core,
+        )
+        .await
+        .map_err(Error::from)?;
+
+        blueprints::write_traefik_routes::execute(
+            reporter,
+            self.seedbank_client.as_ref(),
+            self.docker_client.as_ref(),
+            self.folder.as_ref(),
+            self.file_writer.as_ref(),
+            &*self.permissions,
+            &*self.rolodex,
+            &self.douglas_folders,
         )
         .await
         .map_err(Error::from)

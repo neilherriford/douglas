@@ -20,6 +20,8 @@ mime = { workspace = true }
 os = { workspace = true }
 refined_string = { workspace = true }
 regex = { workspace = true }
+reconcile_trigger_client = { workspace = true }
+reconcile_trigger_types = { workspace = true }
 resin_types = { workspace = true }
 seedling_registration_client = { workspace = true }
 seedling_registration_types = { workspace = true }
@@ -33,11 +35,12 @@ tokio-util = { workspace = true }
 uuid = { workspace = true }
 
 [features]
-mock = ["file_system/mock", "seedling_registration_client/mock"]
+mock = ["file_system/mock", "seedling_registration_client/mock", "reconcile_trigger_client/mock"]
 
 [dev-dependencies]
 mockall = { workspace = true }
 file_system = { workspace = true, features = ["mock"] }
+reconcile_trigger_client = { workspace = true, features = ["mock"] }
 seedling_registration_client = { workspace = true, features = ["mock"] }
 simple_rest_client = { workspace = true, features = ["mock"] }
 tower = "0.5"

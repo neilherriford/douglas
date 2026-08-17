@@ -334,12 +334,14 @@ dependencies = [
  "mockall",
  "os",
  "postcard",
+ "reconcile_trigger_types",
  "resin_client",
  "resin_types",
  "seedbank_client",
  "seedbank_types",
  "serde",
  "serde_json",
+ "serde_yaml_ng",
  "sha2 0.11.0",
  "subtle",
  "thiserror 1.0.69",
@@ -2194,6 +2196,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "reconcile_trigger_client"
+version = "0.0.1"
+dependencies = [
+ "async-trait",
+ "config",
+ "log 0.1.0",
+ "mockall",
+ "reconcile_trigger_types",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+]
+
+[[package]]
+name = "reconcile_trigger_types"
+version = "0.0.1"
+dependencies = [
+ "serde",
+]
+
+[[package]]
 name = "redox_syscall"
 version = "0.5.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2259,6 +2282,8 @@ dependencies = [
  "mime",
  "mockall",
  "os",
+ "reconcile_trigger_client",
+ "reconcile_trigger_types",
  "refined_string",
  "regex",
  "resin_types",
