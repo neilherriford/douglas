@@ -63,3 +63,39 @@ nix build .#build-large
 ```
 
 This creates a bootable live cd to use!
+
+## Running in UTM
+
+### Shared folder (required for the persistent build cache)
+
+`configuration.nix` mounts a UTM virtiofs share at `/mnt/share` and keeps
+`~/.cargo`, `~/.rustup`, and cargo's `target/` output under
+`/mnt/share/cache`, so a full toolchain/dependency rebuild isn't needed
+every time the live CD boots fresh.
+
+This UTM version's Shared Directory UI only supports a single virtiofs
+tag, so there's no way to configure a separate share just for the cache
+— everything lives under the one share instead:
+
+1. In the VM's settings, under **Sharing**, enable **Shared Directory**
+   and point it at a stable folder on the host (created once, reused
+   across rebuilds/reboots — that persistence is the whole point).
+2. Do not rename or add a second share; the mount unit
+   (`mount-utm-share.service`) expects the tag to be exactly `share`,
+   which is what UTM uses by default for its single Shared Directory.
+3. Boot the VM. Inside, `/mnt/share` should be mounted automatically, and
+   a `cache/` subfolder (containing `cargo/`, `rustup/`, `target/`) is
+   created there on first boot.
+
+Verify it worked:
+
+```bash
+mountpoint -q /mnt/share && echo mounted
+ls /mnt/share/cache
+readlink ~/.cargo ~/.rustup   # should point into /mnt/share/cache
+echo $CARGO_TARGET_DIR        # should be /mnt/share/cache/target
+```
+
+If the share isn't configured in UTM, none of this is fatal — the VM
+still boots, you just get an ephemeral `~/.cargo`/`~/.rustup` and
+default `target/` that don't survive a reboot.

@@ -13,8 +13,8 @@ let
       (builtins.attrNames (builtins.readDir userKeysDir));
 
   # Version information for your dev image
-  devImageVersion = "0.0.2k";
-  devImageDate = "2026-06-19";
+  devImageVersion = "0.0.2j";
+  devImageDate = "2026-08-19";
   devImageName = "Douglas Development Environment";
 
   # Define our development packages explicitly
@@ -87,43 +87,42 @@ in
   };
 
   ############################## UTM CACHE #############################
-  # Second virtiofs share for persistent build artifacts (~/.cargo, ~/.rustup).
-  # In UTM: add a shared folder pointing at a stable directory on the host,
-  # set its tag to "cache". If the share isn't configured the mount will fail
-  # but that's non-fatal — users just get a normal (ephemeral) ~/.cargo.
-  systemd.services.mount-utm-cache = {
-    description = "Mount UTM Cache Folder";
-    after = [ "local-fs.target" ];
-    preStart = ''
-      mkdir -p /mnt/cache
-    '';
-    serviceConfig = {
-      Type = "oneshot";
-      ExecStart = "${pkgs.util-linux}/bin/mount -t virtiofs cache /mnt/cache";
-      RemainAfterExit = true;
-    };
-    wantedBy = [ "multi-user.target" ];
-  };
-
-  # Wire ~/.cargo and ~/.rustup for every user in /home to the persistent cache.
-  # Uses `wants` (not `requires`) so a missing/unconfigured cache share is
-  # non-fatal — the system boots fine and users get ephemeral cargo dirs instead.
+  # This UTM version's Shared Directory feature only exposes a single
+  # virtiofs tag ("share") — there's no way to configure a second named
+  # share for the cache. So persistent build artifacts (~/.cargo,
+  # ~/.rustup, cargo's target/) live under a "cache" subfolder of the one
+  # share we do have: /mnt/share/cache. Same host-backed persistence as
+  # the rest of /mnt/share, no second mount unit required.
+  #
+  # Depends only on mount-utm-share (which already works) rather than a
+  # separate cache mount. If /mnt/share itself isn't up yet, this is
+  # non-fatal — users just get a normal (ephemeral) ~/.cargo.
   systemd.services.setup-cache-symlinks = {
-    description = "Symlink ~/.cargo and ~/.rustup to UTM cache share";
-    after = [ "mount-utm-cache.service" ];
-    wants = [ "mount-utm-cache.service" ];
+    description = "Symlink ~/.cargo and ~/.rustup to persistent cache dir";
+    after = [ "mount-utm-share.service" ];
+    wants = [ "mount-utm-share.service" ];
     wantedBy = [ "multi-user.target" ];
     serviceConfig = {
       Type = "oneshot";
       RemainAfterExit = true;
       ExecStart = pkgs.writeShellScript "setup-cache-symlinks" ''
-        # Bail out silently if the cache share isn't mounted.
-        if ! mountpoint -q /mnt/cache; then
-          echo "setup-cache-symlinks: /mnt/cache not mounted, skipping"
+        # Bail out silently if the share isn't mounted.
+        if ! ${pkgs.util-linux}/bin/mountpoint -q /mnt/share; then
+          echo "setup-cache-symlinks: /mnt/share not mounted, skipping"
           exit 0
         fi
 
-        mkdir -p /mnt/cache/cargo /mnt/cache/rustup
+        # This service runs as root, so newly-created dirs come out
+        # root:root 0755 -- fine for the symlink itself (chown -h below),
+        # but the *target* dirs need to stay writable by normal users too,
+        # or cargo/rustup fail with permission denied on every write.
+        # group-writable + group "users" (NixOS normal users' default
+        # primary group) covers that without hardcoding a specific user.
+        for cache_dir in /mnt/share/cache/cargo /mnt/share/cache/rustup /mnt/share/cache/target; do
+          mkdir -p "$cache_dir"
+          chgrp users "$cache_dir"
+          chmod g+rwx "$cache_dir"
+        done
 
         for user_home in /home/*; do
           [ -d "$user_home" ] || continue
@@ -133,13 +132,13 @@ in
           # re-running this service is idempotent.
           if [ ! -L "$user_home/.cargo" ]; then
             rm -rf "$user_home/.cargo"
-            ln -s /mnt/cache/cargo "$user_home/.cargo"
+            ln -s /mnt/share/cache/cargo "$user_home/.cargo"
             chown -h "$user:users" "$user_home/.cargo"
           fi
 
           if [ ! -L "$user_home/.rustup" ]; then
             rm -rf "$user_home/.rustup"
-            ln -s /mnt/cache/rustup "$user_home/.rustup"
+            ln -s /mnt/share/cache/rustup "$user_home/.rustup"
             chown -h "$user:users" "$user_home/.rustup"
           fi
         done
@@ -261,6 +260,26 @@ in
     '';
     mode = "0755";
   };
+
+  # Redirect cargo's build output (target/) to /mnt/share/cache/target,
+  # alongside ~/.cargo and ~/.rustup, instead of the default per-checkout
+  # ./target under the tracked source tree. Keeps build artifacts out of
+  # the repo directory and shares one target/ across multiple checkouts
+  # (e.g. git worktrees) under /mnt/share, so dependency compiles aren't
+  # duplicated per checkout. Falls back to cargo's normal ./target when
+  # the share isn't mounted, same non-fatal pattern as the cargo/rustup
+  # symlinks.
+  #
+  # NOTE: NixOS does not source /etc/profile.d/*.sh the way Debian/RHEL
+  # do — dropping a script there is a no-op unless something explicitly
+  # loops over the directory. environment.interactiveShellInit is the
+  # option NixOS actually splices into every interactive shell's startup.
+  environment.interactiveShellInit = ''
+    if ${pkgs.util-linux}/bin/mountpoint -q /mnt/share 2>/dev/null; then
+      mkdir -p /mnt/share/cache/target
+      export CARGO_TARGET_DIR="/mnt/share/cache/target"
+    fi
+  '';
 
   # Alternative approach: Create a wrapper script that ensures rustup is configured
   environment.etc."rustup-wrapper.sh" = {
@@ -410,10 +429,10 @@ in
     # Show development environment info
     if [ -n "$SSH_CONNECTION" ]; then
       echo "📁 Available: /scratch (4GB tmpfs), /mnt/share (UTM share)"
-      if mountpoint -q /mnt/cache 2>/dev/null; then
-        echo "📦 Build cache: ~/.cargo and ~/.rustup → /mnt/cache (persistent)"
+      if mountpoint -q /mnt/share 2>/dev/null; then
+        echo "📦 Build cache: ~/.cargo, ~/.rustup, and target/ → /mnt/share/cache (persistent)"
       else
-        echo "📦 Build cache: ephemeral (add a 'cache' virtiofs share in UTM to persist)"
+        echo "📦 Build cache: ephemeral (UTM share not mounted)"
       fi
       echo "🔧 Run 'verify-tools' to check all development tools"
     fi
