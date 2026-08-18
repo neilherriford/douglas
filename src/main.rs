@@ -48,10 +48,11 @@ struct Cli {
         long,
         global = true,
         value_enum,
-        default_value_t = OutputStyle::Plain,
-        help = "Set the output mode"
+        help = "Set the output mode. Defaults to plain text for most commands; `start` defaults \
+                to an interactive TUI instead and only switches to plain/json output when this \
+                is explicitly set, since plain/json mode has no live terminal to render into."
     )]
-    output_style: OutputStyle,
+    output_style: Option<OutputStyle>,
     #[arg(
         long,
         global = true,
@@ -208,10 +209,11 @@ impl Display for Commands {
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
-    let output_style = cli.output_style;
+    let output_style_arg = cli.output_style;
+    let output_style = output_style_arg.unwrap_or(OutputStyle::Plain);
 
     match cli.command {
-        Commands::Start { plan_only } => run_with_tokio(start(plan_only)),
+        Commands::Start { plan_only } => run_with_tokio(start(plan_only, output_style_arg)),
         Commands::Stop => todo!(),
         Commands::Service {
             service: ServiceCommand::Bract { notify_fd },
@@ -660,11 +662,18 @@ fn build_plain_reporter(douglas_folders: &DouglasFolders, log_name: &str) -> Arc
     ))
 }
 
-async fn start(plan_only: bool) -> ExitCode {
+async fn start(plan_only: bool, output_style: Option<OutputStyle>) -> ExitCode {
     let douglas_folders = DouglasFolders::new();
-    let Ok(reporter) = build_cli_reporter(&douglas_folders, "douglas-cli") else {
-        eprintln!("Failed to start TUI reporter");
-        return ExitCode::from(1);
+
+    let reporter: Arc<dyn Reporter> = match output_style {
+        Some(_) => build_plain_reporter(&douglas_folders, "douglas-cli"),
+        None => match build_cli_reporter(&douglas_folders, "douglas-cli") {
+            Ok(reporter) => reporter,
+            Err(_) => {
+                eprintln!("Failed to start TUI reporter");
+                return ExitCode::from(1);
+            }
+        },
     };
 
     let folder: Arc<dyn Folder> = Arc::new(UnixFolder::new());
@@ -687,6 +696,9 @@ async fn start(plan_only: bool) -> ExitCode {
     .await;
 
     if !succeeded {
+        if let Some(style) = output_style {
+            print_error(style, "System bootstrap failed");
+        }
         return ExitCode::from(1);
     }
 
@@ -706,12 +718,30 @@ async fn start(plan_only: bool) -> ExitCode {
         bootstrap::seedlings::perform(Arc::clone(&reporter), Arc::clone(&bract_client)).await;
 
     if !succeeded {
+        if let Some(style) = output_style {
+            print_error(style, "Seedling reconciliation failed");
+        }
         return ExitCode::from(1);
     }
 
     log_orphans_if_any(&reporter, bract_client.as_ref()).await;
 
+    if let Some(style) = output_style {
+        print_start_result(style);
+    }
+
     ExitCode::from(0)
+}
+
+fn print_start_result(output_style: OutputStyle) {
+    match output_style {
+        OutputStyle::Plain => println!("Douglas started."),
+        OutputStyle::Json => {
+            if let Ok(json) = serde_json::to_string(&serde_json::json!({ "success": true })) {
+                println!("{json}");
+            }
+        }
+    }
 }
 
 async fn log_orphans_if_any(reporter: &Arc<dyn Reporter>, bract_client: &dyn bract_client::Client) {
