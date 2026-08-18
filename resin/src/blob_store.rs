@@ -1532,6 +1532,10 @@ mod tests {
                         .ok_or(FileSystemError::ExpectedFileError)?;
                     Ok(Box::new(std::io::Cursor::new(bytes)))
                 }
+
+                fn read_stdin(&self) -> Result<String, FileSystemError> {
+                    Ok(String::new())
+                }
             }
 
             impl FileRenamer for FakeDisk {

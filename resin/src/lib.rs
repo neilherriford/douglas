@@ -86,6 +86,7 @@ enum ServerError {
     RepositoryUnknown(String),
     InvalidName(String),
     SeedlingNotRegistered(String),
+    SeedlingReserved(String),
 }
 
 impl From<serde_json::Error> for ServerError {
@@ -169,6 +170,11 @@ impl IntoResponse for ServerError {
                 StatusCode::BAD_REQUEST,
                 error_code::SEEDLING_NOT_REGISTERED,
                 format!("seedling '{name}' is not registered"),
+            ),
+            ServerError::SeedlingReserved(name) => (
+                StatusCode::BAD_REQUEST,
+                error_code::SEEDLING_RESERVED,
+                format!("seedling '{name}' is reserved and cannot be pushed to directly"),
             ),
         };
         let mut response = (

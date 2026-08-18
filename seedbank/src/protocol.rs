@@ -39,6 +39,18 @@ pub fn handle(seedbank: &dyn Seedbank, request: Request) -> Response {
             Ok(status) => Response::Status { status },
             Err(err) => error_response(err),
         },
+        Request::Root => match seedbank.root() {
+            Ok(name) => Response::Root { name },
+            Err(err) => error_response(err),
+        },
+        Request::ClaimRoot { name } => match seedbank.claim_root(&name) {
+            Ok(()) => Response::Ok,
+            Err(err) => error_response(err),
+        },
+        Request::ReleaseRoot { name } => match seedbank.release_root(&name) {
+            Ok(()) => Response::Ok,
+            Err(err) => error_response(err),
+        },
     }
 }
 
@@ -213,6 +225,68 @@ mod tests {
             .returning(|_| Err(Error::CannotBeRoot));
 
         let response = handle(&seedbank, Request::Status { name: name("foo") });
+
+        assert!(matches!(response, Response::Error { .. }));
+    }
+
+    #[test]
+    fn test_root_should_wrap_success_in_name() {
+        let mut seedbank = MockSeedbank::new();
+        seedbank.expect_root().returning(|| Ok(Some(name("foo"))));
+
+        let response = handle(&seedbank, Request::Root);
+
+        assert!(
+            matches!(response, Response::Root { name: Some(returned) } if returned == name("foo"))
+        );
+    }
+
+    #[test]
+    fn test_claim_root_should_dispatch_with_name_and_wrap_ok() {
+        let mut seedbank = MockSeedbank::new();
+        seedbank
+            .expect_claim_root()
+            .withf(|claimed| claimed == &name("foo"))
+            .returning(|_| Ok(()));
+
+        let response = handle(&seedbank, Request::ClaimRoot { name: name("foo") });
+
+        assert!(matches!(response, Response::Ok));
+    }
+
+    #[test]
+    fn test_claim_root_should_wrap_failure_in_error() {
+        let mut seedbank = MockSeedbank::new();
+        seedbank
+            .expect_claim_root()
+            .returning(|_| Err(Error::RootAlreadyClaimed(name("bar"))));
+
+        let response = handle(&seedbank, Request::ClaimRoot { name: name("foo") });
+
+        assert!(matches!(response, Response::Error { .. }));
+    }
+
+    #[test]
+    fn test_release_root_should_dispatch_with_name_and_wrap_ok() {
+        let mut seedbank = MockSeedbank::new();
+        seedbank
+            .expect_release_root()
+            .withf(|released| released == &name("foo"))
+            .returning(|_| Ok(()));
+
+        let response = handle(&seedbank, Request::ReleaseRoot { name: name("foo") });
+
+        assert!(matches!(response, Response::Ok));
+    }
+
+    #[test]
+    fn test_release_root_should_wrap_failure_in_error() {
+        let mut seedbank = MockSeedbank::new();
+        seedbank
+            .expect_release_root()
+            .returning(|_| Err(Error::CannotBeRoot));
+
+        let response = handle(&seedbank, Request::ReleaseRoot { name: name("foo") });
 
         assert!(matches!(response, Response::Error { .. }));
     }

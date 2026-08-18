@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use mockall::predicate;
 use nix::sys::stat::{Mode, stat, umask};
 use regex::Regex;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::VecDeque;
 use std::ffi::OsString;
 use std::fs::{
@@ -12,7 +12,7 @@ use std::fs::{
     read_to_string, remove_dir_all, remove_file, rename, set_permissions, symlink_metadata,
 };
 use std::fs::{OpenOptions, hard_link};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt, chown, symlink};
 use std::path::{Component, Components, Path, PathBuf};
 use std::sync::{Arc, LazyLock};
@@ -37,7 +37,7 @@ pub enum RelativePathError {
     NotRelative(PathBuf),
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct RelativePath {
     value: PathBuf,
 }
@@ -47,6 +47,25 @@ impl RelativePath {
         Self {
             value: PathBuf::new(),
         }
+    }
+}
+
+impl Serialize for RelativePath {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&self.value.to_string_lossy())
+    }
+}
+
+impl<'de> Deserialize<'de> for RelativePath {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        RelativePath::try_from(PathBuf::from(value)).map_err(serde::de::Error::custom)
     }
 }
 
@@ -347,6 +366,7 @@ pub trait FileWriter: Send + Sync {
 pub trait FileReader: Send + Sync {
     fn read_all(&self, path: &Path) -> Result<String, FileSystemError>;
     fn read_all_bytes(&self, path: &Path) -> Result<Vec<u8>, FileSystemError>;
+    fn read_stdin(&self) -> Result<String, FileSystemError>;
     fn exists(&self, path: &Path) -> bool;
     fn create_reader(
         &self,
@@ -637,6 +657,12 @@ impl FileReader for UnixFileReader {
             path: path.to_path_buf(),
             error,
         })
+    }
+
+    fn read_stdin(&self) -> Result<String, FileSystemError> {
+        let mut input = String::new();
+        std::io::stdin().read_to_string(&mut input)?;
+        Ok(input)
     }
 
     fn exists(&self, path: &Path) -> bool {

@@ -66,6 +66,8 @@ pub enum Error {
     StopSeedlingError(#[from] blueprints::stop_seedling::StopSeedlingError),
     #[error("Failed to drop seedling: {0}")]
     DropSeedlingError(#[from] blueprints::drop_seedling::DropSeedlingError),
+    #[error("Failed to create new seedling: {0}")]
+    NewSeedlingError(#[from] blueprints::new_seedling::NewSeedlingError),
     #[error("Failed to write traefik routes: {0}")]
     WriteTraefikRoutesError(#[from] blueprints::write_traefik_routes::WriteTraefikRoutesError),
 }
@@ -102,6 +104,12 @@ pub trait Server: Send + Sync {
     async fn start_seedling(&self, reporter: Arc<dyn Reporter>, name: &Name) -> Result<(), Error>;
     async fn stop_seedling(&self, reporter: Arc<dyn Reporter>, name: &Name) -> Result<(), Error>;
     async fn drop_seedling(&self, reporter: Arc<dyn Reporter>, name: &Name) -> Result<(), Error>;
+    async fn new_seedling(
+        &self,
+        reporter: Arc<dyn Reporter>,
+        name: &seedbank_types::Name,
+        seedling_spec: &seedbank_types::SeedlingSpec,
+    ) -> Result<String, Error>;
 }
 
 pub struct Bract {
@@ -648,5 +656,24 @@ impl Server for Bract {
         blueprints::drop_seedling::execute(reporter, &*self.docker_client_builder, name)
             .await
             .map_err(Error::from)
+    }
+
+    async fn new_seedling(
+        &self,
+        reporter: Arc<dyn Reporter>,
+        name: &seedbank_types::Name,
+        seedling_spec: &seedbank_types::SeedlingSpec,
+    ) -> Result<String, Error> {
+        blueprints::new_seedling::execute(
+            reporter,
+            &*self.docker_client_builder,
+            &*self.resin_client_builder,
+            self.seedbank_client.as_ref(),
+            &self.registry,
+            name,
+            seedling_spec,
+        )
+        .await
+        .map_err(Error::from)
     }
 }

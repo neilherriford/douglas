@@ -6,6 +6,10 @@ pub fn handle(seedbank: &dyn Seedbank, request: Request) -> Result<Response, Err
         return Ok(Response::InvalidName);
     };
 
+    if seedbank_types::RESERVED_SEEDLING_NAMES.contains(&name.as_ref()) {
+        return Ok(Response::Reserved);
+    }
+
     Ok(if seedbank.exists(&name)? {
         Response::Registered
     } else {
@@ -33,7 +37,7 @@ mod tests {
     }
 
     #[test]
-    fn test_handle_should_report_registered_when_the_seedling_exists() {
+    fn test_handle_should_report_reserved_for_a_reserved_name_even_when_registered() {
         let mut seedbank = MockSeedbank::new();
         seedbank.expect_exists().returning(|_| Ok(true));
 
@@ -41,6 +45,21 @@ mod tests {
             &seedbank,
             Request {
                 name: "traefik".to_string(),
+            },
+        );
+
+        assert!(matches!(response, Ok(Response::Reserved)));
+    }
+
+    #[test]
+    fn test_handle_should_report_registered_when_the_seedling_exists() {
+        let mut seedbank = MockSeedbank::new();
+        seedbank.expect_exists().returning(|_| Ok(true));
+
+        let response = handle(
+            &seedbank,
+            Request {
+                name: "myapp".to_string(),
             },
         );
 
@@ -55,7 +74,7 @@ mod tests {
         let response = handle(
             &seedbank,
             Request {
-                name: "traefik".to_string(),
+                name: "myapp".to_string(),
             },
         );
 
@@ -72,7 +91,7 @@ mod tests {
         let response = handle(
             &seedbank,
             Request {
-                name: "traefik".to_string(),
+                name: "myapp".to_string(),
             },
         );
 

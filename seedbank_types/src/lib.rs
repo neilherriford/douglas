@@ -14,6 +14,7 @@ use std::{
 use thiserror::Error;
 
 pub static MAX_SEEDLINGS: u16 = 4096;
+pub static RESERVED_SEEDLING_NAMES: &[&str] = &["traefik", "root"];
 
 #[derive(Debug, Error)]
 pub enum NameParseError {
@@ -166,7 +167,28 @@ pub enum MountType {
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 pub struct MountFile {
     pub file_relative_path: RelativePath,
+    #[serde(with = "contents_as_string")]
     pub contents: Vec<u8>,
+}
+
+mod contents_as_string {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S>(contents: &[u8], serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        std::str::from_utf8(contents)
+            .map_err(serde::ser::Error::custom)?
+            .serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Vec<u8>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Ok(String::deserialize(deserializer)?.into_bytes())
+    }
 }
 
 impl MountFile {
@@ -223,7 +245,7 @@ impl MountContents {
 pub struct Mount {
     kind: MountType,
     remote_path: PathBuf,
-    #[serde(skip)]
+    #[serde(default)]
     contents: HashSet<MountContents>,
     access_mode: AccessMode,
 }
@@ -355,6 +377,13 @@ pub enum Request {
         version: Version,
         definition: SeedlingDefinition,
     },
+    Root,
+    ClaimRoot {
+        name: Name,
+    },
+    ReleaseRoot {
+        name: Name,
+    },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -364,6 +393,44 @@ pub enum Response {
     Exists { exists: bool },
     Status { status: SeedlingStatus },
     Seedling { seedling: Seedling },
+    Root { name: Option<Name> },
     Ok,
     Error { message: String },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_mount_file_contents_should_round_trip_through_toml_as_text() {
+        let mount = Mount::build(
+            MountType::Persisted,
+            PathBuf::from("/usr/src/app/public"),
+            AccessMode::ReadOnly,
+            HashSet::from([
+                MountContents::file("index.html", b"<h1>Hello, world!</h1>\n")
+                    .expect("valid relative path"),
+            ]),
+        );
+
+        let toml = toml::to_string_pretty(&mount).expect("should serialize");
+        assert!(toml.contains("<h1>Hello, world!</h1>"));
+
+        let round_tripped: Mount = toml::from_str(&toml).expect("should deserialize");
+        assert_eq!(round_tripped, mount);
+    }
+
+    #[test]
+    fn test_mount_contents_should_default_to_empty_when_omitted() {
+        let toml = r#"
+            kind = "Persisted"
+            remote_path = "/etc/example/config"
+            access_mode = "ReadOnly"
+        "#;
+
+        let mount: Mount = toml::from_str(toml).expect("should deserialize");
+
+        assert!(mount.contents().is_empty());
+    }
 }

@@ -160,6 +160,9 @@ async fn assert_seedling_registered(
         seedling_registration_types::Response::InvalidName => Err(ServerError::InvalidName(
             format!("invalid seedling name '{name}'"),
         )),
+        seedling_registration_types::Response::Reserved => {
+            Err(ServerError::SeedlingReserved(name.to_string()))
+        }
     }
 }
 
@@ -620,6 +623,18 @@ mod tests {
             let result = assert_seedling_registered(&client, &name()).await;
 
             assert!(matches!(result, Err(ServerError::Internal(_))));
+        }
+
+        #[tokio::test]
+        async fn test_should_reject_a_reserved_seedling() {
+            let mut client = MockClient::new();
+            client
+                .expect_seedling_registered()
+                .returning(|_| Ok(Response::Reserved));
+
+            let result = assert_seedling_registered(&client, &name()).await;
+
+            assert!(matches!(result, Err(ServerError::SeedlingReserved(_))));
         }
     }
 

@@ -47,6 +47,9 @@ pub trait Client: Send + Sync {
         version: &Version,
         definition: &SeedlingDefinition,
     ) -> Result<(), Error>;
+    async fn root(&self) -> Result<Option<Name>, Error>;
+    async fn claim_root(&self, name: &Name) -> Result<(), Error>;
+    async fn release_root(&self, name: &Name) -> Result<(), Error>;
 }
 
 pub struct UdsClient {
@@ -237,6 +240,72 @@ impl Client for UdsClient {
                 version: version.clone(),
                 definition: definition.clone(),
             })
+            .await
+        {
+            Ok(response) => response,
+            Err(err) => return guard.finish(Err(err)),
+        };
+
+        guard.finish(match response {
+            Response::Ok => Ok(()),
+            Response::Error { message } => Err(Error::ServerError(message)),
+            _ => Err(Error::UnexpectedResponse),
+        })
+    }
+
+    async fn root(&self) -> Result<Option<Name>, Error> {
+        let guard = Span::new(
+            Arc::clone(&self.reporter),
+            "Checking root seedling",
+            ScopeKind::Task,
+        )
+        .start_guard();
+
+        let response = match self.request(Request::Root).await {
+            Ok(response) => response,
+            Err(err) => return guard.finish(Err(err)),
+        };
+
+        guard.finish(match response {
+            Response::Root { name } => Ok(name),
+            Response::Error { message } => Err(Error::ServerError(message)),
+            _ => Err(Error::UnexpectedResponse),
+        })
+    }
+
+    async fn claim_root(&self, name: &Name) -> Result<(), Error> {
+        let guard = Span::new(
+            Arc::clone(&self.reporter),
+            "Claiming root seedling",
+            ScopeKind::Task,
+        )
+        .start_guard();
+
+        let response = match self
+            .request(Request::ClaimRoot { name: name.clone() })
+            .await
+        {
+            Ok(response) => response,
+            Err(err) => return guard.finish(Err(err)),
+        };
+
+        guard.finish(match response {
+            Response::Ok => Ok(()),
+            Response::Error { message } => Err(Error::ServerError(message)),
+            _ => Err(Error::UnexpectedResponse),
+        })
+    }
+
+    async fn release_root(&self, name: &Name) -> Result<(), Error> {
+        let guard = Span::new(
+            Arc::clone(&self.reporter),
+            "Releasing root seedling",
+            ScopeKind::Task,
+        )
+        .start_guard();
+
+        let response = match self
+            .request(Request::ReleaseRoot { name: name.clone() })
             .await
         {
             Ok(response) => response,

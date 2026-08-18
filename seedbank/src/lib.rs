@@ -14,9 +14,10 @@ use blueprint::listener::SocketListenerFactory;
 use config::DouglasFolders;
 use credentials::create_credentials;
 use file_system::{
-    BindableUnixDomainSocketFile, Entry, FileDeleter, FileReader, FileSystemError, FileWriter,
-    Folder, FolderDeleter, Inspect, Permissions, RelativePath, UnixDomainSocket, UnixFileDeleter,
-    UnixFileReader, UnixFileWriter, UnixFolder, UnixFolderDeleter, UnixInspect, UnixPermissions,
+    BindableUnixDomainSocketFile, Entry, EntryKind, FileDeleter, FileReader, FileSystemError,
+    FileWriter, Folder, FolderDeleter, Inspect, Permissions, RelativePath, UnixDomainSocket,
+    UnixFileDeleter, UnixFileReader, UnixFileWriter, UnixFolder, UnixFolderDeleter, UnixInspect,
+    UnixPermissions,
 };
 use log::{BufferedFileReporter, Reporter, ScopeKind, Span, TuiReporter};
 use os::{Os, Unix};
@@ -48,6 +49,8 @@ pub enum Error {
     InvalidVersion,
     #[error("Seedling limit reached")]
     TooManySeedlings,
+    #[error("Root is already claimed by {0}")]
+    RootAlreadyClaimed(Name),
 
     #[error("IO Error {0}")]
     IoError(#[from] std::io::Error),
@@ -84,6 +87,9 @@ pub trait Seedbank {
         version: &Version,
         definition: &SeedlingDefinition,
     ) -> Result<(), Error>;
+    fn root(&self) -> Result<Option<Name>, Error>;
+    fn claim_root(&self, name: &Name) -> Result<(), Error>;
+    fn release_root(&self, name: &Name) -> Result<(), Error>;
 }
 
 pub struct Server {
@@ -182,6 +188,22 @@ impl Server {
         let mut path = self.create_seedling_path(name);
         path.push("seedling.toml");
         path
+    }
+
+    fn root_path(&self) -> PathBuf {
+        self.seeds.join("root")
+    }
+
+    fn read_root(&self) -> Result<Option<Name>, Error> {
+        match self.file_reader.read_all(&self.root_path()) {
+            Ok(raw) => Ok(Some(Name::from_str(raw.trim())?)),
+            Err(FileSystemError::IoErrorAtPath { error, .. })
+                if error.kind() == std::io::ErrorKind::NotFound =>
+            {
+                Ok(None)
+            }
+            Err(err) => Err(err.into()),
+        }
     }
 
     fn id_path(&self, name: &Name) -> PathBuf {
@@ -435,6 +457,7 @@ impl Server {
             .folder
             .entries(&self.seeds)?
             .iter()
+            .filter(|entry| entry.kind == EntryKind::Directory)
             .filter_map(|entry| Name::from_str(&entry.name).ok())
             .collect())
     }
@@ -728,6 +751,61 @@ impl Seedbank for Server {
                 }
             }
             SeedlingStatus::Unknown => guard.finish(Err(Error::NotFound(name.clone()))),
+        }
+    }
+
+    fn root(&self) -> Result<Option<Name>, Error> {
+        let _lock = self.global_lock.lock().expect("seedbank lock poisoned");
+        self.read_root()
+    }
+
+    fn claim_root(&self, name: &Name) -> Result<(), Error> {
+        let guard = Span::new(
+            Arc::clone(&self.reporter),
+            &format!("Claiming root for {name}…"),
+            ScopeKind::Task,
+        )
+        .start_guard();
+        let _lock = self.global_lock.lock().expect("seedbank lock poisoned");
+
+        if !self.seedling_exists(name)? {
+            return guard.finish(Err(Error::NotFound(name.clone())));
+        }
+
+        if let Some(current) = match self.read_root() {
+            Ok(current) => current,
+            Err(err) => return guard.finish(Err(err)),
+        } {
+            if current != *name {
+                return guard.finish(Err(Error::RootAlreadyClaimed(current)));
+            }
+            return guard.finish(Ok(()));
+        }
+
+        guard.finish(
+            self.file_writer
+                .write_all(&self.root_path(), name.as_ref())
+                .map_err(Error::from),
+        )
+    }
+
+    fn release_root(&self, name: &Name) -> Result<(), Error> {
+        let guard = Span::new(
+            Arc::clone(&self.reporter),
+            &format!("Releasing root for {name}…"),
+            ScopeKind::Task,
+        )
+        .start_guard();
+        let _lock = self.global_lock.lock().expect("seedbank lock poisoned");
+
+        match self.read_root() {
+            Ok(Some(current)) if current == *name => guard.finish(
+                self.file_deleter
+                    .delete(&self.root_path())
+                    .map_err(Error::from),
+            ),
+            Ok(_) => guard.finish(Ok(())),
+            Err(err) => guard.finish(Err(err)),
         }
     }
 }
@@ -1651,5 +1729,212 @@ mod tests {
             .expect("create() should not hang by locking its own mutex reentrantly");
 
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_root_should_be_none_when_unclaimed() {
+        let mut file_reader = MockFileReader::new();
+        file_reader.expect_read_all().returning(|path| {
+            Err(FileSystemError::IoErrorAtPath {
+                path: path.to_path_buf(),
+                error: std::io::Error::from(std::io::ErrorKind::NotFound),
+            })
+        });
+
+        let server = build_server(
+            MockFolder::new(),
+            MockFolderDeleter::new(),
+            file_reader,
+            MockFileWriter::new(),
+        );
+
+        assert_eq!(server.root().expect("should check root"), None);
+    }
+
+    #[test]
+    fn test_root_should_return_the_claiming_seedling() {
+        let mut file_reader = MockFileReader::new();
+        file_reader.given_can_read_all_with_contents("/var/lib/seedbank/seeds/root", "foo");
+
+        let server = build_server(
+            MockFolder::new(),
+            MockFolderDeleter::new(),
+            file_reader,
+            MockFileWriter::new(),
+        );
+
+        assert_eq!(server.root().expect("should check root"), Some(name("foo")));
+    }
+
+    #[test]
+    fn test_claim_root_should_fail_when_the_seedling_does_not_exist() {
+        let mut folder = MockFolder::new();
+        folder.given_does_not_exist("/var/lib/seedbank/seeds/foo");
+
+        let server = build_server(
+            folder,
+            MockFolderDeleter::new(),
+            MockFileReader::new(),
+            MockFileWriter::new(),
+        );
+
+        let result = server.claim_root(&name("foo"));
+
+        assert!(matches!(result, Err(Error::NotFound(_))));
+    }
+
+    #[test]
+    fn test_claim_root_should_write_the_root_file_when_unclaimed() {
+        let mut folder = MockFolder::new();
+        folder.given_exists("/var/lib/seedbank/seeds/foo");
+
+        let mut file_reader = MockFileReader::new();
+        file_reader.expect_read_all().returning(|path| {
+            Err(FileSystemError::IoErrorAtPath {
+                path: path.to_path_buf(),
+                error: std::io::Error::from(std::io::ErrorKind::NotFound),
+            })
+        });
+
+        let mut file_writer = MockFileWriter::new();
+        file_writer.expect_write_to_file_with_contents("/var/lib/seedbank/seeds/root", "foo");
+
+        let server = build_server(folder, MockFolderDeleter::new(), file_reader, file_writer);
+
+        server.claim_root(&name("foo")).expect("should claim root");
+    }
+
+    #[test]
+    fn test_claim_root_should_be_idempotent_for_the_current_owner() {
+        let mut folder = MockFolder::new();
+        folder.given_exists("/var/lib/seedbank/seeds/foo");
+
+        let mut file_reader = MockFileReader::new();
+        file_reader.given_can_read_all_with_contents("/var/lib/seedbank/seeds/root", "foo");
+
+        let server = build_server(
+            folder,
+            MockFolderDeleter::new(),
+            file_reader,
+            MockFileWriter::new(),
+        );
+
+        server.claim_root(&name("foo")).expect("should be a no-op");
+    }
+
+    #[test]
+    fn test_claim_root_should_reject_when_already_claimed_by_another_seedling() {
+        let mut folder = MockFolder::new();
+        folder.given_exists("/var/lib/seedbank/seeds/bar");
+
+        let mut file_reader = MockFileReader::new();
+        file_reader.given_can_read_all_with_contents("/var/lib/seedbank/seeds/root", "foo");
+
+        let server = build_server(
+            folder,
+            MockFolderDeleter::new(),
+            file_reader,
+            MockFileWriter::new(),
+        );
+
+        let result = server.claim_root(&name("bar"));
+
+        assert!(
+            matches!(result, Err(Error::RootAlreadyClaimed(current)) if current == name("foo"))
+        );
+    }
+
+    #[test]
+    fn test_release_root_should_delete_the_root_file_when_it_belongs_to_the_caller() {
+        let mut file_reader = MockFileReader::new();
+        file_reader.given_can_read_all_with_contents("/var/lib/seedbank/seeds/root", "foo");
+
+        let mut file_deleter = MockFileDeleter::new();
+        file_deleter
+            .expect_delete()
+            .withf(|path| path == std::path::Path::new("/var/lib/seedbank/seeds/root"))
+            .returning(|_| Ok(()));
+
+        let (shutdown_sender, _) = broadcast::channel::<()>(1);
+        let server = Server {
+            reporter: Arc::new(NullReporter),
+            folder: Arc::new(MockFolder::new()),
+            folder_deleter: Arc::new(MockFolderDeleter::new()),
+            file_deleter: Arc::new(file_deleter),
+            file_reader: Arc::new(file_reader),
+            file_writer: Arc::new(MockFileWriter::new()),
+            inspect: Arc::new(MockInspect::new()),
+            seeds: PathBuf::from("/var/lib/seedbank/seeds"),
+            listener_factory: dummy_listener_factory("seedbank"),
+            registration_listener_factory: dummy_listener_factory("seedbank-registration"),
+            shutdown_sender,
+            global_lock: std::sync::Mutex::new(()),
+        };
+
+        let result = server.release_root(&name("foo"));
+
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_release_root_should_be_a_no_op_when_unclaimed() {
+        let mut file_reader = MockFileReader::new();
+        file_reader.expect_read_all().returning(|path| {
+            Err(FileSystemError::IoErrorAtPath {
+                path: path.to_path_buf(),
+                error: std::io::Error::from(std::io::ErrorKind::NotFound),
+            })
+        });
+
+        let server = build_server(
+            MockFolder::new(),
+            MockFolderDeleter::new(),
+            file_reader,
+            MockFileWriter::new(),
+        );
+
+        let result = server.release_root(&name("foo"));
+
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_release_root_should_be_a_no_op_when_claimed_by_another_seedling() {
+        let mut file_reader = MockFileReader::new();
+        file_reader.given_can_read_all_with_contents("/var/lib/seedbank/seeds/root", "foo");
+
+        let server = build_server(
+            MockFolder::new(),
+            MockFolderDeleter::new(),
+            file_reader,
+            MockFileWriter::new(),
+        );
+
+        let result = server.release_root(&name("bar"));
+
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_list_should_ignore_the_root_file() {
+        let mut folder = MockFolder::new();
+        folder.given_folder_entries(
+            "/var/lib/seedbank/seeds",
+            vec![
+                Entry::create_directory("foo"),
+                Entry::create_file_entry("root"),
+            ],
+        );
+
+        let server = build_server(
+            folder,
+            MockFolderDeleter::new(),
+            MockFileReader::new(),
+            MockFileWriter::new(),
+        );
+
+        let names = server.list().expect("should list");
+
+        assert_eq!(names, vec![name("foo")]);
     }
 }

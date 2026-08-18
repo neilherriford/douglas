@@ -1,4 +1,4 @@
-use seedbank_types::{Name, SeedlingDefinition};
+use seedbank_types::{Name, SeedlingDefinition, SeedlingSpec};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -73,6 +73,10 @@ pub enum Request {
         name: Name,
         version: seedbank_types::Version,
         seedling_definition: SeedlingDefinition,
+    },
+    NewSeedling {
+        name: Name,
+        seedling_spec: SeedlingSpec,
     },
 }
 

@@ -22,6 +22,7 @@ pub enum Error {
 #[async_trait]
 pub trait Client: Send + Sync {
     async fn image_exists(&mut self, name: &VersionedImageName) -> Result<bool, Error>;
+    async fn repository_registered(&mut self, name: &resin_types::Name) -> Result<bool, Error>;
 }
 
 #[cfg_attr(feature = "mock", automock)]
@@ -85,6 +86,24 @@ impl Client for HttpClient {
             headers: Vec::new(),
         };
 
+        match self.client.execute(guard.span(), &request).await? {
+            Response::Okay { .. } => Ok(true),
+            Response::Error { status: 404, .. } => Ok(false),
+            response => Err(Error::UnexpectedResponse(response)),
+        }
+    }
+
+    async fn repository_registered(&mut self, name: &resin_types::Name) -> Result<bool, Error> {
+        let guard = Span::new(
+            Arc::clone(&self.reporter),
+            &format!("Checking repository registration status for {name}"),
+            log::ScopeKind::Task,
+        )
+        .start_guard();
+        let request = Request::Get {
+            path: format!("/v2/{name}/tags/list"),
+            headers: Vec::new(),
+        };
         match self.client.execute(guard.span(), &request).await? {
             Response::Okay { .. } => Ok(true),
             Response::Error { status: 404, .. } => Ok(false),

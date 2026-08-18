@@ -11,7 +11,9 @@ use clap::{Parser, Subcommand, ValueEnum};
 use credentials::create_credentials;
 use crossterm::style::Stylize;
 use daemonize::Daemonize;
-use file_system::{Folder, Permissions, UnixFolder, UnixPermissions};
+use file_system::{
+    FileReader, FileSystemError, Folder, Permissions, UnixFileReader, UnixFolder, UnixPermissions,
+};
 use log::{BufferedFileReporter, Event, Reporter, Span, TeeReporter};
 use os::{EnvironmentVariableReader, Os, Unix, UnixEnvironmentVariableReader};
 use std::{
@@ -140,6 +142,16 @@ enum SeedlingCommand {
         #[arg(long, help = "The seedling to to start")]
         name: String,
     },
+    #[command(about = "Create a new seedling")]
+    New {
+        #[arg(long, help = "The seedling to to create")]
+        name: String,
+        #[arg(
+            long,
+            help = "Path to a TOML seedling spec file; reads stdin if omitted"
+        )]
+        file: Option<PathBuf>,
+    },
     #[command(about = "Create a blank template for a seedling")]
     CreateTemplate,
 }
@@ -170,6 +182,9 @@ impl Display for Commands {
             Commands::Seedling {
                 seedling: SeedlingCommand::Drop { .. },
             } => f.write_str("drop seedling"),
+            Commands::Seedling {
+                seedling: SeedlingCommand::New { .. },
+            } => f.write_str("create seedling"),
             Commands::Seedling {
                 seedling: SeedlingCommand::CreateTemplate,
             } => f.write_str("create seedling template"),
@@ -235,16 +250,25 @@ fn main() -> ExitCode {
             SeedlingAction::Drop,
         )),
         Commands::Seedling {
+            seedling: SeedlingCommand::New { name, file },
+        } => run_with_tokio(create_seedling(&name, file.as_deref(), output_style)),
+        Commands::Seedling {
             seedling: SeedlingCommand::CreateTemplate,
         } => create_seedling_template(output_style),
     }
+}
+
+fn example_name(value: &str) -> seedbank_types::Name {
+    value
+        .parse()
+        .unwrap_or_else(|_| unreachable!("'{value}' is a valid seedling name literal"))
 }
 
 fn example_seedling_spec() -> seedbank_types::SeedlingSpec {
     let mut mounts = HashMap::new();
 
     mounts.insert(
-        "config".parse().expect("valid name"),
+        example_name("config"),
         seedbank_types::Mount::build(
             seedbank_types::MountType::Persisted,
             PathBuf::from("/etc/example/config"),
@@ -254,7 +278,7 @@ fn example_seedling_spec() -> seedbank_types::SeedlingSpec {
     );
 
     mounts.insert(
-        "cache".parse().expect("valid name"),
+        example_name("cache"),
         seedbank_types::Mount::build(
             seedbank_types::MountType::InMemory,
             PathBuf::from("/var/cache/example"),
@@ -264,11 +288,11 @@ fn example_seedling_spec() -> seedbank_types::SeedlingSpec {
     );
 
     mounts.insert(
-        "shared-assets".parse().expect("valid name"),
+        example_name("shared-assets"),
         seedbank_types::Mount::build(
             seedbank_types::MountType::PersistedShared(vec![
-                "sibling-a".parse().expect("valid name"),
-                "sibling-b".parse().expect("valid name"),
+                example_name("sibling-a"),
+                example_name("sibling-b"),
             ]),
             PathBuf::from("/var/lib/example/shared"),
             seedbank_types::AccessMode::Writable,
@@ -314,9 +338,90 @@ fn create_seedling_template(output_style: OutputStyle) -> ExitCode {
     ExitCode::from(0)
 }
 
+fn read_seedling_spec_input(
+    file_reader: &dyn FileReader,
+    file: Option<&Path>,
+) -> Result<String, FileSystemError> {
+    match file {
+        Some(path) => file_reader.read_all(path),
+        None => file_reader.read_stdin(),
+    }
+}
+
+async fn create_seedling(name: &str, file: Option<&Path>, output_style: OutputStyle) -> ExitCode {
+    let (douglas_folders, guard) = seedling_command_context("Creating seedling");
+
+    let Some(seedling_name) = parse_seedling_name(&guard, output_style, name) else {
+        return ExitCode::from(1);
+    };
+
+    let client = bract_client::UdsClient::new(guard.reporter(), &douglas_folders);
+
+    let file_reader = UnixFileReader::new();
+
+    let input = match read_seedling_spec_input(&file_reader, file) {
+        Ok(input) => input,
+        Err(err) => {
+            print_error(
+                output_style,
+                &format!("Could not read seedling spec: {err}"),
+            );
+            return ExitCode::from(1);
+        }
+    };
+
+    let spec: seedbank_types::SeedlingSpec = match toml::from_str(&input) {
+        Ok(spec) => spec,
+        Err(err) => {
+            print_error(output_style, &format!("Invalid seedling spec:\n\n{err}"));
+            return ExitCode::from(1);
+        }
+    };
+
+    match client.new_seedling(&seedling_name, &spec).await {
+        Ok(message) => {
+            match output_style {
+                OutputStyle::Plain => println!("{message}"),
+                OutputStyle::Json => {
+                    match serde_json::to_string(
+                        &serde_json::json!({ "success": true, "message": message }),
+                    ) {
+                        Ok(json) => println!("{json}"),
+                        Err(err) => {
+                            print_error(
+                                output_style,
+                                &format!("Could not serialize response as JSON: {err}"),
+                            );
+                            return ExitCode::from(1);
+                        }
+                    }
+                }
+            }
+            guard.finish_with_outcome(log::Outcome::Ok);
+            ExitCode::from(0)
+        }
+        Err(err) => {
+            let message = format!("Could not create seedling: {err}");
+            guard.span().message(log::Level::Warn, &message);
+            print_error(output_style, &err.to_string());
+            ExitCode::from(1)
+        }
+    }
+}
+
 // Daemonize redirects stdout/stderr to `/dev/null` by default, lets
-// keep logs for crashes that happen pre-fork
+// keep logs for crashes that happen pre-fork.
 fn open_daemon_crash_log(path: &Path) -> Option<(std::fs::File, std::fs::File)> {
+    if let Some(parent) = path.parent()
+        && let Err(err) = std::fs::create_dir_all(parent)
+    {
+        eprintln!(
+            "Failed to create crash log directory '{}': {err}",
+            parent.display()
+        );
+        return None;
+    }
+
     let stdout = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -761,4 +866,117 @@ async fn run_seedling_action(
     guard.finish_with_outcome(log::Outcome::Ok);
 
     ExitCode::from(0)
+}
+
+#[cfg(test)]
+mod crash_log_tests {
+    use super::open_daemon_crash_log;
+    use std::io::Read;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    fn unique_temp_dir() -> PathBuf {
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let mut dir = std::env::temp_dir();
+        dir.push(format!(
+            "douglas-crash-log-test-{}-{}",
+            std::process::id(),
+            COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+        dir
+    }
+
+    #[test]
+    fn test_open_daemon_crash_log_should_create_a_missing_parent_directory() {
+        let dir = unique_temp_dir();
+        let mut path = dir.clone();
+        path.push("nested");
+        path.push("resin.crash.log");
+        assert!(!dir.exists());
+
+        let result = open_daemon_crash_log(&path);
+
+        assert!(result.is_some());
+        assert!(path.exists());
+
+        let Ok(()) = std::fs::remove_dir_all(&dir) else {
+            panic!("cleanup should succeed");
+        };
+    }
+
+    #[test]
+    fn test_open_daemon_crash_log_should_open_the_same_file_for_stdout_and_stderr() {
+        use std::io::Write;
+        use std::os::unix::io::AsRawFd;
+
+        let dir = unique_temp_dir();
+        let Ok(()) = std::fs::create_dir_all(&dir) else {
+            panic!("setup should succeed");
+        };
+        let mut path = dir.clone();
+        path.push("resin.crash.log");
+
+        let Some((mut stdout, mut stderr)) = open_daemon_crash_log(&path) else {
+            panic!("should open crash log");
+        };
+
+        assert_ne!(stdout.as_raw_fd(), stderr.as_raw_fd());
+        let Ok(()) = stdout.write_all(b"hello ") else {
+            panic!("write should succeed");
+        };
+        let Ok(()) = stderr.write_all(b"world") else {
+            panic!("write should succeed");
+        };
+
+        let mut contents = String::new();
+        let Ok(mut file) = std::fs::File::open(&path) else {
+            panic!("file should exist");
+        };
+        let Ok(_) = file.read_to_string(&mut contents) else {
+            panic!("read should succeed");
+        };
+        assert_eq!(contents, "hello world");
+
+        let Ok(()) = std::fs::remove_dir_all(&dir) else {
+            panic!("cleanup should succeed");
+        };
+    }
+
+    #[test]
+    fn test_open_daemon_crash_log_should_append_across_repeated_opens() {
+        let dir = unique_temp_dir();
+        let Ok(()) = std::fs::create_dir_all(&dir) else {
+            panic!("setup should succeed");
+        };
+        let mut path = dir.clone();
+        path.push("resin.crash.log");
+
+        {
+            use std::io::Write;
+            let Some((mut stdout, _stderr)) = open_daemon_crash_log(&path) else {
+                panic!("should open crash log");
+            };
+            let Ok(()) = stdout.write_all(b"first boot\n") else {
+                panic!("write should succeed");
+            };
+        }
+        {
+            use std::io::Write;
+            let Some((mut stdout, _stderr)) = open_daemon_crash_log(&path) else {
+                panic!("should open crash log");
+            };
+            let Ok(()) = stdout.write_all(b"second boot\n") else {
+                panic!("write should succeed");
+            };
+        }
+
+        let Ok(contents) = std::fs::read_to_string(&path) else {
+            panic!("read should succeed");
+        };
+        assert_eq!(contents, "first boot\nsecond boot\n");
+
+        let Ok(()) = std::fs::remove_dir_all(&dir) else {
+            panic!("cleanup should succeed");
+        };
+    }
 }

@@ -12,4 +12,5 @@ pub enum Response {
     Registered,
     NotRegistered,
     InvalidName,
+    Reserved,
 }

@@ -4,6 +4,7 @@ use std::path::PathBuf;
 
 pub mod bootstrap;
 pub(crate) mod drop_seedling;
+pub(crate) mod new_seedling;
 pub(crate) mod reconcile_seedling;
 pub(crate) mod start_seedling;
 pub(crate) mod stop_seedling;

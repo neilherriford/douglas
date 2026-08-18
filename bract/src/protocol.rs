@@ -3,14 +3,16 @@ use bract_types::{Request, Response};
 use log::Reporter;
 use std::sync::Arc;
 
-pub async fn handle(server: &dyn Server, reporter: Arc<dyn Reporter>, request: Request) -> Response {
+pub async fn handle(
+    server: &dyn Server,
+    reporter: Arc<dyn Reporter>,
+    request: Request,
+) -> Response {
     match request {
-        Request::SeedlingStatus { name } => {
-            match server.seedling_status(reporter, &name).await {
-                Ok(status) => Response::SeedlingStatus(status),
-                Err(err) => error_response(err),
-            }
-        }
+        Request::SeedlingStatus { name } => match server.seedling_status(reporter, &name).await {
+            Ok(status) => Response::SeedlingStatus(status),
+            Err(err) => error_response(err),
+        },
         Request::StartSeedling { name } => match server.start_seedling(reporter, &name).await {
             Ok(()) => Response::Started,
             Err(err) => error_response(err),
@@ -32,6 +34,13 @@ pub async fn handle(server: &dyn Server, reporter: Arc<dyn Reporter>, request: R
             .await
         {
             Ok(()) => Response::Started,
+            Err(err) => error_response(err),
+        },
+        Request::NewSeedling {
+            name,
+            seedling_spec,
+        } => match server.new_seedling(reporter, &name, &seedling_spec).await {
+            Ok(message) => Response::Created { message },
             Err(err) => error_response(err),
         },
     }

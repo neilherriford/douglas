@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use bract_types::{Request, SeedlingStatus};
 use config::DouglasFolders;
 use log::{Reporter, ScopeKind, Span};
-use seedbank_types::{Name, SeedlingDefinition, Version};
+use seedbank_types::{Name, SeedlingDefinition, SeedlingSpec, Version};
 use std::path::PathBuf;
 use std::sync::Arc;
 use thiserror::Error;
@@ -39,6 +39,11 @@ pub trait Client: Send + Sync {
         version: &Version,
         seedling_definition: &SeedlingDefinition,
     ) -> Result<(), Error>;
+    async fn new_seedling(
+        &self,
+        name: &Name,
+        seedling_spec: &SeedlingSpec,
+    ) -> Result<String, Error>;
 }
 
 pub struct UdsClient {
@@ -114,67 +119,6 @@ impl Client for UdsClient {
             unexpected => Err(Error::UnexpectedResponse(unexpected)),
         })
     }
-
-    // async fn create_seedling(
-    //     &self,
-    //     name: &Name,
-    //     seedling_definition: &SeedlingDefinition,
-    // ) -> Result<(), Error> {
-    //     let guard = Span::new(
-    //         Arc::clone(&self.reporter),
-    //         "Creating seedling",
-    //         ScopeKind::Task,
-    //     )
-    //     .start_guard();
-
-    //     let response = match self
-    //         .request(Request::CreateSeedling {
-    //             name: name.clone(),
-    //             seedling_definition: seedling_definition.clone(),
-    //         })
-    //         .await
-    //     {
-    //         Ok(response) => response,
-    //         Err(err) => return guard.finish(Err(err)),
-    //     };
-
-    //     guard.finish(match response {
-    //         bract_types::Response::Created => Ok(()),
-    //         bract_types::Response::Error { message } => Err(Error::ServerError(message)),
-    //         unexpected => Err(Error::UnexpectedResponse(unexpected)),
-    //     })
-    // }
-    // async fn update_seedling(
-    //     &self,
-    //     name: &Name,
-    //     version: &Version,
-    //     seedling_definition: &SeedlingDefinition,
-    // ) -> Result<(), Error> {
-    //     let guard = Span::new(
-    //         Arc::clone(&self.reporter),
-    //         "Updating seedling",
-    //         ScopeKind::Task,
-    //     )
-    //     .start_guard();
-
-    //     let response = match self
-    //         .request(Request::UpdateSeedling {
-    //             name: name.clone(),
-    //             version: version.clone(),
-    //             seedling_definition: seedling_definition.clone(),
-    //         })
-    //         .await
-    //     {
-    //         Ok(response) => response,
-    //         Err(err) => return guard.finish(Err(err)),
-    //     };
-
-    //     guard.finish(match response {
-    //         bract_types::Response::Updated => Ok(()),
-    //         bract_types::Response::Error { message } => Err(Error::ServerError(message)),
-    //         unexpected => Err(Error::UnexpectedResponse(unexpected)),
-    //     })
-    // }
 
     async fn stop_seedling(&self, name: &Name) -> Result<(), Error> {
         let guard = Span::new(
@@ -275,6 +219,39 @@ impl Client for UdsClient {
 
         guard.finish(match response {
             bract_types::Response::Started => Ok(()),
+            bract_types::Response::Error { message } => Err(Error::ServerError(message)),
+            unexpected => Err(Error::UnexpectedResponse(unexpected)),
+        })
+    }
+
+    async fn new_seedling(
+        &self,
+        name: &Name,
+        seedling_spec: &SeedlingSpec,
+    ) -> Result<String, Error> {
+        let guard = Span::new(
+            Arc::clone(&self.reporter),
+            "Creating seedling",
+            ScopeKind::Task,
+        )
+        .start_guard();
+
+        let response = match self
+            .request(
+                guard.span(),
+                Request::NewSeedling {
+                    name: name.clone(),
+                    seedling_spec: seedling_spec.clone(),
+                },
+            )
+            .await
+        {
+            Ok(response) => response,
+            Err(err) => return guard.finish(Err(err)),
+        };
+
+        guard.finish(match response {
+            bract_types::Response::Created { message } => Ok(message),
             bract_types::Response::Error { message } => Err(Error::ServerError(message)),
             unexpected => Err(Error::UnexpectedResponse(unexpected)),
         })

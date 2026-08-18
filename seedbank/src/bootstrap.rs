@@ -109,6 +109,90 @@ pub fn service_definition(douglas_folders: &DouglasFolders) -> ServiceDefinition
     )
 }
 
+#[cfg(test)]
+mod tests {
+    use super::service_definition;
+    use config::DouglasFolders;
+    use credentials::well_known::DOUGLAS_RESIN_SEEDBANK_GROUP;
+
+    #[test]
+    fn test_service_definition_should_declare_both_the_main_and_registration_sockets() {
+        let douglas_folders = DouglasFolders::new();
+
+        let definition = service_definition(&douglas_folders);
+
+        assert_eq!(
+            definition
+                .owned_sockets
+                .iter()
+                .map(|listener| listener.socket_path.clone())
+                .collect::<Vec<_>>(),
+            vec![
+                douglas_folders.socket_file(crate::SEEDBANK),
+                douglas_folders.socket_file(seedling_registration_types::SOCKET_NAME),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_service_definition_should_own_the_main_socket_with_the_resin_seedbank_group() {
+        let douglas_folders = DouglasFolders::new();
+
+        let definition = service_definition(&douglas_folders);
+
+        let main_socket = definition
+            .owned_sockets
+            .iter()
+            .find(|listener| listener.socket_path == douglas_folders.socket_file(crate::SEEDBANK))
+            .expect("main socket should be declared");
+
+        assert_eq!(main_socket.owning_group, DOUGLAS_RESIN_SEEDBANK_GROUP);
+    }
+
+    #[test]
+    fn test_service_definition_should_own_the_registration_socket_with_the_resin_seedbank_group() {
+        let douglas_folders = DouglasFolders::new();
+
+        let definition = service_definition(&douglas_folders);
+
+        let registration_socket = definition
+            .owned_sockets
+            .iter()
+            .find(|listener| {
+                listener.socket_path
+                    == douglas_folders.socket_file(seedling_registration_types::SOCKET_NAME)
+            })
+            .expect("registration socket should be declared");
+
+        assert_eq!(
+            registration_socket.owning_group,
+            DOUGLAS_RESIN_SEEDBANK_GROUP
+        );
+    }
+
+    #[test]
+    fn test_service_definition_should_own_the_registration_socket_directory() {
+        let douglas_folders = DouglasFolders::new();
+
+        let definition = service_definition(&douglas_folders);
+
+        assert!(definition.owned_folders.iter().any(|(path, _mode)| path
+            == &douglas_folders.socket_dir(seedling_registration_types::SOCKET_NAME)));
+    }
+
+    #[test]
+    fn test_service_definition_should_declare_the_resin_seedbank_group_as_an_additional_group() {
+        let douglas_folders = DouglasFolders::new();
+
+        let definition = service_definition(&douglas_folders);
+
+        assert_eq!(
+            definition.additional_groups,
+            vec![DOUGLAS_RESIN_SEEDBANK_GROUP.to_string()]
+        );
+    }
+}
+
 fn create_plan<'a>(definition: &ServiceDefinition, state: State) -> Result<Vec<Step<'a>>, Error> {
     if state.is_root {
         return Err(Error::CannotBeRoot);
