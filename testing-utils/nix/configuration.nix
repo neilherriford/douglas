@@ -13,8 +13,8 @@ let
       (builtins.attrNames (builtins.readDir userKeysDir));
 
   # Version information for your dev image
-  devImageVersion = "0.0.2j";
-  devImageDate = "2026-08-19";
+  devImageVersion = "0.0.2l";
+  devImageDate = "2026-08-18";
   devImageName = "Douglas Development Environment";
 
   # Define our development packages explicitly
@@ -397,15 +397,12 @@ in
     # Default bashrc content
     [ -r /etc/bashrc ] && . /etc/bashrc
 
-    # Custom development environment setup
-    echo "🚀 ${devImageName} v${devImageVersion}"
-
-    # Setup Rust if not already configured
-    if command -v rustup >/dev/null 2>&1 && ! rustup show >/dev/null 2>&1; then
-      echo "🦀 Configuring Rust toolchain..."
-      rustup toolchain install 1.96.0 --component clippy rustfmt rust-src
-      rustup default 1.96.0
-      echo "✅ Rust ready: $(rustc --version)"
+    # Add cargo to PATH if it exists. Must stay unconditional (not gated by
+    # the interactive-shell check below) so non-interactive sessions —
+    # `ssh host some-command`, scp, automated tooling — can still find
+    # cargo-installed binaries like `douglas`.
+    if [ -d "$HOME/.cargo/bin" ]; then
+      export PATH="$HOME/.cargo/bin:$PATH"
     fi
 
     # Useful aliases for development
@@ -421,9 +418,23 @@ in
     alias rust-test='cargo test'
     alias verify-tools='/etc/verify-dev-tools.sh'
 
-    # Add cargo to PATH if it exists
-    if [ -d "$HOME/.cargo/bin" ]; then
-      export PATH="$HOME/.cargo/bin:$PATH"
+    # Everything below here is interactive-only (banner text, auto Rust
+    # setup messaging) — bail out for non-interactive shells so their
+    # output stays clean for scripts that parse it (e.g. smoke tests).
+    case $- in
+      *i*) ;;
+      *) return ;;
+    esac
+
+    # Custom development environment setup
+    echo "🚀 ${devImageName} v${devImageVersion}"
+
+    # Setup Rust if not already configured
+    if command -v rustup >/dev/null 2>&1 && ! rustup show >/dev/null 2>&1; then
+      echo "🦀 Configuring Rust toolchain..."
+      rustup toolchain install 1.96.0 --component clippy rustfmt rust-src
+      rustup default 1.96.0
+      echo "✅ Rust ready: $(rustc --version)"
     fi
 
     # Show development environment info

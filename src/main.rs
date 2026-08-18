@@ -1168,3 +1168,82 @@ mod crash_log_tests {
         };
     }
 }
+
+// Keeps testing-utils/smoke-tests/steps/*.sh honest: each step's `# covers:`
+// line is the shared source of truth between this test and the NixOS smoke
+// test suite, so a CLI command added/renamed/removed here without updating
+// a step to match fails fast in `cargo test` instead of silently rotting the
+// smoke test coverage claim.
+#[cfg(test)]
+mod command_coverage_tests {
+    use super::Cli;
+    use clap::CommandFactory;
+    use std::path::PathBuf;
+
+    fn collect_leaf_command_paths(command: &clap::Command, prefix: &str) -> Vec<String> {
+        let mut paths = Vec::new();
+        for sub in command.get_subcommands() {
+            if sub.is_hide_set() {
+                continue;
+            }
+            let path = if prefix.is_empty() {
+                sub.get_name().to_string()
+            } else {
+                format!("{prefix} {}", sub.get_name())
+            };
+            if sub.has_subcommands() {
+                paths.extend(collect_leaf_command_paths(sub, &path));
+            } else {
+                paths.push(path);
+            }
+        }
+        paths
+    }
+
+    fn steps_dir() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("testing-utils/smoke-tests/steps")
+    }
+
+    fn covered_command_paths() -> Vec<String> {
+        let dir = steps_dir();
+        let entries = std::fs::read_dir(&dir)
+            .unwrap_or_else(|err| panic!("should read {}: {err}", dir.display()));
+
+        let mut covered = Vec::new();
+        for entry in entries {
+            let Ok(entry) = entry else {
+                panic!("should read directory entry");
+            };
+            let path = entry.path();
+            if path.extension().and_then(|ext| ext.to_str()) != Some("sh") {
+                continue;
+            }
+            let contents = std::fs::read_to_string(&path)
+                .unwrap_or_else(|err| panic!("should read {}: {err}", path.display()));
+            for line in contents.lines() {
+                if let Some(command) = line.trim().strip_prefix("# covers:") {
+                    covered.push(command.trim().to_string());
+                }
+            }
+        }
+        covered
+    }
+
+    #[test]
+    fn test_smoke_test_steps_should_cover_every_non_hidden_cli_command() {
+        let mut actual = collect_leaf_command_paths(&Cli::command(), "");
+        actual.sort();
+        actual.dedup();
+
+        let mut expected = covered_command_paths();
+        expected.sort();
+        expected.dedup();
+
+        assert_eq!(
+            actual, expected,
+            "testing-utils/smoke-tests/steps/*.sh is out of sync with the CLI's actual command \
+             surface (left = live CLI commands, right = commands claimed via `# covers:` \
+             lines) — add, rename, or remove a step's `# covers:` line to match"
+        );
+    }
+}
