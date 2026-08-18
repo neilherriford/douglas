@@ -254,7 +254,7 @@ fn create_plan<'a>(
         ),
     );
 
-    push_step(&mut steps, ClaimRoot::new(name.clone()));
+    push_step(&mut steps, ClaimDefault::new(name.clone()));
 
     Ok(steps)
 }
@@ -331,26 +331,26 @@ impl<'a> Command<Context<'a>> for NewSeedlingFromSpec {
     }
 }
 
-struct ClaimRoot {
+struct ClaimDefault {
     seedling_name: seedbank_types::Name,
 }
 
-impl ClaimRoot {
+impl ClaimDefault {
     pub fn new(seedling_name: seedbank_types::Name) -> Self {
         Self { seedling_name }
     }
 }
 
-impl std::fmt::Display for ClaimRoot {
+impl std::fmt::Display for ClaimDefault {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Claiming root for '{}'", self.seedling_name)
+        write!(f, "Claiming default for '{}'", self.seedling_name)
     }
 }
 
 #[async_trait]
-impl<'a> Command<Context<'a>> for ClaimRoot {
+impl<'a> Command<Context<'a>> for ClaimDefault {
     fn name(&self) -> String {
-        "Claiming root".to_string()
+        "Claiming default".to_string()
     }
 
     async fn run(
@@ -360,14 +360,14 @@ impl<'a> Command<Context<'a>> for ClaimRoot {
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let guard = span
             .create_child(
-                &format!("Claiming root for '{}'", self.seedling_name),
+                &format!("Claiming default for '{}'", self.seedling_name),
                 ScopeKind::Step,
             )
             .start_guard();
 
         context
             .seedbank_client
-            .claim_root(&self.seedling_name)
+            .claim_default(&self.seedling_name)
             .await?;
 
         guard.finish_with_outcome(log::Outcome::Ok);
@@ -409,14 +409,14 @@ mod tests {
     }
 
     #[test]
-    fn test_create_plan_should_create_the_seedling_and_claim_root() {
+    fn test_create_plan_should_create_the_seedling_and_claim_default() {
         let steps = create_plan(&name(), &seedling_spec(), state()).expect("should produce a plan");
 
         assert_eq!(
             step_descriptions(steps),
             vec![
                 "Creating seedling for 'foo'".to_string(),
-                "Claiming root for 'foo'".to_string(),
+                "Claiming default for 'foo'".to_string(),
             ]
         );
     }

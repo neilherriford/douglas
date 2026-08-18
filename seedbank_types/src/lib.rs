@@ -14,7 +14,7 @@ use std::{
 use thiserror::Error;
 
 pub static MAX_SEEDLINGS: u16 = 4096;
-pub static RESERVED_SEEDLING_NAMES: &[&str] = &["traefik", "root"];
+pub static RESERVED_SEEDLING_NAMES: &[&str] = &["traefik", "default"];
 
 #[derive(Debug, Error)]
 pub enum NameParseError {
@@ -377,11 +377,11 @@ pub enum Request {
         version: Version,
         definition: SeedlingDefinition,
     },
-    Root,
-    ClaimRoot {
+    Default,
+    ClaimDefault {
         name: Name,
     },
-    ReleaseRoot {
+    ReleaseDefault {
         name: Name,
     },
 }
@@ -393,7 +393,7 @@ pub enum Response {
     Exists { exists: bool },
     Status { status: SeedlingStatus },
     Seedling { seedling: Seedling },
-    Root { name: Option<Name> },
+    Default { name: Option<Name> },
     Ok,
     Error { message: String },
 }

@@ -39,15 +39,15 @@ pub fn handle(seedbank: &dyn Seedbank, request: Request) -> Response {
             Ok(status) => Response::Status { status },
             Err(err) => error_response(err),
         },
-        Request::Root => match seedbank.root() {
-            Ok(name) => Response::Root { name },
+        Request::Default => match seedbank.default_seedling() {
+            Ok(name) => Response::Default { name },
             Err(err) => error_response(err),
         },
-        Request::ClaimRoot { name } => match seedbank.claim_root(&name) {
+        Request::ClaimDefault { name } => match seedbank.claim_default(&name) {
             Ok(()) => Response::Ok,
             Err(err) => error_response(err),
         },
-        Request::ReleaseRoot { name } => match seedbank.release_root(&name) {
+        Request::ReleaseDefault { name } => match seedbank.release_default(&name) {
             Ok(()) => Response::Ok,
             Err(err) => error_response(err),
         },
@@ -230,11 +230,11 @@ mod tests {
     }
 
     #[test]
-    fn test_root_should_wrap_success_in_name() {
+    fn test_default_should_wrap_success_in_name() {
         let mut seedbank = MockSeedbank::new();
-        seedbank.expect_root().returning(|| Ok(Some(name("foo"))));
+        seedbank.expect_default_seedling().returning(|| Ok(Some(name("foo"))));
 
-        let response = handle(&seedbank, Request::Root);
+        let response = handle(&seedbank, Request::Default);
 
         assert!(
             matches!(response, Response::Root { name: Some(returned) } if returned == name("foo"))
@@ -242,51 +242,51 @@ mod tests {
     }
 
     #[test]
-    fn test_claim_root_should_dispatch_with_name_and_wrap_ok() {
+    fn test_claim_default_should_dispatch_with_name_and_wrap_ok() {
         let mut seedbank = MockSeedbank::new();
         seedbank
-            .expect_claim_root()
+            .expect_claim_default()
             .withf(|claimed| claimed == &name("foo"))
             .returning(|_| Ok(()));
 
-        let response = handle(&seedbank, Request::ClaimRoot { name: name("foo") });
+        let response = handle(&seedbank, Request::ClaimDefault { name: name("foo") });
 
         assert!(matches!(response, Response::Ok));
     }
 
     #[test]
-    fn test_claim_root_should_wrap_failure_in_error() {
+    fn test_claim_default_should_wrap_failure_in_error() {
         let mut seedbank = MockSeedbank::new();
         seedbank
-            .expect_claim_root()
-            .returning(|_| Err(Error::RootAlreadyClaimed(name("bar"))));
+            .expect_claim_default()
+            .returning(|_| Err(Error::DefaultAlreadyClaimed(name("bar"))));
 
-        let response = handle(&seedbank, Request::ClaimRoot { name: name("foo") });
+        let response = handle(&seedbank, Request::ClaimDefault { name: name("foo") });
 
         assert!(matches!(response, Response::Error { .. }));
     }
 
     #[test]
-    fn test_release_root_should_dispatch_with_name_and_wrap_ok() {
+    fn test_release_default_should_dispatch_with_name_and_wrap_ok() {
         let mut seedbank = MockSeedbank::new();
         seedbank
-            .expect_release_root()
+            .expect_release_default()
             .withf(|released| released == &name("foo"))
             .returning(|_| Ok(()));
 
-        let response = handle(&seedbank, Request::ReleaseRoot { name: name("foo") });
+        let response = handle(&seedbank, Request::ReleaseDefault { name: name("foo") });
 
         assert!(matches!(response, Response::Ok));
     }
 
     #[test]
-    fn test_release_root_should_wrap_failure_in_error() {
+    fn test_release_default_should_wrap_failure_in_error() {
         let mut seedbank = MockSeedbank::new();
         seedbank
-            .expect_release_root()
+            .expect_release_default()
             .returning(|_| Err(Error::CannotBeRoot));
 
-        let response = handle(&seedbank, Request::ReleaseRoot { name: name("foo") });
+        let response = handle(&seedbank, Request::ReleaseDefault { name: name("foo") });
 
         assert!(matches!(response, Response::Error { .. }));
     }
