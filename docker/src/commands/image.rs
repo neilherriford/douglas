@@ -3,9 +3,8 @@ use crate::DockerError;
 use crate::client::ImageRef;
 use crate::{deserialize_container_command, deserialize_run_as, to_general_error};
 use docker_types::{
-    ContainerUser, EnvironmentVariable, Healthcheck, Id, ImageDefinition, ImageId, Label,
-    Registry, VersionedImageName, deserialize_environment_variables, deserialize_id,
-    deserialize_labels,
+    ContainerUser, EnvironmentVariable, Healthcheck, Id, ImageDefinition, ImageId, Label, Registry,
+    VersionedImageName, deserialize_environment_variables, deserialize_id, deserialize_labels,
 };
 use log::{Reporter, Span};
 use serde::{Deserialize, Deserializer};

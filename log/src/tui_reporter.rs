@@ -66,7 +66,9 @@ impl Drop for TuiReporter {
         if let Ok(mut guard) = self.tx.lock() {
             *guard = None;
         }
-        let Ok(mut guard) = self.handle.lock() else { return };
+        let Ok(mut guard) = self.handle.lock() else {
+            return;
+        };
         if let Some(h) = guard.take() {
             let _ = h.join();
         }
@@ -207,7 +209,11 @@ fn draw(f: &mut Frame, state: &AppState) {
         chunks[0],
     );
 
-    let log_items: Vec<ListItem> = state.lines.iter().map(|l| ListItem::new(l.as_str())).collect();
+    let log_items: Vec<ListItem> = state
+        .lines
+        .iter()
+        .map(|l| ListItem::new(l.as_str()))
+        .collect();
 
     f.render_widget(
         List::new(log_items)

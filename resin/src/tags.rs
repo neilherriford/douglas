@@ -20,9 +20,7 @@ pub(crate) struct TagListParams {
 
 fn to_tag_error(error: TagStoreError) -> ServerError {
     match error {
-        TagStoreError::UnknownRepository(repository) => {
-            ServerError::RepositoryUnknown(repository)
-        }
+        TagStoreError::UnknownRepository(repository) => ServerError::RepositoryUnknown(repository),
         other => ServerError::Internal(Box::new(other)),
     }
 }
@@ -34,7 +32,6 @@ pub(crate) async fn list(
 ) -> Result<impl IntoResponse, ServerError> {
     get_tag_list(tag_store, Name::from_str(&name)?, params).await
 }
-
 
 fn paginate_tags<'a>(
     tags: &'a [String],

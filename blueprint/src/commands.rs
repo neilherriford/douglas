@@ -279,11 +279,7 @@ impl<C: HasPermissions + Send> Command<C> for SetMode {
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let guard = span
             .create_child(
-                &format!(
-                    "Set mode on '{}' to '{}'!",
-                    self.path.display(),
-                    self.mode
-                ),
+                &format!("Set mode on '{}' to '{}'!", self.path.display(), self.mode),
                 ScopeKind::Step,
             )
             .start_guard();
