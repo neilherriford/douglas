@@ -232,12 +232,14 @@ mod tests {
     #[test]
     fn test_default_should_wrap_success_in_name() {
         let mut seedbank = MockSeedbank::new();
-        seedbank.expect_default_seedling().returning(|| Ok(Some(name("foo"))));
+        seedbank
+            .expect_default_seedling()
+            .returning(|| Ok(Some(name("foo"))));
 
         let response = handle(&seedbank, Request::Default);
 
         assert!(
-            matches!(response, Response::Root { name: Some(returned) } if returned == name("foo"))
+            matches!(response, Response::Default { name: Some(returned) } if returned == name("foo"))
         );
     }
 

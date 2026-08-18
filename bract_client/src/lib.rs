@@ -44,6 +44,8 @@ pub trait Client: Send + Sync {
         name: &Name,
         seedling_spec: &SeedlingSpec,
     ) -> Result<String, Error>;
+    async fn find_orphans(&self) -> Result<bract_types::Orphans, Error>;
+    async fn prune_orphans(&self, orphans: &bract_types::Orphans) -> Result<(), Error>;
 }
 
 pub struct UdsClient {
@@ -252,6 +254,54 @@ impl Client for UdsClient {
 
         guard.finish(match response {
             bract_types::Response::Created { message } => Ok(message),
+            bract_types::Response::Error { message } => Err(Error::ServerError(message)),
+            unexpected => Err(Error::UnexpectedResponse(unexpected)),
+        })
+    }
+
+    async fn find_orphans(&self) -> Result<bract_types::Orphans, Error> {
+        let guard = Span::new(
+            Arc::clone(&self.reporter),
+            "Finding orphans",
+            ScopeKind::Task,
+        )
+        .start_guard();
+
+        let response = match self.request(guard.span(), Request::FindOrphans).await {
+            Ok(response) => response,
+            Err(err) => return guard.finish(Err(err)),
+        };
+
+        guard.finish(match response {
+            bract_types::Response::Orphans(orphans) => Ok(orphans),
+            bract_types::Response::Error { message } => Err(Error::ServerError(message)),
+            unexpected => Err(Error::UnexpectedResponse(unexpected)),
+        })
+    }
+
+    async fn prune_orphans(&self, orphans: &bract_types::Orphans) -> Result<(), Error> {
+        let guard = Span::new(
+            Arc::clone(&self.reporter),
+            "Pruning orphans",
+            ScopeKind::Task,
+        )
+        .start_guard();
+
+        let response = match self
+            .request(
+                guard.span(),
+                Request::PruneOrphans {
+                    orphans: orphans.clone(),
+                },
+            )
+            .await
+        {
+            Ok(response) => response,
+            Err(err) => return guard.finish(Err(err)),
+        };
+
+        guard.finish(match response {
+            bract_types::Response::Pruned => Ok(()),
             bract_types::Response::Error { message } => Err(Error::ServerError(message)),
             unexpected => Err(Error::UnexpectedResponse(unexpected)),
         })

@@ -1,7 +1,12 @@
 use crate::{RepositoryStore, ServerError};
-use axum::{extract::State, http::StatusCode, response::IntoResponse};
+use axum::{
+    extract::{Path, State},
+    http::StatusCode,
+    response::IntoResponse,
+};
+use resin_types::Name;
 use serde_json::{Map, Value};
-use std::sync::Arc;
+use std::{str::FromStr, sync::Arc};
 
 pub(crate) async fn catalog(
     State(repository_store): State<Arc<dyn RepositoryStore>>,
@@ -31,6 +36,15 @@ pub(crate) async fn catalog(
         result,
     )
         .into_response())
+}
+
+pub(crate) async fn delete_repository(
+    State(repository_store): State<Arc<dyn RepositoryStore>>,
+    Path(name): Path<String>,
+) -> Result<impl IntoResponse, ServerError> {
+    let name = Name::from_str(&name)?;
+    repository_store.delete(&name)?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 pub(crate) async fn v2() -> impl IntoResponse {

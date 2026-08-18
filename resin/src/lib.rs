@@ -37,14 +37,15 @@ use axum::{
     http::StatusCode,
     middleware::{self, Next},
     response::IntoResponse,
-    routing::{get, head, post},
+    routing::{delete, get, head, post},
 };
 use config::DouglasFolders;
 use credentials::create_credentials;
 use file_system::{
     FileAppender, FileDeleter, FileReader, FileRenamer, FileSystemError, FileWriter, Folder,
-    Inspect, Links, Permissions, UnixFileAppender, UnixFileDeleter, UnixFileReader,
-    UnixFileRenamer, UnixFileWriter, UnixFolder, UnixInspect, UnixLinks, UnixPermissions,
+    FolderDeleter, Inspect, Links, Permissions, UnixFileAppender, UnixFileDeleter, UnixFileReader,
+    UnixFileRenamer, UnixFileWriter, UnixFolder, UnixFolderDeleter, UnixInspect, UnixLinks,
+    UnixPermissions,
 };
 use futures_util::FutureExt;
 use log::{BufferedFileReporter, Outcome, Reporter, ScopeKind, Span, TuiReporter};
@@ -266,6 +267,7 @@ impl Server {
         let douglas_folders = DouglasFolders::new();
         let file_renamer: Arc<dyn FileRenamer> = Arc::new(UnixFileRenamer::new());
         let file_deleter: Arc<dyn FileDeleter> = Arc::new(UnixFileDeleter::new());
+        let folder_deleter: Arc<dyn FolderDeleter> = Arc::new(UnixFolderDeleter::new());
         let file_reader: Arc<dyn FileReader> = Arc::new(UnixFileReader::new());
         let file_writer: Arc<dyn FileWriter> = Arc::new(UnixFileWriter::new());
         let file_appender: Arc<dyn FileAppender> = Arc::new(UnixFileAppender::new());
@@ -342,6 +344,7 @@ impl Server {
         let repository_store: Arc<dyn RepositoryStore> = Arc::new(FileRepositoryStore::new(
             repositories_root.clone(),
             Arc::clone(&folder),
+            Arc::clone(&folder_deleter),
         ));
 
         let blob_mounter = Arc::new(FileBlobMounter::new(
@@ -465,6 +468,8 @@ impl Server {
         let system_routes = Router::new()
             .route("/v2/_catalog", get(system::catalog))
             .route("/v2/", get(system::v2))
+            .route("/v2/{name}/", delete(system::delete_repository))
+            .route("/v2/{namespace}/{name}/", delete(reject_namespaced))
             .with_state(Arc::clone(&self.repository_store));
 
         let app = Router::new()

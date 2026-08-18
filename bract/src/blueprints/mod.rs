@@ -4,7 +4,9 @@ use std::path::PathBuf;
 
 pub mod bootstrap;
 pub(crate) mod drop_seedling;
+pub(crate) mod find_orphans;
 pub(crate) mod new_seedling;
+pub(crate) mod prune_orphans;
 pub(crate) mod reconcile_seedling;
 pub(crate) mod start_seedling;
 pub(crate) mod stop_seedling;
@@ -40,6 +42,11 @@ pub(crate) fn container_name(
     format!("{CONTAINER_NAME_PREFIX}{}", seedling_name.as_ref()).parse()
 }
 
+pub(crate) fn seedling_name_from_doug_prefixed(raw: &str) -> Option<seedbank_types::Name> {
+    raw.strip_prefix(CONTAINER_NAME_PREFIX)
+        .and_then(|name| name.parse().ok())
+}
+
 fn seedling_mount_path(
     douglas_folders: &DouglasFolders,
     seedling_name: &seedbank_types::Name,
@@ -62,6 +69,24 @@ mod tests {
         let result = container_name(&seedling_name).expect("should be a valid container name");
 
         assert_eq!(result.as_ref(), "doug.traefik");
+    }
+
+    #[test]
+    fn test_seedling_name_from_doug_prefixed_should_strip_the_prefix() {
+        assert_eq!(
+            seedling_name_from_doug_prefixed("doug.hello-world"),
+            Some("hello-world".parse().unwrap())
+        );
+    }
+
+    #[test]
+    fn test_seedling_name_from_doug_prefixed_should_be_none_without_the_prefix() {
+        assert_eq!(seedling_name_from_doug_prefixed("hello-world"), None);
+    }
+
+    #[test]
+    fn test_seedling_name_from_doug_prefixed_should_be_none_for_an_invalid_name() {
+        assert_eq!(seedling_name_from_doug_prefixed("doug.Not Valid!"), None);
     }
 
     #[test]

@@ -154,6 +154,17 @@ enum SeedlingCommand {
     },
     #[command(about = "Create a blank template for a seedling")]
     CreateTemplate,
+    #[command(
+        about = "Find and remove orphaned containers, networks, route files, and resin repositories"
+    )]
+    Prune {
+        #[arg(
+            long,
+            default_value_t = false,
+            help = "Skip the confirmation prompt and prune immediately"
+        )]
+        yes: bool,
+    },
 }
 
 impl Display for Commands {
@@ -188,6 +199,9 @@ impl Display for Commands {
             Commands::Seedling {
                 seedling: SeedlingCommand::CreateTemplate,
             } => f.write_str("create seedling template"),
+            Commands::Seedling {
+                seedling: SeedlingCommand::Prune { .. },
+            } => f.write_str("prune orphans"),
         }
     }
 }
@@ -255,6 +269,9 @@ fn main() -> ExitCode {
         Commands::Seedling {
             seedling: SeedlingCommand::CreateTemplate,
         } => create_seedling_template(output_style),
+        Commands::Seedling {
+            seedling: SeedlingCommand::Prune { yes },
+        } => run_with_tokio(prune_orphans(output_style, yes)),
     }
 }
 
@@ -685,13 +702,50 @@ async fn start(plan_only: bool) -> ExitCode {
         &douglas_folders,
     ));
 
-    let succeeded = bootstrap::seedlings::perform(reporter, bract_client).await;
+    let succeeded =
+        bootstrap::seedlings::perform(Arc::clone(&reporter), Arc::clone(&bract_client)).await;
 
     if !succeeded {
         return ExitCode::from(1);
     }
 
+    log_orphans_if_any(&reporter, bract_client.as_ref()).await;
+
     ExitCode::from(0)
+}
+
+async fn log_orphans_if_any(reporter: &Arc<dyn Reporter>, bract_client: &dyn bract_client::Client) {
+    let guard = Span::new(
+        Arc::clone(reporter),
+        "Checking for orphaned resources",
+        log::ScopeKind::Task,
+    )
+    .start_guard();
+
+    match bract_client.find_orphans().await {
+        Ok(orphans) if orphans.is_empty() => guard.finish_with_outcome(log::Outcome::Ok),
+        Ok(orphans) => {
+            guard.span().message(
+                log::Level::Warn,
+                &format!(
+                    "Found orphaned resources (run `douglas seedling prune` to clean up): \
+                     {} container(s), {} network(s), {} route file(s), {} resin repository(s)",
+                    orphans.containers.len(),
+                    orphans.networks.len(),
+                    orphans.route_files.len(),
+                    orphans.resin_repositories.len(),
+                ),
+            );
+            guard.finish_with_outcome(log::Outcome::Ok);
+        }
+        Err(err) => {
+            guard.span().message(
+                log::Level::Warn,
+                &format!("Could not check for orphaned resources: {err}"),
+            );
+            guard.finish_with_outcome(log::Outcome::Failed);
+        }
+    }
 }
 
 fn seedling_command_context(label: &str) -> (DouglasFolders, log::ScopeGuard) {
@@ -857,6 +911,110 @@ async fn run_seedling_action(
         }
         Err(err) => {
             let message = format!("{}: {err}", action.error_prefix());
+            guard.span().message(log::Level::Warn, &message);
+            print_error(output_style, &err.to_string());
+            return ExitCode::from(1);
+        }
+    }
+
+    guard.finish_with_outcome(log::Outcome::Ok);
+
+    ExitCode::from(0)
+}
+
+fn print_orphans(orphans: &bract_types::Orphans) {
+    print_orphan_group("Containers", &orphans.containers);
+    print_orphan_group("Networks", &orphans.networks);
+    print_orphan_group("Route files", &orphans.route_files);
+    print_orphan_group("Resin repositories", &orphans.resin_repositories);
+}
+
+fn print_orphan_group<T: std::fmt::Display>(label: &str, names: &[T]) {
+    if names.is_empty() {
+        return;
+    }
+    println!("{}", label.bold());
+    for name in names {
+        println!("  - {name}");
+    }
+}
+
+fn confirm_prune() -> bool {
+    print!("Prune the above? [y/N] ");
+    if io::Write::flush(&mut io::stdout()).is_err() {
+        return false;
+    }
+
+    let mut answer = String::new();
+    if io::stdin().read_line(&mut answer).is_err() {
+        return false;
+    }
+
+    matches!(answer.trim().to_lowercase().as_str(), "y" | "yes")
+}
+
+async fn prune_orphans(output_style: OutputStyle, skip_confirmation: bool) -> ExitCode {
+    let (douglas_folders, guard) = seedling_command_context("Finding orphans");
+    let client = bract_client::UdsClient::new(guard.reporter(), &douglas_folders);
+
+    let orphans = match client.find_orphans().await {
+        Ok(orphans) => orphans,
+        Err(err) => {
+            let message = format!("Could not find orphans: {err}");
+            guard.span().message(log::Level::Warn, &message);
+            print_error(output_style, &err.to_string());
+            return ExitCode::from(1);
+        }
+    };
+
+    if orphans.is_empty() {
+        match output_style {
+            OutputStyle::Plain => println!("No orphans found."),
+            OutputStyle::Json => println!(
+                "{}",
+                serde_json::json!({ "orphans": orphans, "pruned": false })
+            ),
+        }
+        guard.finish_with_outcome(log::Outcome::Ok);
+        return ExitCode::from(0);
+    }
+
+    let has_prunable = !orphans.containers.is_empty()
+        || !orphans.networks.is_empty()
+        || !orphans.route_files.is_empty()
+        || !orphans.resin_repositories.is_empty();
+
+    if let OutputStyle::Plain = output_style {
+        print_orphans(&orphans);
+    }
+
+    if !has_prunable {
+        if let OutputStyle::Json = output_style {
+            println!(
+                "{}",
+                serde_json::json!({ "orphans": orphans, "pruned": false })
+            );
+        }
+        guard.finish_with_outcome(log::Outcome::Ok);
+        return ExitCode::from(0);
+    }
+
+    if !skip_confirmation && !confirm_prune() {
+        println!("Not pruning.");
+        guard.finish_with_outcome(log::Outcome::Ok);
+        return ExitCode::from(0);
+    }
+
+    match client.prune_orphans(&orphans).await {
+        Ok(()) => match output_style {
+            OutputStyle::Plain => println!("Pruned."),
+            OutputStyle::Json => println!(
+                "{}",
+                serde_json::json!({ "orphans": orphans, "pruned": true })
+            ),
+        },
+        Err(err) => {
+            let message = format!("Could not prune orphans: {err}");
             guard.span().message(log::Level::Warn, &message);
             print_error(output_style, &err.to_string());
             return ExitCode::from(1);

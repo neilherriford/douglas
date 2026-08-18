@@ -1,15 +1,19 @@
-use crate::blueprints::container_name;
+use crate::blueprints::{container_name, seedling_network_name, traefik_dynamic_dir};
 use crate::labels;
 use async_trait::async_trait;
 use blueprint::{
     Command,
     bootstrap::{execute_plan, resolve_plan},
 };
+use config::DouglasFolders;
 use docker::client::{ClientBuilder, ContainerRef};
 use docker_types::DockerNameError;
+use file_system::{FileDeleter, FileSystemError};
 use log::{Reporter, ScopeKind, Span};
 use std::sync::Arc;
 use thiserror::Error;
+
+const TRAEFIK_SEEDLING_NAME: &str = "traefik";
 
 #[derive(Error, Debug)]
 pub enum DropSeedlingError {
@@ -23,10 +27,22 @@ pub enum DropSeedlingError {
     CannotDropSeedling(String),
     #[error("Cannot drop seedling {0}: it is a core seedling managed by douglas")]
     CoreSeedling(String),
+    #[error("Seedbank error: {0}")]
+    SeedbankError(#[from] seedbank_client::Error),
+    #[error("Resin error: {0}")]
+    ResinError(#[from] resin_client::Error),
+    #[error("Name parse error: {0}")]
+    NameParseError(#[from] seedbank_types::NameParseError),
+    #[error("File system error: {0}")]
+    FileSystemError(#[from] FileSystemError),
 }
 
 struct Context<'a> {
     docker_client: &'a mut dyn docker::client::Client,
+    resin_client: &'a mut dyn resin_client::Client,
+    seedbank_client: &'a dyn seedbank_client::Client,
+    file_deleter: &'a dyn FileDeleter,
+    douglas_folders: &'a DouglasFolders,
 }
 
 #[derive(Debug)]
@@ -36,11 +52,17 @@ struct State {
     container_name: docker_types::ContainerName,
     version: Option<seedbank_types::Version>,
     origin: Option<labels::Origin>,
+    network_exists: bool,
+    seedbank_entry_exists: bool,
 }
 
 pub async fn execute(
     reporter: Arc<dyn Reporter>,
     docker_client_builder: &dyn ClientBuilder,
+    resin_client_builder: &dyn resin_client::ClientBuilder,
+    seedbank_client: &dyn seedbank_client::Client,
+    file_deleter: &dyn FileDeleter,
+    douglas_folders: &DouglasFolders,
     name: &seedbank_types::Name,
 ) -> Result<(), DropSeedlingError> {
     let guard = Span::new(
@@ -59,8 +81,17 @@ pub async fn execute(
         }
     };
 
+    let mut resin_client = match resin_client_builder.build(Arc::clone(&reporter)).await {
+        Ok(resin_client) => resin_client,
+        Err(err) => {
+            return guard.finish(Err(DropSeedlingError::FailedBoostrap(vec![
+                err.to_string(),
+            ])));
+        }
+    };
+
     let state = {
-        let mut state_observer = StateObserver::new(&mut *docker_client);
+        let mut state_observer = StateObserver::new(&mut *docker_client, seedbank_client);
         state_observer.discover(guard.span(), name).await?
     };
 
@@ -72,6 +103,10 @@ pub async fn execute(
     let result = {
         let mut context = Context {
             docker_client: &mut *docker_client,
+            resin_client: &mut *resin_client,
+            seedbank_client,
+            file_deleter,
+            douglas_folders,
         };
         execute_plan(guard.span(), plan, &mut context, |reason| {
             DropSeedlingError::FailedBoostrap(vec![reason])
@@ -84,11 +119,18 @@ pub async fn execute(
 
 struct StateObserver<'a> {
     docker_client: &'a mut dyn docker::client::Client,
+    seedbank_client: &'a dyn seedbank_client::Client,
 }
 
 impl<'a> StateObserver<'a> {
-    pub fn new(docker_client: &'a mut dyn docker::client::Client) -> Self {
-        Self { docker_client }
+    pub fn new(
+        docker_client: &'a mut dyn docker::client::Client,
+        seedbank_client: &'a dyn seedbank_client::Client,
+    ) -> Self {
+        Self {
+            docker_client,
+            seedbank_client,
+        }
     }
 
     pub async fn discover(
@@ -109,14 +151,21 @@ impl<'a> StateObserver<'a> {
             container_name: container_name(name)?,
             version: None,
             origin: None,
+            network_exists: false,
+            seedbank_entry_exists: self.seedbank_client.exists(name).await?,
         };
+
+        result.network_exists = self
+            .docker_client
+            .network_exists(&seedling_network_name(name)?)
+            .await?;
 
         if !self
             .docker_client
             .container_exists(ContainerRef::FullName(result.container_name.clone()))
             .await?
         {
-            return Ok(result);
+            return guard.finish(Ok(result));
         }
         result.container_exists = true;
         result.container_is_stopped = matches!(
@@ -151,22 +200,34 @@ fn create_plan<'a>(
 ) -> Result<Vec<Step<'a>>, DropSeedlingError> {
     let mut steps: Vec<Box<dyn Command<Context>>> = Vec::new();
 
-    if !state.container_exists {
-        return Ok(steps);
-    }
     if state.origin == Some(labels::Origin::Core) {
         return Err(DropSeedlingError::CoreSeedling(name.to_string()));
     }
-    if !state.container_is_stopped {
+    if state.container_exists && !state.container_is_stopped {
         return Err(DropSeedlingError::CannotDropSeedling(
             "Seedling is not stopped".to_string(),
         ));
     }
 
-    push_step(
-        &mut steps,
-        DropSeedling::new(name.clone(), state.container_name, state.version),
-    );
+    push_step(&mut steps, RemoveTraefikRoute::new(name.clone()));
+
+    if state.container_exists {
+        push_step(
+            &mut steps,
+            DropSeedling::new(name.clone(), state.container_name, state.version),
+        );
+    }
+
+    if state.network_exists {
+        push_step(&mut steps, DeleteSeedlingNetwork::new(name.clone()));
+    }
+
+    if state.seedbank_entry_exists {
+        push_step(&mut steps, DeleteSeedbankEntry::new(name.clone()));
+    }
+
+    push_step(&mut steps, ReleaseDefault::new(name.clone()));
+    push_step(&mut steps, DeleteResinRepository::new(name.clone()));
 
     Ok(steps)
 }
@@ -176,7 +237,7 @@ mod tests {
     use super::*;
 
     fn name() -> seedbank_types::Name {
-        "traefik".parse().unwrap()
+        "hello-world".parse().unwrap()
     }
 
     fn droppable_state() -> State {
@@ -186,6 +247,8 @@ mod tests {
             container_name: container_name(&name()).unwrap(),
             version: Some(seedbank_types::Version(1)),
             origin: Some(labels::Origin::User),
+            network_exists: true,
+            seedbank_entry_exists: true,
         }
     }
 
@@ -194,12 +257,19 @@ mod tests {
     }
 
     #[test]
-    fn test_create_plan_should_drop_a_stopped_container() {
+    fn test_create_plan_should_fully_tear_down_a_stopped_seedling() {
         let steps = create_plan(&name(), droppable_state()).expect("should produce a plan");
 
         assert_eq!(
             step_descriptions(steps),
-            vec!["Dropping seedling 'traefik' (v1)"]
+            vec![
+                "Removing traefik route for 'hello-world'".to_string(),
+                "Dropping seedling 'hello-world' (v1)".to_string(),
+                "Deleting network for 'hello-world'".to_string(),
+                "Deleting seedbank entry for 'hello-world'".to_string(),
+                "Releasing default for 'hello-world'".to_string(),
+                "Deleting resin repository for 'hello-world'".to_string(),
+            ]
         );
     }
 
@@ -214,24 +284,50 @@ mod tests {
         )
         .expect("should produce a plan");
 
-        assert_eq!(
-            step_descriptions(steps),
-            vec!["Dropping seedling 'traefik'"]
-        );
+        assert!(step_descriptions(steps).contains(&"Dropping seedling 'hello-world'".to_string()));
     }
 
     #[test]
-    fn test_create_plan_should_be_a_no_op_when_the_container_does_not_exist() {
+    fn test_create_plan_should_skip_container_and_network_steps_when_absent_but_still_clean_up_the_rest()
+     {
         let steps = create_plan(
             &name(),
             State {
                 container_exists: false,
+                container_is_stopped: false,
+                network_exists: false,
                 ..droppable_state()
             },
         )
         .expect("should produce a plan");
 
-        assert!(step_descriptions(steps).is_empty());
+        assert_eq!(
+            step_descriptions(steps),
+            vec![
+                "Removing traefik route for 'hello-world'".to_string(),
+                "Deleting seedbank entry for 'hello-world'".to_string(),
+                "Releasing default for 'hello-world'".to_string(),
+                "Deleting resin repository for 'hello-world'".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_create_plan_should_skip_the_seedbank_step_when_no_entry_exists() {
+        let steps = create_plan(
+            &name(),
+            State {
+                seedbank_entry_exists: false,
+                ..droppable_state()
+            },
+        )
+        .expect("should produce a plan");
+
+        assert!(
+            !step_descriptions(steps)
+                .iter()
+                .any(|description| description.contains("seedbank entry"))
+        );
     }
 
     #[test]
@@ -314,6 +410,222 @@ impl<'a> Command<Context<'a>> for DropSeedling {
             .docker_client
             .delete_container(ContainerRef::FullName(self.container_name.clone()))
             .await?;
+
+        guard.finish(Ok(()))
+    }
+}
+
+struct RemoveTraefikRoute {
+    seedling_name: seedbank_types::Name,
+}
+
+impl RemoveTraefikRoute {
+    pub fn new(seedling_name: seedbank_types::Name) -> Self {
+        Self { seedling_name }
+    }
+}
+
+impl std::fmt::Display for RemoveTraefikRoute {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Removing traefik route for '{}'", self.seedling_name)
+    }
+}
+
+#[async_trait]
+impl<'a> Command<Context<'a>> for RemoveTraefikRoute {
+    fn name(&self) -> String {
+        "Removing traefik route".to_string()
+    }
+
+    async fn run(
+        &mut self,
+        span: &Span,
+        context: &mut Context<'a>,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let guard = span
+            .create_child(
+                &format!("Removing traefik route for '{}'…", self.seedling_name),
+                ScopeKind::Step,
+            )
+            .start_guard();
+
+        let traefik_name: seedbank_types::Name = TRAEFIK_SEEDLING_NAME.parse()?;
+        let traefik_container = container_name(&traefik_name)?;
+        let seedling_network = seedling_network_name(&self.seedling_name)?;
+
+        context
+            .docker_client
+            .disconnect_network(&seedling_network, ContainerRef::FullName(traefik_container))
+            .await?;
+
+        let mut route_path = traefik_dynamic_dir(context.douglas_folders)?;
+        route_path.push(format!("{}.yml", self.seedling_name));
+        context.file_deleter.delete(&route_path)?;
+
+        guard.finish(Ok(()))
+    }
+}
+
+struct DeleteSeedlingNetwork {
+    seedling_name: seedbank_types::Name,
+}
+
+impl DeleteSeedlingNetwork {
+    pub fn new(seedling_name: seedbank_types::Name) -> Self {
+        Self { seedling_name }
+    }
+}
+
+impl std::fmt::Display for DeleteSeedlingNetwork {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Deleting network for '{}'", self.seedling_name)
+    }
+}
+
+#[async_trait]
+impl<'a> Command<Context<'a>> for DeleteSeedlingNetwork {
+    fn name(&self) -> String {
+        "Deleting network".to_string()
+    }
+
+    async fn run(
+        &mut self,
+        span: &Span,
+        context: &mut Context<'a>,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let guard = span
+            .create_child(
+                &format!("Deleting network for '{}'…", self.seedling_name),
+                ScopeKind::Step,
+            )
+            .start_guard();
+
+        let network = seedling_network_name(&self.seedling_name)?;
+        context.docker_client.delete_network(&network).await?;
+
+        guard.finish(Ok(()))
+    }
+}
+
+struct DeleteSeedbankEntry {
+    seedling_name: seedbank_types::Name,
+}
+
+impl DeleteSeedbankEntry {
+    pub fn new(seedling_name: seedbank_types::Name) -> Self {
+        Self { seedling_name }
+    }
+}
+
+impl std::fmt::Display for DeleteSeedbankEntry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Deleting seedbank entry for '{}'", self.seedling_name)
+    }
+}
+
+#[async_trait]
+impl<'a> Command<Context<'a>> for DeleteSeedbankEntry {
+    fn name(&self) -> String {
+        "Deleting seedbank entry".to_string()
+    }
+
+    async fn run(
+        &mut self,
+        span: &Span,
+        context: &mut Context<'a>,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let guard = span
+            .create_child(
+                &format!("Deleting seedbank entry for '{}'…", self.seedling_name),
+                ScopeKind::Step,
+            )
+            .start_guard();
+
+        context.seedbank_client.delete(&self.seedling_name).await?;
+
+        guard.finish(Ok(()))
+    }
+}
+
+struct ReleaseDefault {
+    seedling_name: seedbank_types::Name,
+}
+
+impl ReleaseDefault {
+    pub fn new(seedling_name: seedbank_types::Name) -> Self {
+        Self { seedling_name }
+    }
+}
+
+impl std::fmt::Display for ReleaseDefault {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Releasing default for '{}'", self.seedling_name)
+    }
+}
+
+#[async_trait]
+impl<'a> Command<Context<'a>> for ReleaseDefault {
+    fn name(&self) -> String {
+        "Releasing default".to_string()
+    }
+
+    async fn run(
+        &mut self,
+        span: &Span,
+        context: &mut Context<'a>,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let guard = span
+            .create_child(
+                &format!("Releasing default for '{}'…", self.seedling_name),
+                ScopeKind::Step,
+            )
+            .start_guard();
+
+        context
+            .seedbank_client
+            .release_default(&self.seedling_name)
+            .await?;
+
+        guard.finish(Ok(()))
+    }
+}
+
+struct DeleteResinRepository {
+    seedling_name: seedbank_types::Name,
+}
+
+impl DeleteResinRepository {
+    pub fn new(seedling_name: seedbank_types::Name) -> Self {
+        Self { seedling_name }
+    }
+}
+
+impl std::fmt::Display for DeleteResinRepository {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Deleting resin repository for '{}'", self.seedling_name)
+    }
+}
+
+#[async_trait]
+impl<'a> Command<Context<'a>> for DeleteResinRepository {
+    fn name(&self) -> String {
+        "Deleting resin repository".to_string()
+    }
+
+    async fn run(
+        &mut self,
+        span: &Span,
+        context: &mut Context<'a>,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let guard = span
+            .create_child(
+                &format!("Deleting resin repository for '{}'…", self.seedling_name),
+                ScopeKind::Step,
+            )
+            .start_guard();
+
+        let resin_name: resin_types::Name = self.seedling_name.as_ref().parse()?;
+        context.resin_client.delete_repository(&resin_name).await?;
 
         guard.finish(Ok(()))
     }

@@ -13,6 +13,8 @@ log = { workspace = true, features = ["tui"] }
 resin_types = { workspace = true }
 docker_types = { workspace = true }
 mockall = { workspace = true, optional = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
 simple_rest_client = { workspace = true }
 thiserror = { workspace = true }
 

@@ -16,6 +16,8 @@ pub enum Error {
     RestError(#[from] RestClientError),
     #[error("Unexpected response {0}")]
     UnexpectedResponse(Response),
+    #[error("Failed to parse catalog response: {0}")]
+    CatalogParseError(#[from] serde_json::Error),
 }
 
 #[cfg_attr(feature = "mock", automock)]
@@ -23,6 +25,8 @@ pub enum Error {
 pub trait Client: Send + Sync {
     async fn image_exists(&mut self, name: &VersionedImageName) -> Result<bool, Error>;
     async fn repository_registered(&mut self, name: &resin_types::Name) -> Result<bool, Error>;
+    async fn list_repositories(&mut self) -> Result<Vec<resin_types::Name>, Error>;
+    async fn delete_repository(&mut self, name: &resin_types::Name) -> Result<(), Error>;
 }
 
 #[cfg_attr(feature = "mock", automock)]
@@ -110,6 +114,59 @@ impl Client for HttpClient {
             response => Err(Error::UnexpectedResponse(response)),
         }
     }
+
+    async fn list_repositories(&mut self) -> Result<Vec<resin_types::Name>, Error> {
+        let guard = Span::new(
+            Arc::clone(&self.reporter),
+            "Listing registered repositories",
+            log::ScopeKind::Task,
+        )
+        .start_guard();
+
+        let request = Request::Get {
+            path: "/v2/_catalog".to_string(),
+            headers: Vec::new(),
+        };
+
+        guard.finish(match self.client.execute(guard.span(), &request).await? {
+            Response::Okay {
+                body: Some(body), ..
+            } => {
+                let catalog: Catalog = serde_json::from_str(&body)?;
+                Ok(catalog
+                    .repositories
+                    .into_iter()
+                    .filter_map(|name| name.parse().ok())
+                    .collect())
+            }
+            Response::Okay { body: None, .. } => Ok(Vec::new()),
+            response => Err(Error::UnexpectedResponse(response)),
+        })
+    }
+
+    async fn delete_repository(&mut self, name: &resin_types::Name) -> Result<(), Error> {
+        let guard = Span::new(
+            Arc::clone(&self.reporter),
+            &format!("Deleting repository {name}"),
+            log::ScopeKind::Task,
+        )
+        .start_guard();
+
+        let request = Request::Delete {
+            path: format!("/v2/{name}/"),
+            headers: Vec::new(),
+        };
+
+        guard.finish(match self.client.execute(guard.span(), &request).await? {
+            Response::NoContent { .. } => Ok(()),
+            response => Err(Error::UnexpectedResponse(response)),
+        })
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct Catalog {
+    repositories: Vec<String>,
 }
 
 #[cfg(test)]
@@ -248,6 +305,121 @@ mod tests {
             let result = client.image_exists(&image).await;
 
             assert!(matches!(result, Err(Error::RestError(_))));
+        }
+    }
+
+    mod list_repositories {
+        use super::*;
+
+        #[tokio::test]
+        async fn test_should_parse_the_catalog_response() {
+            let mut rest_client = MockRestClient::new();
+            rest_client
+                .expect_execute()
+                .withf(|_, request| {
+                    matches!(request, Request::Get { path, .. } if path == "/v2/_catalog")
+                })
+                .returning(|_, _| {
+                    Ok(Response::Okay {
+                        headers: Vec::new(),
+                        body: Some(r#"{"repositories": ["hello-world", "traefik"]}"#.to_string()),
+                    })
+                });
+
+            let mut client = client(rest_client);
+
+            let result = client
+                .list_repositories()
+                .await
+                .expect("should list repositories");
+
+            assert_eq!(
+                result,
+                vec!["hello-world".parse().unwrap(), "traefik".parse().unwrap(),]
+            );
+        }
+
+        #[tokio::test]
+        async fn test_should_return_empty_when_catalog_has_no_repositories() {
+            let mut rest_client = MockRestClient::new();
+            rest_client.expect_execute().returning(|_, _| {
+                Ok(Response::Okay {
+                    headers: Vec::new(),
+                    body: Some(r#"{"repositories": []}"#.to_string()),
+                })
+            });
+
+            let mut client = client(rest_client);
+
+            let result = client
+                .list_repositories()
+                .await
+                .expect("should list repositories");
+
+            assert!(result.is_empty());
+        }
+
+        #[tokio::test]
+        async fn test_should_error_on_unexpected_response() {
+            let mut rest_client = MockRestClient::new();
+            rest_client.expect_execute().returning(|_, _| {
+                Ok(Response::Error {
+                    headers: Vec::new(),
+                    status: 500,
+                    body: None,
+                })
+            });
+
+            let mut client = client(rest_client);
+
+            let result = client.list_repositories().await;
+
+            assert!(matches!(result, Err(Error::UnexpectedResponse(_))));
+        }
+    }
+
+    mod delete_repository {
+        use super::*;
+
+        #[tokio::test]
+        async fn test_should_succeed_on_no_content() {
+            let mut rest_client = MockRestClient::new();
+            rest_client
+                .expect_execute()
+                .withf(|_, request| {
+                    matches!(request, Request::Delete { path, .. } if path == "/v2/hello-world/")
+                })
+                .returning(|_, _| {
+                    Ok(Response::NoContent {
+                        headers: Vec::new(),
+                    })
+                });
+
+            let mut client = client(rest_client);
+            let name: resin_types::Name = "hello-world".parse().unwrap();
+
+            let result = client.delete_repository(&name).await;
+
+            assert!(result.is_ok());
+        }
+
+        #[tokio::test]
+        async fn test_should_error_on_unexpected_response() {
+            let mut rest_client = MockRestClient::new();
+            rest_client.expect_execute().returning(|_, _| {
+                Ok(Response::Error {
+                    headers: Vec::new(),
+                    status: 500,
+                    body: None,
+                })
+            });
+
+            let mut client = client(rest_client);
+            let name: resin_types::Name = "hello-world".parse().unwrap();
+
+            let result = client.delete_repository(&name).await;
+
+            assert!(matches!(result, Err(Error::UnexpectedResponse(_))));
         }
     }
 }

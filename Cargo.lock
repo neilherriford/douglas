@@ -2322,6 +2322,8 @@ dependencies = [
  "log 0.1.0",
  "mockall",
  "resin_types",
+ "serde",
+ "serde_json",
  "simple_rest_client",
  "thiserror 1.0.69",
  "tokio",

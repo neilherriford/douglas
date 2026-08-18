@@ -70,6 +70,10 @@ pub enum Error {
     NewSeedlingError(#[from] blueprints::new_seedling::NewSeedlingError),
     #[error("Failed to write traefik routes: {0}")]
     WriteTraefikRoutesError(#[from] blueprints::write_traefik_routes::WriteTraefikRoutesError),
+    #[error("Failed to find orphans: {0}")]
+    FindOrphansError(#[from] blueprints::find_orphans::FindOrphansError),
+    #[error("Failed to prune orphans: {0}")]
+    PruneOrphansError(#[from] blueprints::prune_orphans::PruneOrphansError),
 }
 
 #[derive(Error, Debug)]
@@ -110,6 +114,15 @@ pub trait Server: Send + Sync {
         name: &seedbank_types::Name,
         seedling_spec: &seedbank_types::SeedlingSpec,
     ) -> Result<String, Error>;
+    async fn find_orphans(
+        &self,
+        reporter: Arc<dyn Reporter>,
+    ) -> Result<bract_types::Orphans, Error>;
+    async fn prune_orphans(
+        &self,
+        reporter: Arc<dyn Reporter>,
+        orphans: &bract_types::Orphans,
+    ) -> Result<(), Error>;
 }
 
 pub struct Bract {
@@ -124,6 +137,7 @@ pub struct Bract {
     folder: Arc<dyn Folder>,
     file_reader: Arc<dyn FileReader>,
     file_writer: Arc<dyn FileWriter>,
+    file_deleter: Arc<dyn FileDeleter>,
     permissions: Arc<dyn Permissions>,
     douglas_folders: DouglasFolders,
     docker_client_builder: Arc<dyn ClientBuilder>,
@@ -218,6 +232,7 @@ impl Bract {
             folder,
             file_reader,
             file_writer,
+            file_deleter,
             permissions: Arc::clone(&permissions),
             douglas_folders: DouglasFolders::new(),
             docker_client_builder,
@@ -653,9 +668,17 @@ impl Server for Bract {
     }
 
     async fn drop_seedling(&self, reporter: Arc<dyn Reporter>, name: &Name) -> Result<(), Error> {
-        blueprints::drop_seedling::execute(reporter, &*self.docker_client_builder, name)
-            .await
-            .map_err(Error::from)
+        blueprints::drop_seedling::execute(
+            reporter,
+            &*self.docker_client_builder,
+            &*self.resin_client_builder,
+            self.seedbank_client.as_ref(),
+            self.file_deleter.as_ref(),
+            &self.douglas_folders,
+            name,
+        )
+        .await
+        .map_err(Error::from)
     }
 
     async fn new_seedling(
@@ -672,6 +695,50 @@ impl Server for Bract {
             &self.registry,
             name,
             seedling_spec,
+        )
+        .await
+        .map_err(Error::from)
+    }
+
+    async fn find_orphans(
+        &self,
+        reporter: Arc<dyn Reporter>,
+    ) -> Result<bract_types::Orphans, Error> {
+        let mut resin_client = self
+            .resin_client_builder
+            .build(Arc::clone(&reporter))
+            .await
+            .map_err(|err| Error::BuildError(err.to_string()))?;
+
+        blueprints::find_orphans::execute(
+            self.seedbank_client.as_ref(),
+            self.docker_client.as_ref(),
+            resin_client.as_mut(),
+            self.folder.as_ref(),
+            &self.douglas_folders,
+        )
+        .await
+        .map_err(Error::from)
+    }
+
+    async fn prune_orphans(
+        &self,
+        reporter: Arc<dyn Reporter>,
+        orphans: &bract_types::Orphans,
+    ) -> Result<(), Error> {
+        let mut resin_client = self
+            .resin_client_builder
+            .build(Arc::clone(&reporter))
+            .await
+            .map_err(|err| Error::BuildError(err.to_string()))?;
+
+        blueprints::prune_orphans::execute(
+            reporter,
+            self.docker_client.as_ref(),
+            resin_client.as_mut(),
+            self.file_deleter.as_ref(),
+            &self.douglas_folders,
+            orphans,
         )
         .await
         .map_err(Error::from)

@@ -1748,7 +1748,10 @@ mod tests {
             MockFileWriter::new(),
         );
 
-        assert_eq!(server.default_seedling().expect("should check default"), None);
+        assert_eq!(
+            server.default_seedling().expect("should check default"),
+            None
+        );
     }
 
     #[test]
@@ -1763,7 +1766,10 @@ mod tests {
             MockFileWriter::new(),
         );
 
-        assert_eq!(server.default_seedling().expect("should check default"), Some(name("foo")));
+        assert_eq!(
+            server.default_seedling().expect("should check default"),
+            Some(name("foo"))
+        );
     }
 
     #[test]
@@ -1801,7 +1807,9 @@ mod tests {
 
         let server = build_server(folder, MockFolderDeleter::new(), file_reader, file_writer);
 
-        server.claim_default(&name("foo")).expect("should claim default");
+        server
+            .claim_default(&name("foo"))
+            .expect("should claim default");
     }
 
     #[test]
@@ -1819,7 +1827,9 @@ mod tests {
             MockFileWriter::new(),
         );
 
-        server.claim_default(&name("foo")).expect("should be a no-op");
+        server
+            .claim_default(&name("foo"))
+            .expect("should be a no-op");
     }
 
     #[test]
@@ -1840,7 +1850,7 @@ mod tests {
         let result = server.claim_default(&name("bar"));
 
         assert!(
-            matches!(result, Err(Error::RootAlreadyClaimed(current)) if current == name("foo"))
+            matches!(result, Err(Error::DefaultAlreadyClaimed(current)) if current == name("foo"))
         );
     }
 

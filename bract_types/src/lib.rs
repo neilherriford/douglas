@@ -37,6 +37,23 @@ impl std::fmt::Display for SeedlingStatus {
     }
 }
 
+#[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Orphans {
+    pub containers: Vec<Name>,
+    pub networks: Vec<Name>,
+    pub route_files: Vec<Name>,
+    pub resin_repositories: Vec<String>,
+}
+
+impl Orphans {
+    pub fn is_empty(&self) -> bool {
+        self.containers.is_empty()
+            && self.networks.is_empty()
+            && self.route_files.is_empty()
+            && self.resin_repositories.is_empty()
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
 pub enum DefinitionStatus {
     Current,
@@ -78,6 +95,10 @@ pub enum Request {
         name: Name,
         seedling_spec: SeedlingSpec,
     },
+    FindOrphans,
+    PruneOrphans {
+        orphans: Orphans,
+    },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -89,6 +110,8 @@ pub enum Response {
     Started,
     Stopped,
     Dropped,
+    Orphans(Orphans),
+    Pruned,
     Error { message: String },
 }
 
@@ -103,6 +126,8 @@ impl std::fmt::Display for Response {
             Response::Started => f.write_str("started"),
             Response::Stopped => f.write_str("stopped"),
             Response::Dropped => f.write_str("dropped"),
+            Response::Orphans(_) => f.write_str("orphans"),
+            Response::Pruned => f.write_str("pruned"),
             Response::Error { message } => f.write_str(&format!("error: '{message}'")),
         }
     }

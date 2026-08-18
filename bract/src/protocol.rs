@@ -43,6 +43,14 @@ pub async fn handle(
             Ok(message) => Response::Created { message },
             Err(err) => error_response(err),
         },
+        Request::FindOrphans => match server.find_orphans(reporter).await {
+            Ok(orphans) => Response::Orphans(orphans),
+            Err(err) => error_response(err),
+        },
+        Request::PruneOrphans { orphans } => match server.prune_orphans(reporter, &orphans).await {
+            Ok(()) => Response::Pruned,
+            Err(err) => error_response(err),
+        },
     }
 }
 

@@ -43,10 +43,9 @@ fn start_upload(
     let source_registry = params.from.and_then(|raw| Name::from_str(&raw).ok());
 
     if let Some(digest) = digest {
-        let mounted =
-            state
-                .blob_mounter
-                .mount_blob(source_registry.as_ref(), &digest, &name)?;
+        let mounted = state
+            .blob_mounter
+            .mount_blob(source_registry.as_ref(), &digest, &name)?;
         if mounted {
             return Ok((
                 StatusCode::CREATED,
@@ -169,7 +168,7 @@ impl AsyncRead for BodyReader {
                     }
                 }
                 Poll::Ready(Some(Err(err))) => {
-                    return Poll::Ready(Err(io::Error::other(err.to_string())));
+                    return Poll::Ready(Err(io::Error::other(crate::error_chain(&err))));
                 }
                 Poll::Ready(None) => return Poll::Ready(Ok(())),
                 Poll::Pending => return Poll::Pending,
