@@ -391,9 +391,14 @@ where
     D: Deserializer<'de>,
 {
     let json: Json = Json::deserialize(deserializer)?;
+    if json.is_null() {
+        // Docker returns null not empty for images or containers with
+        // no labels set
+        return Ok(Vec::new());
+    }
     let obj = json
         .as_object()
-        .ok_or_else(|| serde::de::Error::custom("Expected Lables to be an object"))?;
+        .ok_or_else(|| serde::de::Error::custom("Expected labels to be an object"))?;
 
     let result = obj
         .iter()
@@ -1245,6 +1250,19 @@ mod tests {
                 vec![Label::new("baz", "qux"), Label::new("foo", "bar")],
                 wrapper.labels
             );
+        }
+
+        #[test]
+        fn should_deserialize_null_as_no_labels() {
+            let json = r#"
+                {
+                    "labels": null
+                }
+            "#;
+
+            let wrapper: Wrapper = serde_json::from_str(json).unwrap();
+
+            assert!(wrapper.labels.is_empty());
         }
     }
 
