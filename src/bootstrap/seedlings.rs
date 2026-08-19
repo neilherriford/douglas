@@ -37,16 +37,10 @@ struct State {
     core_seedlings: Vec<(Name, Version, SeedlingDefinition)>,
 }
 
-struct StateObserver {
-    reporter: Arc<dyn Reporter>,
-}
+struct StateObserver {}
 
 impl StateObserver {
-    pub fn new(reporter: Arc<dyn Reporter>) -> Self {
-        Self { reporter }
-    }
-
-    pub fn discover(&mut self, span: &Span) -> Result<State, BootstrapError> {
+    pub fn discover(span: &Span) -> Result<State, BootstrapError> {
         let guard = span
             .create_child(
                 "Loading douglas system, discovering current seedling state",
@@ -68,7 +62,7 @@ impl StateObserver {
     }
 }
 
-fn create_plan<'a>(mut state: State) -> Result<Vec<Step<'a>>, BootstrapError> {
+fn create_plan<'a>(mut state: State) -> Vec<Step<'a>> {
     let mut result = Vec::new();
 
     for (name, version, definition) in state.core_seedlings.drain(std::ops::RangeFull) {
@@ -78,7 +72,7 @@ fn create_plan<'a>(mut state: State) -> Result<Vec<Step<'a>>, BootstrapError> {
         );
     }
 
-    Ok(result)
+    result
 }
 
 pub async fn perform(
@@ -92,8 +86,7 @@ pub async fn perform(
     )
     .start_guard();
 
-    let mut state_observer = StateObserver::new(Arc::clone(&reporter));
-    let state = match state_observer.discover(guard.span()) {
+    let state = match StateObserver::discover(guard.span()) {
         Ok(state) => state,
         Err(err) => {
             guard.span().message(Level::Warn, &err.to_string());
@@ -101,7 +94,7 @@ pub async fn perform(
         }
     };
 
-    let plan = match resolve_plan(guard.span(), create_plan(state)) {
+    let plan = match resolve_plan::<Context, BootstrapError>(guard.span(), Ok(create_plan(state))) {
         Ok(plan) => plan,
         Err(err) => {
             guard.span().message(Level::Warn, &err.to_string());

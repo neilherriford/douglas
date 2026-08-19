@@ -97,7 +97,6 @@ struct AppState {
     scope_map: HashMap<ScopeId, ActiveScope>,
     lines: VecDeque<String>,
     spinner: u8,
-    done: bool,
 }
 
 impl AppState {

@@ -247,153 +247,6 @@ fn create_plan<'a>(
     Ok(steps)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn name() -> seedbank_types::Name {
-        "hello-world".parse().unwrap()
-    }
-
-    fn droppable_state() -> State {
-        State {
-            container_exists: true,
-            container_is_stopped: true,
-            container_name: container_name(&name()).unwrap(),
-            version: Some(seedbank_types::Version(1)),
-            origin: Some(labels::Origin::User),
-            network_exists: true,
-            seedbank_entry_exists: true,
-            route_exists: true,
-        }
-    }
-
-    fn step_descriptions(steps: Vec<Step<'_>>) -> Vec<String> {
-        steps.iter().map(std::string::ToString::to_string).collect()
-    }
-
-    #[test]
-    fn test_create_plan_should_fully_tear_down_a_stopped_seedling() {
-        let steps = create_plan(&name(), droppable_state()).expect("should produce a plan");
-
-        assert_eq!(
-            step_descriptions(steps),
-            vec![
-                "Removing traefik route for 'hello-world'".to_string(),
-                "Dropping seedling 'hello-world' (v1)".to_string(),
-                "Deleting network for 'hello-world'".to_string(),
-                "Deleting seedbank entry for 'hello-world'".to_string(),
-                "Releasing default for 'hello-world'".to_string(),
-                "Deleting resin repository for 'hello-world'".to_string(),
-            ]
-        );
-    }
-
-    #[test]
-    fn test_create_plan_should_omit_the_version_when_it_could_not_be_determined() {
-        let steps = create_plan(
-            &name(),
-            State {
-                version: None,
-                ..droppable_state()
-            },
-        )
-        .expect("should produce a plan");
-
-        assert!(step_descriptions(steps).contains(&"Dropping seedling 'hello-world'".to_string()));
-    }
-
-    #[test]
-    fn test_create_plan_should_skip_container_and_network_steps_when_absent_but_still_clean_up_the_rest()
-     {
-        let steps = create_plan(
-            &name(),
-            State {
-                container_exists: false,
-                container_is_stopped: false,
-                network_exists: false,
-                ..droppable_state()
-            },
-        )
-        .expect("should produce a plan");
-
-        assert_eq!(
-            step_descriptions(steps),
-            vec![
-                "Removing traefik route for 'hello-world'".to_string(),
-                "Deleting seedbank entry for 'hello-world'".to_string(),
-                "Releasing default for 'hello-world'".to_string(),
-                "Deleting resin repository for 'hello-world'".to_string(),
-            ]
-        );
-    }
-
-    #[test]
-    fn test_create_plan_should_skip_the_traefik_route_step_when_no_route_was_ever_written() {
-        let steps = create_plan(
-            &name(),
-            State {
-                route_exists: false,
-                ..droppable_state()
-            },
-        )
-        .expect("should produce a plan");
-
-        assert!(
-            !step_descriptions(steps)
-                .iter()
-                .any(|description| description.contains("traefik route"))
-        );
-    }
-
-    #[test]
-    fn test_create_plan_should_skip_the_seedbank_step_when_no_entry_exists() {
-        let steps = create_plan(
-            &name(),
-            State {
-                seedbank_entry_exists: false,
-                ..droppable_state()
-            },
-        )
-        .expect("should produce a plan");
-
-        assert!(
-            !step_descriptions(steps)
-                .iter()
-                .any(|description| description.contains("seedbank entry"))
-        );
-    }
-
-    #[test]
-    fn test_create_plan_should_refuse_when_not_stopped() {
-        let result = create_plan(
-            &name(),
-            State {
-                container_is_stopped: false,
-                ..droppable_state()
-            },
-        );
-
-        assert!(matches!(
-            result,
-            Err(DropSeedlingError::CannotDropSeedling(_))
-        ));
-    }
-
-    #[test]
-    fn test_create_plan_should_refuse_to_drop_a_core_seedling() {
-        let result = create_plan(
-            &name(),
-            State {
-                origin: Some(labels::Origin::Core),
-                ..droppable_state()
-            },
-        );
-
-        assert!(matches!(result, Err(DropSeedlingError::CoreSeedling(_))));
-    }
-}
-
 struct DropSeedling {
     seedling_name: seedbank_types::Name,
     container_name: docker_types::ContainerName,
@@ -662,5 +515,152 @@ impl<'a> Command<Context<'a>> for DeleteResinRepository {
         context.resin_client.delete_repository(&resin_name).await?;
 
         guard.finish(Ok(()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn name() -> seedbank_types::Name {
+        "hello-world".parse().unwrap()
+    }
+
+    fn droppable_state() -> State {
+        State {
+            container_exists: true,
+            container_is_stopped: true,
+            container_name: container_name(&name()).unwrap(),
+            version: Some(seedbank_types::Version(1)),
+            origin: Some(labels::Origin::User),
+            network_exists: true,
+            seedbank_entry_exists: true,
+            route_exists: true,
+        }
+    }
+
+    fn step_descriptions(steps: Vec<Step<'_>>) -> Vec<String> {
+        steps.iter().map(std::string::ToString::to_string).collect()
+    }
+
+    #[test]
+    fn test_create_plan_should_fully_tear_down_a_stopped_seedling() {
+        let steps = create_plan(&name(), droppable_state()).expect("should produce a plan");
+
+        assert_eq!(
+            step_descriptions(steps),
+            vec![
+                "Removing traefik route for 'hello-world'".to_string(),
+                "Dropping seedling 'hello-world' (v1)".to_string(),
+                "Deleting network for 'hello-world'".to_string(),
+                "Deleting seedbank entry for 'hello-world'".to_string(),
+                "Releasing default for 'hello-world'".to_string(),
+                "Deleting resin repository for 'hello-world'".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_create_plan_should_omit_the_version_when_it_could_not_be_determined() {
+        let steps = create_plan(
+            &name(),
+            State {
+                version: None,
+                ..droppable_state()
+            },
+        )
+        .expect("should produce a plan");
+
+        assert!(step_descriptions(steps).contains(&"Dropping seedling 'hello-world'".to_string()));
+    }
+
+    #[test]
+    fn test_create_plan_should_skip_container_and_network_steps_when_absent_but_still_clean_up_the_rest()
+     {
+        let steps = create_plan(
+            &name(),
+            State {
+                container_exists: false,
+                container_is_stopped: false,
+                network_exists: false,
+                ..droppable_state()
+            },
+        )
+        .expect("should produce a plan");
+
+        assert_eq!(
+            step_descriptions(steps),
+            vec![
+                "Removing traefik route for 'hello-world'".to_string(),
+                "Deleting seedbank entry for 'hello-world'".to_string(),
+                "Releasing default for 'hello-world'".to_string(),
+                "Deleting resin repository for 'hello-world'".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_create_plan_should_skip_the_traefik_route_step_when_no_route_was_ever_written() {
+        let steps = create_plan(
+            &name(),
+            State {
+                route_exists: false,
+                ..droppable_state()
+            },
+        )
+        .expect("should produce a plan");
+
+        assert!(
+            !step_descriptions(steps)
+                .iter()
+                .any(|description| description.contains("traefik route"))
+        );
+    }
+
+    #[test]
+    fn test_create_plan_should_skip_the_seedbank_step_when_no_entry_exists() {
+        let steps = create_plan(
+            &name(),
+            State {
+                seedbank_entry_exists: false,
+                ..droppable_state()
+            },
+        )
+        .expect("should produce a plan");
+
+        assert!(
+            !step_descriptions(steps)
+                .iter()
+                .any(|description| description.contains("seedbank entry"))
+        );
+    }
+
+    #[test]
+    fn test_create_plan_should_refuse_when_not_stopped() {
+        let result = create_plan(
+            &name(),
+            State {
+                container_is_stopped: false,
+                ..droppable_state()
+            },
+        );
+
+        assert!(matches!(
+            result,
+            Err(DropSeedlingError::CannotDropSeedling(_))
+        ));
+    }
+
+    #[test]
+    fn test_create_plan_should_refuse_to_drop_a_core_seedling() {
+        let result = create_plan(
+            &name(),
+            State {
+                origin: Some(labels::Origin::Core),
+                ..droppable_state()
+            },
+        );
+
+        assert!(matches!(result, Err(DropSeedlingError::CoreSeedling(_))));
     }
 }

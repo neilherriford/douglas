@@ -1,5 +1,4 @@
 mod bootstrap;
-mod config;
 #[macro_use]
 pub(crate) mod macros;
 mod cli_reporter;
@@ -14,7 +13,7 @@ use daemonize::Daemonize;
 use file_system::{
     FileReader, FileSystemError, Folder, Permissions, UnixFileReader, UnixFolder, UnixPermissions,
 };
-use log::{BufferedFileReporter, Event, Reporter, Span, TeeReporter};
+use log::{BufferedFileReporter, Reporter, Span, TeeReporter};
 use os::{EnvironmentVariableReader, Os, Unix, UnixEnvironmentVariableReader};
 use std::{
     collections::{HashMap, HashSet},
@@ -667,13 +666,14 @@ async fn start(plan_only: bool, output_style: Option<OutputStyle>) -> ExitCode {
 
     let reporter: Arc<dyn Reporter> = match output_style {
         Some(_) => build_plain_reporter(&douglas_folders, "douglas-cli"),
-        None => match build_cli_reporter(&douglas_folders, "douglas-cli") {
-            Ok(reporter) => reporter,
-            Err(_) => {
+        None => {
+            if let Ok(reporter) = build_cli_reporter(&douglas_folders, "douglas-cli") {
+                reporter
+            } else {
                 eprintln!("Failed to start TUI reporter");
                 return ExitCode::from(1);
             }
-        },
+        }
     };
 
     let folder: Arc<dyn Folder> = Arc::new(UnixFolder::new());

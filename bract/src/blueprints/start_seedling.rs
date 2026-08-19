@@ -328,6 +328,66 @@ fn create_plan<'a>(
     Ok(steps)
 }
 
+struct StartSeedling {
+    seedling_name: seedbank_types::Name,
+    container_name: docker_types::ContainerName,
+    version: seedbank_types::Version,
+}
+
+impl StartSeedling {
+    pub fn new(
+        seedling_name: seedbank_types::Name,
+        container_name: docker_types::ContainerName,
+        version: seedbank_types::Version,
+    ) -> Self {
+        Self {
+            seedling_name,
+            container_name,
+            version,
+        }
+    }
+}
+
+impl std::fmt::Display for StartSeedling {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Starting seedling '{}' (v{})",
+            self.seedling_name, self.version
+        )
+    }
+}
+
+#[async_trait]
+impl<'a> Command<Context<'a>> for StartSeedling {
+    fn name(&self) -> String {
+        "Starting seedling".to_string()
+    }
+
+    async fn run(
+        &mut self,
+        span: &Span,
+        context: &mut Context<'a>,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let guard = span
+            .create_child(
+                &format!(
+                    "Starting seedling '{}' (v{})",
+                    self.seedling_name, self.version
+                ),
+                ScopeKind::Step,
+            )
+            .start_guard();
+
+        context
+            .docker_client
+            .start_container(ContainerRef::FullName(self.container_name.clone()))
+            .await?;
+
+        guard.finish(Ok(()))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -439,65 +499,5 @@ mod tests {
         );
 
         assert!(matches!(result, Err(StartSeedlingError::CoreSeedling(_))));
-    }
-}
-
-struct StartSeedling {
-    seedling_name: seedbank_types::Name,
-    container_name: docker_types::ContainerName,
-    version: seedbank_types::Version,
-}
-
-impl StartSeedling {
-    pub fn new(
-        seedling_name: seedbank_types::Name,
-        container_name: docker_types::ContainerName,
-        version: seedbank_types::Version,
-    ) -> Self {
-        Self {
-            seedling_name,
-            container_name,
-            version,
-        }
-    }
-}
-
-impl std::fmt::Display for StartSeedling {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "Starting seedling '{}' (v{})",
-            self.seedling_name, self.version
-        )
-    }
-}
-
-#[async_trait]
-impl<'a> Command<Context<'a>> for StartSeedling {
-    fn name(&self) -> String {
-        "Starting seedling".to_string()
-    }
-
-    async fn run(
-        &mut self,
-        span: &Span,
-        context: &mut Context<'a>,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let guard = span
-            .create_child(
-                &format!(
-                    "Starting seedling '{}' (v{})",
-                    self.seedling_name, self.version
-                ),
-                ScopeKind::Step,
-            )
-            .start_guard();
-
-        context
-            .docker_client
-            .start_container(ContainerRef::FullName(self.container_name.clone()))
-            .await?;
-
-        guard.finish(Ok(()))
     }
 }

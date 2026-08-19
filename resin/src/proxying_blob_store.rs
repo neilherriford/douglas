@@ -698,8 +698,6 @@ mod tests {
         Box::new(reader)
     }
 
-    struct FakePathFactory;
-
     fn build_store(
         primary_blob_store: Arc<dyn BlobStore>,
         token_exchange: MockTokenExchange,
