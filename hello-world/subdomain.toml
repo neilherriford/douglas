@@ -1,3 +1,5 @@
+route = "subdomain"
+
 [mounts.public]
 kind = "Persisted"
 remote_path = "/usr/src/app/public"
@@ -15,7 +17,7 @@ contents = """
   <title>hello-world</title>
 </head>
 <body>
-  <h1>Hello, world!</h1>
+  <h1>Hello, world! (from subdomain)</h1>
 </body>
 </html>
 """

@@ -254,7 +254,9 @@ fn create_plan<'a>(
         ),
     );
 
-    push_step(&mut steps, ClaimDefault::new(name.clone()));
+    if seedling_spec.route == seedbank_types::RouteSpec::Root {
+        push_step(&mut steps, ClaimDefault::new(name.clone()));
+    }
 
     Ok(steps)
 }
@@ -312,7 +314,7 @@ impl<'a> Command<Context<'a>> for NewSeedlingFromSpec {
             image,
             self.seedling_spec.mounts.clone(),
             seedbank_types::Routing::Routed {
-                route: seedbank_types::RouteSpec::Root,
+                route: self.seedling_spec.route.clone(),
                 ports: self.seedling_spec.ports.clone(),
             },
         );
@@ -418,6 +420,20 @@ mod tests {
                 "Creating seedling for 'foo'".to_string(),
                 "Claiming default for 'foo'".to_string(),
             ]
+        );
+    }
+
+    #[test]
+    fn test_create_plan_should_not_claim_default_for_a_subdomain_seedling() {
+        let spec = seedbank_types::SeedlingSpec {
+            route: seedbank_types::RouteSpec::Subdomain,
+            ..seedling_spec()
+        };
+        let steps = create_plan(&name(), &spec, state()).expect("should produce a plan");
+
+        assert_eq!(
+            step_descriptions(steps),
+            vec!["Creating seedling for 'foo'".to_string()]
         );
     }
 

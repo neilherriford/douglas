@@ -292,9 +292,12 @@ impl Mount {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum RouteSpec {
+    #[default]
     Root,
+    Subdomain,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -343,11 +346,17 @@ impl SeedlingDefinition {
 pub struct SeedlingSpec {
     pub mounts: HashMap<Name, Mount>,
     pub ports: PortSpec,
+    #[serde(default)]
+    pub route: RouteSpec,
 }
 
 impl SeedlingSpec {
     pub fn new(mounts: HashMap<Name, Mount>, ports: PortSpec) -> Self {
-        Self { mounts, ports }
+        Self {
+            mounts,
+            ports,
+            route: RouteSpec::default(),
+        }
     }
 }
 

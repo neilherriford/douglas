@@ -173,7 +173,8 @@ fn render_route(
     container: &str,
 ) -> Result<String, serde_yaml_ng::Error> {
     let rule = match route {
-        RouteSpec::Root => "Host(`localhost`)",
+        RouteSpec::Root => "Host(`localhost`)".to_string(),
+        RouteSpec::Subdomain => format!("Host(`{name}.localhost`)"),
     };
 
     let config = DynamicConfig {
@@ -181,7 +182,7 @@ fn render_route(
             routers: HashMap::from([(
                 name.to_string(),
                 Router {
-                    rule: rule.to_string(),
+                    rule,
                     entry_points: vec!["web".to_string()],
                     service: name.to_string(),
                 },
@@ -220,6 +221,29 @@ mod tests {
         assert_eq!(
             result,
             "http:\n  routers:\n    hello-world:\n      rule: Host(`localhost`)\n      entryPoints:\n      - web\n      service: hello-world\n  services:\n    hello-world:\n      loadBalancer:\n        servers:\n        - url: http://doug.hello-world:3000\n"
+        );
+    }
+
+    #[test]
+    fn test_render_route_should_produce_a_subdomain_host_rule() {
+        let name: Name = "second-app".parse().expect("valid name");
+        let ports = PortSpec {
+            public: 3000,
+            additional: Vec::new(),
+        };
+
+        let rendered = render_route(&name, &RouteSpec::Subdomain, &ports, "doug.second-app")
+            .expect("should serialize");
+        let parsed: DynamicConfig = serde_yaml_ng::from_str(&rendered).expect("should parse back");
+
+        assert_eq!(
+            parsed
+                .http
+                .routers
+                .get("second-app")
+                .expect("router present")
+                .rule,
+            "Host(`second-app.localhost`)"
         );
     }
 

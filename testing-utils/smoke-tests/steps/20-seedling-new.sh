@@ -17,7 +17,7 @@ SEED_DIR="/var/lib/douglas/seedbank/seeds/hello-world"
 # No `--file`: the CLI reads stdin when the flag is omitted (see its help
 # text), not when passed a literal "-".
 assert_success "create hello-world seedling from spec" bash -c \
-    "ssh -o LogLevel=ERROR -i '$SSH_KEY' '$VM' '~/douglas seedling new --name hello-world' < '$REPO_ROOT/hello-world/seedling.toml'"
+    "ssh -o LogLevel=ERROR -i '$SSH_KEY' '$VM' '~/douglas seedling new --name hello-world' < '$REPO_ROOT/hello-world/default.toml'"
 
 ## Everything seedbank should have written to disk for this seedling.
 # "path|owner:group:mode|description" — seedbank runs as douglas-seedbank

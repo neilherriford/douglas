@@ -1,0 +1,27 @@
+route = "root"
+
+[mounts.public]
+kind = "Persisted"
+remote_path = "/usr/src/app/public"
+access_mode = "ReadOnly"
+
+[[mounts.public.contents]]
+
+[mounts.public.contents.File]
+file_relative_path = "index.html"
+contents = """
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>hello-world</title>
+</head>
+<body>
+  <h1>Hello, world! (from default)</h1>
+</body>
+</html>
+"""
+
+[ports]
+public = 3000
+additional = []
