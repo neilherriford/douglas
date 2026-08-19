@@ -331,6 +331,27 @@ impl<'a> Command<Context<'a>> for NewSeedlingFromSpec {
         guard.finish_with_outcome(log::Outcome::Ok);
         Ok(())
     }
+
+    async fn rollback(
+        &mut self,
+        span: &Span,
+        context: &mut Context<'a>,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let guard = span
+            .create_child(
+                &format!(
+                    "Rolling back seedling creation for '{}'",
+                    self.seedling_name
+                ),
+                ScopeKind::Step,
+            )
+            .start_guard();
+
+        context.seedbank_client.delete(&self.seedling_name).await?;
+
+        guard.finish_with_outcome(log::Outcome::Ok);
+        Ok(())
+    }
 }
 
 struct ClaimDefault {

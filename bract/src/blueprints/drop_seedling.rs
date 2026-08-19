@@ -8,7 +8,7 @@ use blueprint::{
 use config::DouglasFolders;
 use docker::client::{ClientBuilder, ContainerRef};
 use docker_types::DockerNameError;
-use file_system::{FileDeleter, FileSystemError};
+use file_system::{FileDeleter, FileReader, FileSystemError};
 use log::{Reporter, ScopeKind, Span};
 use std::sync::Arc;
 use thiserror::Error;
@@ -54,6 +54,7 @@ struct State {
     origin: Option<labels::Origin>,
     network_exists: bool,
     seedbank_entry_exists: bool,
+    route_exists: bool,
 }
 
 pub async fn execute(
@@ -62,6 +63,7 @@ pub async fn execute(
     resin_client_builder: &dyn resin_client::ClientBuilder,
     seedbank_client: &dyn seedbank_client::Client,
     file_deleter: &dyn FileDeleter,
+    file_reader: &dyn FileReader,
     douglas_folders: &DouglasFolders,
     name: &seedbank_types::Name,
 ) -> Result<(), DropSeedlingError> {
@@ -91,8 +93,11 @@ pub async fn execute(
     };
 
     let state = {
-        let mut state_observer = StateObserver::new(&mut *docker_client, seedbank_client);
-        state_observer.discover(guard.span(), name).await?
+        let mut state_observer =
+            StateObserver::new(&mut *docker_client, seedbank_client, file_reader);
+        state_observer
+            .discover(guard.span(), douglas_folders, name)
+            .await?
     };
 
     let plan = match resolve_plan(guard.span(), create_plan(name, state)) {
@@ -120,22 +125,26 @@ pub async fn execute(
 struct StateObserver<'a> {
     docker_client: &'a mut dyn docker::client::Client,
     seedbank_client: &'a dyn seedbank_client::Client,
+    file_reader: &'a dyn FileReader,
 }
 
 impl<'a> StateObserver<'a> {
     pub fn new(
         docker_client: &'a mut dyn docker::client::Client,
         seedbank_client: &'a dyn seedbank_client::Client,
+        file_reader: &'a dyn FileReader,
     ) -> Self {
         Self {
             docker_client,
             seedbank_client,
+            file_reader,
         }
     }
 
     pub async fn discover(
         &mut self,
         span: &Span,
+        douglas_folders: &DouglasFolders,
         name: &seedbank_types::Name,
     ) -> Result<State, DropSeedlingError> {
         let guard = span
@@ -145,6 +154,9 @@ impl<'a> StateObserver<'a> {
             )
             .start_guard();
 
+        let mut route_path = traefik_dynamic_dir(douglas_folders)?;
+        route_path.push(format!("{name}.yml"));
+
         let mut result = State {
             container_exists: false,
             container_is_stopped: false,
@@ -153,6 +165,7 @@ impl<'a> StateObserver<'a> {
             origin: None,
             network_exists: false,
             seedbank_entry_exists: self.seedbank_client.exists(name).await?,
+            route_exists: self.file_reader.exists(&route_path),
         };
 
         result.network_exists = self
@@ -209,7 +222,9 @@ fn create_plan<'a>(
         ));
     }
 
-    push_step(&mut steps, RemoveTraefikRoute::new(name.clone()));
+    if state.route_exists {
+        push_step(&mut steps, RemoveTraefikRoute::new(name.clone()));
+    }
 
     if state.container_exists {
         push_step(
@@ -249,6 +264,7 @@ mod tests {
             origin: Some(labels::Origin::User),
             network_exists: true,
             seedbank_entry_exists: true,
+            route_exists: true,
         }
     }
 
@@ -309,6 +325,24 @@ mod tests {
                 "Releasing default for 'hello-world'".to_string(),
                 "Deleting resin repository for 'hello-world'".to_string(),
             ]
+        );
+    }
+
+    #[test]
+    fn test_create_plan_should_skip_the_traefik_route_step_when_no_route_was_ever_written() {
+        let steps = create_plan(
+            &name(),
+            State {
+                route_exists: false,
+                ..droppable_state()
+            },
+        )
+        .expect("should produce a plan");
+
+        assert!(
+            !step_descriptions(steps)
+                .iter()
+                .any(|description| description.contains("traefik route"))
         );
     }
 

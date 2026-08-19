@@ -674,6 +674,7 @@ impl Server for Bract {
             &*self.resin_client_builder,
             self.seedbank_client.as_ref(),
             self.file_deleter.as_ref(),
+            &*self.file_reader,
             &self.douglas_folders,
             name,
         )

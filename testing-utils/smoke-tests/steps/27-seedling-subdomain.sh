@@ -38,13 +38,10 @@ fi
 assert_contains "rejection names the current default holder" "$new_output" \
     "Default is already claimed by hello-world"
 
-## `new` still writes the seedling record before the rejected ClaimDefault
-## step runs, so third-app is now orphaned the same way it would be for any
-## user hitting this collision by hand. `seedling drop` can't clean it up
-## (its RemoveTraefikRoute step is unconditional and 500s when no route was
-## ever written — a separate known bug), so remove it directly, same
-## workaround used for this exact case during manual testing.
-ssh_out sudo rm -rf "$THIRD_SEED_DIR" >/dev/null
+## `new` writes the seedling record before the rejected ClaimDefault step
+## runs — NewSeedlingFromSpec's rollback (see bract/src/blueprints/
+## new_seedling.rs) deletes it again when a later step fails, so no orphan
+## should be left behind.
 assert_failure "third-app seedling dir no longer exists" ssh_out \
     "sudo test -e '$THIRD_SEED_DIR'"
 
