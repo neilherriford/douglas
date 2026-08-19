@@ -167,6 +167,11 @@ impl ProxyingBlobStore {
             StreamedResponse::NoContent { .. } => {
                 Err(BlobStoreError::DigestNotFound(digest.to_string()))
             }
+            // See the matching arm in remote_stats: Docker Hub's anonymous
+            // 401 means the same thing a 404 would here.
+            StreamedResponse::Error {
+                status: 404 | 401, ..
+            } => Err(BlobStoreError::DigestNotFound(digest.to_string())),
             StreamedResponse::Error { status, body, .. } => Err(Self::failed(
                 digest,
                 format!("status {status}: {}", body.unwrap_or_default()),
@@ -242,9 +247,15 @@ impl ProxyingBlobStore {
             Response::Created { .. } | Response::NoContent { .. } => {
                 Err(Self::failed(digest, "Unexpected response"))
             }
-            Response::Error { status: 404, .. } => {
-                Err(BlobStoreError::DigestNotFound(digest.to_string()))
-            }
+            // Docker Hub returns 401 rather than 404 for a repo it doesn't
+            // recognize, even for anonymous pulls — it doesn't distinguish
+            // "doesn't exist" from "exists but you can't see it", so both
+            // collapse to 401/insufficient_scope. Since we only ever call
+            // Docker Hub anonymously here, a 401 means "no such public repo",
+            // same as a 404.
+            Response::Error {
+                status: 404 | 401, ..
+            } => Err(BlobStoreError::DigestNotFound(digest.to_string())),
             Response::Error { status, body, .. } => Err(Self::failed(
                 digest,
                 format!("status {status}: {}", body.unwrap_or_default()),
@@ -310,9 +321,11 @@ impl ProxyingBlobStore {
             Response::Created { .. } | Response::NoContent { .. } => {
                 Err(Self::failed(reference, "Unexpected response"))
             }
-            Response::Error { status: 404, .. } => {
-                Err(BlobStoreError::DigestNotFound(reference.to_string()))
-            }
+            // See the matching arm in remote_stats: Docker Hub's anonymous
+            // 401 means the same thing a 404 would here.
+            Response::Error {
+                status: 404 | 401, ..
+            } => Err(BlobStoreError::DigestNotFound(reference.to_string())),
             Response::Error { status, body, .. } => Err(Self::failed(
                 reference,
                 format!("status {status}: {}", body.unwrap_or_default()),
@@ -1189,6 +1202,36 @@ mod tests {
 
             assert_eq!(stats.size, 42);
             assert_eq!(stats.mediatype, "application/octet-stream");
+        }
+
+        #[tokio::test]
+        async fn test_stats_should_return_digest_not_found_when_remote_returns_401() {
+            let mut primary = MockBlobStore::new();
+            primary.expect_stats().return_once(|_, digest, _| {
+                Err(BlobStoreError::DigestNotFound(digest.to_string()))
+            });
+
+            let mut token_exchange = MockTokenExchange::new();
+            token_exchange
+                .expect_fetch_token()
+                .return_once(|_| Ok("token".to_string()));
+
+            let mut rest_client = MockRedirectFollowingClient::new();
+            rest_client.expect_execute().return_once(|_, _, _| {
+                Ok(Response::Error {
+                    headers: vec![],
+                    status: 401,
+                    body: None,
+                })
+            });
+
+            let store = build_store(Arc::new(primary), token_exchange, rest_client);
+
+            let name = test_name();
+            let digest = test_digest();
+            let result = store.stats(&name, &digest, ResourceKind::Blob).await;
+
+            assert!(matches!(result, Err(BlobStoreError::DigestNotFound(_))));
         }
 
         #[tokio::test]
