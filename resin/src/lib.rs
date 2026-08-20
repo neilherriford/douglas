@@ -429,8 +429,8 @@ impl Server {
             )
             .route(
                 "/v2/{namespace}/{name}/blobs/{digest}",
-                head(reject_namespaced)
-                    .get(reject_namespaced)
+                head(blobs::info_namespaced)
+                    .get(blobs::blob_namespaced)
                     .delete(reject_namespaced),
             )
             .with_state(blob_state);
@@ -453,8 +453,8 @@ impl Server {
             )
             .route(
                 "/v2/{namespace}/{name}/manifests/{ref}",
-                head(reject_namespaced)
-                    .get(reject_namespaced)
+                head(manifest::info_namespaced)
+                    .get(manifest::read_namespaced)
                     .put(reject_namespaced)
                     .delete(reject_namespaced),
             )

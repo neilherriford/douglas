@@ -30,6 +30,13 @@ pub(crate) async fn info(
     manifest_info(state, Name::from_str(&name)?, reference).await
 }
 
+pub(crate) async fn info_namespaced(
+    State(state): State<ManifestState>,
+    Path((namespace, name, reference)): Path<(String, String, String)>,
+) -> Result<impl IntoResponse, ServerError> {
+    manifest_info(state, Name::from_namespaced(&namespace, &name)?, reference).await
+}
+
 async fn manifest_info(
     state: ManifestState,
     name: Name,
@@ -93,6 +100,13 @@ pub(crate) async fn read(
     Path((name, reference)): Path<(String, String)>,
 ) -> Result<impl IntoResponse, ServerError> {
     read_manifest(state, Name::from_str(&name)?, reference).await
+}
+
+pub(crate) async fn read_namespaced(
+    State(state): State<ManifestState>,
+    Path((namespace, name, reference)): Path<(String, String, String)>,
+) -> Result<impl IntoResponse, ServerError> {
+    read_manifest(state, Name::from_namespaced(&namespace, &name)?, reference).await
 }
 
 async fn read_manifest(
