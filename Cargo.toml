@@ -53,7 +53,7 @@ members = [
     "log",
     "file_system",
     "os",
-    "bract", "bract_types", "bract_client", "config", "utils", "openbao", "blueprint", "service_library",  "resin", "seedbank", "seedbank_types", "docker_types", "refined_string",
+    "bract", "bract_types", "bract_client", "config", "utils", "openbao", "blueprint",  "resin", "seedbank", "seedbank_types", "docker_types", "refined_string",
     "seedbank_client", "resin_client", "resin_types",
     "seedling_registration_types", "seedling_registration_client",
     "reconcile_trigger_types", "reconcile_trigger_client",
