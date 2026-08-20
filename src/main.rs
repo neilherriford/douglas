@@ -287,7 +287,7 @@ fn example_seedling_spec() -> seedbank_types::SeedlingSpec {
 
     mounts.insert(
         example_name("config"),
-        seedbank_types::Mount::build(
+        seedbank_types::Mount::with_files(
             seedbank_types::MountType::Persisted,
             PathBuf::from("/etc/example/config"),
             seedbank_types::AccessMode::ReadOnly,
@@ -297,7 +297,7 @@ fn example_seedling_spec() -> seedbank_types::SeedlingSpec {
 
     mounts.insert(
         example_name("cache"),
-        seedbank_types::Mount::build(
+        seedbank_types::Mount::with_files(
             seedbank_types::MountType::InMemory,
             PathBuf::from("/var/cache/example"),
             seedbank_types::AccessMode::Writable,
@@ -307,7 +307,7 @@ fn example_seedling_spec() -> seedbank_types::SeedlingSpec {
 
     mounts.insert(
         example_name("shared-assets"),
-        seedbank_types::Mount::build(
+        seedbank_types::Mount::with_files(
             seedbank_types::MountType::PersistedShared(vec![
                 example_name("sibling-a"),
                 example_name("sibling-b"),

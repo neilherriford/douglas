@@ -118,20 +118,19 @@ pub fn discover_service_state(
             && !user_is_in_group(credentials, &definition.group, name)
     );
 
-    if let ServiceUser::Managed(user_name) = &definition.user {
-        for group_name in &definition.additional_groups {
-            let is_member = if credentials.group_exists(group_name) {
-                user_is_in_group(credentials, group_name, user_name)
-            } else {
-                state.additional_groups_missing.push(group_name.clone());
-                false
-            };
+    let user_name = definition.user.name();
+    for group_name in &definition.additional_groups {
+        let is_member = if credentials.group_exists(group_name) {
+            user_is_in_group(credentials, group_name, &user_name)
+        } else {
+            state.additional_groups_missing.push(group_name.clone());
+            false
+        };
 
-            if !is_member {
-                state
-                    .additional_group_memberships_missing
-                    .push(GroupMembershipRequirement::new(group_name, user_name));
-            }
+        if !is_member {
+            state
+                .additional_group_memberships_missing
+                .push(GroupMembershipRequirement::new(group_name, &user_name));
         }
     }
 
@@ -304,6 +303,17 @@ mod tests {
             ServiceDefinition::with_sockets(
                 ServiceUser::create_managed("foo"),
                 "foo",
+                vec![(PathBuf::from("/var/lib/foo"), Modes::OwnerReadWrite)],
+                Vec::new(),
+                &["shared"],
+                BootstrapReporting::Pipe,
+            )
+        }
+
+        fn system_user_definition_with_additional_group() -> ServiceDefinition {
+            ServiceDefinition::with_sockets(
+                ServiceUser::create_system(credentials::ROOT_USER_NAME),
+                "douglas-admin",
                 vec![(PathBuf::from("/var/lib/foo"), Modes::OwnerReadWrite)],
                 Vec::new(),
                 &["shared"],
@@ -610,6 +620,45 @@ mod tests {
             assert_eq!(
                 state.additional_group_memberships_missing[0].user_name,
                 "foo"
+            );
+        }
+
+        #[test]
+        fn test_should_flag_missing_additional_group_for_a_system_user_too() {
+            let mut credentials = MockCredentials::new();
+            let mut folder = MockFolder::new();
+            let mut permissions = MockPermissions::new();
+
+            credentials
+                .given_group_exists("douglas-admin")
+                .given_user_memberships("douglas-admin", vec![credentials::ROOT_USER_NAME]);
+            credentials.given_group_does_not_exist("shared");
+
+            folder.given_exists("/var/lib/foo");
+            permissions.given_ownership_and_mode(
+                "/var/lib/foo",
+                credentials::ROOT_USER_NAME,
+                "douglas-admin",
+                Modes::OwnerReadWrite,
+            );
+
+            let state = discover_service_state(
+                &system_user_definition_with_additional_group(),
+                &credentials,
+                &folder,
+                &permissions,
+            )
+            .expect("should discover");
+
+            assert_eq!(state.additional_groups_missing, vec!["shared".to_string()]);
+            assert_eq!(state.additional_group_memberships_missing.len(), 1);
+            assert_eq!(
+                state.additional_group_memberships_missing[0].group_name,
+                "shared"
+            );
+            assert_eq!(
+                state.additional_group_memberships_missing[0].user_name,
+                credentials::ROOT_USER_NAME
             );
         }
 

@@ -860,7 +860,7 @@ mod tests {
     }
 
     fn mount(contents: HashSet<MountContents>) -> Mount {
-        Mount::build(
+        Mount::with_files(
             MountType::Persisted,
             PathBuf::from("/etc/traefik"),
             seedbank_types::AccessMode::Writable,

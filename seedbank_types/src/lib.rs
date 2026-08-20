@@ -257,7 +257,7 @@ pub enum AccessMode {
 }
 
 impl Mount {
-    pub fn build(
+    pub fn with_files(
         kind: MountType,
         remote_path: PathBuf,
         access_mode: AccessMode,
@@ -269,6 +269,10 @@ impl Mount {
             access_mode,
             contents,
         }
+    }
+
+    pub fn empty(kind: MountType, remote_path: PathBuf, access_mode: AccessMode) -> Self {
+        Self::with_files(kind, remote_path, access_mode, HashSet::new())
     }
 
     pub fn contents(&self) -> &HashSet<MountContents> {
@@ -324,6 +328,8 @@ pub struct SeedlingDefinition {
     pub mounts: HashMap<Name, Mount>,
     pub routing: Routing,
     pub published_ports: Vec<PortMapping>,
+    pub command: Option<String>,
+    pub environment_variables: HashMap<String, String>,
 }
 
 impl SeedlingDefinition {
@@ -333,11 +339,24 @@ impl SeedlingDefinition {
             mounts,
             routing,
             published_ports: Vec::new(),
+            command: None,
+            environment_variables: HashMap::new(),
         }
     }
 
     pub fn with_published_ports(mut self, published_ports: Vec<PortMapping>) -> Self {
         self.published_ports = published_ports;
+        self
+    }
+
+    pub fn with_command(mut self, command: &str) -> Self {
+        self.command = Some(command.to_string());
+        self
+    }
+
+    pub fn with_environment_variable(mut self, name: &str, value: &str) -> Self {
+        self.environment_variables
+            .insert(name.to_string(), value.to_string());
         self
     }
 }
@@ -413,7 +432,7 @@ mod tests {
 
     #[test]
     fn test_mount_file_contents_should_round_trip_through_toml_as_text() {
-        let mount = Mount::build(
+        let mount = Mount::with_files(
             MountType::Persisted,
             PathBuf::from("/usr/src/app/public"),
             AccessMode::ReadOnly,
