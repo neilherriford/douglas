@@ -315,22 +315,6 @@ where
     Ok(Id { algorithm, hex })
 }
 
-impl<'de> Deserialize<'de> for ContainerUser {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let value = String::deserialize(deserializer)?;
-        let (user_id, group_id) = value
-            .split_once(':')
-            .ok_or_else(|| serde::de::Error::custom(format!("invalid user '{value}'")))?;
-        Ok(ContainerUser {
-            user_id: user_id.parse().map_err(serde::de::Error::custom)?,
-            group_id: group_id.parse().map_err(serde::de::Error::custom)?,
-        })
-    }
-}
-
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum LabelKeyError {
     #[error("label key cannot be empty")]
@@ -988,7 +972,6 @@ impl FromStr for ImageId {
 #[derive(Debug, PartialEq, Clone)]
 pub struct ContainerDefinition {
     pub name: ContainerName,
-    pub run_as: Option<ContainerUser>,
     pub command: Option<String>,
     pub environment_variables: Vec<EnvironmentVariable>,
     pub image: ImageDefinition,
@@ -1033,7 +1016,6 @@ pub struct ImageDefinition {
     pub id: Id,
     pub created: String,
     pub architecture: String,
-    pub run_as: Option<ContainerUser>,
     pub exposed_ports: Vec<String>,
     pub environment_variables: Vec<EnvironmentVariable>,
     pub command: Option<String>,

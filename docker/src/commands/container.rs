@@ -355,7 +355,6 @@ pub async fn find(
     guard.finish(Ok(ContainerSnapshot {
         definition: ContainerDefinition {
             name,
-            run_as: buffer.config.run_as,
             command: buffer.config.command,
             environment_variables: buffer.config.env,
             image,

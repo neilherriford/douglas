@@ -2,7 +2,7 @@ pub mod client;
 mod commands;
 
 use docker_types::{
-    ContainerUser, EnvironmentVariable, HealthStatus, Id, Label, Mount, Status, Tag,
+    EnvironmentVariable, HealthStatus, Id, Label, Mount, Status, Tag,
     deserialize_environment_variables, deserialize_id, deserialize_labels, deserialize_tags,
 };
 use serde::{Deserialize, Deserializer};
@@ -94,10 +94,6 @@ struct Health {
 
 #[derive(Debug, Deserialize, PartialEq)]
 struct Config {
-    #[serde(rename = "User")]
-    #[serde(deserialize_with = "deserialize_run_as")]
-    pub run_as: Option<ContainerUser>,
-
     #[serde(rename = "Cmd")]
     #[serde(deserialize_with = "deserialize_container_command")]
     pub command: Option<String>,
@@ -118,25 +114,6 @@ where
     let value = String::deserialize(deserializer)?;
     time::OffsetDateTime::parse(&value, &time::format_description::well_known::Rfc3339)
         .map_err(serde::de::Error::custom)
-}
-
-fn deserialize_run_as<'de, D>(deserializer: D) -> Result<Option<ContainerUser>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    let value = String::deserialize(deserializer)?;
-    if value.is_empty() {
-        return Ok(None);
-    }
-
-    let (user_id, group_id) = value
-        .split_once(':')
-        .ok_or_else(|| serde::de::Error::custom(format!("invalid user '{value}'")))?;
-
-    Ok(Some(ContainerUser {
-        user_id: user_id.parse().map_err(serde::de::Error::custom)?,
-        group_id: group_id.parse().map_err(serde::de::Error::custom)?,
-    }))
 }
 
 fn deserialize_container_command<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>

@@ -1,9 +1,9 @@
 use super::assert_no_docker_errors;
 use crate::DockerError;
 use crate::client::ImageRef;
-use crate::{deserialize_container_command, deserialize_run_as, to_general_error};
+use crate::{deserialize_container_command, to_general_error};
 use docker_types::{
-    ContainerUser, EnvironmentVariable, Healthcheck, Id, ImageDefinition, ImageId, Label, Registry,
+    EnvironmentVariable, Healthcheck, Id, ImageDefinition, ImageId, Label, Registry,
     VersionedImageName, deserialize_environment_variables, deserialize_id, deserialize_labels,
 };
 use log::{Reporter, Span};
@@ -43,10 +43,6 @@ pub struct InspectedImage {
 
 #[derive(Debug, Deserialize, PartialEq)]
 pub struct InspectedImageConfig {
-    #[serde(rename = "User")]
-    #[serde(deserialize_with = "deserialize_run_as")]
-    pub run_as: Option<ContainerUser>,
-
     #[serde(rename = "ExposedPorts")]
     #[serde(default)]
     #[serde(deserialize_with = "deserialize_exposed_ports")]
@@ -106,7 +102,6 @@ impl From<InspectedImage> for ImageDefinition {
             id: image.id,
             created: image.created,
             architecture: image.architecture,
-            run_as: image.config.run_as,
             exposed_ports: image.config.exposed_ports,
             environment_variables: image.config.env,
             command: image.config.command,
