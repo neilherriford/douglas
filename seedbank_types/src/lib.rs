@@ -1,4 +1,4 @@
-use docker_types::VersionedImageName;
+use docker_types::{Capability, VersionedImageName};
 use file_system::{RelativePath, RelativePathError};
 use refined_string::{StringRules, Validated};
 use regex::Regex;
@@ -329,7 +329,7 @@ pub struct SeedlingDefinition {
     pub routing: Routing,
     pub published_ports: Vec<PortMapping>,
     pub command: Option<String>,
-    pub environment_variables: HashMap<String, String>,
+    pub added_capabilities: HashSet<Capability>,
 }
 
 impl SeedlingDefinition {
@@ -340,7 +340,7 @@ impl SeedlingDefinition {
             routing,
             published_ports: Vec::new(),
             command: None,
-            environment_variables: HashMap::new(),
+            added_capabilities: HashSet::new(),
         }
     }
 
@@ -354,9 +354,8 @@ impl SeedlingDefinition {
         self
     }
 
-    pub fn with_environment_variable(mut self, name: &str, value: &str) -> Self {
-        self.environment_variables
-            .insert(name.to_string(), value.to_string());
+    pub fn with_capability(mut self, capability: Capability) -> Self {
+        self.added_capabilities.insert(capability);
         self
     }
 }

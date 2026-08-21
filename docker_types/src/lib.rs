@@ -1,6 +1,6 @@
 use refined_string::{StringRules, Validated};
 use regex::Regex;
-use serde::ser::{SerializeMap, SerializeSeq, SerializeStruct};
+use serde::ser::{self, SerializeMap, SerializeSeq, SerializeStruct};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::value::Value as Json;
 use std::collections::HashSet;
@@ -248,45 +248,44 @@ impl<'de> Deserialize<'de> for VersionedImageName {
     }
 }
 
-#[derive(Debug, PartialEq, Eq, Clone)]
+#[derive(Debug, PartialEq, Eq, Clone, Hash)]
 pub enum Capability {
     IpcLock,
     Chown,
 }
 
-pub fn serialize_capabilities<S>(
-    capabilities: &Vec<Capability>,
-    serializer: S,
-) -> Result<S::Ok, S::Error>
-where
-    S: Serializer,
-{
-    let mut seq = serializer.serialize_seq(Some(capabilities.len()))?;
-    for capability in capabilities {
-        let text = match capability {
-            Capability::IpcLock => "IPC_LOCK",
-            Capability::Chown => "CAP_CHOWN",
-        };
-
-        seq.serialize_element(&text)?;
+impl Serialize for Capability {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&self.to_string())
     }
-    seq.end()
 }
 
-pub fn deserialize_capabilities<'de, D>(deserializer: D) -> Result<Vec<Capability>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    let raw: Vec<String> = Vec::deserialize(deserializer)?;
-    raw.iter()
-        .map(|text| match text.as_str() {
+impl<'de> Deserialize<'de> for Capability {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        match value.as_str() {
             "IPC_LOCK" => Ok(Capability::IpcLock),
             "CAP_CHOWN" => Ok(Capability::Chown),
             other => Err(serde::de::Error::custom(format!(
                 "invalid capability '{other}'"
             ))),
+        }
+    }
+}
+
+impl std::fmt::Display for Capability {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Capability::IpcLock => "IPC_LOCK",
+            Capability::Chown => "CAP_CHOWN",
         })
-        .collect()
+    }
 }
 
 #[derive(Debug, Deserialize, Clone, PartialEq)]
@@ -662,7 +661,7 @@ pub struct NewContainer {
     pub command: Option<String>,
     pub environment_variables: Vec<EnvironmentVariable>,
     pub mounts: Vec<MountDefinition>,
-    pub added_capabilities: Vec<Capability>,
+    pub added_capabilities: HashSet<Capability>,
     pub labels: Vec<Label>,
     pub published_ports: Vec<PortMapping>,
 }
@@ -976,7 +975,7 @@ pub struct ContainerDefinition {
     pub environment_variables: Vec<EnvironmentVariable>,
     pub image: ImageDefinition,
     pub mounts: Vec<MountDefinition>,
-    pub added_capabilities: Vec<Capability>,
+    pub added_capabilities: HashSet<Capability>,
     pub labels: Vec<Label>,
 }
 
@@ -1029,6 +1028,37 @@ pub struct ImageDefinition {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_capability_should_serialize_to_its_docker_flag_name() {
+        assert_eq!(
+            serde_json::to_string(&Capability::IpcLock).expect("should serialize"),
+            "\"IPC_LOCK\""
+        );
+        assert_eq!(
+            serde_json::to_string(&Capability::Chown).expect("should serialize"),
+            "\"CAP_CHOWN\""
+        );
+    }
+
+    #[test]
+    fn test_capability_should_deserialize_from_its_docker_flag_name() {
+        assert_eq!(
+            serde_json::from_str::<Capability>("\"IPC_LOCK\"").expect("should deserialize"),
+            Capability::IpcLock
+        );
+        assert_eq!(
+            serde_json::from_str::<Capability>("\"CAP_CHOWN\"").expect("should deserialize"),
+            Capability::Chown
+        );
+    }
+
+    #[test]
+    fn test_capability_should_reject_an_unknown_name() {
+        let result = serde_json::from_str::<Capability>("\"CAP_SYS_ADMIN\"");
+
+        assert!(result.is_err());
+    }
 
     #[test]
     fn test_from_str_should_parse_namespaced_image() {

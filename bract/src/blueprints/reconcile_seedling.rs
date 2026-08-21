@@ -1335,6 +1335,34 @@ fn published_ports_for(
         .collect()
 }
 
+fn build_new_container(
+    name: ContainerName,
+    seedling_definition: &seedbank_types::SeedlingDefinition,
+    uid: u32,
+    gid: u32,
+    mounts: Vec<MountDefinition>,
+    version: &seedbank_types::Version,
+    origin: labels::Origin,
+) -> NewContainer {
+    NewContainer {
+        name,
+        run_as: Some(ContainerUser {
+            user_id: uid,
+            group_id: gid,
+        }),
+        command: seedling_definition.command.clone(),
+        environment_variables: Vec::new(),
+        image: seedling_definition.image.clone(),
+        mounts,
+        added_capabilities: seedling_definition.added_capabilities.clone(),
+        labels: vec![
+            labels::create_version_label(version),
+            labels::create_origin_label(origin),
+        ],
+        published_ports: published_ports_for(seedling_definition),
+    }
+}
+
 struct BuildContainer {
     name: seedbank_types::Name,
     version: seedbank_types::Version,
@@ -1402,23 +1430,15 @@ impl<'a> Command<Context<'a>> for BuildContainer {
             })
             .collect::<Result<Vec<MountDefinition>, DockerNameError>>()?;
 
-        let new_container = NewContainer {
-            name: new_container_name,
-            run_as: Some(ContainerUser {
-                user_id: uid,
-                group_id: gid,
-            }),
-            command: None,
-            environment_variables: Vec::new(),
-            image: context.seedling_definition.image.clone(),
+        let new_container = build_new_container(
+            new_container_name,
+            context.seedling_definition,
+            uid,
+            gid,
             mounts,
-            added_capabilities: Vec::new(),
-            labels: vec![
-                labels::create_version_label(context.version),
-                labels::create_origin_label(context.origin),
-            ],
-            published_ports: published_ports_for(context.seedling_definition),
-        };
+            context.version,
+            context.origin,
+        );
 
         context
             .docker_client
@@ -1507,7 +1527,7 @@ impl<'a> Command<Context<'a>> for StartContainer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
 
     fn name() -> seedbank_types::Name {
         "traefik".parse().unwrap()
@@ -1828,5 +1848,49 @@ mod tests {
         let result = published_ports_for(&definition);
 
         assert_eq!(result, Vec::new());
+    }
+
+    #[test]
+    fn test_build_new_container_should_carry_the_seedling_definitions_command_and_capabilities() {
+        let definition = seedling_definition()
+            .with_command("server -config=/openbao/config/config.json")
+            .with_capability(docker_types::Capability::Chown);
+
+        let new_container = build_new_container(
+            container_name(&name()).unwrap(),
+            &definition,
+            1000,
+            1000,
+            Vec::new(),
+            &seedbank_types::Version(1),
+            labels::Origin::User,
+        );
+
+        assert_eq!(
+            new_container.command,
+            Some("server -config=/openbao/config/config.json".to_string())
+        );
+        assert_eq!(
+            new_container.added_capabilities,
+            HashSet::from([docker_types::Capability::Chown])
+        );
+    }
+
+    #[test]
+    fn test_build_new_container_should_leave_command_unset_when_the_definition_has_none() {
+        let definition = seedling_definition();
+
+        let new_container = build_new_container(
+            container_name(&name()).unwrap(),
+            &definition,
+            1000,
+            1000,
+            Vec::new(),
+            &seedbank_types::Version(1),
+            labels::Origin::User,
+        );
+
+        assert_eq!(new_container.command, None);
+        assert!(new_container.added_capabilities.is_empty());
     }
 }

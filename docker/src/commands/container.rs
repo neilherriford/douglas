@@ -6,8 +6,7 @@ use crate::{
 use docker_types::{
     Capability, ContainerDefinition, ContainerId, ContainerRuntimeState, ContainerSnapshot,
     ContainerUser, MountDefinition, MountName, NewContainer, PortMapping, Registry, Status,
-    deserialize_capabilities, deserialize_labels, serialize_capabilities,
-    serialize_environment_variables, serialize_labels,
+    deserialize_labels, serialize_environment_variables, serialize_labels,
 };
 use log::{Reporter, Span};
 use serde::ser::{SerializeMap, SerializeSeq};
@@ -20,7 +19,7 @@ use simple_rest_client::assertions::{
 use simple_rest_client::parsers::Parser;
 use simple_rest_client::parsers::json::JsonParserError;
 use simple_rest_client::{Header, RestClient, create_path_and_query_string};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -34,8 +33,8 @@ struct CreationResponse {
 struct CreateContainerHostConfig {
     #[serde(rename = "Mounts")]
     mounts: Vec<MountDefinition>,
-    #[serde(rename = "CapAdd", serialize_with = "serialize_capabilities")]
-    added_capabilities: Vec<Capability>,
+    #[serde(rename = "CapAdd")]
+    added_capabilities: HashSet<Capability>,
     #[serde(rename = "PortBindings", serialize_with = "serialize_port_bindings")]
     published_ports: Vec<PortMapping>,
 }
@@ -195,8 +194,7 @@ struct InspectedContainerState {
 #[derive(Debug, Deserialize, PartialEq)]
 pub struct InspectedHostConfig {
     #[serde(rename = "CapAdd")]
-    #[serde(deserialize_with = "deserialize_capabilities")]
-    pub added_capabilities: Vec<Capability>,
+    pub added_capabilities: HashSet<Capability>,
 }
 
 fn to_mount_definition(
@@ -359,7 +357,7 @@ pub async fn find(
             environment_variables: buffer.config.env,
             image,
             mounts,
-            added_capabilities: buffer.host_config.added_capabilities,
+            added_capabilities: buffer.host_config.added_capabilities.clone(),
             labels: buffer.config.labels,
         },
         runtime_state: ContainerRuntimeState {
@@ -595,7 +593,7 @@ mod tests {
             command: None,
             environment_variables: Vec::new(),
             mounts: Vec::new(),
-            added_capabilities: Vec::new(),
+            added_capabilities: HashSet::new(),
             labels: Vec::new(),
             published_ports: Vec::new(),
         }
