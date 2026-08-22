@@ -254,6 +254,7 @@ impl std::fmt::Display for Masks {
 pub enum Modes {
     None,
     OwnerReadWrite,
+    OwnerReadWriteExecute,
     OwnerReadWriteGroupRead,
     OwnerReadWriteGroupReadWrite,
     OwnerReadWriteExecuteGroupReadWriteExecute,
@@ -268,6 +269,7 @@ impl From<Modes> for u32 {
         match value {
             Modes::None => 0,
             Modes::OwnerReadWrite => 0o600,
+            Modes::OwnerReadWriteExecute => 0o700,
             Modes::OwnerReadWriteGroupRead => 0o640,
             Modes::OwnerReadWriteGroupReadWrite => 0o660,
             Modes::OwnerReadWriteExecuteGroupReadWriteExecute => 0o770,

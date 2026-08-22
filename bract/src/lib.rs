@@ -213,7 +213,7 @@ impl Bract {
         let docker_client_builder = Arc::new(UdsClientBuilder);
         let resin_client_builder = Arc::new(LocalhostClientBuilder);
         let rolodex = Arc::new(FileRolodex::new(
-            douglas_folders.rolodex.clone(),
+            douglas_folders.rolodex(),
             Arc::clone(&credentials),
             Arc::clone(&folder),
             Arc::clone(&file_reader),

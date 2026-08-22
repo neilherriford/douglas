@@ -136,15 +136,15 @@ pub fn service_definition(douglas_folders: &DouglasFolders) -> ServiceDefinition
                 Modes::OwnerReadWriteExecuteGroupReadWriteExecuteOtherExecute,
             ),
             (
-                douglas_folders.applications.clone(),
+                douglas_folders.seedlings_root.clone(),
                 Modes::OwnerReadWriteExecuteGroupReadWriteExecuteOtherExecute,
             ),
             (
-                douglas_folders.application_services.clone(),
+                douglas_folders.services(),
                 Modes::OwnerReadWriteExecuteGroupReadWriteExecute,
             ),
             (
-                douglas_folders.application_mounts.clone(),
+                douglas_folders.seedling_mounts(),
                 Modes::OwnerReadWriteExecuteGroupReadWriteExecute,
             ),
             (
@@ -152,8 +152,12 @@ pub fn service_definition(douglas_folders: &DouglasFolders) -> ServiceDefinition
                 Modes::InheritedOwnerReadWriteExecuteGroupReadWriteExecute,
             ),
             (
-                douglas_folders.rolodex.clone(),
+                douglas_folders.rolodex(),
                 Modes::InheritedOwnerReadWriteExecuteGroupReadWriteExecute,
+            ),
+            (
+                douglas_folders.credentials(),
+                Modes::OwnerReadWriteExecute,
             ),
             (
                 douglas_folders.socket_dir("bract"),

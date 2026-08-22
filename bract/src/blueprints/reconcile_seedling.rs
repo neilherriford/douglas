@@ -1,8 +1,5 @@
 use crate::{
-    blueprints::{
-        EXPECTED_MOUNT_MODE, SYSTEM_NETWORK_NAME, container_name, seedling_mount_path,
-        seedling_network_name,
-    },
+    blueprints::{EXPECTED_MOUNT_MODE, SYSTEM_NETWORK_NAME, container_name, seedling_network_name},
     labels::{self},
     rolodex::{Rolodex, RolodexError},
 };
@@ -176,7 +173,14 @@ pub async fn execute(
 
     let plan = match resolve_plan(
         guard.span(),
-        create_plan(name, version, seedling_definition, state, registry),
+        create_plan(
+            douglas_folders.clone(),
+            name,
+            version,
+            seedling_definition,
+            state,
+            registry,
+        ),
     ) {
         Ok(plan) => plan,
         Err(err) => return guard.finish(Err(err)),
@@ -523,7 +527,8 @@ impl<'a> StateObserver<'a> {
         seedling_name: &seedbank_types::Name,
         name: &seedbank_types::Name,
     ) -> PathBuf {
-        seedling_mount_path(self.douglas_folders, seedling_name, name)
+        self.douglas_folders
+            .seedling_mount(seedling_name.as_ref(), name.as_ref())
     }
 
     fn add_missing_mount(
@@ -607,6 +612,7 @@ impl<'a> StateObserver<'a> {
 type Step<'a> = Box<dyn Command<Context<'a>>>;
 
 fn create_plan<'a>(
+    douglas_folders: DouglasFolders,
     name: &seedbank_types::Name,
     version: &seedbank_types::Version,
     seedling_definition: &seedbank_types::SeedlingDefinition,
@@ -673,7 +679,7 @@ fn create_plan<'a>(
         VersionComparison::Missing => {
             push_step(
                 &mut steps,
-                BuildContainer::new(name.clone(), version.clone()),
+                BuildContainer::new(douglas_folders.clone(), name.clone(), version.clone()),
             );
             push_step(
                 &mut steps,
@@ -705,7 +711,7 @@ fn create_plan<'a>(
             );
             push_step(
                 &mut steps,
-                BuildContainer::new(name.clone(), version.clone()),
+                BuildContainer::new(douglas_folders.clone(), name.clone(), version.clone()),
             );
             push_step(
                 &mut steps,
@@ -1366,11 +1372,20 @@ fn build_new_container(
 struct BuildContainer {
     name: seedbank_types::Name,
     version: seedbank_types::Version,
+    douglas_folders: DouglasFolders,
 }
 
 impl BuildContainer {
-    pub fn new(name: seedbank_types::Name, version: seedbank_types::Version) -> Self {
-        Self { name, version }
+    pub fn new(
+        douglas_folders: DouglasFolders,
+        name: seedbank_types::Name,
+        version: seedbank_types::Version,
+    ) -> Self {
+        Self {
+            douglas_folders,
+            name,
+            version,
+        }
     }
 }
 
@@ -1419,7 +1434,9 @@ impl<'a> Command<Context<'a>> for BuildContainer {
             .mounts
             .iter()
             .map(|(name, definition)| {
-                let host_path = seedling_mount_path(context.douglas_folders, context.name, name);
+                let host_path = context
+                    .douglas_folders
+                    .seedling_mount(context.name.as_ref(), name.as_ref());
 
                 Ok(MountDefinition {
                     name: name.as_ref().parse()?,
@@ -1569,6 +1586,7 @@ mod tests {
     #[test]
     fn test_create_plan_should_refuse_to_downgrade() {
         let result = create_plan(
+            DouglasFolders::new(),
             &name(),
             &seedbank_types::Version(1),
             &seedling_definition(),
@@ -1589,6 +1607,7 @@ mod tests {
     #[test]
     fn test_create_plan_should_error_when_the_image_is_unavailable() {
         let result = create_plan(
+            DouglasFolders::new(),
             &name(),
             &seedbank_types::Version(1),
             &seedling_definition(),
@@ -1605,6 +1624,7 @@ mod tests {
     #[test]
     fn test_create_plan_should_do_nothing_when_everything_is_current() {
         let steps = create_plan(
+            DouglasFolders::new(),
             &name(),
             &seedbank_types::Version(1),
             &seedling_definition(),
@@ -1621,6 +1641,7 @@ mod tests {
         let mount_name: seedbank_types::Name = "config".parse().unwrap();
 
         let steps = create_plan(
+            DouglasFolders::new(),
             &name(),
             &seedbank_types::Version(1),
             &seedling_definition(),
@@ -1644,6 +1665,7 @@ mod tests {
         let path = PathBuf::from("/var/lib/douglas/mounts/traefik/config");
 
         let steps = create_plan(
+            DouglasFolders::new(),
             &name(),
             &seedbank_types::Version(1),
             &seedling_definition(),
@@ -1671,6 +1693,7 @@ mod tests {
     #[test]
     fn test_create_plan_should_build_and_start_a_missing_container() {
         let steps = create_plan(
+            DouglasFolders::new(),
             &name(),
             &seedbank_types::Version(2),
             &seedling_definition(),
@@ -1696,6 +1719,7 @@ mod tests {
     #[test]
     fn test_create_plan_should_stop_drop_rebuild_and_restart_a_stale_running_container() {
         let steps = create_plan(
+            DouglasFolders::new(),
             &name(),
             &seedbank_types::Version(2),
             &seedling_definition(),
@@ -1723,6 +1747,7 @@ mod tests {
     #[test]
     fn test_create_plan_should_skip_stopping_a_stale_container_that_is_not_running() {
         let steps = create_plan(
+            DouglasFolders::new(),
             &name(),
             &seedbank_types::Version(2),
             &seedling_definition(),

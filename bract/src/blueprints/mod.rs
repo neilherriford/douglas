@@ -25,7 +25,8 @@ pub(crate) fn traefik_dynamic_dir(
     let traefik_name: seedbank_types::Name = TRAEFIK_SEEDLING_NAME.parse()?;
     let config_mount_name: seedbank_types::Name = TRAEFIK_CONFIG_MOUNT_NAME.parse()?;
 
-    let mut dynamic_dir = seedling_mount_path(douglas_folders, &traefik_name, &config_mount_name);
+    let mut dynamic_dir =
+        douglas_folders.seedling_mount(&traefik_name.as_ref(), &config_mount_name.as_ref());
     dynamic_dir.push(TRAEFIK_DYNAMIC_DIR_NAME);
     Ok(dynamic_dir)
 }
@@ -45,17 +46,6 @@ pub(crate) fn container_name(
 pub(crate) fn seedling_name_from_doug_prefixed(raw: &str) -> Option<seedbank_types::Name> {
     raw.strip_prefix(CONTAINER_NAME_PREFIX)
         .and_then(|name| name.parse().ok())
-}
-
-fn seedling_mount_path(
-    douglas_folders: &DouglasFolders,
-    seedling_name: &seedbank_types::Name,
-    mount_name: &seedbank_types::Name,
-) -> PathBuf {
-    let mut result = douglas_folders.application_mounts.clone();
-    result.push(seedling_name.as_ref());
-    result.push(mount_name.as_ref());
-    result
 }
 
 #[cfg(test)]
@@ -105,24 +95,11 @@ mod tests {
         let result =
             traefik_dynamic_dir(&douglas_folders).expect("should build a valid dynamic dir path");
 
-        let mut expected = douglas_folders.application_mounts.clone();
+        let mut expected = douglas_folders.seedling_mounts();
         expected.push("traefik");
         expected.push("config");
         expected.push("dynamic");
         assert_eq!(result, expected);
     }
 
-    #[test]
-    fn test_seedling_mount_path_should_nest_the_mount_under_the_seedling() {
-        let douglas_folders = DouglasFolders::new();
-        let seedling_name: seedbank_types::Name = "traefik".parse().unwrap();
-        let mount_name: seedbank_types::Name = "shared".parse().unwrap();
-
-        let result = seedling_mount_path(&douglas_folders, &seedling_name, &mount_name);
-
-        let mut expected = douglas_folders.application_mounts.clone();
-        expected.push("traefik");
-        expected.push("shared");
-        assert_eq!(result, expected);
-    }
 }

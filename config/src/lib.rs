@@ -4,12 +4,8 @@ use std::path::PathBuf;
 pub struct DouglasFolders {
     pub logs: PathBuf,
     pub transients: PathBuf,
-    pub applications: PathBuf,
-    pub application_services: PathBuf,
-    pub application_mounts: PathBuf,
     pub configs: PathBuf,
-    pub rolodex: PathBuf,
-    services_root: PathBuf,
+    pub seedlings_root: PathBuf,
 }
 
 impl DouglasFolders {
@@ -43,8 +39,46 @@ impl DouglasFolders {
         result
     }
 
-    pub fn service_root(&self, name: &str) -> PathBuf {
-        let mut result = self.services_root.clone();
+    pub fn seedling_root(&self, name: &str) -> PathBuf {
+        let mut result = self.seedlings_root.clone();
+        result.push(name);
+        result
+    }
+
+    pub fn seedling_mounts(&self) -> PathBuf {
+        let mut result = self.seedlings_root.clone();
+        result.push("mounts");
+        result
+    }
+
+    pub fn seedling_mount(&self, seedling_name: &str, mount_name: &str) -> PathBuf {
+        let mut result = self.seedlings_root.clone();
+        result.push("mounts");
+        result.push(seedling_name);
+        result.push(mount_name);
+        result
+    }
+
+    pub fn services(&self) -> PathBuf {
+        let mut result = self.seedlings_root.clone();
+        result.push("services");
+        result
+    }
+
+    pub fn rolodex(&self) -> PathBuf {
+        let mut result = self.seedlings_root.clone();
+        result.push("rolodex");
+        result
+    }
+
+    pub fn credentials(&self) -> PathBuf {
+        let mut result = self.seedlings_root.clone();
+        result.push("credentials");
+        result
+    }
+
+    pub fn credential_file(&self, name: &str) -> PathBuf {
+        let mut result = self.credentials();
         result.push(name);
         result
     }
@@ -63,12 +97,8 @@ impl DouglasFolders {
         Self {
             logs: PathBuf::from("/Library/Logs/douglas/"),
             transients: PathBuf::from("/var/run/douglas/"),
-            applications: PathBuf::from("/Library/Application Support/douglas/"),
-            application_services: PathBuf::from("/Library/Application Support/douglas/services/"),
-            application_mounts: PathBuf::from("/Library/Application Support/douglas/mounts/"),
             configs: PathBuf::from("/Library/Preferences/douglas/"),
-            rolodex: PathBuf::from("/Library/Application Support/douglas/rolodex/"),
-            services_root: PathBuf::from("/Library/Application Support/douglas/"),
+            seedlings_root: PathBuf::from("/Library/Application Support/douglas/"),
         }
     }
 }
@@ -80,12 +110,8 @@ impl DouglasFolders {
         Self {
             logs: PathBuf::from("/var/log/douglas/"),
             transients: PathBuf::from("/run/douglas/"),
-            applications: PathBuf::from("/var/lib/douglas/"),
-            application_services: PathBuf::from("/var/lib/douglas/services/"),
-            application_mounts: PathBuf::from("/var/lib/douglas/mounts/"),
             configs: PathBuf::from("/etc/douglas/"),
-            rolodex: PathBuf::from("/var/lib/douglas/rolodex/"),
-            services_root: PathBuf::from("/var/lib/douglas/"),
+            seedlings_root: PathBuf::from("/var/lib/douglas/"),
         }
     }
 }
@@ -99,12 +125,8 @@ mod tests {
         DouglasFolders {
             logs: PathBuf::from("/var/log/douglas/"),
             transients: PathBuf::from("/run/douglas/"),
-            applications: PathBuf::from("/var/lib/douglas/"),
-            application_services: PathBuf::from("/var/lib/douglas/services/"),
-            application_mounts: PathBuf::from("/var/lib/douglas/mounts/"),
             configs: PathBuf::from("/etc/douglas/"),
-            rolodex: PathBuf::from("/var/lib/douglas/rolodex/"),
-            services_root: PathBuf::from("/var/lib/douglas/"),
+            seedlings_root: PathBuf::from("/var/lib/douglas/"),
         }
     }
 
@@ -149,10 +171,58 @@ mod tests {
     }
 
     #[test]
-    fn test_service_root_should_be_nested_under_applications() {
+    fn test_seedling_root_should_be_nested_under_seedlings_root() {
         assert_eq!(
-            folders().service_root("resin"),
+            folders().seedling_root("resin"),
             PathBuf::from("/var/lib/douglas/resin")
+        );
+    }
+
+    #[test]
+    fn test_seedling_mounts_should_be_nested_under_seedlings_root() {
+        assert_eq!(
+            folders().seedling_mounts(),
+            PathBuf::from("/var/lib/douglas/mounts")
+        );
+    }
+
+    #[test]
+    fn test_seedling_mount_should_be_nested_under_the_seedlings_own_mount_dir() {
+        assert_eq!(
+            folders().seedling_mount("openbao", "socket"),
+            PathBuf::from("/var/lib/douglas/mounts/openbao/socket")
+        );
+    }
+
+    #[test]
+    fn test_services_should_be_nested_under_seedlings_root() {
+        assert_eq!(
+            folders().services(),
+            PathBuf::from("/var/lib/douglas/services")
+        );
+    }
+
+    #[test]
+    fn test_rolodex_should_be_nested_under_seedlings_root() {
+        assert_eq!(
+            folders().rolodex(),
+            PathBuf::from("/var/lib/douglas/rolodex")
+        );
+    }
+
+    #[test]
+    fn test_credentials_should_be_nested_under_seedlings_root() {
+        assert_eq!(
+            folders().credentials(),
+            PathBuf::from("/var/lib/douglas/credentials")
+        );
+    }
+
+    #[test]
+    fn test_credential_file_should_be_nested_under_credentials() {
+        assert_eq!(
+            folders().credential_file("openbao-approle"),
+            PathBuf::from("/var/lib/douglas/credentials/openbao-approle")
         );
     }
 
@@ -162,6 +232,10 @@ mod tests {
 
         assert_ne!(folders.log_dir("bract"), folders.log_dir("resin"));
         assert_ne!(folders.socket_dir("bract"), folders.socket_dir("resin"));
-        assert_ne!(folders.service_root("bract"), folders.service_root("resin"));
+        assert_ne!(folders.seedling_root("bract"), folders.seedling_root("resin"));
+        assert_ne!(
+            folders.seedling_mount("bract", "socket"),
+            folders.seedling_mount("resin", "socket")
+        );
     }
 }

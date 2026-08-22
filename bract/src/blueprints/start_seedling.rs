@@ -1,5 +1,5 @@
 use crate::{
-    blueprints::{EXPECTED_MOUNT_MODE, container_name, seedling_mount_path},
+    blueprints::{EXPECTED_MOUNT_MODE, container_name},
     labels,
     rolodex::{Rolodex, RolodexError},
 };
@@ -207,7 +207,9 @@ impl<'a> StateObserver<'a> {
         result.origin = labels::get_origin(&container_labels);
 
         for (mount_name, mount_definition) in seedling.definition.mounts {
-            let expected = seedling_mount_path(self.douglas_folders, &seedling.name, &mount_name);
+            let expected = self
+                .douglas_folders
+                .seedling_mount(seedling.name.as_ref(), mount_name.as_ref());
 
             if !self.inspect.exists(&expected) {
                 return Ok(result);
