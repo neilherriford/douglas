@@ -65,11 +65,11 @@ pub trait Client: Send + Sync {
         name: &NetworkName,
         subnet: Option<&'a Ipv4Subnet>,
     ) -> Result<(), DockerError>;
-    async fn connect_network<'a>(
+    async fn connect_network(
         &self,
         network: &NetworkName,
         container_ref: ContainerRef,
-        static_ipv4: Option<&'a str>,
+        static_ipv4: Option<std::net::Ipv4Addr>,
     ) -> Result<(), DockerError>;
     async fn disconnect_network(
         &self,
@@ -310,11 +310,11 @@ impl Client for UdsClient {
         .map(|_| ())
     }
 
-    async fn connect_network<'a>(
+    async fn connect_network(
         &self,
         network_name: &NetworkName,
         container_ref: ContainerRef,
-        static_ipv4: Option<&'a str>,
+        static_ipv4: Option<std::net::Ipv4Addr>,
     ) -> Result<(), DockerError> {
         let target_network = network::inspect_by_name(
             Arc::clone(&self.reporter),

@@ -155,8 +155,9 @@ pub fn service_definition(douglas_folders: &DouglasFolders) -> ServiceDefinition
                 douglas_folders.rolodex(),
                 Modes::InheritedOwnerReadWriteExecuteGroupReadWriteExecute,
             ),
+            (douglas_folders.credentials(), Modes::OwnerReadWriteExecute),
             (
-                douglas_folders.credentials(),
+                douglas_folders.identity.clone(),
                 Modes::OwnerReadWriteExecute,
             ),
             (
@@ -202,7 +203,7 @@ async fn ensure_system_network(
         return Ok(());
     }
 
-    docker_client.create_network(&network_name).await
+    docker_client.create_network(&network_name, None).await
 }
 
 type Context<'a> = blueprint::StandardContext<'a>;
@@ -318,7 +319,7 @@ mod tests {
         well_known::{DOUGLAS_ADMIN_GROUP, DOUGLAS_RESIN_BRACT_GROUP},
     };
     use docker::{DockerError, MockClient, client::Client, client::MockClientBuilder};
-    use file_system::{MockFolder, MockPermissions};
+    use file_system::{MockFolder, MockPermissions, Modes};
     use log::{Event, Reporter};
     use std::path::PathBuf;
     use std::sync::Arc;
@@ -391,6 +392,36 @@ mod tests {
             == &douglas_folders.socket_dir(reconcile_trigger_types::SOCKET_NAME)));
     }
 
+    #[test]
+    fn test_service_definition_should_own_the_credentials_directory_as_owner_only() {
+        let douglas_folders = DouglasFolders::new();
+
+        let definition = service_definition(&douglas_folders);
+
+        assert!(
+            definition
+                .owned_folders
+                .iter()
+                .any(|(path, mode)| path == &douglas_folders.credentials()
+                    && mode == &Modes::OwnerReadWriteExecute)
+        );
+    }
+
+    #[test]
+    fn test_service_definition_should_own_the_identity_directory_as_owner_only() {
+        let douglas_folders = DouglasFolders::new();
+
+        let definition = service_definition(&douglas_folders);
+
+        assert!(
+            definition
+                .owned_folders
+                .iter()
+                .any(|(path, mode)| path == &douglas_folders.identity
+                    && mode == &Modes::OwnerReadWriteExecute)
+        );
+    }
+
     fn client_builder_returning(client: MockClient) -> MockClientBuilder {
         let mut builder = MockClientBuilder::new();
         builder
@@ -459,8 +490,8 @@ mod tests {
             .returning(|_| Ok(false));
         client
             .expect_create_network()
-            .withf(|name| name == &expected_network_name())
-            .returning(|_| Ok(()));
+            .withf(|name, subnet| name == &expected_network_name() && subnet.is_none())
+            .returning(|_, _| Ok(()));
 
         let result = super::ensure_system_network(&client).await;
 

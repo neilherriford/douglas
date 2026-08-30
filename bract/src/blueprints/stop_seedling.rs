@@ -1,4 +1,4 @@
-use crate::blueprints::container_name;
+use crate::blueprints::{agent_container_name, container_name};
 use crate::labels;
 use async_trait::async_trait;
 use blueprint::{
@@ -34,6 +34,9 @@ struct State {
     container_name: docker_types::ContainerName,
     version: Option<seedbank_types::Version>,
     origin: Option<labels::Origin>,
+    agent_container_exists: bool,
+    agent_container_is_running: bool,
+    agent_container_name: docker_types::ContainerName,
 }
 
 pub async fn execute(
@@ -107,7 +110,22 @@ impl<'a> StateObserver<'a> {
             container_name: container_name(name)?,
             version: None,
             origin: None,
+            agent_container_exists: false,
+            agent_container_is_running: false,
+            agent_container_name: agent_container_name(name)?,
         };
+
+        result.agent_container_exists = self
+            .docker_client
+            .container_exists(ContainerRef::FullName(result.agent_container_name.clone()))
+            .await?;
+        if result.agent_container_exists {
+            result.agent_container_is_running = self
+                .docker_client
+                .container_status(ContainerRef::FullName(result.agent_container_name.clone()))
+                .await?
+                == docker_types::Status::Running;
+        }
 
         if !self
             .docker_client
@@ -147,20 +165,24 @@ fn create_plan<'a>(
 ) -> Result<Vec<Step<'a>>, StopSeedlingError> {
     let mut steps: Vec<Box<dyn Command<Context>>> = Vec::new();
 
-    if !state.container_exists {
-        return Ok(steps);
-    }
-    if state.origin == Some(labels::Origin::Core) {
-        return Err(StopSeedlingError::CoreSeedling(name.to_string()));
-    }
-    if !state.container_is_running {
-        return Ok(steps);
+    if state.container_exists {
+        if state.origin == Some(labels::Origin::Core) {
+            return Err(StopSeedlingError::CoreSeedling(name.to_string()));
+        }
+        if state.container_is_running {
+            push_step(
+                &mut steps,
+                StopSeedling::new(name.clone(), state.container_name, state.version),
+            );
+        }
     }
 
-    push_step(
-        &mut steps,
-        StopSeedling::new(name.clone(), state.container_name, state.version),
-    );
+    if state.agent_container_is_running {
+        push_step(
+            &mut steps,
+            StopSeedling::new(name.clone(), state.agent_container_name, None),
+        );
+    }
 
     Ok(steps)
 }
@@ -235,6 +257,9 @@ mod tests {
             container_name: container_name(&name()).unwrap(),
             version: Some(seedbank_types::Version(1)),
             origin: Some(labels::Origin::User),
+            agent_container_exists: false,
+            agent_container_is_running: false,
+            agent_container_name: agent_container_name(&name()).unwrap(),
         }
     }
 
@@ -308,5 +333,44 @@ mod tests {
         );
 
         assert!(matches!(result, Err(StopSeedlingError::CoreSeedling(_))));
+    }
+
+    #[test]
+    fn test_create_plan_should_also_stop_a_running_agent_container() {
+        let steps = create_plan(
+            &name(),
+            State {
+                agent_container_exists: true,
+                agent_container_is_running: true,
+                ..stoppable_state()
+            },
+        )
+        .expect("should produce a plan");
+
+        assert_eq!(
+            step_descriptions(steps),
+            vec![
+                "Stopping seedling 'traefik' (v1)",
+                "Stopping seedling 'traefik'",
+            ]
+        );
+    }
+
+    #[test]
+    fn test_create_plan_should_skip_stopping_an_agent_container_that_is_not_running() {
+        let steps = create_plan(
+            &name(),
+            State {
+                agent_container_exists: true,
+                agent_container_is_running: false,
+                ..stoppable_state()
+            },
+        )
+        .expect("should produce a plan");
+
+        assert_eq!(
+            step_descriptions(steps),
+            vec!["Stopping seedling 'traefik' (v1)"]
+        );
     }
 }

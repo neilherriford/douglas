@@ -1,5 +1,5 @@
 use crate::{
-    blueprints::{EXPECTED_MOUNT_MODE, container_name},
+    blueprints::{EXPECTED_MOUNT_MODE, agent_container_name, container_name},
     labels,
     rolodex::{Rolodex, RolodexError},
 };
@@ -54,6 +54,9 @@ struct State {
     container_name: Option<docker_types::ContainerName>,
     version: Option<seedbank_types::Version>,
     origin: Option<labels::Origin>,
+    agent_container_exists: bool,
+    agent_container_is_running: bool,
+    agent_container_name: Option<docker_types::ContainerName>,
 }
 
 pub async fn execute(
@@ -163,6 +166,20 @@ impl<'a> StateObserver<'a> {
             .start_guard();
 
         let mut result = State::default();
+
+        let agent_container = agent_container_name(name)?;
+        result.agent_container_name = Some(agent_container.clone());
+        result.agent_container_exists = self
+            .docker_client
+            .container_exists(ContainerRef::FullName(agent_container.clone()))
+            .await?;
+        if result.agent_container_exists {
+            result.agent_container_is_running = self
+                .docker_client
+                .container_status(ContainerRef::FullName(agent_container))
+                .await?
+                == docker_types::Status::Running;
+        }
 
         if !self.seedbank_client.exists(name).await? {
             return Ok(result);
@@ -310,6 +327,22 @@ fn create_plan<'a>(
         ));
     }
 
+    let version = state
+        .version
+        .ok_or(StartSeedlingError::CannotStartSeedling(
+            "Docker instance not initialized".to_string(),
+        ))?;
+
+    if state.agent_container_exists
+        && !state.agent_container_is_running
+        && let Some(agent_container_name) = state.agent_container_name
+    {
+        push_step(
+            &mut steps,
+            StartSeedling::new(name.clone(), agent_container_name, version.clone()),
+        );
+    }
+
     push_step(
         &mut steps,
         StartSeedling::new(
@@ -319,11 +352,7 @@ fn create_plan<'a>(
                 .ok_or(StartSeedlingError::CannotStartSeedling(
                     "Docker instance not initialized".to_string(),
                 ))?,
-            state
-                .version
-                .ok_or(StartSeedlingError::CannotStartSeedling(
-                    "Docker instance not initialized".to_string(),
-                ))?,
+            version,
         ),
     );
 
@@ -409,6 +438,9 @@ mod tests {
             container_name: Some(container_name(&name()).unwrap()),
             version: Some(seedbank_types::Version(1)),
             origin: Some(labels::Origin::User),
+            agent_container_exists: false,
+            agent_container_is_running: false,
+            agent_container_name: Some(agent_container_name(&name()).unwrap()),
         }
     }
 
@@ -501,5 +533,62 @@ mod tests {
         );
 
         assert!(matches!(result, Err(StartSeedlingError::CoreSeedling(_))));
+    }
+
+    #[test]
+    fn test_create_plan_should_start_a_stopped_agent_container_before_the_app() {
+        let steps = create_plan(
+            &name(),
+            State {
+                agent_container_exists: true,
+                agent_container_is_running: false,
+                ..startable_state()
+            },
+        )
+        .expect("should produce a plan");
+
+        assert_eq!(
+            step_descriptions(steps),
+            vec![
+                "Starting seedling 'traefik' (v1)",
+                "Starting seedling 'traefik' (v1)",
+            ]
+        );
+    }
+
+    #[test]
+    fn test_create_plan_should_skip_the_agent_when_it_does_not_exist() {
+        let steps = create_plan(
+            &name(),
+            State {
+                agent_container_exists: false,
+                agent_container_is_running: false,
+                ..startable_state()
+            },
+        )
+        .expect("should produce a plan");
+
+        assert_eq!(
+            step_descriptions(steps),
+            vec!["Starting seedling 'traefik' (v1)"]
+        );
+    }
+
+    #[test]
+    fn test_create_plan_should_skip_the_agent_when_already_running() {
+        let steps = create_plan(
+            &name(),
+            State {
+                agent_container_exists: true,
+                agent_container_is_running: true,
+                ..startable_state()
+            },
+        )
+        .expect("should produce a plan");
+
+        assert_eq!(
+            step_descriptions(steps),
+            vec!["Starting seedling 'traefik' (v1)"]
+        );
     }
 }

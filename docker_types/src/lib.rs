@@ -755,7 +755,7 @@ pub type NetworkName = Validated<DockerNameRules>;
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub struct Ipv4Subnet {
     pub cidr: String,
-    pub gateway: String,
+    pub gateway: std::net::Ipv4Addr,
 }
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]

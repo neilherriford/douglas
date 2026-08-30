@@ -53,6 +53,12 @@ assert_failure "hello-world container no longer exists" ssh_out \
 assert_failure "traefik route file no longer exists" ssh_out \
     "sudo test -f /var/lib/douglas/mounts/traefik/config/dynamic/hello-world.yml"
 
+# Drop also wipes hello-world's own live mount dir (distinct from
+# seedbank's copy, already checked above) — see
+# bract/src/blueprints/drop_seedling.rs's DeleteSeedlingMounts.
+assert_failure "hello-world's own live mount dir no longer exists" ssh_out \
+    "sudo test -e /var/lib/douglas/mounts/hello-world"
+
 wait_until "hello-world no longer responds through traefik with HTTP 200" 15 ssh_out \
     "[ \"\$(curl -s -o /dev/null -w '%{http_code}' http://localhost/)\" != 200 ]"
 

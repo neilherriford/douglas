@@ -30,14 +30,21 @@ cd "$(dirname "${BASH_SOURCE[0]}")"
 ORANGE=$'\033[38;5;208m'
 RESET=$'\033[0m'
 
+run_started_at=$SECONDS
+
 for step in steps/[0-9]*.sh; do
-    echo "${ORANGE}=== $step ===${RESET}"
+    step_started_at=$SECONDS
+    echo "${ORANGE}=== $step (started $(date '+%H:%M:%S')) ===${RESET}"
     if ! bash "$step"; then
+        step_elapsed=$((SECONDS - step_started_at))
         echo "${ORANGE}----${RESET}"
-        echo "FAILED at $step — stopping (later steps assume this one passed)"
+        echo "FAILED at $step after ${step_elapsed}s — stopping (later steps assume this one passed)"
         exit 1
     fi
+    step_elapsed=$((SECONDS - step_started_at))
+    echo "${ORANGE}--- $step finished in ${step_elapsed}s ---${RESET}"
 done
 
+total_elapsed=$((SECONDS - run_started_at))
 echo "${ORANGE}----${RESET}"
-echo "all steps passed"
+echo "all steps passed in ${total_elapsed}s"

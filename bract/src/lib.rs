@@ -4,6 +4,7 @@ mod protocol;
 mod rolodex;
 
 pub use blueprints::bootstrap::service_definition;
+pub use blueprints::traefik_dynamic_dir;
 pub use bract_types::{Mount, Request, Response, SeedlingStatus, ServerMessage, Service};
 
 use crate::{
@@ -21,8 +22,8 @@ use docker::{
 use docker_types::{ContainerName, Registry};
 use file_system::{
     BindableUnixDomainSocketFile, FileDeleter, FileReader, FileSystemError, FileWriter, Folder,
-    Inspect, Permissions, UnixDomainSocket, UnixFileDeleter, UnixFileReader, UnixFileWriter,
-    UnixFolder, UnixInspect, UnixPermissions,
+    FolderDeleter, Inspect, Permissions, UnixDomainSocket, UnixFileDeleter, UnixFileReader,
+    UnixFileWriter, UnixFolder, UnixFolderDeleter, UnixInspect, UnixPermissions,
 };
 use log::{BufferedFileReporter, ChannelReporter, Reporter, ScopeKind, Span, TeeReporter};
 use os::{Os, Unix};
@@ -74,6 +75,14 @@ pub enum Error {
     FindOrphansError(#[from] blueprints::find_orphans::FindOrphansError),
     #[error("Failed to prune orphans: {0}")]
     PruneOrphansError(#[from] blueprints::prune_orphans::PruneOrphansError),
+    #[error("Failed to determine OpenBao status: {0}")]
+    OpenBaoStatusError(#[from] blueprints::openbao_status::OpenBaoStatusError),
+    #[error("Failed to provision seedling secrets: {0}")]
+    ProvisionSeedlingSecretsError(
+        #[from] blueprints::provision_seedling_secrets::ProvisionSeedlingSecretsError,
+    ),
+    #[error("Name parse error: {0}")]
+    NameParseError(#[from] seedbank_types::NameParseError),
 }
 
 #[derive(Error, Debug)]
@@ -123,6 +132,11 @@ pub trait Server: Send + Sync {
         reporter: Arc<dyn Reporter>,
         orphans: &bract_types::Orphans,
     ) -> Result<(), Error>;
+    async fn list_seedlings(&self, reporter: Arc<dyn Reporter>) -> Result<Vec<Name>, Error>;
+    async fn openbao_status(
+        &self,
+        reporter: Arc<dyn Reporter>,
+    ) -> Result<bract_types::OpenBaoReport, Error>;
 }
 
 pub struct Bract {
@@ -138,12 +152,15 @@ pub struct Bract {
     file_reader: Arc<dyn FileReader>,
     file_writer: Arc<dyn FileWriter>,
     file_deleter: Arc<dyn FileDeleter>,
+    folder_deleter: Arc<dyn FolderDeleter>,
     permissions: Arc<dyn Permissions>,
     douglas_folders: DouglasFolders,
     docker_client_builder: Arc<dyn ClientBuilder>,
     resin_client_builder: Arc<dyn resin_client::ClientBuilder>,
+    openbao_client_factory: Arc<dyn openbao::ClientFactory>,
     rolodex: Arc<dyn Rolodex>,
     registry: Registry,
+    ram_disk: Arc<dyn ram_disk::RamDisk>,
 }
 
 impl Bract {
@@ -152,6 +169,7 @@ impl Bract {
         let credentials = create_credentials(Arc::clone(&os));
         let folder = Box::new(UnixFolder::new());
         let file_deleter: Arc<dyn FileDeleter> = Arc::new(UnixFileDeleter::new());
+        let folder_deleter: Arc<dyn FolderDeleter> = Arc::new(UnixFolderDeleter::new());
         let unix_domain_socket: Arc<dyn BindableUnixDomainSocketFile> =
             Arc::new(UnixDomainSocket::new());
         let permissions = Box::new(UnixPermissions::new());
@@ -206,12 +224,16 @@ impl Bract {
         );
 
         let credentials = Arc::from(create_credentials(Arc::clone(&os)));
+        let ram_disk: Arc<dyn ram_disk::RamDisk> =
+            Arc::from(ram_disk::create_ram_disk(Arc::clone(&os)));
         let inspect = Arc::new(UnixInspect::new());
         let folder: Arc<dyn Folder> = Arc::new(UnixFolder::new());
         let file_reader: Arc<dyn FileReader> = Arc::new(UnixFileReader::new());
         let file_writer: Arc<dyn FileWriter> = Arc::new(UnixFileWriter::new());
         let docker_client_builder = Arc::new(UdsClientBuilder);
         let resin_client_builder = Arc::new(LocalhostClientBuilder);
+        let openbao_client_factory: Arc<dyn openbao::ClientFactory> =
+            Arc::new(openbao::SocketClientFactory::new(Arc::clone(&reporter)));
         let rolodex = Arc::new(FileRolodex::new(
             douglas_folders.rolodex(),
             Arc::clone(&credentials),
@@ -233,14 +255,17 @@ impl Bract {
             file_reader,
             file_writer,
             file_deleter,
+            folder_deleter,
             permissions: Arc::clone(&permissions),
             douglas_folders: DouglasFolders::new(),
             docker_client_builder,
             resin_client_builder,
+            openbao_client_factory,
             rolodex,
             registry: format!("localhost:{}", resin_types::DEFAULT_PORT)
                 .parse()
                 .map_err(|err: docker_types::RegistryError| Error::BuildError(err.to_string()))?,
+            ram_disk,
         })
     }
 
@@ -453,8 +478,57 @@ impl Bract {
             }
         };
 
-        let result = blueprints::reconcile_seedling::execute(
-            Arc::clone(&self.reporter),
+        let result = self
+            .do_reconcile_seedling(
+                Arc::clone(&self.reporter),
+                &name,
+                &seedling.version,
+                &seedling.definition,
+                Some(&seedling.id),
+                labels::Origin::User,
+            )
+            .await;
+
+        match result {
+            Ok(()) => guard.finish_with_outcome(log::Outcome::Ok),
+            Err(err) => {
+                guard.span().message(
+                    log::Level::Warn,
+                    &format!("Triggered reconcile for '{name}' failed: {err}"),
+                );
+                guard.finish_with_outcome(log::Outcome::Failed);
+            }
+        }
+    }
+
+    async fn do_reconcile_seedling(
+        &self,
+        reporter: Arc<dyn Reporter>,
+        name: &seedbank_types::Name,
+        version: &seedbank_types::Version,
+        seedling_definition: &seedbank_types::SeedlingDefinition,
+        seedling_id: Option<&seedbank_types::Id>,
+        origin: labels::Origin,
+    ) -> Result<(), Error> {
+        let mut identity = identity::LocalIdentity::new(
+            Arc::clone(&self.file_reader),
+            Arc::clone(&self.file_writer),
+        );
+        let agent_provisioning =
+            blueprints::provision_seedling_secrets::provision_agent_if_requested(
+                self.openbao_client_factory.as_ref(),
+                self.file_reader.as_ref(),
+                &mut identity,
+                &self.douglas_folders,
+                name,
+                seedling_id,
+                seedling_definition,
+            )
+            .await
+            .map_err(Error::from)?;
+
+        blueprints::reconcile_seedling::execute(
+            Arc::clone(&reporter),
             &*self.credentials,
             &*self.inspect,
             &*self.folder,
@@ -467,44 +541,28 @@ impl Bract {
             self.seedbank_client.as_ref(),
             &self.registry,
             &*self.rolodex,
-            &name,
-            &seedling.version,
-            &seedling.definition,
-            labels::Origin::User,
+            name,
+            version,
+            seedling_definition,
+            agent_provisioning.as_ref(),
+            origin,
+            self.ram_disk.as_ref(),
         )
-        .await;
+        .await
+        .map_err(Error::from)?;
 
-        match result {
-            Ok(()) => {
-                if let Err(err) = blueprints::write_traefik_routes::execute(
-                    Arc::clone(&self.reporter),
-                    self.seedbank_client.as_ref(),
-                    self.docker_client.as_ref(),
-                    self.folder.as_ref(),
-                    self.file_writer.as_ref(),
-                    &*self.permissions,
-                    &*self.rolodex,
-                    &self.douglas_folders,
-                )
-                .await
-                {
-                    guard.span().message(
-                        log::Level::Warn,
-                        &format!(
-                            "Could not write traefik routes after reconciling '{name}': {err}"
-                        ),
-                    );
-                }
-                guard.finish_with_outcome(log::Outcome::Ok);
-            }
-            Err(err) => {
-                guard.span().message(
-                    log::Level::Warn,
-                    &format!("Triggered reconcile for '{name}' failed: {err}"),
-                );
-                guard.finish_with_outcome(log::Outcome::Failed);
-            }
-        }
+        blueprints::write_traefik_routes::execute(
+            reporter,
+            self.seedbank_client.as_ref(),
+            self.docker_client.as_ref(),
+            self.folder.as_ref(),
+            self.file_writer.as_ref(),
+            &*self.permissions,
+            &*self.rolodex,
+            &self.douglas_folders,
+        )
+        .await
+        .map_err(Error::from)
     }
 
     async fn write_message(
@@ -608,40 +666,15 @@ impl Server for Bract {
         version: &seedbank_types::Version,
         seedling_definition: &seedbank_types::SeedlingDefinition,
     ) -> Result<(), Error> {
-        blueprints::reconcile_seedling::execute(
-            Arc::clone(&reporter),
-            &*self.credentials,
-            &*self.inspect,
-            &*self.folder,
-            &*self.file_reader,
-            &*self.file_writer,
-            &*self.permissions,
-            &self.douglas_folders,
-            &*self.docker_client_builder,
-            &*self.resin_client_builder,
-            self.seedbank_client.as_ref(),
-            &self.registry,
-            &*self.rolodex,
+        self.do_reconcile_seedling(
+            reporter,
             name,
             version,
             seedling_definition,
+            None,
             labels::Origin::Core,
         )
         .await
-        .map_err(Error::from)?;
-
-        blueprints::write_traefik_routes::execute(
-            reporter,
-            self.seedbank_client.as_ref(),
-            self.docker_client.as_ref(),
-            self.folder.as_ref(),
-            self.file_writer.as_ref(),
-            &*self.permissions,
-            &*self.rolodex,
-            &self.douglas_folders,
-        )
-        .await
-        .map_err(Error::from)
     }
 
     async fn start_seedling(&self, reporter: Arc<dyn Reporter>, name: &Name) -> Result<(), Error> {
@@ -668,14 +701,59 @@ impl Server for Bract {
     }
 
     async fn drop_seedling(&self, reporter: Arc<dyn Reporter>, name: &Name) -> Result<(), Error> {
+        if self
+            .seedbank_client
+            .exists(name)
+            .await
+            .map_err(|err| Error::SeedbankError(err.to_string()))?
+        {
+            let seedling = self
+                .seedbank_client
+                .load(name)
+                .await
+                .map_err(|err| Error::SeedbankError(err.to_string()))?;
+
+            let mut identity = identity::LocalIdentity::new(
+                Arc::clone(&self.file_reader),
+                Arc::clone(&self.file_writer),
+            );
+            if let Err(err) = blueprints::provision_seedling_secrets::revoke_if_provisioned(
+                self.openbao_client_factory.as_ref(),
+                self.file_reader.as_ref(),
+                &mut identity,
+                &self.douglas_folders,
+                name,
+                &seedling.definition,
+            )
+            .await
+            {
+                let guard = Span::new(
+                    Arc::clone(&reporter),
+                    "Revoking OpenBao secrets",
+                    ScopeKind::Step,
+                )
+                .start_guard();
+                guard.span().message(
+                    log::Level::Warn,
+                    &format!(
+                        "Could not revoke OpenBao secrets for '{name}': {err}. Dropping the rest of the seedling anyway; run 'seedling prune' to clean this up later."
+                    ),
+                );
+                guard.finish_with_outcome(log::Outcome::Failed);
+            }
+        }
+
         blueprints::drop_seedling::execute(
             reporter,
             &*self.docker_client_builder,
             &*self.resin_client_builder,
             self.seedbank_client.as_ref(),
             self.file_deleter.as_ref(),
+            self.folder_deleter.as_ref(),
             &*self.file_reader,
+            self.folder.as_ref(),
             &self.douglas_folders,
+            self.ram_disk.as_ref(),
             name,
         )
         .await
@@ -711,12 +789,20 @@ impl Server for Bract {
             .await
             .map_err(|err| Error::BuildError(err.to_string()))?;
 
+        let mut identity = identity::LocalIdentity::new(
+            Arc::clone(&self.file_reader),
+            Arc::clone(&self.file_writer),
+        );
+
         blueprints::find_orphans::execute(
             self.seedbank_client.as_ref(),
             self.docker_client.as_ref(),
             resin_client.as_mut(),
             self.folder.as_ref(),
             &self.douglas_folders,
+            self.openbao_client_factory.as_ref(),
+            self.file_reader.as_ref(),
+            &mut identity,
         )
         .await
         .map_err(Error::from)
@@ -733,13 +819,56 @@ impl Server for Bract {
             .await
             .map_err(|err| Error::BuildError(err.to_string()))?;
 
+        let mut identity = identity::LocalIdentity::new(
+            Arc::clone(&self.file_reader),
+            Arc::clone(&self.file_writer),
+        );
+
         blueprints::prune_orphans::execute(
             reporter,
             self.docker_client.as_ref(),
             resin_client.as_mut(),
             self.file_deleter.as_ref(),
+            self.folder_deleter.as_ref(),
+            self.openbao_client_factory.as_ref(),
+            self.file_reader.as_ref(),
+            &mut identity,
             &self.douglas_folders,
             orphans,
+        )
+        .await
+        .map_err(Error::from)
+    }
+
+    async fn list_seedlings(&self, _reporter: Arc<dyn Reporter>) -> Result<Vec<Name>, Error> {
+        self.seedbank_client
+            .list()
+            .await
+            .map_err(|err| Error::SeedbankError(err.to_string()))
+    }
+
+    async fn openbao_status(
+        &self,
+        reporter: Arc<dyn Reporter>,
+    ) -> Result<bract_types::OpenBaoReport, Error> {
+        let openbao_name: Name = openbao::SEEDLING_NAME.parse()?;
+        let is_running = matches!(
+            self.seedling_status(Arc::clone(&reporter), &openbao_name)
+                .await?,
+            SeedlingStatus::Running(..)
+        );
+
+        let mut identity = identity::LocalIdentity::new(
+            Arc::clone(&self.file_reader),
+            Arc::clone(&self.file_writer),
+        );
+
+        blueprints::openbao_status::execute(
+            self.openbao_client_factory.as_ref(),
+            self.file_reader.as_ref(),
+            &mut identity,
+            is_running,
+            &self.douglas_folders,
         )
         .await
         .map_err(Error::from)

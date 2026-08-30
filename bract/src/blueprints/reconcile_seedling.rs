@@ -1,5 +1,8 @@
 use crate::{
-    blueprints::{EXPECTED_MOUNT_MODE, SYSTEM_NETWORK_NAME, container_name, seedling_network_name},
+    blueprints::{
+        AGENT_MOUNT_RAM_DISK_SIZE_MB, EXPECTED_MOUNT_MODE, SYSTEM_NETWORK_NAME,
+        agent_container_name, container_name, provision_seedling_secrets, seedling_network_name,
+    },
     labels::{self},
     rolodex::{Rolodex, RolodexError},
 };
@@ -23,6 +26,7 @@ use file_system::{
     path_to_string,
 };
 use log::{Level, Reporter, ScopeKind, Span};
+use ram_disk::RamDisk;
 use seedbank_types::{MountContents, MountFile};
 use std::{
     cmp::Ordering,
@@ -59,12 +63,15 @@ pub enum ReconcileSeedlingError {
     SeedbankError(#[from] seedbank_client::Error),
     #[error("Refusing to downgrade: the running container is newer than the declared version")]
     WouldDowngrade,
+    #[error("Agent provisioning was requested but not available")]
+    MissingAgentProvisioning,
 }
 
 struct Context<'a> {
     name: &'a seedbank_types::Name,
     version: &'a seedbank_types::Version,
     seedling_definition: &'a seedbank_types::SeedlingDefinition,
+    agent_provisioning: Option<&'a provision_seedling_secrets::AgentProvisioning>,
     credentials: &'a dyn Credentials,
     docker_client: &'a mut dyn docker::client::Client,
     seedbank_client: &'a dyn seedbank_client::Client,
@@ -75,6 +82,7 @@ struct Context<'a> {
     permissions: &'a dyn Permissions,
     registry: &'a docker_types::Registry,
     origin: labels::Origin,
+    ram_disk: &'a dyn RamDisk,
 }
 
 #[derive(Debug)]
@@ -91,6 +99,9 @@ struct State {
     needs_mount_ownership: Vec<(PathBuf, seedbank_types::Name, seedbank_types::MountType)>,
     missing_mount_mode: Vec<(PathBuf, Modes)>,
     missing_mount_files: Vec<(PathBuf, String, Vec<u8>)>,
+    agent_missing_service_credentials: bool,
+    agent_container_exists: bool,
+    agent_container_is_running: bool,
 }
 
 #[derive(Default, Debug, PartialEq, Eq)]
@@ -127,7 +138,9 @@ pub async fn execute(
     name: &seedbank_types::Name,
     version: &seedbank_types::Version,
     seedling_definition: &seedbank_types::SeedlingDefinition,
+    agent_provisioning: Option<&provision_seedling_secrets::AgentProvisioning>,
     origin: labels::Origin,
+    ram_disk: &dyn RamDisk,
 ) -> Result<(), ReconcileSeedlingError> {
     let guard = Span::new(
         Arc::clone(&reporter),
@@ -167,20 +180,19 @@ pub async fn execute(
             registry,
         );
         state_observer
-            .discover(guard.span(), name, version, seedling_definition)
+            .discover(
+                guard.span(),
+                name,
+                version,
+                seedling_definition,
+                agent_provisioning.is_some(),
+            )
             .await?
     };
 
     let plan = match resolve_plan(
         guard.span(),
-        create_plan(
-            douglas_folders.clone(),
-            name,
-            version,
-            seedling_definition,
-            state,
-            registry,
-        ),
+        create_plan(name, version, seedling_definition, state, registry),
     ) {
         Ok(plan) => plan,
         Err(err) => return guard.finish(Err(err)),
@@ -191,6 +203,7 @@ pub async fn execute(
             name,
             version,
             seedling_definition,
+            agent_provisioning,
             credentials,
             docker_client: &mut *docker_client,
             seedbank_client,
@@ -201,6 +214,7 @@ pub async fn execute(
             file_writer,
             registry,
             origin,
+            ram_disk,
         };
         execute_plan(guard.span(), plan, &mut context, |reason| {
             ReconcileSeedlingError::FailedBoostrap(vec![reason])
@@ -257,6 +271,7 @@ impl<'a> StateObserver<'a> {
         name: &seedbank_types::Name,
         version: &seedbank_types::Version,
         seedling_definition: &seedbank_types::SeedlingDefinition,
+        agent_requested: bool,
     ) -> Result<State, ReconcileSeedlingError> {
         let guard = span
             .create_child(
@@ -278,7 +293,26 @@ impl<'a> StateObserver<'a> {
             needs_mount_ownership: Vec::new(),
             missing_mount_mode: Vec::new(),
             missing_mount_files: Vec::new(),
+            agent_missing_service_credentials: true,
+            agent_container_exists: false,
+            agent_container_is_running: false,
         };
+
+        if agent_requested {
+            let agent_account = provision_seedling_secrets::agent_account_full_name(name);
+            result.agent_missing_service_credentials =
+                self.rolodex.find_service_account(&agent_account)?.is_none();
+
+            let agent_container = agent_container_name(name)?;
+            result.agent_container_exists = self
+                .docker_client
+                .container_exists(ContainerRef::FullName(agent_container.clone()))
+                .await?;
+            if result.agent_container_exists {
+                result.agent_container_is_running =
+                    self.discover_container_is_running(&agent_container).await?;
+            }
+        }
 
         result.seedling_version = self
             .discover_current_seedbank_version(name, version)
@@ -612,7 +646,6 @@ impl<'a> StateObserver<'a> {
 type Step<'a> = Box<dyn Command<Context<'a>>>;
 
 fn create_plan<'a>(
-    douglas_folders: DouglasFolders,
     name: &seedbank_types::Name,
     version: &seedbank_types::Version,
     seedling_definition: &seedbank_types::SeedlingDefinition,
@@ -635,6 +668,12 @@ fn create_plan<'a>(
 
     if state.missing_service_credentials {
         push_step(&mut steps, CreateServiceAccount::new(name.clone()));
+    }
+
+    let agent_requested = seedling_definition.secrets.is_some();
+
+    if agent_requested && state.agent_missing_service_credentials {
+        push_step(&mut steps, CreateAgentServiceAccount::new(name.clone()));
     }
 
     for (mount_name, guest_names) in state.missing_share_groups {
@@ -673,13 +712,33 @@ fn create_plan<'a>(
         ),
     }
 
+    if agent_requested {
+        push_step(&mut steps, EnsureAgentMount::new(name.clone()));
+
+        if !state.agent_container_exists {
+            push_step(
+                &mut steps,
+                BuildAgentContainer::new(name.clone(), version.clone()),
+            );
+            push_step(
+                &mut steps,
+                StartContainer::new(agent_container_name(name)?, version.clone()),
+            );
+        } else if !state.agent_container_is_running {
+            push_step(
+                &mut steps,
+                StartContainer::new(agent_container_name(name)?, version.clone()),
+            );
+        }
+    }
+
     let container_name = state.container_name;
 
     match state.container_status {
         VersionComparison::Missing => {
             push_step(
                 &mut steps,
-                BuildContainer::new(douglas_folders.clone(), name.clone(), version.clone()),
+                BuildContainer::new(name.clone(), version.clone()),
             );
             push_step(
                 &mut steps,
@@ -711,7 +770,7 @@ fn create_plan<'a>(
             );
             push_step(
                 &mut steps,
-                BuildContainer::new(douglas_folders.clone(), name.clone(), version.clone()),
+                BuildContainer::new(name.clone(), version.clone()),
             );
             push_step(
                 &mut steps,
@@ -885,6 +944,55 @@ impl<'a> Command<Context<'a>> for CreateServiceAccount {
             .start_guard();
 
         context.rolodex.create_service_account(self.name.as_ref())?;
+
+        guard.finish_with_outcome(log::Outcome::Ok);
+        Ok(())
+    }
+}
+
+struct CreateAgentServiceAccount {
+    seedling_name: seedbank_types::Name,
+}
+
+impl CreateAgentServiceAccount {
+    pub fn new(seedling_name: seedbank_types::Name) -> Self {
+        Self { seedling_name }
+    }
+}
+
+impl std::fmt::Display for CreateAgentServiceAccount {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Creating OpenBao agent service account for '{}'",
+            self.seedling_name
+        )
+    }
+}
+
+#[async_trait]
+impl<'a> Command<Context<'a>> for CreateAgentServiceAccount {
+    fn name(&self) -> String {
+        "Creating OpenBao agent service account".to_string()
+    }
+
+    async fn run(
+        &mut self,
+        span: &Span,
+        context: &mut Context<'a>,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let guard = span
+            .create_child(
+                &format!(
+                    "Creating OpenBao agent service account for '{}'…",
+                    self.seedling_name
+                ),
+                ScopeKind::Step,
+            )
+            .start_guard();
+
+        let account_name = provision_seedling_secrets::agent_account_full_name(&self.seedling_name);
+        context.rolodex.create_service_account(&account_name)?;
 
         guard.finish_with_outcome(log::Outcome::Ok);
         Ok(())
@@ -1184,6 +1292,97 @@ impl<'a> Command<Context<'a>> for SetMountMode {
     }
 }
 
+struct EnsureAgentMount {
+    seedling_name: seedbank_types::Name,
+}
+
+impl EnsureAgentMount {
+    pub fn new(seedling_name: seedbank_types::Name) -> Self {
+        Self { seedling_name }
+    }
+}
+
+impl std::fmt::Display for EnsureAgentMount {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Ensuring OpenBao agent mount for '{}'",
+            self.seedling_name
+        )
+    }
+}
+
+#[async_trait]
+impl<'a> Command<Context<'a>> for EnsureAgentMount {
+    fn name(&self) -> String {
+        "Ensuring OpenBao agent mount".to_string()
+    }
+
+    async fn run(
+        &mut self,
+        span: &Span,
+        context: &mut Context<'a>,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let guard = span
+            .create_child(
+                &format!("Ensuring OpenBao agent mount for '{}'…", self.seedling_name),
+                ScopeKind::Step,
+            )
+            .start_guard();
+
+        let Some(agent_provisioning) = context.agent_provisioning else {
+            guard.finish_with_outcome(log::Outcome::Failed);
+            return Err(Box::new(ReconcileSeedlingError::MissingAgentProvisioning));
+        };
+
+        context
+            .folder
+            .create_recursively(&agent_provisioning.mount_dir)?;
+        let swap_protected = context
+            .ram_disk
+            .mount(&agent_provisioning.mount_dir, AGENT_MOUNT_RAM_DISK_SIZE_MB)?;
+        if !swap_protected {
+            guard.span().message(
+                log::Level::Warn,
+                &format!(
+                    "'{}' agent credentials are on a RAM disk without swap protection (kernel predates tmpfs's noswap option) — they could be paged out to a real disk under memory pressure",
+                    self.seedling_name
+                ),
+            );
+        }
+
+        let account_name = provision_seedling_secrets::agent_account_full_name(&self.seedling_name);
+        let Some(service_account) = context.rolodex.find_service_account(&account_name)? else {
+            guard.finish_with_outcome(log::Outcome::Failed);
+            return Err(Box::new(ReconcileSeedlingError::MissingServiceAccount));
+        };
+        context.permissions.change_user_and_group_ownership(
+            &agent_provisioning.mount_dir,
+            &service_account.user.system_name,
+            &service_account.group.system_name,
+        )?;
+        context
+            .permissions
+            .change_mode(&agent_provisioning.mount_dir, &EXPECTED_MOUNT_MODE)?;
+
+        context.file_writer.write_all_bytes(
+            &agent_provisioning.role_id_path,
+            agent_provisioning.role_id.as_bytes(),
+        )?;
+        context.file_writer.write_all_bytes(
+            &agent_provisioning.secret_id_path,
+            agent_provisioning.secret_id.as_bytes(),
+        )?;
+        context.file_writer.write_all_bytes(
+            &agent_provisioning.agent_config_path,
+            &agent_provisioning.agent_config,
+        )?;
+
+        guard.finish_with_outcome(log::Outcome::Ok);
+        Ok(())
+    }
+}
+
 struct PullImageFromResin {
     registry: docker_types::Registry,
     name: VersionedImageName,
@@ -1349,6 +1548,7 @@ fn build_new_container(
     mounts: Vec<MountDefinition>,
     version: &seedbank_types::Version,
     origin: labels::Origin,
+    environment_variables: Vec<docker_types::EnvironmentVariable>,
 ) -> NewContainer {
     NewContainer {
         name,
@@ -1357,7 +1557,7 @@ fn build_new_container(
             group_id: gid,
         }),
         command: seedling_definition.command.clone(),
-        environment_variables: Vec::new(),
+        environment_variables,
         image: seedling_definition.image.clone(),
         mounts,
         added_capabilities: seedling_definition.added_capabilities.clone(),
@@ -1372,20 +1572,11 @@ fn build_new_container(
 struct BuildContainer {
     name: seedbank_types::Name,
     version: seedbank_types::Version,
-    douglas_folders: DouglasFolders,
 }
 
 impl BuildContainer {
-    pub fn new(
-        douglas_folders: DouglasFolders,
-        name: seedbank_types::Name,
-        version: seedbank_types::Version,
-    ) -> Self {
-        Self {
-            douglas_folders,
-            name,
-            version,
-        }
+    pub fn new(name: seedbank_types::Name, version: seedbank_types::Version) -> Self {
+        Self { name, version }
     }
 }
 
@@ -1447,6 +1638,19 @@ impl<'a> Command<Context<'a>> for BuildContainer {
             })
             .collect::<Result<Vec<MountDefinition>, DockerNameError>>()?;
 
+        let environment_variables = if context.seedling_definition.secrets.is_some() {
+            vec![docker_types::EnvironmentVariable::new(
+                "OPENBAO_AGENT_ADDR",
+                &format!(
+                    "http://{}:{}",
+                    agent_container_name(&self.name)?.as_ref(),
+                    openbao::AGENT_LOCAL_PROXY_PORT
+                ),
+            )]
+        } else {
+            Vec::new()
+        };
+
         let new_container = build_new_container(
             new_container_name,
             context.seedling_definition,
@@ -1455,6 +1659,7 @@ impl<'a> Command<Context<'a>> for BuildContainer {
             mounts,
             context.version,
             context.origin,
+            environment_variables,
         );
 
         context
@@ -1463,6 +1668,9 @@ impl<'a> Command<Context<'a>> for BuildContainer {
             .await?;
 
         let seedling_network = seedling_network_name(&self.name)?;
+        let private_subnet = context
+            .agent_provisioning
+            .map(|agent_provisioning| agent_provisioning.private_subnet.clone());
         if !context
             .docker_client
             .network_exists(&seedling_network)
@@ -1470,7 +1678,7 @@ impl<'a> Command<Context<'a>> for BuildContainer {
         {
             context
                 .docker_client
-                .create_network(&seedling_network)
+                .create_network(&seedling_network, private_subnet.as_ref())
                 .await?;
         }
         context
@@ -1478,6 +1686,7 @@ impl<'a> Command<Context<'a>> for BuildContainer {
             .connect_network(
                 &seedling_network,
                 ContainerRef::FullName(new_container.name.clone()),
+                None,
             )
             .await?;
 
@@ -1487,9 +1696,154 @@ impl<'a> Command<Context<'a>> for BuildContainer {
                 .expect("SYSTEM_NETWORK_NAME is a valid network name");
             context
                 .docker_client
-                .connect_network(&system_network, ContainerRef::FullName(new_container.name))
+                .connect_network(
+                    &system_network,
+                    ContainerRef::FullName(new_container.name),
+                    None,
+                )
                 .await?;
         }
+
+        guard.finish_with_outcome(log::Outcome::Ok);
+        Ok(())
+    }
+}
+
+struct BuildAgentContainer {
+    seedling_name: seedbank_types::Name,
+    version: seedbank_types::Version,
+}
+
+impl BuildAgentContainer {
+    pub fn new(seedling_name: seedbank_types::Name, version: seedbank_types::Version) -> Self {
+        Self {
+            seedling_name,
+            version,
+        }
+    }
+}
+
+impl std::fmt::Display for BuildAgentContainer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Building OpenBao agent container for '{}' (v{})",
+            self.seedling_name, self.version
+        )
+    }
+}
+
+#[async_trait]
+impl<'a> Command<Context<'a>> for BuildAgentContainer {
+    fn name(&self) -> String {
+        "Building OpenBao agent container".to_string()
+    }
+
+    async fn run(
+        &mut self,
+        span: &Span,
+        context: &mut Context<'a>,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let guard = span
+            .create_child(
+                &format!(
+                    "Building OpenBao agent container for '{}' (v{})…",
+                    self.seedling_name, self.version
+                ),
+                ScopeKind::Step,
+            )
+            .start_guard();
+
+        let Some(agent_provisioning) = context.agent_provisioning else {
+            guard.finish_with_outcome(log::Outcome::Failed);
+            return Err(Box::new(ReconcileSeedlingError::MissingAgentProvisioning));
+        };
+
+        let new_container_name = agent_container_name(&self.seedling_name)?;
+        let account_name = provision_seedling_secrets::agent_account_full_name(&self.seedling_name);
+        let service_account = context
+            .rolodex
+            .find_service_account(&account_name)?
+            .ok_or(ReconcileSeedlingError::MissingServiceAccount)?;
+
+        let uid = context
+            .credentials
+            .get_user_id(&service_account.user.system_name)
+            .ok_or(ReconcileSeedlingError::MissingServiceAccount)?;
+        let gid = context
+            .credentials
+            .get_group_id(&service_account.group.system_name)
+            .ok_or(ReconcileSeedlingError::MissingServiceAccount)?;
+
+        let mount = MountDefinition {
+            name: "config".parse()?,
+            host_path: agent_provisioning.mount_dir.clone(),
+            container_path: PathBuf::from(provision_seedling_secrets::AGENT_CONTAINER_MOUNT_PATH),
+            writable: false,
+        };
+
+        let new_container = NewContainer {
+            name: new_container_name,
+            run_as: Some(ContainerUser {
+                user_id: uid,
+                group_id: gid,
+            }),
+            command: Some(format!(
+                "agent -config={}/{}",
+                provision_seedling_secrets::AGENT_CONTAINER_MOUNT_PATH,
+                provision_seedling_secrets::AGENT_CONFIG_FILE_NAME
+            )),
+            environment_variables: Vec::new(),
+            image: VersionedImageName::namespaced_specific(
+                "openbao",
+                "openbao",
+                openbao::IMAGE_VERSION,
+            ),
+            mounts: vec![mount],
+            added_capabilities: std::collections::HashSet::new(),
+            labels: vec![
+                labels::create_version_label(&self.version),
+                labels::create_origin_label(context.origin),
+            ],
+            published_ports: Vec::new(),
+        };
+
+        context
+            .docker_client
+            .create_container(context.registry, &new_container)
+            .await?;
+
+        let seedling_network = seedling_network_name(&self.seedling_name)?;
+        if !context
+            .docker_client
+            .network_exists(&seedling_network)
+            .await?
+        {
+            context
+                .docker_client
+                .create_network(&seedling_network, Some(&agent_provisioning.private_subnet))
+                .await?;
+        }
+        context
+            .docker_client
+            .connect_network(
+                &seedling_network,
+                ContainerRef::FullName(new_container.name.clone()),
+                Some(agent_provisioning.agent_private_ip),
+            )
+            .await?;
+
+        let system_network: docker_types::NetworkName = SYSTEM_NETWORK_NAME
+            .parse()
+            .expect("SYSTEM_NETWORK_NAME is a valid network name");
+        context
+            .docker_client
+            .connect_network(
+                &system_network,
+                ContainerRef::FullName(new_container.name),
+                None,
+            )
+            .await?;
 
         guard.finish_with_outcome(log::Outcome::Ok);
         Ok(())
@@ -1576,6 +1930,9 @@ mod tests {
             needs_mount_ownership: Vec::new(),
             missing_mount_mode: Vec::new(),
             missing_mount_files: Vec::new(),
+            agent_missing_service_credentials: false,
+            agent_container_exists: true,
+            agent_container_is_running: true,
         }
     }
 
@@ -1586,7 +1943,6 @@ mod tests {
     #[test]
     fn test_create_plan_should_refuse_to_downgrade() {
         let result = create_plan(
-            DouglasFolders::new(),
             &name(),
             &seedbank_types::Version(1),
             &seedling_definition(),
@@ -1607,7 +1963,6 @@ mod tests {
     #[test]
     fn test_create_plan_should_error_when_the_image_is_unavailable() {
         let result = create_plan(
-            DouglasFolders::new(),
             &name(),
             &seedbank_types::Version(1),
             &seedling_definition(),
@@ -1624,7 +1979,6 @@ mod tests {
     #[test]
     fn test_create_plan_should_do_nothing_when_everything_is_current() {
         let steps = create_plan(
-            DouglasFolders::new(),
             &name(),
             &seedbank_types::Version(1),
             &seedling_definition(),
@@ -1641,7 +1995,6 @@ mod tests {
         let mount_name: seedbank_types::Name = "config".parse().unwrap();
 
         let steps = create_plan(
-            DouglasFolders::new(),
             &name(),
             &seedbank_types::Version(1),
             &seedling_definition(),
@@ -1665,7 +2018,6 @@ mod tests {
         let path = PathBuf::from("/var/lib/douglas/mounts/traefik/config");
 
         let steps = create_plan(
-            DouglasFolders::new(),
             &name(),
             &seedbank_types::Version(1),
             &seedling_definition(),
@@ -1693,7 +2045,6 @@ mod tests {
     #[test]
     fn test_create_plan_should_build_and_start_a_missing_container() {
         let steps = create_plan(
-            DouglasFolders::new(),
             &name(),
             &seedbank_types::Version(2),
             &seedling_definition(),
@@ -1716,10 +2067,121 @@ mod tests {
         );
     }
 
+    fn secrets_seedling_definition() -> seedbank_types::SeedlingDefinition {
+        seedling_definition().with_secrets_access(Some(seedbank_types::SecretsAccess {
+            read: true,
+            write: true,
+        }))
+    }
+
+    #[test]
+    fn test_create_plan_should_build_and_start_a_missing_agent_container() {
+        let steps = create_plan(
+            &name(),
+            &seedbank_types::Version(1),
+            &secrets_seedling_definition(),
+            State {
+                agent_container_exists: false,
+                agent_container_is_running: false,
+                ..state()
+            },
+            &registry(),
+        )
+        .expect("should produce a plan");
+
+        assert_eq!(
+            step_descriptions(steps),
+            vec![
+                "Ensuring OpenBao agent mount for 'traefik'",
+                "Building OpenBao agent container for 'traefik' (v1)",
+                "Starting container 'doug-agent.traefik' (v1)",
+            ]
+        );
+    }
+
+    #[test]
+    fn test_create_plan_should_only_start_an_existing_stopped_agent_container() {
+        let steps = create_plan(
+            &name(),
+            &seedbank_types::Version(1),
+            &secrets_seedling_definition(),
+            State {
+                agent_container_exists: true,
+                agent_container_is_running: false,
+                ..state()
+            },
+            &registry(),
+        )
+        .expect("should produce a plan");
+
+        assert_eq!(
+            step_descriptions(steps),
+            vec![
+                "Ensuring OpenBao agent mount for 'traefik'",
+                "Starting container 'doug-agent.traefik' (v1)",
+            ]
+        );
+    }
+
+    #[test]
+    fn test_create_plan_should_create_the_agent_service_account_when_missing() {
+        let steps = create_plan(
+            &name(),
+            &seedbank_types::Version(1),
+            &secrets_seedling_definition(),
+            State {
+                agent_missing_service_credentials: true,
+                ..state()
+            },
+            &registry(),
+        )
+        .expect("should produce a plan");
+
+        assert!(
+            step_descriptions(steps)
+                .contains(&"Creating OpenBao agent service account for 'traefik'".to_string())
+        );
+    }
+
+    #[test]
+    fn test_create_plan_should_ignore_the_agent_entirely_when_secrets_are_not_requested() {
+        let steps = create_plan(
+            &name(),
+            &seedbank_types::Version(1),
+            &seedling_definition(),
+            State {
+                agent_container_exists: false,
+                agent_container_is_running: false,
+                agent_missing_service_credentials: true,
+                ..state()
+            },
+            &registry(),
+        )
+        .expect("should produce a plan");
+
+        assert!(step_descriptions(steps).is_empty());
+    }
+
+    #[test]
+    fn test_create_plan_should_do_nothing_for_a_running_agent_container() {
+        let steps = create_plan(
+            &name(),
+            &seedbank_types::Version(1),
+            &secrets_seedling_definition(),
+            state(),
+            &registry(),
+        )
+        .expect("should produce a plan");
+
+        assert_eq!(
+            step_descriptions(steps),
+            vec!["Ensuring OpenBao agent mount for 'traefik'"]
+        );
+    }
+
     #[test]
     fn test_create_plan_should_stop_drop_rebuild_and_restart_a_stale_running_container() {
         let steps = create_plan(
-            DouglasFolders::new(),
             &name(),
             &seedbank_types::Version(2),
             &seedling_definition(),
@@ -1747,7 +2209,6 @@ mod tests {
     #[test]
     fn test_create_plan_should_skip_stopping_a_stale_container_that_is_not_running() {
         let steps = create_plan(
-            DouglasFolders::new(),
             &name(),
             &seedbank_types::Version(2),
             &seedling_definition(),
@@ -1889,6 +2350,7 @@ mod tests {
             Vec::new(),
             &seedbank_types::Version(1),
             labels::Origin::User,
+            Vec::new(),
         );
 
         assert_eq!(
@@ -1913,9 +2375,32 @@ mod tests {
             Vec::new(),
             &seedbank_types::Version(1),
             labels::Origin::User,
+            Vec::new(),
         );
 
         assert_eq!(new_container.command, None);
         assert!(new_container.added_capabilities.is_empty());
+    }
+
+    #[test]
+    fn test_build_new_container_should_carry_the_provided_environment_variables() {
+        let definition = seedling_definition();
+        let environment_variables = vec![docker_types::EnvironmentVariable::new(
+            "OPENBAO_AGENT_ADDR",
+            "http://doug-agent.secrets:8100",
+        )];
+
+        let new_container = build_new_container(
+            container_name(&name()).unwrap(),
+            &definition,
+            1000,
+            1000,
+            Vec::new(),
+            &seedbank_types::Version(1),
+            labels::Origin::User,
+            environment_variables.clone(),
+        );
+
+        assert_eq!(new_container.environment_variables, environment_variables);
     }
 }

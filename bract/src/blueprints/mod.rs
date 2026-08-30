@@ -6,6 +6,8 @@ pub mod bootstrap;
 pub(crate) mod drop_seedling;
 pub(crate) mod find_orphans;
 pub(crate) mod new_seedling;
+pub(crate) mod openbao_status;
+pub(crate) mod provision_seedling_secrets;
 pub(crate) mod prune_orphans;
 pub(crate) mod reconcile_seedling;
 pub(crate) mod start_seedling;
@@ -14,19 +16,24 @@ pub(crate) mod write_traefik_routes;
 
 const EXPECTED_MOUNT_MODE: Modes = Modes::InheritedOwnerReadWriteExecuteGroupReadWriteExecute;
 const CONTAINER_NAME_PREFIX: &str = "doug.";
+const AGENT_CONTAINER_NAME_PREFIX: &str = "doug-agent.";
 pub(crate) const SYSTEM_NETWORK_NAME: &str = "douglas-system";
+#[cfg(target_os = "linux")]
+pub(crate) const AGENT_MOUNT_RAM_DISK_SIZE_MB: u32 = 1;
+#[cfg(target_os = "macos")]
+pub(crate) const AGENT_MOUNT_RAM_DISK_SIZE_MB: u32 = 8;
 const TRAEFIK_SEEDLING_NAME: &str = "traefik";
 const TRAEFIK_CONFIG_MOUNT_NAME: &str = "config";
 const TRAEFIK_DYNAMIC_DIR_NAME: &str = "dynamic";
 
-pub(crate) fn traefik_dynamic_dir(
+pub fn traefik_dynamic_dir(
     douglas_folders: &DouglasFolders,
 ) -> Result<PathBuf, seedbank_types::NameParseError> {
     let traefik_name: seedbank_types::Name = TRAEFIK_SEEDLING_NAME.parse()?;
     let config_mount_name: seedbank_types::Name = TRAEFIK_CONFIG_MOUNT_NAME.parse()?;
 
     let mut dynamic_dir =
-        douglas_folders.seedling_mount(&traefik_name.as_ref(), &config_mount_name.as_ref());
+        douglas_folders.seedling_mount(traefik_name.as_ref(), config_mount_name.as_ref());
     dynamic_dir.push(TRAEFIK_DYNAMIC_DIR_NAME);
     Ok(dynamic_dir)
 }
@@ -46,6 +53,24 @@ pub(crate) fn container_name(
 pub(crate) fn seedling_name_from_doug_prefixed(raw: &str) -> Option<seedbank_types::Name> {
     raw.strip_prefix(CONTAINER_NAME_PREFIX)
         .and_then(|name| name.parse().ok())
+}
+
+pub(crate) fn agent_container_name(
+    seedling_name: &seedbank_types::Name,
+) -> Result<docker_types::ContainerName, docker_types::DockerNameError> {
+    format!("{AGENT_CONTAINER_NAME_PREFIX}{}", seedling_name.as_ref()).parse()
+}
+
+pub(crate) fn seedling_name_from_agent_prefixed(raw: &str) -> Option<seedbank_types::Name> {
+    raw.strip_prefix(AGENT_CONTAINER_NAME_PREFIX)
+        .and_then(|name| name.parse().ok())
+}
+
+pub(crate) fn openbao_socket_path(douglas_folders: &DouglasFolders) -> PathBuf {
+    let mut path =
+        douglas_folders.seedling_mount(openbao::SEEDLING_NAME, openbao::SOCKET_MOUNT_NAME);
+    path.push(openbao::SOCKET_NAME);
+    path
 }
 
 #[cfg(test)]
@@ -89,6 +114,39 @@ mod tests {
     }
 
     #[test]
+    fn test_agent_container_name_should_add_the_agent_prefix() {
+        let seedling_name: seedbank_types::Name = "secrets".parse().unwrap();
+
+        let result =
+            agent_container_name(&seedling_name).expect("should be a valid container name");
+
+        assert_eq!(result.as_ref(), "doug-agent.secrets");
+    }
+
+    #[test]
+    fn test_seedling_name_from_agent_prefixed_should_strip_the_prefix() {
+        assert_eq!(
+            seedling_name_from_agent_prefixed("doug-agent.secrets"),
+            Some("secrets".parse().unwrap())
+        );
+    }
+
+    #[test]
+    fn test_seedling_name_from_agent_prefixed_should_be_none_without_the_prefix() {
+        assert_eq!(seedling_name_from_agent_prefixed("secrets"), None);
+    }
+
+    #[test]
+    fn test_agent_and_doug_prefixes_should_never_collide() {
+        let seedling_name: seedbank_types::Name = "secrets".parse().unwrap();
+        let agent_name = agent_container_name(&seedling_name).unwrap();
+        let app_name = container_name(&seedling_name).unwrap();
+
+        assert_eq!(seedling_name_from_doug_prefixed(agent_name.as_ref()), None);
+        assert_eq!(seedling_name_from_agent_prefixed(app_name.as_ref()), None);
+    }
+
+    #[test]
     fn test_traefik_dynamic_dir_should_nest_under_traefiks_config_mount() {
         let douglas_folders = DouglasFolders::new();
 
@@ -101,5 +159,4 @@ mod tests {
         expected.push("dynamic");
         assert_eq!(result, expected);
     }
-
 }

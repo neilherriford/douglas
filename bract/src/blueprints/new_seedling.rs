@@ -317,7 +317,8 @@ impl<'a> Command<Context<'a>> for NewSeedlingFromSpec {
                 route: self.seedling_spec.route.clone(),
                 ports: self.seedling_spec.ports.clone(),
             },
-        );
+        )
+        .with_secrets_access(self.seedling_spec.secrets);
 
         context
             .seedbank_client

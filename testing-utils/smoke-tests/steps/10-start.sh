@@ -42,6 +42,7 @@ FOLDER_CHECKS=(
     "/etc/douglas|root:douglas-admin:2770|douglas configs dir"
     "/var/lib/douglas/rolodex|root:douglas-admin:2770|rolodex dir"
     "/var/lib/douglas/credentials|root:douglas-admin:700|credentials dir"
+    "/var/lib/douglas-identity|root:douglas-admin:700|identity dir"
     "/run/douglas/bract|root:douglas-admin:770|bract socket dir"
     "/run/douglas/bract-trigger|root:douglas-resin-bract:770|bract-trigger socket dir"
     "/var/log/douglas/bract|root:douglas-admin:770|bract log dir"

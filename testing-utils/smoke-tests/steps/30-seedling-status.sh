@@ -16,4 +16,10 @@ assert_success "hello-world container is running" ssh_out \
 assert_success "traefik route file was written" ssh_out \
     "sudo test -f /var/lib/douglas/mounts/traefik/config/dynamic/hello-world.yml"
 
+# `douglas status`'s traefik section is a direct read of that same dynamic
+# routes dir, so it should now list the route it just confirmed exists above.
+overall_status="$(ssh_out '~/douglas --output-style plain status')"
+assert_contains "douglas status reports the hello-world traefik route" \
+    "$overall_status" "hello-world"
+
 finish

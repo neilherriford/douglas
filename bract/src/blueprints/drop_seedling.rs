@@ -1,4 +1,7 @@
-use crate::blueprints::{container_name, seedling_network_name, traefik_dynamic_dir};
+use crate::blueprints::{
+    agent_container_name, container_name, provision_seedling_secrets, seedling_network_name,
+    traefik_dynamic_dir,
+};
 use crate::labels;
 use async_trait::async_trait;
 use blueprint::{
@@ -8,8 +11,9 @@ use blueprint::{
 use config::DouglasFolders;
 use docker::client::{ClientBuilder, ContainerRef};
 use docker_types::DockerNameError;
-use file_system::{FileDeleter, FileReader, FileSystemError};
+use file_system::{FileDeleter, FileReader, FileSystemError, Folder, FolderDeleter};
 use log::{Reporter, ScopeKind, Span};
+use ram_disk::{RamDisk, RamDiskError};
 use std::sync::Arc;
 use thiserror::Error;
 
@@ -35,6 +39,8 @@ pub enum DropSeedlingError {
     NameParseError(#[from] seedbank_types::NameParseError),
     #[error("File system error: {0}")]
     FileSystemError(#[from] FileSystemError),
+    #[error("RAM disk error: {0}")]
+    RamDiskError(#[from] RamDiskError),
 }
 
 struct Context<'a> {
@@ -42,7 +48,9 @@ struct Context<'a> {
     resin_client: &'a mut dyn resin_client::Client,
     seedbank_client: &'a dyn seedbank_client::Client,
     file_deleter: &'a dyn FileDeleter,
+    folder_deleter: &'a dyn FolderDeleter,
     douglas_folders: &'a DouglasFolders,
+    ram_disk: &'a dyn RamDisk,
 }
 
 #[derive(Debug)]
@@ -55,6 +63,11 @@ struct State {
     network_exists: bool,
     seedbank_entry_exists: bool,
     route_exists: bool,
+    mounts_dir_exists: bool,
+    agent_container_exists: bool,
+    agent_container_is_stopped: bool,
+    agent_container_name: docker_types::ContainerName,
+    agent_mount_is_ram_disk: bool,
 }
 
 pub async fn execute(
@@ -63,8 +76,11 @@ pub async fn execute(
     resin_client_builder: &dyn resin_client::ClientBuilder,
     seedbank_client: &dyn seedbank_client::Client,
     file_deleter: &dyn FileDeleter,
+    folder_deleter: &dyn FolderDeleter,
     file_reader: &dyn FileReader,
+    folder: &dyn Folder,
     douglas_folders: &DouglasFolders,
+    ram_disk: &dyn RamDisk,
     name: &seedbank_types::Name,
 ) -> Result<(), DropSeedlingError> {
     let guard = Span::new(
@@ -94,9 +110,9 @@ pub async fn execute(
 
     let state = {
         let mut state_observer =
-            StateObserver::new(&mut *docker_client, seedbank_client, file_reader);
+            StateObserver::new(&mut *docker_client, seedbank_client, file_reader, folder);
         state_observer
-            .discover(guard.span(), douglas_folders, name)
+            .discover(guard.span(), douglas_folders, ram_disk, name)
             .await?
     };
 
@@ -111,7 +127,9 @@ pub async fn execute(
             resin_client: &mut *resin_client,
             seedbank_client,
             file_deleter,
+            folder_deleter,
             douglas_folders,
+            ram_disk,
         };
         execute_plan(guard.span(), plan, &mut context, |reason| {
             DropSeedlingError::FailedBoostrap(vec![reason])
@@ -126,6 +144,7 @@ struct StateObserver<'a> {
     docker_client: &'a mut dyn docker::client::Client,
     seedbank_client: &'a dyn seedbank_client::Client,
     file_reader: &'a dyn FileReader,
+    folder: &'a dyn Folder,
 }
 
 impl<'a> StateObserver<'a> {
@@ -133,11 +152,13 @@ impl<'a> StateObserver<'a> {
         docker_client: &'a mut dyn docker::client::Client,
         seedbank_client: &'a dyn seedbank_client::Client,
         file_reader: &'a dyn FileReader,
+        folder: &'a dyn Folder,
     ) -> Self {
         Self {
             docker_client,
             seedbank_client,
             file_reader,
+            folder,
         }
     }
 
@@ -145,6 +166,7 @@ impl<'a> StateObserver<'a> {
         &mut self,
         span: &Span,
         douglas_folders: &DouglasFolders,
+        ram_disk: &dyn RamDisk,
         name: &seedbank_types::Name,
     ) -> Result<State, DropSeedlingError> {
         let guard = span
@@ -166,12 +188,36 @@ impl<'a> StateObserver<'a> {
             network_exists: false,
             seedbank_entry_exists: self.seedbank_client.exists(name).await?,
             route_exists: self.file_reader.exists(&route_path),
+            mounts_dir_exists: self
+                .folder
+                .exists(&douglas_folders.seedling_mounts_dir(name.as_ref())),
+            agent_container_exists: false,
+            agent_container_is_stopped: false,
+            agent_container_name: agent_container_name(name)?,
+            agent_mount_is_ram_disk: ram_disk.is_mounted(
+                &provision_seedling_secrets::agent_mount_dir(douglas_folders, name),
+            )?,
         };
 
         result.network_exists = self
             .docker_client
             .network_exists(&seedling_network_name(name)?)
             .await?;
+
+        result.agent_container_exists = self
+            .docker_client
+            .container_exists(ContainerRef::FullName(result.agent_container_name.clone()))
+            .await?;
+        if result.agent_container_exists {
+            result.agent_container_is_stopped = matches!(
+                self.docker_client
+                    .container_status(ContainerRef::FullName(result.agent_container_name.clone()))
+                    .await?,
+                docker_types::Status::Created
+                    | docker_types::Status::Exited
+                    | docker_types::Status::Dead
+            );
+        }
 
         if !self
             .docker_client
@@ -221,6 +267,11 @@ fn create_plan<'a>(
             "Seedling is not stopped".to_string(),
         ));
     }
+    if state.agent_container_exists && !state.agent_container_is_stopped {
+        return Err(DropSeedlingError::CannotDropSeedling(
+            "Seedling is not stopped".to_string(),
+        ));
+    }
 
     if state.route_exists {
         push_step(&mut steps, RemoveTraefikRoute::new(name.clone()));
@@ -233,12 +284,27 @@ fn create_plan<'a>(
         );
     }
 
+    if state.agent_container_exists {
+        push_step(
+            &mut steps,
+            DropSeedling::new(name.clone(), state.agent_container_name, None),
+        );
+    }
+
     if state.network_exists {
         push_step(&mut steps, DeleteSeedlingNetwork::new(name.clone()));
     }
 
     if state.seedbank_entry_exists {
         push_step(&mut steps, DeleteSeedbankEntry::new(name.clone()));
+    }
+
+    if state.agent_mount_is_ram_disk {
+        push_step(&mut steps, UnmountAgentRamDisk::new(name.clone()));
+    }
+
+    if state.mounts_dir_exists {
+        push_step(&mut steps, DeleteSeedlingMounts::new(name.clone()));
     }
 
     push_step(&mut steps, ReleaseDefault::new(name.clone()));
@@ -434,6 +500,100 @@ impl<'a> Command<Context<'a>> for DeleteSeedbankEntry {
     }
 }
 
+struct UnmountAgentRamDisk {
+    seedling_name: seedbank_types::Name,
+}
+
+impl UnmountAgentRamDisk {
+    pub fn new(seedling_name: seedbank_types::Name) -> Self {
+        Self { seedling_name }
+    }
+}
+
+impl std::fmt::Display for UnmountAgentRamDisk {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Unmounting OpenBao agent ram disk for '{}'",
+            self.seedling_name
+        )
+    }
+}
+
+#[async_trait]
+impl<'a> Command<Context<'a>> for UnmountAgentRamDisk {
+    fn name(&self) -> String {
+        "Unmounting OpenBao agent ram disk".to_string()
+    }
+
+    async fn run(
+        &mut self,
+        span: &Span,
+        context: &mut Context<'a>,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let guard = span
+            .create_child(
+                &format!(
+                    "Unmounting OpenBao agent ram disk for '{}'…",
+                    self.seedling_name
+                ),
+                ScopeKind::Step,
+            )
+            .start_guard();
+
+        let mount_dir = provision_seedling_secrets::agent_mount_dir(
+            context.douglas_folders,
+            &self.seedling_name,
+        );
+        context.ram_disk.unmount(&mount_dir)?;
+
+        guard.finish(Ok(()))
+    }
+}
+
+struct DeleteSeedlingMounts {
+    seedling_name: seedbank_types::Name,
+}
+
+impl DeleteSeedlingMounts {
+    pub fn new(seedling_name: seedbank_types::Name) -> Self {
+        Self { seedling_name }
+    }
+}
+
+impl std::fmt::Display for DeleteSeedlingMounts {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Deleting mounts for '{}'", self.seedling_name)
+    }
+}
+
+#[async_trait]
+impl<'a> Command<Context<'a>> for DeleteSeedlingMounts {
+    fn name(&self) -> String {
+        "Deleting mounts".to_string()
+    }
+
+    async fn run(
+        &mut self,
+        span: &Span,
+        context: &mut Context<'a>,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let guard = span
+            .create_child(
+                &format!("Deleting mounts for '{}'…", self.seedling_name),
+                ScopeKind::Step,
+            )
+            .start_guard();
+
+        let mounts_dir = context
+            .douglas_folders
+            .seedling_mounts_dir(self.seedling_name.as_ref());
+        context.folder_deleter.delete(&mounts_dir)?;
+
+        guard.finish(Ok(()))
+    }
+}
+
 struct ReleaseDefault {
     seedling_name: seedbank_types::Name,
 }
@@ -536,6 +696,11 @@ mod tests {
             network_exists: true,
             seedbank_entry_exists: true,
             route_exists: true,
+            mounts_dir_exists: true,
+            agent_container_exists: false,
+            agent_container_is_stopped: false,
+            agent_container_name: agent_container_name(&name()).unwrap(),
+            agent_mount_is_ram_disk: false,
         }
     }
 
@@ -554,6 +719,7 @@ mod tests {
                 "Dropping seedling 'hello-world' (v1)".to_string(),
                 "Deleting network for 'hello-world'".to_string(),
                 "Deleting seedbank entry for 'hello-world'".to_string(),
+                "Deleting mounts for 'hello-world'".to_string(),
                 "Releasing default for 'hello-world'".to_string(),
                 "Deleting resin repository for 'hello-world'".to_string(),
             ]
@@ -593,6 +759,7 @@ mod tests {
             vec![
                 "Removing traefik route for 'hello-world'".to_string(),
                 "Deleting seedbank entry for 'hello-world'".to_string(),
+                "Deleting mounts for 'hello-world'".to_string(),
                 "Releasing default for 'hello-world'".to_string(),
                 "Deleting resin repository for 'hello-world'".to_string(),
             ]
@@ -636,6 +803,24 @@ mod tests {
     }
 
     #[test]
+    fn test_create_plan_should_skip_the_mounts_step_when_no_mounts_dir_exists() {
+        let steps = create_plan(
+            &name(),
+            State {
+                mounts_dir_exists: false,
+                ..droppable_state()
+            },
+        )
+        .expect("should produce a plan");
+
+        assert!(
+            !step_descriptions(steps)
+                .iter()
+                .any(|description| description.contains("mounts"))
+        );
+    }
+
+    #[test]
     fn test_create_plan_should_refuse_when_not_stopped() {
         let result = create_plan(
             &name(),
@@ -662,5 +847,84 @@ mod tests {
         );
 
         assert!(matches!(result, Err(DropSeedlingError::CoreSeedling(_))));
+    }
+
+    #[test]
+    fn test_create_plan_should_also_drop_an_existing_agent_container() {
+        let steps = create_plan(
+            &name(),
+            State {
+                agent_container_exists: true,
+                agent_container_is_stopped: true,
+                ..droppable_state()
+            },
+        )
+        .expect("should produce a plan");
+
+        assert_eq!(
+            step_descriptions(steps),
+            vec![
+                "Removing traefik route for 'hello-world'".to_string(),
+                "Dropping seedling 'hello-world' (v1)".to_string(),
+                "Dropping seedling 'hello-world'".to_string(),
+                "Deleting network for 'hello-world'".to_string(),
+                "Deleting seedbank entry for 'hello-world'".to_string(),
+                "Deleting mounts for 'hello-world'".to_string(),
+                "Releasing default for 'hello-world'".to_string(),
+                "Deleting resin repository for 'hello-world'".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_create_plan_should_unmount_the_agent_ram_disk_before_deleting_mounts_when_present() {
+        let steps = create_plan(
+            &name(),
+            State {
+                agent_mount_is_ram_disk: true,
+                ..droppable_state()
+            },
+        )
+        .expect("should produce a plan");
+
+        let descriptions = step_descriptions(steps);
+        let unmount_index = descriptions
+            .iter()
+            .position(|description| description.contains("agent ram disk"))
+            .expect("should include the unmount step");
+        let delete_mounts_index = descriptions
+            .iter()
+            .position(|description| description == "Deleting mounts for 'hello-world'")
+            .expect("should include the delete mounts step");
+
+        assert!(unmount_index < delete_mounts_index);
+    }
+
+    #[test]
+    fn test_create_plan_should_skip_the_ram_disk_unmount_step_when_not_ram_backed() {
+        let steps = create_plan(&name(), droppable_state()).expect("should produce a plan");
+
+        assert!(
+            !step_descriptions(steps)
+                .iter()
+                .any(|description| description.contains("agent ram disk"))
+        );
+    }
+
+    #[test]
+    fn test_create_plan_should_refuse_when_the_agent_container_is_not_stopped() {
+        let result = create_plan(
+            &name(),
+            State {
+                agent_container_exists: true,
+                agent_container_is_stopped: false,
+                ..droppable_state()
+            },
+        );
+
+        assert!(matches!(
+            result,
+            Err(DropSeedlingError::CannotDropSeedling(_))
+        ));
     }
 }

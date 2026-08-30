@@ -7,6 +7,7 @@ license = "MIT"
 
 [dependencies]
 async-trait = { workspace = true }
+base64 = { workspace = true }
 blueprint = { workspace = true }
 bract = { workspace = true }
 bract_client = { workspace = true }
@@ -20,15 +21,19 @@ crossterm = { workspace = true }
 daemonize = "0.5.0"
 docker_types = { workspace = true }
 file_system = { workspace = true }
+hex = { workspace = true }
 humantime = { workspace = true }
+identity = { workspace = true }
 log = { workspace = true }
 mockall = { workspace = true }
 nix = { workspace = true }
 openbao = { workspace = true }
+openbao_types = { workspace = true }
 os = { workspace = true }
 os_pipe = "1.2.3"
 ratatui = { workspace = true }
 resin = { workspace = true }
+resin_client = { workspace = true }
 resin_types = { workspace = true }
 seedbank = { workspace = true }
 seedbank_client = { workspace = true }
@@ -43,7 +48,10 @@ users = { workspace = true }
 utils = { workspace = true }
 
 [dev-dependencies]
+bract_client = { workspace = true, features = ["mock"] }
 file_system = { workspace = true, features = ["mock"] }
+identity = { workspace = true, features = ["mock"] }
+openbao = { workspace = true, features = ["mock"] }
 
 [workspace]
 members = [
@@ -56,21 +64,20 @@ members = [
     "bract", "bract_types", "bract_client", "config", "utils", "openbao", "blueprint",  "resin", "seedbank", "seedbank_types", "docker_types", "refined_string",
     "seedbank_client", "resin_client", "resin_types",
     "seedling_registration_types", "seedling_registration_client",
-    "reconcile_trigger_types", "reconcile_trigger_client", "ram_disk", "identity", "openbao_types",
-]
+    "reconcile_trigger_types", "reconcile_trigger_client", "openbao_types"
+, "identity", "ram_disk"]
 
 [workspace.dependencies]
 # External
 async-trait = "0.1"
-time = { version = "0.3", features = ["parsing", "formatting"] }
-hex = "0.4.3"
 base64 = "0.23.1"
 colored = "3"
+crossterm = "0.29.0"
+hex = "0.4.3"
 http-body-util = "0.1"
 humantime = "2.3.0"
 hyper = { version = "1.6.0", features = ["client"] }
 hyper-util = { version = "0.1.11", features = ["full"] }
-crossterm = "0.29.0"
 mime = "0.3.17"
 mockall = "0.13.1"
 nix = { version = "0.30.1", features = ["fs", "user"] }
@@ -80,6 +87,7 @@ serde = { version = "1.0.219", features = ["derive"] }
 serde_json = "1.0.140"
 serde_yaml_ng = "0.10.0"
 thiserror = "1"
+time = { version = "0.3", features = ["parsing", "formatting"] }
 tokio = { version = "1.44.1", features = ["full"] }
 tokio-util = { version = "0.7", features = ["io"] }
 toml = "1.1.2"
@@ -93,16 +101,16 @@ bract_types = { path = "./bract_types" }
 config = { path = "./config" }
 credentials = { path = "./credentials" }
 docker = { path = "./docker" }
-reconcile_trigger_client = { path = "./reconcile_trigger_client" }
-reconcile_trigger_types = { path = "./reconcile_trigger_types" }
 docker_types = { path = "./docker_types" }
 file_system = { path = "./file_system" }
+identity = { path = "./identity" }
 log = { path = "./log" }
 openbao = { path = "./openbao" }
+openbao_types = { path = "./openbao_types" }
 os = { path = "./os" }
 ram_disk = { path = "./ram_disk" }
-openbao_types = { path = "./openbao_types" }
-identity = { path = "./identity" }
+reconcile_trigger_client = { path = "./reconcile_trigger_client" }
+reconcile_trigger_types = { path = "./reconcile_trigger_types" }
 refined_string = { path = "./refined_string" }
 resin = { path = "./resin" }
 resin_client = { path = "./resin_client" }

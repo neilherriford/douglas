@@ -51,6 +51,14 @@ pub async fn handle(
             Ok(()) => Response::Pruned,
             Err(err) => error_response(err),
         },
+        Request::ListSeedlings => match server.list_seedlings(reporter).await {
+            Ok(names) => Response::Seedlings { names },
+            Err(err) => error_response(err),
+        },
+        Request::OpenBaoStatus => match server.openbao_status(reporter).await {
+            Ok(report) => Response::OpenBaoStatus(report),
+            Err(err) => error_response(err),
+        },
     }
 }
 

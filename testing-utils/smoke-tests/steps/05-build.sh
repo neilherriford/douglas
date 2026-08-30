@@ -6,7 +6,7 @@
 #
 # /mnt/share/douglas is the same checkout as this repo, made visible to the
 # VM via UTM's shared-folder mount, so there's nothing to copy over first —
-# same reason 25-push-image.sh can build hello-world/ directly from there
+# same reason 25-push-image.sh can build example-seedlings/hello-world/ directly from there
 # too, instead of copying it over.
 set -uo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")"

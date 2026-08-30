@@ -11,10 +11,13 @@ use credentials::create_credentials;
 use crossterm::style::Stylize;
 use daemonize::Daemonize;
 use file_system::{
-    FileReader, FileSystemError, Folder, Permissions, UnixFileReader, UnixFolder, UnixPermissions,
+    FileDeleter, FileReader, FileSystemError, FileWriter, Folder, Inspect, Permissions,
+    UnixFileDeleter, UnixFileReader, UnixFileWriter, UnixFolder, UnixInspect, UnixPermissions,
 };
+use identity::{Identity, LocalIdentity};
 use log::{BufferedFileReporter, Reporter, Span, TeeReporter};
 use os::{EnvironmentVariableReader, Os, Unix, UnixEnvironmentVariableReader};
+use resin_client::ClientBuilder as _;
 use std::{
     collections::{HashMap, HashSet},
     fmt::{Debug, Display},
@@ -72,6 +75,8 @@ enum Commands {
     },
     #[command(about = "Stop Douglas")]
     Stop,
+    #[command(about = "Report the status of every seedling and of OpenBao's secrets state")]
+    Status,
     #[command(hide = true)]
     Service {
         #[command(subcommand)]
@@ -172,6 +177,7 @@ impl Display for Commands {
         match self {
             Commands::Start { .. } => f.write_str("start"),
             Commands::Stop => f.write_str("stop"),
+            Commands::Status => f.write_str("status"),
             Commands::Service {
                 service: ServiceCommand::Bract { .. },
             } => f.write_str("service bract"),
@@ -214,6 +220,7 @@ fn main() -> ExitCode {
     match cli.command {
         Commands::Start { plan_only } => run_with_tokio(start(plan_only, output_style_arg)),
         Commands::Stop => todo!(),
+        Commands::Status => run_with_tokio(status(output_style)),
         Commands::Service {
             service: ServiceCommand::Bract { notify_fd },
         } => start_bract(notify_fd),
@@ -715,11 +722,50 @@ async fn start(plan_only: bool, output_style: Option<OutputStyle>) -> ExitCode {
     ));
 
     let succeeded =
-        bootstrap::seedlings::perform(Arc::clone(&reporter), Arc::clone(&bract_client)).await;
+        bootstrap::core_seedlings::perform(Arc::clone(&reporter), Arc::clone(&bract_client)).await;
 
     if !succeeded {
         if let Some(style) = output_style {
             print_error(style, "Seedling reconciliation failed");
+        }
+        return ExitCode::from(1);
+    }
+
+    let inspect: Arc<dyn Inspect> = Arc::new(UnixInspect {});
+    let openbao_client_factory: Arc<dyn openbao::ClientFactory> =
+        Arc::new(openbao::SocketClientFactory::new(Arc::clone(&reporter)));
+    let openbao_file_reader: Arc<dyn FileReader> = Arc::new(UnixFileReader {});
+    let openbao_file_writer: Arc<dyn FileWriter> = Arc::new(UnixFileWriter {});
+    let openbao_file_deleter: Arc<dyn FileDeleter> = Arc::new(UnixFileDeleter {});
+    let mut identity = LocalIdentity::new(
+        Arc::clone(&openbao_file_reader),
+        Arc::clone(&openbao_file_writer),
+    );
+
+    if let Err(err) = identity.initialize() {
+        if let Some(style) = output_style {
+            print_error(style, &format!("Failed to initialize identity: {err}"));
+        }
+        return ExitCode::from(1);
+    }
+
+    let succeeded = bootstrap::openbao::perform(
+        Arc::clone(&reporter),
+        inspect,
+        openbao_client_factory,
+        Arc::clone(&bract_client),
+        openbao_file_reader,
+        openbao_file_writer,
+        openbao_file_deleter,
+        Arc::new(UnixPermissions::new()),
+        &mut identity,
+        &douglas_folders,
+    )
+    .await;
+
+    if !succeeded {
+        if let Some(style) = output_style {
+            print_error(style, "OpenBao bootstrap failed");
         }
         return ExitCode::from(1);
     }
@@ -731,6 +777,248 @@ async fn start(plan_only: bool, output_style: Option<OutputStyle>) -> ExitCode {
     }
 
     ExitCode::from(0)
+}
+
+#[derive(serde::Serialize)]
+struct SeedlingStatusEntry {
+    name: String,
+    status: String,
+}
+
+#[derive(serde::Serialize)]
+struct CoreServiceStatus {
+    name: String,
+    running: bool,
+    detail: String,
+}
+
+#[derive(serde::Serialize)]
+struct StatusReport {
+    seedlings: Vec<SeedlingStatusEntry>,
+    seedlings_error: Option<String>,
+    core_services: Vec<CoreServiceStatus>,
+    traefik_routes: Vec<String>,
+    traefik_routes_error: Option<String>,
+    openbao: Option<bract_types::OpenBaoReport>,
+    openbao_error: Option<String>,
+}
+
+fn bract_error_means_unreachable(err: &bract_client::Error) -> bool {
+    matches!(
+        err,
+        bract_client::Error::MissingSocket
+            | bract_client::Error::ConnectionRefused
+            | bract_client::Error::NoResponse
+            | bract_client::Error::IoError(_)
+    )
+}
+
+fn probe_bract(
+    seedling_names_result: &Result<Vec<seedbank_types::Name>, bract_client::Error>,
+) -> CoreServiceStatus {
+    let running = !matches!(seedling_names_result, Err(err) if bract_error_means_unreachable(err));
+    let detail = match seedling_names_result {
+        Ok(names) => format!("{} seedling(s) registered", names.len()),
+        Err(err) => err.to_string(),
+    };
+    CoreServiceStatus {
+        name: "bract".to_string(),
+        running,
+        detail,
+    }
+}
+
+fn probe_seedbank(
+    seedling_names_result: &Result<Vec<seedbank_types::Name>, bract_client::Error>,
+) -> CoreServiceStatus {
+    let (running, detail) = match seedling_names_result {
+        Ok(names) => (true, format!("{} seedling(s) registered", names.len())),
+        Err(err) if bract_error_means_unreachable(err) => (
+            false,
+            "bract is unreachable, cannot determine seedbank status".to_string(),
+        ),
+        Err(err) => (false, err.to_string()),
+    };
+    CoreServiceStatus {
+        name: "seedbank".to_string(),
+        running,
+        detail,
+    }
+}
+
+async fn probe_resin(reporter: Arc<dyn Reporter>) -> CoreServiceStatus {
+    let (running, detail) = match resin_client::LocalhostClientBuilder.build(reporter).await {
+        Ok(mut client) => match client.list_repositories().await {
+            Ok(repositories) => (true, format!("{} repositories", repositories.len())),
+            Err(err) => (false, err.to_string()),
+        },
+        Err(err) => (false, err.to_string()),
+    };
+    CoreServiceStatus {
+        name: "resin".to_string(),
+        running,
+        detail,
+    }
+}
+
+fn list_traefik_routes(
+    folder: &dyn Folder,
+    douglas_folders: &DouglasFolders,
+) -> Result<Vec<String>, String> {
+    let dynamic_dir = bract::traefik_dynamic_dir(douglas_folders).map_err(|err| err.to_string())?;
+
+    if !folder.exists(&dynamic_dir) {
+        return Ok(Vec::new());
+    }
+
+    folder
+        .entries(&dynamic_dir)
+        .map(|entries| {
+            entries
+                .iter()
+                .filter_map(|entry| entry.name.strip_suffix(".yml"))
+                .map(std::string::ToString::to_string)
+                .collect()
+        })
+        .map_err(|err| err.to_string())
+}
+
+async fn status(output_style: OutputStyle) -> ExitCode {
+    let douglas_folders = DouglasFolders::new();
+    let reporter = build_plain_reporter(&douglas_folders, "douglas-cli");
+    let guard = Span::new(Arc::clone(&reporter), "Status", log::ScopeKind::Task).start_guard();
+
+    let bract_client = bract_client::UdsClient::new(Arc::clone(&reporter), &douglas_folders);
+
+    let seedling_names_result = bract_client.list_seedlings().await;
+    let (seedlings, seedlings_error) = match &seedling_names_result {
+        Ok(names) => {
+            let mut entries = Vec::with_capacity(names.len());
+            for name in names {
+                let status = match bract_client.seedling_status(name).await {
+                    Ok(status) => status.to_string(),
+                    Err(err) => format!("unavailable ({err})"),
+                };
+                entries.push(SeedlingStatusEntry {
+                    name: name.to_string(),
+                    status,
+                });
+            }
+            (entries, None)
+        }
+        Err(err) => (Vec::new(), Some(err.to_string())),
+    };
+
+    let core_services = vec![
+        probe_bract(&seedling_names_result),
+        probe_resin(Arc::clone(&reporter)).await,
+        probe_seedbank(&seedling_names_result),
+    ];
+
+    let folder: Arc<dyn Folder> = Arc::new(UnixFolder::new());
+    let (traefik_routes, traefik_routes_error) =
+        match list_traefik_routes(folder.as_ref(), &douglas_folders) {
+            Ok(routes) => (routes, None),
+            Err(err) => (Vec::new(), Some(err)),
+        };
+
+    let (openbao_report, openbao_error) = match bract_client.openbao_status().await {
+        Ok(report) => (Some(report), None),
+        Err(err) => (None, Some(err.to_string())),
+    };
+
+    print_status_report(
+        output_style,
+        &StatusReport {
+            seedlings,
+            seedlings_error,
+            core_services,
+            traefik_routes,
+            traefik_routes_error,
+            openbao: openbao_report,
+            openbao_error,
+        },
+    );
+
+    guard.finish_with_outcome(log::Outcome::Ok);
+    ExitCode::from(0)
+}
+
+fn print_status_report(output_style: OutputStyle, report: &StatusReport) {
+    match output_style {
+        OutputStyle::Json => {
+            if let Ok(json) = serde_json::to_string(report) {
+                println!("{json}");
+            }
+        }
+        OutputStyle::Plain => {
+            println!("Core services:");
+            for service in &report.core_services {
+                let state = if service.running {
+                    "running"
+                } else {
+                    "unavailable"
+                };
+                println!("  {}: {} ({})", service.name, state, service.detail);
+            }
+
+            println!("Seedlings:");
+            if let Some(err) = &report.seedlings_error {
+                println!("  unavailable ({err})");
+            } else if report.seedlings.is_empty() {
+                println!("  none");
+            } else {
+                for entry in &report.seedlings {
+                    println!("  {}: {}", entry.name, entry.status);
+                }
+            }
+
+            println!("Traefik:");
+            if let Some(err) = &report.traefik_routes_error {
+                println!("  routes unavailable ({err})");
+            } else if report.traefik_routes.is_empty() {
+                println!("  routes: none");
+            } else {
+                println!("  routes:");
+                for route in &report.traefik_routes {
+                    println!("    {route}");
+                }
+            }
+
+            println!("OpenBao:");
+            match (&report.openbao, &report.openbao_error) {
+                (Some(openbao), _) => print_openbao_report_plain(openbao),
+                (None, Some(err)) => println!("  unavailable ({err})"),
+                (None, None) => println!("  unavailable"),
+            }
+        }
+    }
+}
+
+fn print_openbao_report_plain(report: &bract_types::OpenBaoReport) {
+    println!("  running: {}", report.is_running);
+    if !report.is_running {
+        return;
+    }
+    println!("  initialized: {}", report.is_initialized);
+    println!("  sealed: {}", report.is_sealed);
+    println!("  credentials available: {}", report.credentials_available);
+    println!("  credentials work: {}", report.credentials_work);
+    if !report.credentials_work {
+        return;
+    }
+    println!("  approle enabled: {}", report.app_role_enabled);
+    println!("  acme enabled: {}", report.acme_enabled);
+    println!("  root ca configured: {}", report.root_ca_configured);
+    println!("  acme pki role created: {}", report.acme_pki_role_created);
+    println!("  mounts:");
+    if report.mounts.is_empty() {
+        println!("    none");
+    } else {
+        for (path, kind) in &report.mounts {
+            println!("    {path} ({kind})");
+        }
+    }
 }
 
 fn print_start_result(output_style: OutputStyle) {
@@ -755,15 +1043,24 @@ async fn log_orphans_if_any(reporter: &Arc<dyn Reporter>, bract_client: &dyn bra
     match bract_client.find_orphans().await {
         Ok(orphans) if orphans.is_empty() => guard.finish_with_outcome(log::Outcome::Ok),
         Ok(orphans) => {
+            let details = [
+                ("container", names(&orphans.containers)),
+                ("network", names(&orphans.networks)),
+                ("route file", names(&orphans.route_files)),
+                ("resin repository", orphans.resin_repositories.clone()),
+                ("mount", names(&orphans.mounts)),
+                ("openbao secret", names(&orphans.openbao_secrets)),
+            ]
+            .into_iter()
+            .filter(|(_, names)| !names.is_empty())
+            .map(|(label, names)| format!("{label}(s): {}", names.join(", ")))
+            .collect::<Vec<_>>()
+            .join("; ");
+
             guard.span().message(
                 log::Level::Warn,
                 &format!(
-                    "Found orphaned resources (run `douglas seedling prune` to clean up): \
-                     {} container(s), {} network(s), {} route file(s), {} resin repository(s)",
-                    orphans.containers.len(),
-                    orphans.networks.len(),
-                    orphans.route_files.len(),
-                    orphans.resin_repositories.len(),
+                    "Found orphaned resources (run `douglas seedling prune` to clean up): {details}"
                 ),
             );
             guard.finish_with_outcome(log::Outcome::Ok);
@@ -776,6 +1073,10 @@ async fn log_orphans_if_any(reporter: &Arc<dyn Reporter>, bract_client: &dyn bra
             guard.finish_with_outcome(log::Outcome::Failed);
         }
     }
+}
+
+fn names(items: &[seedbank_types::Name]) -> Vec<String> {
+    items.iter().map(std::string::ToString::to_string).collect()
 }
 
 fn seedling_command_context(label: &str) -> (DouglasFolders, log::ScopeGuard) {
@@ -957,6 +1258,8 @@ fn print_orphans(orphans: &bract_types::Orphans) {
     print_orphan_group("Networks", &orphans.networks);
     print_orphan_group("Route files", &orphans.route_files);
     print_orphan_group("Resin repositories", &orphans.resin_repositories);
+    print_orphan_group("Mounts", &orphans.mounts);
+    print_orphan_group("OpenBao secrets", &orphans.openbao_secrets);
 }
 
 fn print_orphan_group<T: std::fmt::Display>(label: &str, names: &[T]) {
@@ -1009,10 +1312,7 @@ async fn prune_orphans(output_style: OutputStyle, skip_confirmation: bool) -> Ex
         return ExitCode::from(0);
     }
 
-    let has_prunable = !orphans.containers.is_empty()
-        || !orphans.networks.is_empty()
-        || !orphans.route_files.is_empty()
-        || !orphans.resin_repositories.is_empty();
+    let has_prunable = !orphans.is_empty();
 
     if let OutputStyle::Plain = output_style {
         print_orphans(&orphans);

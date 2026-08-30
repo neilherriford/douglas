@@ -159,6 +159,7 @@ async fn write_routes(
             .connect_network(
                 &seedling_network,
                 ContainerRef::FullName(traefik_container.clone()),
+                None,
             )
             .await?;
     }

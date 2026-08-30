@@ -202,7 +202,7 @@ pub async fn create(
     let ipam = subnet.map(|subnet| Ipam {
         config: vec![IpamConfigEntry {
             subnet: subnet.cidr.clone(),
-            gateway: subnet.gateway.clone(),
+            gateway: subnet.gateway.to_string(),
         }],
     });
 
@@ -240,7 +240,7 @@ pub async fn connect(
     rest_client: &tokio::sync::Mutex<dyn RestClient + Send + Sync + 'static>,
     network_id: &str,
     container_id: &str,
-    static_ipv4: Option<&str>,
+    static_ipv4: Option<std::net::Ipv4Addr>,
 ) -> Result<(), DockerError> {
     let guard = Span::new(
         Arc::clone(&reporter),

@@ -16,7 +16,7 @@ source ../lib.sh
 SEED_DIR="/var/lib/douglas/seedbank/seeds/second-app"
 
 assert_success "create second-app seedling from subdomain spec" bash -c \
-    "ssh -o LogLevel=ERROR -i '$SSH_KEY' '$VM' '~/douglas seedling new --name second-app' < '$REPO_ROOT/hello-world/subdomain.toml'"
+    "ssh -o LogLevel=ERROR -i '$SSH_KEY' '$VM' '~/douglas seedling new --name second-app' < '$REPO_ROOT/example-seedlings/hello-world/subdomain.toml'"
 
 definition_content="$(ssh_out sudo cat "$SEED_DIR/seedling.toml")"
 assert_contains "definition records subdomain routing" "$definition_content" 'route = "subdomain"'
@@ -27,7 +27,7 @@ assert_contains "definition records subdomain routing" "$definition_content" 'ro
 THIRD_SEED_DIR="/var/lib/douglas/seedbank/seeds/third-app"
 
 new_output="$(ssh -o LogLevel=ERROR -i "$SSH_KEY" "$VM" '~/douglas seedling new --name third-app' \
-    < "$REPO_ROOT/hello-world/default.toml" 2>&1)"
+    < "$REPO_ROOT/example-seedlings/hello-world/default.toml" 2>&1)"
 new_status=$?
 if [ "$new_status" -ne 0 ]; then
     pass "second root-routed seedling is rejected"
