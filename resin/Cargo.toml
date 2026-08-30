@@ -13,7 +13,7 @@ docker_types = { workspace = true }
 file_system = { workspace = true }
 bytes = "1"
 futures-util = "0.3"
-hex = "0.4.3"
+hex =  { workspace = true }
 http-body = "1"
 log = { workspace = true, features = ["tui"] }
 mime = { workspace = true }

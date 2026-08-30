@@ -63,6 +63,7 @@ members = [
 # External
 async-trait = "0.1"
 time = { version = "0.3", features = ["parsing", "formatting"] }
+hex = "0.4.3"
 base64 = "0.23.1"
 colored = "3"
 http-body-util = "0.1"
