@@ -1,6 +1,21 @@
 use seedbank_types::{Name, SeedlingDefinition, SeedlingSpec};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::PathBuf;
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub struct OpenBaoReport {
+    pub is_running: bool,
+    pub is_initialized: bool,
+    pub is_sealed: bool,
+    pub credentials_available: bool,
+    pub credentials_work: bool,
+    pub mounts: HashMap<String, String>,
+    pub app_role_enabled: bool,
+    pub acme_enabled: bool,
+    pub root_ca_configured: bool,
+    pub acme_pki_role_created: bool,
+}
 
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
 pub struct Mount {
@@ -43,6 +58,8 @@ pub struct Orphans {
     pub networks: Vec<Name>,
     pub route_files: Vec<Name>,
     pub resin_repositories: Vec<String>,
+    pub mounts: Vec<Name>,
+    pub openbao_secrets: Vec<Name>,
 }
 
 impl Orphans {
@@ -51,6 +68,8 @@ impl Orphans {
             && self.networks.is_empty()
             && self.route_files.is_empty()
             && self.resin_repositories.is_empty()
+            && self.mounts.is_empty()
+            && self.openbao_secrets.is_empty()
     }
 }
 
@@ -99,6 +118,8 @@ pub enum Request {
     PruneOrphans {
         orphans: Orphans,
     },
+    ListSeedlings,
+    OpenBaoStatus,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -112,6 +133,8 @@ pub enum Response {
     Dropped,
     Orphans(Orphans),
     Pruned,
+    Seedlings { names: Vec<Name> },
+    OpenBaoStatus(OpenBaoReport),
     Error { message: String },
 }
 
@@ -128,6 +151,8 @@ impl std::fmt::Display for Response {
             Response::Dropped => f.write_str("dropped"),
             Response::Orphans(_) => f.write_str("orphans"),
             Response::Pruned => f.write_str("pruned"),
+            Response::Seedlings { names } => f.write_str(&format!("{} seedling(s)", names.len())),
+            Response::OpenBaoStatus(_) => f.write_str("openbao status"),
             Response::Error { message } => f.write_str(&format!("error: '{message}'")),
         }
     }
@@ -194,6 +219,44 @@ mod tests {
                 );
             }
             other => panic!("expected a Created response, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_seedlings_response_should_round_trip() {
+        let message = ServerMessage::Response(Response::Seedlings {
+            names: vec!["hello-world".parse().unwrap()],
+        });
+
+        let serialized = serde_json::to_string(&message).unwrap();
+        let deserialized: ServerMessage = serde_json::from_str(&serialized).unwrap();
+
+        match deserialized {
+            ServerMessage::Response(Response::Seedlings { names }) => {
+                assert_eq!(names, vec!["hello-world".parse().unwrap()]);
+            }
+            other => panic!("expected a Seedlings response, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_openbao_status_response_should_round_trip() {
+        let report = OpenBaoReport {
+            is_running: true,
+            mounts: std::collections::HashMap::from([("kv/".to_string(), "kv".to_string())]),
+            ..Default::default()
+        };
+        let message = ServerMessage::Response(Response::OpenBaoStatus(report));
+
+        let serialized = serde_json::to_string(&message).unwrap();
+        let deserialized: ServerMessage = serde_json::from_str(&serialized).unwrap();
+
+        match deserialized {
+            ServerMessage::Response(Response::OpenBaoStatus(report)) => {
+                assert!(report.is_running);
+                assert_eq!(report.mounts.get("kv/"), Some(&"kv".to_string()));
+            }
+            other => panic!("expected an OpenBaoStatus response, got {other:?}"),
         }
     }
 

@@ -27,6 +27,7 @@ pub enum Error {
     UnexpectedResponse(bract_types::Response),
 }
 
+#[cfg_attr(feature = "mock", mockall::automock)]
 #[async_trait]
 pub trait Client: Send + Sync {
     async fn seedling_status(&self, name: &Name) -> Result<SeedlingStatus, Error>;
@@ -46,6 +47,8 @@ pub trait Client: Send + Sync {
     ) -> Result<String, Error>;
     async fn find_orphans(&self) -> Result<bract_types::Orphans, Error>;
     async fn prune_orphans(&self, orphans: &bract_types::Orphans) -> Result<(), Error>;
+    async fn list_seedlings(&self) -> Result<Vec<Name>, Error>;
+    async fn openbao_status(&self) -> Result<bract_types::OpenBaoReport, Error>;
 }
 
 pub struct UdsClient {
@@ -302,6 +305,46 @@ impl Client for UdsClient {
 
         guard.finish(match response {
             bract_types::Response::Pruned => Ok(()),
+            bract_types::Response::Error { message } => Err(Error::ServerError(message)),
+            unexpected => Err(Error::UnexpectedResponse(unexpected)),
+        })
+    }
+
+    async fn list_seedlings(&self) -> Result<Vec<Name>, Error> {
+        let guard = Span::new(
+            Arc::clone(&self.reporter),
+            "Listing seedlings",
+            ScopeKind::Task,
+        )
+        .start_guard();
+
+        let response = match self.request(guard.span(), Request::ListSeedlings).await {
+            Ok(response) => response,
+            Err(err) => return guard.finish(Err(err)),
+        };
+
+        guard.finish(match response {
+            bract_types::Response::Seedlings { names } => Ok(names),
+            bract_types::Response::Error { message } => Err(Error::ServerError(message)),
+            unexpected => Err(Error::UnexpectedResponse(unexpected)),
+        })
+    }
+
+    async fn openbao_status(&self) -> Result<bract_types::OpenBaoReport, Error> {
+        let guard = Span::new(
+            Arc::clone(&self.reporter),
+            "Checking OpenBao status",
+            ScopeKind::Task,
+        )
+        .start_guard();
+
+        let response = match self.request(guard.span(), Request::OpenBaoStatus).await {
+            Ok(response) => response,
+            Err(err) => return guard.finish(Err(err)),
+        };
+
+        guard.finish(match response {
+            bract_types::Response::OpenBaoStatus(report) => Ok(report),
             bract_types::Response::Error { message } => Err(Error::ServerError(message)),
             unexpected => Err(Error::UnexpectedResponse(unexpected)),
         })
