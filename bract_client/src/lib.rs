@@ -24,7 +24,7 @@ pub enum Error {
     #[error("Server error: {0}")]
     ServerError(String),
     #[error("Unexpected Response: {0}")]
-    UnexpectedResponse(bract_types::Response),
+    UnexpectedResponse(Box<bract_types::Response>),
 }
 
 #[cfg_attr(feature = "mock", mockall::automock)]
@@ -121,7 +121,7 @@ impl Client for UdsClient {
         guard.finish(match response {
             bract_types::Response::SeedlingStatus(status) => Ok(status),
             bract_types::Response::Error { message } => Err(Error::ServerError(message)),
-            unexpected => Err(Error::UnexpectedResponse(unexpected)),
+            unexpected => Err(Error::UnexpectedResponse(Box::new(unexpected))),
         })
     }
 
@@ -144,7 +144,7 @@ impl Client for UdsClient {
         guard.finish(match response {
             bract_types::Response::Stopped => Ok(()),
             bract_types::Response::Error { message } => Err(Error::ServerError(message)),
-            unexpected => Err(Error::UnexpectedResponse(unexpected)),
+            unexpected => Err(Error::UnexpectedResponse(Box::new(unexpected))),
         })
     }
 
@@ -167,7 +167,7 @@ impl Client for UdsClient {
         guard.finish(match response {
             bract_types::Response::Dropped => Ok(()),
             bract_types::Response::Error { message } => Err(Error::ServerError(message)),
-            unexpected => Err(Error::UnexpectedResponse(unexpected)),
+            unexpected => Err(Error::UnexpectedResponse(Box::new(unexpected))),
         })
     }
 
@@ -190,7 +190,7 @@ impl Client for UdsClient {
         guard.finish(match response {
             bract_types::Response::Started => Ok(()),
             bract_types::Response::Error { message } => Err(Error::ServerError(message)),
-            unexpected => Err(Error::UnexpectedResponse(unexpected)),
+            unexpected => Err(Error::UnexpectedResponse(Box::new(unexpected))),
         })
     }
 
@@ -225,7 +225,7 @@ impl Client for UdsClient {
         guard.finish(match response {
             bract_types::Response::Started => Ok(()),
             bract_types::Response::Error { message } => Err(Error::ServerError(message)),
-            unexpected => Err(Error::UnexpectedResponse(unexpected)),
+            unexpected => Err(Error::UnexpectedResponse(Box::new(unexpected))),
         })
     }
 
@@ -258,7 +258,7 @@ impl Client for UdsClient {
         guard.finish(match response {
             bract_types::Response::Created { message } => Ok(message),
             bract_types::Response::Error { message } => Err(Error::ServerError(message)),
-            unexpected => Err(Error::UnexpectedResponse(unexpected)),
+            unexpected => Err(Error::UnexpectedResponse(Box::new(unexpected))),
         })
     }
 
@@ -278,7 +278,7 @@ impl Client for UdsClient {
         guard.finish(match response {
             bract_types::Response::Orphans(orphans) => Ok(orphans),
             bract_types::Response::Error { message } => Err(Error::ServerError(message)),
-            unexpected => Err(Error::UnexpectedResponse(unexpected)),
+            unexpected => Err(Error::UnexpectedResponse(Box::new(unexpected))),
         })
     }
 
@@ -306,7 +306,7 @@ impl Client for UdsClient {
         guard.finish(match response {
             bract_types::Response::Pruned => Ok(()),
             bract_types::Response::Error { message } => Err(Error::ServerError(message)),
-            unexpected => Err(Error::UnexpectedResponse(unexpected)),
+            unexpected => Err(Error::UnexpectedResponse(Box::new(unexpected))),
         })
     }
 
@@ -326,7 +326,7 @@ impl Client for UdsClient {
         guard.finish(match response {
             bract_types::Response::Seedlings { names } => Ok(names),
             bract_types::Response::Error { message } => Err(Error::ServerError(message)),
-            unexpected => Err(Error::UnexpectedResponse(unexpected)),
+            unexpected => Err(Error::UnexpectedResponse(Box::new(unexpected))),
         })
     }
 
@@ -346,7 +346,7 @@ impl Client for UdsClient {
         guard.finish(match response {
             bract_types::Response::OpenBaoStatus(report) => Ok(report),
             bract_types::Response::Error { message } => Err(Error::ServerError(message)),
-            unexpected => Err(Error::UnexpectedResponse(unexpected)),
+            unexpected => Err(Error::UnexpectedResponse(Box::new(unexpected))),
         })
     }
 }
