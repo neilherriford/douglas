@@ -3,11 +3,29 @@ name = "openbao"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+default = []
+mock = ["mockall"]
+
 [dependencies]
 async-trait = { workspace = true }
+config = { workspace = true }
+credentials = { workspace = true }
+file_system = { workspace = true }
+identity = { workspace = true }
 log = { workspace = true }
+mockall = { workspace = true, optional = true }
+openbao_types = { workspace = true }
 rand = "0.9.2"
 serde = { workspace = true }
 serde_json = { workspace = true }
 simple_rest_client = { workspace = true }
 thiserror = { workspace = true }
+
+[dev-dependencies]
+file_system = { workspace = true, features = ["mock"] }
+identity = { workspace = true, features = ["mock"] }
+mockall = { workspace = true }
+openbao = { path = ".", features = ["mock"] }
+simple_rest_client = { workspace = true, features = ["mock"] }
+tokio = { workspace = true, features = ["macros", "rt"] }
