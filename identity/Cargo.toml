@@ -1,0 +1,23 @@
+[package]
+name = "identity"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+default = []
+mock = ["mockall"]
+
+[dependencies]
+aes-gcm = "0.11.1"
+base64 = {workspace = true}
+config = { workspace = true }
+file_system = { workspace = true }
+hkdf = "0.13.0"
+log = { workspace = true }
+mockall = { workspace = true, optional = true }
+thiserror = { workspace = true }
+sha2 = "0.11.0"
+
+[dev-dependencies]
+file_system = { workspace = true, features = ["mock"] }
+mockall = { workspace = true }

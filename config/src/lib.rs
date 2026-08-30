@@ -6,6 +6,7 @@ pub struct DouglasFolders {
     pub transients: PathBuf,
     pub configs: PathBuf,
     pub seedlings_root: PathBuf,
+    pub identity: PathBuf,
 }
 
 impl DouglasFolders {
@@ -51,10 +52,14 @@ impl DouglasFolders {
         result
     }
 
-    pub fn seedling_mount(&self, seedling_name: &str, mount_name: &str) -> PathBuf {
-        let mut result = self.seedlings_root.clone();
-        result.push("mounts");
+    pub fn seedling_mounts_dir(&self, seedling_name: &str) -> PathBuf {
+        let mut result = self.seedling_mounts();
         result.push(seedling_name);
+        result
+    }
+
+    pub fn seedling_mount(&self, seedling_name: &str, mount_name: &str) -> PathBuf {
+        let mut result = self.seedling_mounts_dir(seedling_name);
         result.push(mount_name);
         result
     }
@@ -99,6 +104,7 @@ impl DouglasFolders {
             transients: PathBuf::from("/var/run/douglas/"),
             configs: PathBuf::from("/Library/Preferences/douglas/"),
             seedlings_root: PathBuf::from("/Library/Application Support/douglas/"),
+            identity: PathBuf::from("/Library/Application Support/douglas-identity/"),
         }
     }
 }
@@ -112,6 +118,7 @@ impl DouglasFolders {
             transients: PathBuf::from("/run/douglas/"),
             configs: PathBuf::from("/etc/douglas/"),
             seedlings_root: PathBuf::from("/var/lib/douglas/"),
+            identity: PathBuf::from("/var/lib/douglas-identity/"),
         }
     }
 }
@@ -127,6 +134,7 @@ mod tests {
             transients: PathBuf::from("/run/douglas/"),
             configs: PathBuf::from("/etc/douglas/"),
             seedlings_root: PathBuf::from("/var/lib/douglas/"),
+            identity: PathBuf::from("/var/lib/douglas-identity/"),
         }
     }
 
@@ -195,6 +203,14 @@ mod tests {
     }
 
     #[test]
+    fn test_seedling_mounts_dir_should_be_the_seedlings_own_mounts_root() {
+        assert_eq!(
+            folders().seedling_mounts_dir("openbao"),
+            PathBuf::from("/var/lib/douglas/mounts/openbao")
+        );
+    }
+
+    #[test]
     fn test_services_should_be_nested_under_seedlings_root() {
         assert_eq!(
             folders().services(),
@@ -232,7 +248,10 @@ mod tests {
 
         assert_ne!(folders.log_dir("bract"), folders.log_dir("resin"));
         assert_ne!(folders.socket_dir("bract"), folders.socket_dir("resin"));
-        assert_ne!(folders.seedling_root("bract"), folders.seedling_root("resin"));
+        assert_ne!(
+            folders.seedling_root("bract"),
+            folders.seedling_root("resin")
+        );
         assert_ne!(
             folders.seedling_mount("bract", "socket"),
             folders.seedling_mount("resin", "socket")

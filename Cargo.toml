@@ -56,13 +56,14 @@ members = [
     "bract", "bract_types", "bract_client", "config", "utils", "openbao", "blueprint",  "resin", "seedbank", "seedbank_types", "docker_types", "refined_string",
     "seedbank_client", "resin_client", "resin_types",
     "seedling_registration_types", "seedling_registration_client",
-    "reconcile_trigger_types", "reconcile_trigger_client", "ram_disk",
+    "reconcile_trigger_types", "reconcile_trigger_client", "ram_disk", "identity",
 ]
 
 [workspace.dependencies]
 # External
 async-trait = "0.1"
 time = { version = "0.3", features = ["parsing", "formatting"] }
+base64 = "0.23.1"
 colored = "3"
 http-body-util = "0.1"
 humantime = "2.3.0"
@@ -99,6 +100,7 @@ log = { path = "./log" }
 openbao = { path = "./openbao" }
 os = { path = "./os" }
 ram_disk = { path = "./ram_disk" }
+identity = { path = "./identity" }
 refined_string = { path = "./refined_string" }
 resin = { path = "./resin" }
 resin_client = { path = "./resin_client" }

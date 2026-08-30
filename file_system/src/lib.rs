@@ -356,6 +356,9 @@ pub trait BufferedFileWiter: Send {
 pub trait FileWriter: Send + Sync {
     fn write_all(&self, path: &Path, contents: &str) -> Result<(), FileSystemError>;
     fn write_all_bytes(&self, path: &Path, bytes: &[u8]) -> Result<(), FileSystemError>;
+    /// Atomic create-if-missing: `Ok(true)` if it wrote, `Ok(false)` if the file already existed.
+    fn write_all_bytes_if_absent(&self, path: &Path, bytes: &[u8])
+    -> Result<bool, FileSystemError>;
     fn create_buffered_file_writer(
         &self,
         path: &Path,
@@ -569,6 +572,33 @@ impl FileWriter for UnixFileWriter {
             })?;
 
         Ok(())
+    }
+
+    fn write_all_bytes_if_absent(
+        &self,
+        path: &Path,
+        bytes: &[u8],
+    ) -> Result<bool, FileSystemError> {
+        let file = OpenOptions::new().write(true).create_new(true).open(path);
+
+        let mut file = match file {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => return Ok(false),
+            Err(error) => {
+                return Err(FileSystemError::IoErrorAtPath {
+                    path: path.to_path_buf(),
+                    error,
+                });
+            }
+        };
+
+        file.write_all(bytes)
+            .map_err(|error| FileSystemError::IoErrorAtPath {
+                path: path.to_path_buf(),
+                error,
+            })?;
+
+        Ok(true)
     }
 
     fn create_buffered_file_writer(
@@ -1775,6 +1805,70 @@ mod tests {
                 result,
                 Err(FileSystemError::ParentNotFoundError(parent)) if parent == dir
             ));
+        }
+    }
+
+    mod modes {
+        use super::*;
+
+        #[test]
+        fn test_owner_read_write_execute_should_convert_to_0700() {
+            assert_eq!(u32::from(Modes::OwnerReadWriteExecute), 0o700);
+        }
+    }
+
+    mod unix_file_writer {
+        use super::*;
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        fn unique_temp_dir() -> PathBuf {
+            static COUNTER: AtomicU64 = AtomicU64::new(0);
+            let mut dir = std::env::temp_dir();
+            dir.push(format!(
+                "douglas-file-writer-test-{}-{}",
+                std::process::id(),
+                COUNTER.fetch_add(1, Ordering::Relaxed)
+            ));
+            dir
+        }
+
+        #[test]
+        fn test_write_all_bytes_if_absent_should_write_and_return_true_when_missing() {
+            let dir = unique_temp_dir();
+            std::fs::create_dir_all(&dir).expect("should create temp dir");
+            let mut file_path = dir.clone();
+            file_path.push("identity");
+
+            let writer = UnixFileWriter::new();
+            let result = writer.write_all_bytes_if_absent(&file_path, b"secret");
+
+            assert!(matches!(result, Ok(true)));
+            assert_eq!(
+                std::fs::read(&file_path).expect("should read back written bytes"),
+                b"secret"
+            );
+
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn test_write_all_bytes_if_absent_should_not_overwrite_and_return_false_when_present() {
+            let dir = unique_temp_dir();
+            std::fs::create_dir_all(&dir).expect("should create temp dir");
+            let mut file_path = dir.clone();
+            file_path.push("identity");
+            std::fs::write(&file_path, b"original").expect("should seed existing file");
+
+            let writer = UnixFileWriter::new();
+            let result = writer.write_all_bytes_if_absent(&file_path, b"attacker-controlled");
+
+            assert!(matches!(result, Ok(false)));
+            assert_eq!(
+                std::fs::read(&file_path).expect("should read back original bytes"),
+                b"original"
+            );
+
+            let _ = std::fs::remove_dir_all(&dir);
         }
     }
 }
