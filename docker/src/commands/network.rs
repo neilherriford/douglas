@@ -1,5 +1,5 @@
 use crate::{DockerError, Label, to_general_error};
-use docker_types::{NetworkName, serialize_labels};
+use docker_types::{Ipv4Subnet, NetworkName, serialize_labels};
 use log::{Reporter, Span};
 use serde::{Deserialize, Serialize};
 use serde_json::from_value;
@@ -21,18 +21,50 @@ pub struct Network {
 }
 
 #[derive(Debug, Serialize, PartialEq)]
+struct IpamConfigEntry {
+    #[serde(rename = "Subnet")]
+    subnet: String,
+    #[serde(rename = "Gateway")]
+    gateway: String,
+}
+
+#[derive(Debug, Serialize, PartialEq)]
+struct Ipam {
+    #[serde(rename = "Config")]
+    config: Vec<IpamConfigEntry>,
+}
+
+#[derive(Debug, Serialize, PartialEq)]
 struct CreationBody {
     #[serde(rename = "Name")]
     pub name: NetworkName,
     #[serde(rename = "Labels")]
     #[serde(serialize_with = "serialize_labels")]
     pub labels: Vec<Label>,
+    #[serde(rename = "IPAM")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ipam: Option<Ipam>,
+}
+
+#[derive(Debug, Serialize, PartialEq)]
+struct EndpointIpamConfig {
+    #[serde(rename = "IPv4Address")]
+    ipv4_address: String,
+}
+
+#[derive(Debug, Serialize, PartialEq)]
+struct EndpointConfig {
+    #[serde(rename = "IPAMConfig")]
+    ipam_config: EndpointIpamConfig,
 }
 
 #[derive(Debug, Serialize, PartialEq)]
 struct ConnectionBody {
     #[serde(rename = "Container")]
     container_id: String,
+    #[serde(rename = "EndpointConfig")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    endpoint_config: Option<EndpointConfig>,
 }
 
 #[derive(Debug, Deserialize, PartialEq)]
@@ -158,6 +190,7 @@ pub async fn create(
     parser: Arc<dyn Parser<Json, ParseError = JsonParserError>>,
     name: &NetworkName,
     labels: Vec<Label>,
+    subnet: Option<&Ipv4Subnet>,
 ) -> Result<String, DockerError> {
     let guard = Span::new(
         Arc::clone(&reporter),
@@ -166,12 +199,20 @@ pub async fn create(
     )
     .start_guard();
 
+    let ipam = subnet.map(|subnet| Ipam {
+        config: vec![IpamConfigEntry {
+            subnet: subnet.cidr.clone(),
+            gateway: subnet.gateway.clone(),
+        }],
+    });
+
     let req = Request::Post {
         path: "/networks/create".to_string(),
         body: Some(
             serde_json::to_string(&CreationBody {
                 name: name.clone(),
                 labels,
+                ipam,
             })
             .map_err(to_general_error)?,
         ),
@@ -199,6 +240,7 @@ pub async fn connect(
     rest_client: &tokio::sync::Mutex<dyn RestClient + Send + Sync + 'static>,
     network_id: &str,
     container_id: &str,
+    static_ipv4: Option<&str>,
 ) -> Result<(), DockerError> {
     let guard = Span::new(
         Arc::clone(&reporter),
@@ -207,11 +249,18 @@ pub async fn connect(
     )
     .start_guard();
 
+    let endpoint_config = static_ipv4.map(|ipv4_address| EndpointConfig {
+        ipam_config: EndpointIpamConfig {
+            ipv4_address: ipv4_address.to_string(),
+        },
+    });
+
     let req = Request::Post {
         path: format!("/networks/{network_id}/connect"),
         body: Some(
             serde_json::to_string(&ConnectionBody {
                 container_id: container_id.to_string(),
+                endpoint_config,
             })
             .map_err(to_general_error)?,
         ),
@@ -249,6 +298,7 @@ pub async fn disconnect(
         body: Some(
             serde_json::to_string(&ConnectionBody {
                 container_id: container_id.to_string(),
+                endpoint_config: None,
             })
             .map_err(to_general_error)?,
         ),

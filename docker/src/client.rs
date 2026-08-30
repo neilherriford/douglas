@@ -4,8 +4,8 @@ use crate::{
 };
 use async_trait::async_trait;
 use docker_types::{
-    ContainerId, ContainerName, ContainerSnapshot, ImageDefinition, ImageId, Label, MountName,
-    NetworkName, NewContainer, Registry, Status, VersionedImageName,
+    ContainerId, ContainerName, ContainerSnapshot, ImageDefinition, ImageId, Ipv4Subnet, Label,
+    MountName, NetworkName, NewContainer, Registry, Status, VersionedImageName,
 };
 use log::Reporter;
 #[cfg(feature = "mock")]
@@ -60,11 +60,16 @@ pub trait Client: Send + Sync {
         new_container: &NewContainer,
     ) -> Result<(), DockerError>;
     async fn network_exists(&self, name: &NetworkName) -> Result<bool, DockerError>;
-    async fn create_network(&self, name: &NetworkName) -> Result<(), DockerError>;
-    async fn connect_network(
+    async fn create_network<'a>(
+        &self,
+        name: &NetworkName,
+        subnet: Option<&'a Ipv4Subnet>,
+    ) -> Result<(), DockerError>;
+    async fn connect_network<'a>(
         &self,
         network: &NetworkName,
         container_ref: ContainerRef,
+        static_ipv4: Option<&'a str>,
     ) -> Result<(), DockerError>;
     async fn disconnect_network(
         &self,
@@ -288,22 +293,28 @@ impl Client for UdsClient {
         .await
     }
 
-    async fn create_network(&self, name: &NetworkName) -> Result<(), DockerError> {
+    async fn create_network<'a>(
+        &self,
+        name: &NetworkName,
+        subnet: Option<&'a Ipv4Subnet>,
+    ) -> Result<(), DockerError> {
         network::create(
             Arc::clone(&self.reporter),
             &*self.rest_client,
             Arc::clone(&self.parser),
             name,
             Vec::new(),
+            subnet,
         )
         .await
         .map(|_| ())
     }
 
-    async fn connect_network(
+    async fn connect_network<'a>(
         &self,
         network_name: &NetworkName,
         container_ref: ContainerRef,
+        static_ipv4: Option<&'a str>,
     ) -> Result<(), DockerError> {
         let target_network = network::inspect_by_name(
             Arc::clone(&self.reporter),
@@ -325,6 +336,7 @@ impl Client for UdsClient {
             &*self.rest_client,
             &target_network.id,
             &container_id,
+            static_ipv4,
         )
         .await
     }

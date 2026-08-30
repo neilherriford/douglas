@@ -1,6 +1,6 @@
 use refined_string::{StringRules, Validated};
 use regex::Regex;
-use serde::ser::{self, SerializeMap, SerializeSeq, SerializeStruct};
+use serde::ser::{SerializeMap, SerializeSeq, SerializeStruct};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::value::Value as Json;
 use std::collections::HashSet;
@@ -751,6 +751,12 @@ pub type ContainerName = Validated<DockerNameRules>;
 pub type ImageName = Validated<DockerNameRules>;
 pub type MountName = Validated<DockerNameRules>;
 pub type NetworkName = Validated<DockerNameRules>;
+
+#[derive(Debug, PartialEq, Eq, Clone)]
+pub struct Ipv4Subnet {
+    pub cidr: String,
+    pub gateway: String,
+}
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum RegistryError {
