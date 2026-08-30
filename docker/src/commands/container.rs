@@ -200,14 +200,11 @@ pub struct InspectedHostConfig {
 fn to_mount_definition(
     mount: Mount,
     mount_names: &HashMap<PathBuf, MountName>,
-) -> Result<MountDefinition, DockerError> {
+) -> Option<MountDefinition> {
     let container_path = PathBuf::from(&mount.destination);
-    let name = mount_names
-        .get(&container_path)
-        .cloned()
-        .ok_or_else(|| DockerError::UnknownMount(container_path.clone()))?;
+    let name = mount_names.get(&container_path).cloned()?;
 
-    Ok(MountDefinition {
+    Some(MountDefinition {
         name,
         host_path: PathBuf::from(&mount.source),
         container_path,
@@ -279,6 +276,7 @@ pub async fn list(
     let request = Request::Get {
         path: create_path_and_query_string("/containers/json", HashMap::from([("all", "true")])),
         headers: vec![],
+        query: HashMap::new(),
     };
 
     let response = {
@@ -347,8 +345,8 @@ pub async fn find(
     let mounts = buffer
         .mounts
         .into_iter()
-        .map(|mount| to_mount_definition(mount, mount_names))
-        .collect::<Result<Vec<_>, _>>()?;
+        .filter_map(|mount| to_mount_definition(mount, mount_names))
+        .collect::<Vec<_>>();
 
     guard.finish(Ok(ContainerSnapshot {
         definition: ContainerDefinition {
@@ -377,6 +375,7 @@ async fn inspect_container(
     let request = Request::Get {
         path: format!("/containers/{container_ref}/json"),
         headers: vec![],
+        query: HashMap::new(),
     };
     let response = {
         let mut rest_client = rest_client.lock().await;
@@ -409,6 +408,7 @@ async fn find_container(
             HashMap::from([("all", "true"), ("filters", filters.as_str())]),
         ),
         headers: vec![],
+        query: HashMap::new(),
     };
     let response = {
         let mut rest_client = rest_client.lock().await;
@@ -440,6 +440,7 @@ pub async fn delete(
             HashMap::from([("v", "true")]),
         ),
         headers: vec![],
+        query: HashMap::new(),
     };
 
     let response = {
@@ -473,6 +474,7 @@ pub async fn start(
         ),
         headers: vec![],
         body: None,
+        query: HashMap::new(),
     };
 
     let response = {
@@ -506,6 +508,7 @@ pub async fn stop(
         ),
         headers: vec![],
         body: None,
+        query: HashMap::new(),
     };
 
     let response = {
@@ -563,6 +566,7 @@ pub async fn create(
         ),
         headers: vec![Header::content_type_json()],
         body: Some(body),
+        query: HashMap::new(),
     };
     let response = {
         let mut rest_client = rest_client.lock().await;
@@ -675,7 +679,7 @@ mod tests {
     }
 
     #[test]
-    fn test_to_mount_definition_should_error_on_an_unrecognized_mount_path() {
+    fn test_to_mount_definition_should_ignore_a_mount_douglas_does_not_manage() {
         let mount = Mount {
             mount_type: docker_types::MountType::Bind,
             source: "/var/lib/douglas/mounts/traefik/shared".to_string(),
@@ -685,6 +689,6 @@ mod tests {
 
         let result = to_mount_definition(mount, &HashMap::new());
 
-        assert!(matches!(result, Err(DockerError::UnknownMount(_))));
+        assert!(result.is_none());
     }
 }

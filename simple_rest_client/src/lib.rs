@@ -58,35 +58,40 @@ pub enum Request {
     Delete {
         path: String,
         headers: Vec<Header>,
+        query: HashMap<String, String>,
     },
     Get {
         path: String,
         headers: Vec<Header>,
+        query: HashMap<String, String>,
     },
     Head {
         path: String,
         headers: Vec<Header>,
+        query: HashMap<String, String>,
     },
     Post {
         path: String,
         headers: Vec<Header>,
         body: Option<String>,
+        query: HashMap<String, String>,
     },
     Put {
         path: String,
         headers: Vec<Header>,
         body: Option<String>,
+        query: HashMap<String, String>,
     },
 }
 
 impl Request {
     pub fn to_short_description(&self) -> String {
         match self {
-            Request::Delete { path, .. } => format!("DELETE {path}"),
-            Request::Get { path, .. } => format!("GET {path}"),
-            Request::Head { path, .. } => format!("HEAD {path}"),
-            Request::Post { path, .. } => format!("POST {path}"),
-            Request::Put { path, .. } => format!("PUT {path}"),
+            Request::Delete { .. } => format!("DELETE {}", self.path()),
+            Request::Get { .. } => format!("GET {}", self.path()),
+            Request::Head { .. } => format!("HEAD {}", self.path()),
+            Request::Post { .. } => format!("POST {}", self.path()),
+            Request::Put { .. } => format!("PUT {}", self.path()),
         }
     }
 
@@ -101,14 +106,34 @@ impl Request {
         .to_vec()
     }
 
-    pub fn path(&self) -> String {
+    pub fn query(&self) -> &HashMap<String, String> {
         match self {
-            Request::Delete { path, .. } => path.clone(),
-            Request::Get { path, .. } => path.clone(),
-            Request::Head { path, .. } => path.clone(),
-            Request::Post { path, .. } => path.clone(),
-            Request::Put { path, .. } => path.clone(),
+            Request::Delete { query, .. } => query,
+            Request::Get { query, .. } => query,
+            Request::Head { query, .. } => query,
+            Request::Post { query, .. } => query,
+            Request::Put { query, .. } => query,
         }
+    }
+
+    fn bare_path(&self) -> &str {
+        match self {
+            Request::Delete { path, .. } => path,
+            Request::Get { path, .. } => path,
+            Request::Head { path, .. } => path,
+            Request::Post { path, .. } => path,
+            Request::Put { path, .. } => path,
+        }
+    }
+
+    pub fn path(&self) -> String {
+        create_path_and_query_string(
+            self.bare_path(),
+            self.query()
+                .iter()
+                .map(|(name, value)| (name.as_str(), value.as_str()))
+                .collect(),
+        )
     }
 }
 
@@ -339,49 +364,38 @@ impl<TIo: IoStream + 'static> SimpleRestClient<TIo> {
         &self,
         request: &Request,
     ) -> Result<hyper::Request<String>, RestClientError> {
-        let uri_builder = hyper::http::uri::Builder::new()
+        let uri = hyper::http::uri::Builder::new()
             .scheme(self.scheme.as_str())
-            .authority(self.authority.as_str());
-        let mut request_builder = hyper::Request::builder();
+            .authority(self.authority.as_str())
+            .path_and_query(request.path())
+            .build()?;
+        let mut request_builder = hyper::Request::builder().uri(uri);
         let request_headers: &Vec<Header>;
         let request_body: &Option<String>;
 
         match request {
-            Request::Delete { path, headers } => {
-                let uri = uri_builder.path_and_query(path).build()?;
-                request_builder = request_builder.method("DELETE").uri(uri);
+            Request::Delete { headers, .. } => {
+                request_builder = request_builder.method("DELETE");
                 request_headers = headers;
                 request_body = &None;
             }
-            Request::Get { path, headers } => {
-                let uri = uri_builder.path_and_query(path).build()?;
-                request_builder = request_builder.method("GET").uri(uri);
+            Request::Get { headers, .. } => {
+                request_builder = request_builder.method("GET");
                 request_headers = headers;
                 request_body = &None;
             }
-            Request::Head { path, headers } => {
-                let uri = uri_builder.path_and_query(path).build()?;
-                request_builder = request_builder.method("HEAD").uri(uri);
+            Request::Head { headers, .. } => {
+                request_builder = request_builder.method("HEAD");
                 request_headers = headers;
                 request_body = &None;
             }
-            Request::Post {
-                path,
-                headers,
-                body,
-            } => {
-                let uri = uri_builder.path_and_query(path).build()?;
-                request_builder = request_builder.method("POST").uri(uri);
+            Request::Post { headers, body, .. } => {
+                request_builder = request_builder.method("POST");
                 request_body = body;
                 request_headers = headers;
             }
-            Request::Put {
-                path,
-                headers,
-                body,
-            } => {
-                let uri = uri_builder.path_and_query(path).build()?;
-                request_builder = request_builder.method("PUT").uri(uri);
+            Request::Put { headers, body, .. } => {
+                request_builder = request_builder.method("PUT");
                 request_body = body;
                 request_headers = headers;
             }
@@ -529,46 +543,32 @@ impl<TIo: IoStream + 'static> SimpleRestClient<TIo> {
 
     fn log_request(&self, span: &Span, request: &Request) {
         let verb: &str;
-        let request_path: &String;
         let request_headers: &Vec<Header>;
         let request_body: &Option<String>;
 
         match request {
-            Request::Delete { path, headers } => {
+            Request::Delete { headers, .. } => {
                 verb = "DELETE";
-                request_path = path;
                 request_headers = headers;
                 request_body = &None;
             }
-            Request::Get { path, headers } => {
+            Request::Get { headers, .. } => {
                 verb = "GET";
-                request_path = path;
                 request_headers = headers;
                 request_body = &None;
             }
-            Request::Head { path, headers } => {
+            Request::Head { headers, .. } => {
                 verb = "HEAD";
-                request_path = path;
                 request_headers = headers;
                 request_body = &None;
             }
-            Request::Post {
-                path,
-                headers,
-                body,
-            } => {
+            Request::Post { headers, body, .. } => {
                 verb = "POST";
-                request_path = path;
                 request_headers = headers;
                 request_body = body;
             }
-            Request::Put {
-                path,
-                headers,
-                body,
-            } => {
+            Request::Put { headers, body, .. } => {
                 verb = "PUT";
-                request_path = path;
                 request_headers = headers;
                 request_body = body;
             }
@@ -578,7 +578,11 @@ impl<TIo: IoStream + 'static> SimpleRestClient<TIo> {
 
         let mut result = format!(
             "Performing '{}' on '{}://{}{}', with headers {}",
-            verb, self.scheme, self.authority, request_path, headers
+            verb,
+            self.scheme,
+            self.authority,
+            request.path(),
+            headers
         );
 
         if let Some(body) = request_body {
@@ -710,6 +714,7 @@ mod tests {
         Request::Get {
             path: path.to_string(),
             headers: vec![],
+            query: HashMap::new(),
         }
     }
 
@@ -764,6 +769,7 @@ mod tests {
                     Request::Delete {
                         path: "/foo".to_string(),
                         headers: vec![],
+                        query: HashMap::new(),
                     },
                     "DELETE /foo",
                 ),
@@ -772,6 +778,7 @@ mod tests {
                     Request::Head {
                         path: "/foo".to_string(),
                         headers: vec![],
+                        query: HashMap::new(),
                     },
                     "HEAD /foo",
                 ),
@@ -780,6 +787,7 @@ mod tests {
                         path: "/foo".to_string(),
                         headers: vec![],
                         body: None,
+                        query: HashMap::new(),
                     },
                     "POST /foo",
                 ),
@@ -788,6 +796,7 @@ mod tests {
                         path: "/foo".to_string(),
                         headers: vec![],
                         body: None,
+                        query: HashMap::new(),
                     },
                     "PUT /foo",
                 ),
@@ -799,25 +808,64 @@ mod tests {
         }
 
         #[test]
+        fn test_to_short_description_should_include_the_query_string() {
+            let request = Request::Get {
+                path: "/foo".to_string(),
+                headers: vec![],
+                query: HashMap::from([("a".to_string(), "b".to_string())]),
+            };
+
+            assert_eq!(request.to_short_description(), "GET /foo?a=b");
+        }
+
+        #[test]
         fn test_headers_should_return_the_requests_headers() {
             let request = Request::Post {
                 path: "/foo".to_string(),
                 headers: vec![Header::new("x-test", "1")],
                 body: None,
+                query: HashMap::new(),
             };
 
             assert_eq!(request.headers(), vec![Header::new("x-test", "1")]);
         }
 
         #[test]
-        fn test_path_should_return_the_requests_path() {
+        fn test_query_should_return_the_requests_query_parameters() {
+            let request = Request::Get {
+                path: "/foo".to_string(),
+                headers: vec![],
+                query: HashMap::from([("a".to_string(), "b".to_string())]),
+            };
+
+            assert_eq!(
+                request.query(),
+                &HashMap::from([("a".to_string(), "b".to_string())])
+            );
+        }
+
+        #[test]
+        fn test_path_should_return_the_bare_path_when_there_is_no_query() {
             let request = Request::Put {
                 path: "/foo".to_string(),
                 headers: vec![],
                 body: None,
+                query: HashMap::new(),
             };
 
             assert_eq!(request.path(), "/foo");
+        }
+
+        #[test]
+        fn test_path_should_append_the_encoded_query_string() {
+            let request = Request::Put {
+                path: "/foo".to_string(),
+                headers: vec![],
+                body: None,
+                query: HashMap::from([("a b".to_string(), "c&d".to_string())]),
+            };
+
+            assert_eq!(request.path(), "/foo?a%20b=c%26d");
         }
     }
 

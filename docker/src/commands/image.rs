@@ -182,6 +182,7 @@ async fn find_image(
             HashMap::from([("all", "true"), ("filters", filters.as_str())]),
         ),
         headers: vec![],
+        query: HashMap::new(),
     };
     let mut rest_client = rest_client.lock().await;
     let response = rest_client
@@ -205,6 +206,7 @@ pub async fn inspect(
     let request = Request::Get {
         path: format!("/images/{id}/json"),
         headers: vec![],
+        query: HashMap::new(),
     };
 
     let mut rest_client = rest_client.lock().await;
@@ -239,6 +241,7 @@ pub async fn pull(
         ),
         headers: vec![],
         body: None,
+        query: HashMap::new(),
     };
 
     let response = {

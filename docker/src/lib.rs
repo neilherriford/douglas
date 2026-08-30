@@ -38,9 +38,6 @@ pub enum DockerError {
     #[error("Invalid name '{name}': {description}")]
     InvalidName { name: String, description: String },
 
-    #[error("Unknown mount at container path '{}'", .0.display())]
-    UnknownMount(std::path::PathBuf),
-
     #[error("General error {0}")]
     GeneralError(String),
 }

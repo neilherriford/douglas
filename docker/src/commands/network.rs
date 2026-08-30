@@ -10,7 +10,7 @@ use simple_rest_client::assertions::{
 use simple_rest_client::parsers::Parser;
 use simple_rest_client::parsers::json::JsonParserError;
 use simple_rest_client::{Header, Request, RestClient};
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 #[derive(Debug, Deserialize, PartialEq)]
 pub struct Network {
@@ -62,6 +62,7 @@ pub async fn inspect_by_name(
     let request = Request::Get {
         path: format!("/networks/{}", name.as_ref()),
         headers: vec![],
+        query: HashMap::new(),
     };
 
     let response = {
@@ -92,6 +93,7 @@ pub async fn list(
     let request = Request::Get {
         path: "/networks".to_string(),
         headers: vec![],
+        query: HashMap::new(),
     };
 
     let response = {
@@ -122,6 +124,7 @@ pub async fn delete(
     let request = Request::Delete {
         path: format!("/networks/{network_id}"),
         headers: vec![],
+        query: HashMap::new(),
     };
 
     let response = {
@@ -173,6 +176,7 @@ pub async fn create(
             .map_err(to_general_error)?,
         ),
         headers: vec![Header::content_type_json()],
+        query: HashMap::new(),
     };
 
     let response = {
@@ -212,6 +216,7 @@ pub async fn connect(
             .map_err(to_general_error)?,
         ),
         headers: vec![Header::content_type_json()],
+        query: HashMap::new(),
     };
 
     let response = {
@@ -248,6 +253,7 @@ pub async fn disconnect(
             .map_err(to_general_error)?,
         ),
         headers: vec![Header::content_type_json()],
+        query: HashMap::new(),
     };
 
     let response = {

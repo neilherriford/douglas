@@ -102,6 +102,23 @@ pub fn assert_no_content(response: Response) -> Result<Vec<Header>, AssertionErr
     }
 }
 
+pub fn assert_okay_or_no_content(response: Response) -> Result<Vec<Header>, AssertionError> {
+    match response {
+        Response::Okay { headers, .. } | Response::NoContent { headers } => Ok(headers),
+        Response::Created { body, .. } => Err(AssertionError::UnexpectedResponseError {
+            status: 201,
+            body,
+            message: "expected OK or NO CONTENT, but recieved CREATED".to_string(),
+        }),
+        Response::Error { status: 404, .. } => Err(AssertionError::NotFoundError),
+        Response::Error { status, body, .. } => Err(AssertionError::UnexpectedResponseError {
+            status,
+            body,
+            message: "non successful response".to_string(),
+        }),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -205,5 +222,46 @@ mod tests {
 
         let err = result.expect_err("should be an error");
         assert!(err.to_string().contains("malformed request"));
+    }
+
+    #[test]
+    fn test_assert_okay_or_no_content_should_pass_through_an_okay_response() {
+        let headers = assert_okay_or_no_content(Response::Okay {
+            headers: vec![Header::new("x-test", "1")],
+            body: Some("{}".to_string()),
+        })
+        .expect("should pass through");
+
+        assert_eq!(headers, vec![Header::new("x-test", "1")]);
+    }
+
+    #[test]
+    fn test_assert_okay_or_no_content_should_pass_through_a_no_content_response() {
+        let headers = assert_okay_or_no_content(Response::NoContent {
+            headers: vec![Header::new("x-test", "1")],
+        })
+        .expect("should pass through");
+
+        assert_eq!(headers, vec![Header::new("x-test", "1")]);
+    }
+
+    #[test]
+    fn test_assert_okay_or_no_content_should_reject_a_created_response() {
+        let result = assert_okay_or_no_content(Response::Created {
+            headers: Vec::new(),
+            body: None,
+        });
+
+        assert!(matches!(
+            result,
+            Err(AssertionError::UnexpectedResponseError { status: 201, .. })
+        ));
+    }
+
+    #[test]
+    fn test_assert_okay_or_no_content_should_treat_404_as_not_found() {
+        let result = assert_okay_or_no_content(error_response(404, None));
+
+        assert!(matches!(result, Err(AssertionError::NotFoundError)));
     }
 }

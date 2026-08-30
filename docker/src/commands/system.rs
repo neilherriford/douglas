@@ -1,7 +1,7 @@
 use crate::{DockerError, to_general_error};
 use log::{Reporter, Span};
 use simple_rest_client::{Request, RestClient, assertions::assert_okay_with_body};
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 pub(crate) async fn ping(
     reporter: Arc<dyn Reporter>,
@@ -11,6 +11,7 @@ pub(crate) async fn ping(
     let req = Request::Get {
         path: "/_ping".to_string(),
         headers: vec![],
+        query: HashMap::new(),
     };
     let mut rest_client = rest_client.lock().await;
     let response = rest_client

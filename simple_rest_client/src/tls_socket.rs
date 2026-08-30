@@ -12,7 +12,7 @@ use log::Span;
 #[cfg(feature = "mock")]
 use mockall::automock;
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     fmt::Formatter,
     pin::Pin,
     sync::{Arc, LazyLock},
@@ -326,6 +326,7 @@ impl TlsRedirectFollowingClient {
             return Request::Get {
                 path: new_path,
                 headers: Self::headers_for_redirect(request.headers(), same_host),
+                query: HashMap::new(),
             };
         }
 
@@ -333,24 +334,29 @@ impl TlsRedirectFollowingClient {
             Request::Delete { headers, .. } => Request::Delete {
                 path: new_path,
                 headers: Self::headers_for_redirect(headers.clone(), same_host),
+                query: HashMap::new(),
             },
             Request::Get { headers, .. } => Request::Get {
                 path: new_path,
                 headers: Self::headers_for_redirect(headers.clone(), same_host),
+                query: HashMap::new(),
             },
             Request::Head { headers, .. } => Request::Head {
                 path: new_path,
                 headers: Self::headers_for_redirect(headers.clone(), same_host),
+                query: HashMap::new(),
             },
             Request::Post { headers, body, .. } => Request::Post {
                 path: new_path,
                 headers: Self::headers_for_redirect(headers.clone(), same_host),
                 body: body.clone(),
+                query: HashMap::new(),
             },
             Request::Put { headers, body, .. } => Request::Put {
                 path: new_path,
                 headers: Self::headers_for_redirect(headers.clone(), same_host),
                 body: body.clone(),
+                query: HashMap::new(),
             },
         }
     }
@@ -613,6 +619,7 @@ mod tests {
                 path: "/foo".to_string(),
                 headers: vec![Header::new("x-test", "1")],
                 body: Some("body".to_string()),
+                query: HashMap::new(),
             };
 
             let result = TlsRedirectFollowingClient::rebuild_request_for_redirect(
@@ -627,6 +634,7 @@ mod tests {
                 Request::Get {
                     path: "/bar".to_string(),
                     headers: vec![Header::new("x-test", "1")],
+                    query: HashMap::new(),
                 }
             );
         }
@@ -637,6 +645,7 @@ mod tests {
                 path: "/foo".to_string(),
                 headers: vec![Header::new("x-test", "1")],
                 body: Some("body".to_string()),
+                query: HashMap::new(),
             };
 
             let result = TlsRedirectFollowingClient::rebuild_request_for_redirect(
@@ -652,6 +661,7 @@ mod tests {
                     path: "/bar".to_string(),
                     headers: vec![Header::new("x-test", "1")],
                     body: Some("body".to_string()),
+                    query: HashMap::new(),
                 }
             );
         }
@@ -661,6 +671,7 @@ mod tests {
             let request = Request::Get {
                 path: "/foo".to_string(),
                 headers: vec![],
+                query: HashMap::new(),
             };
 
             let result = TlsRedirectFollowingClient::rebuild_request_for_redirect(
@@ -675,6 +686,7 @@ mod tests {
                 Request::Get {
                     path: "/bar".to_string(),
                     headers: vec![],
+                    query: HashMap::new(),
                 }
             );
         }
@@ -687,6 +699,7 @@ mod tests {
                     Header::new("authorization", "Bearer secret"),
                     Header::new("x-test", "1"),
                 ],
+                query: HashMap::new(),
             };
 
             let result = TlsRedirectFollowingClient::rebuild_request_for_redirect(
@@ -701,6 +714,7 @@ mod tests {
                 Request::Get {
                     path: "/bar".to_string(),
                     headers: vec![Header::new("x-test", "1")],
+                    query: HashMap::new(),
                 }
             );
         }
@@ -715,6 +729,7 @@ mod tests {
                     Header::new("Proxy-Authorization", "Basic xyz"),
                     Header::new("x-test", "1"),
                 ],
+                query: HashMap::new(),
             };
 
             let result = TlsRedirectFollowingClient::rebuild_request_for_redirect(
@@ -729,6 +744,7 @@ mod tests {
                 Request::Get {
                     path: "/bar".to_string(),
                     headers: vec![Header::new("x-test", "1")],
+                    query: HashMap::new(),
                 }
             );
         }
@@ -738,6 +754,7 @@ mod tests {
             let request = Request::Get {
                 path: "/foo".to_string(),
                 headers: vec![Header::new("authorization", "Bearer secret")],
+                query: HashMap::new(),
             };
 
             let result = TlsRedirectFollowingClient::rebuild_request_for_redirect(
@@ -752,6 +769,7 @@ mod tests {
                 Request::Get {
                     path: "/bar".to_string(),
                     headers: vec![Header::new("authorization", "Bearer secret")],
+                    query: HashMap::new(),
                 }
             );
         }
