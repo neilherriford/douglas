@@ -37,7 +37,7 @@ pub async fn bootstrap(
     .start_guard();
 
     let definition = service_definition(douglas_folders);
-    let root_path = douglas_folders.service_root(RESIN);
+    let root_path = douglas_folders.seedling_root(RESIN);
 
     let state = {
         let mut state_observer = StateObserver::new(credentials, folder);
@@ -68,7 +68,7 @@ pub async fn bootstrap(
 }
 
 pub fn service_definition(douglas_folders: &DouglasFolders) -> ServiceDefinition {
-    let mut repositories_path = douglas_folders.service_root(RESIN);
+    let mut repositories_path = douglas_folders.seedling_root(RESIN);
     repositories_path.push("repositories");
 
     ServiceDefinition::with_sockets(

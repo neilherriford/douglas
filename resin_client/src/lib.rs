@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 use async_trait::async_trait;
 use docker_types::VersionedImageName;
@@ -88,6 +88,7 @@ impl Client for HttpClient {
         let request = Request::Head {
             path: Self::manifest_path(image),
             headers: Vec::new(),
+            query: HashMap::new(),
         };
 
         match self.client.execute(guard.span(), &request).await? {
@@ -107,6 +108,7 @@ impl Client for HttpClient {
         let request = Request::Get {
             path: format!("/v2/{name}/tags/list"),
             headers: Vec::new(),
+            query: HashMap::new(),
         };
         match self.client.execute(guard.span(), &request).await? {
             Response::Okay { .. } => Ok(true),
@@ -126,6 +128,7 @@ impl Client for HttpClient {
         let request = Request::Get {
             path: "/v2/_catalog".to_string(),
             headers: Vec::new(),
+            query: HashMap::new(),
         };
 
         guard.finish(match self.client.execute(guard.span(), &request).await? {
@@ -155,6 +158,7 @@ impl Client for HttpClient {
         let request = Request::Delete {
             path: format!("/v2/{name}/"),
             headers: Vec::new(),
+            query: HashMap::new(),
         };
 
         guard.finish(match self.client.execute(guard.span(), &request).await? {

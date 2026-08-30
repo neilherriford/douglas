@@ -8,7 +8,7 @@ use simple_rest_client::{
     assertions::{AssertionError, assert_okay_with_body},
     tls_socket,
 };
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -75,6 +75,7 @@ impl TokenExchange for DockerHubTokenExchange {
                 "/token?service=registry.docker.io&scope=repository:{repository_name}:pull"
             ),
             headers: vec![],
+            query: HashMap::new(),
         };
 
         let result: Result<String, TokenExchangeError> = async {

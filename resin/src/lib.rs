@@ -280,7 +280,7 @@ impl Server {
             (root, douglas_folders.service_log_file(RESIN))
         } else {
             (
-                douglas_folders.service_root(RESIN),
+                douglas_folders.seedling_root(RESIN),
                 douglas_folders.service_log_file(RESIN),
             )
         };

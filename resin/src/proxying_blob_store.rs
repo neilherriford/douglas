@@ -12,6 +12,7 @@ use simple_rest_client::{
     tls_socket::{RedirectFollowingClient, TlsRedirectFollowingClient},
 };
 use std::{
+    collections::HashMap,
     future::Future,
     pin::Pin,
     sync::Arc,
@@ -129,6 +130,7 @@ impl ProxyingBlobStore {
         let request = Request::Get {
             path: Self::blob_path(name, digest, resource_kind),
             headers: vec![Header::authorization_bearer(&token)],
+            query: HashMap::new(),
         };
 
         let guard = Span::new(
@@ -203,6 +205,7 @@ impl ProxyingBlobStore {
         let request = Request::Head {
             path: Self::blob_path(name, digest, resource_kind),
             headers: vec![Header::authorization_bearer(&token)],
+            query: HashMap::new(),
         };
 
         let guard = Span::new(
@@ -278,6 +281,7 @@ impl ProxyingBlobStore {
         let request = Request::Head {
             path: Self::reference_path(name, reference, resource_kind),
             headers: vec![Header::authorization_bearer(&token)],
+            query: HashMap::new(),
         };
 
         let guard = Span::new(

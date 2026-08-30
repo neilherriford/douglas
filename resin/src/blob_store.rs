@@ -1483,6 +1483,18 @@ mod tests {
                         .insert(path.to_path_buf(), bytes.to_vec());
                     Ok(())
                 }
+                fn write_all_bytes_if_absent(
+                    &self,
+                    path: &Path,
+                    bytes: &[u8],
+                ) -> Result<bool, FileSystemError> {
+                    let mut disk = self.0.lock().unwrap();
+                    if disk.contains_key(path) {
+                        return Ok(false);
+                    }
+                    disk.insert(path.to_path_buf(), bytes.to_vec());
+                    Ok(true)
+                }
                 fn create_buffered_file_writer(
                     &self,
                     path: &Path,
