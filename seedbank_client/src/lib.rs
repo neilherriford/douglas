@@ -163,7 +163,7 @@ impl Client for UdsClient {
         };
 
         guard.finish(match response {
-            Response::Seedling { seedling } => Ok(seedling),
+            Response::Seedling { seedling } => Ok(*seedling),
             Response::Error { message } => Err(Error::ServerError(message)),
             _ => Err(Error::UnexpectedResponse),
         })

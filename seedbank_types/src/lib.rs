@@ -322,6 +322,12 @@ pub enum Routing {
     Routed { route: RouteSpec, ports: PortSpec },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SecretsAccess {
+    pub read: bool,
+    pub write: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SeedlingDefinition {
     pub image: VersionedImageName,
@@ -330,6 +336,8 @@ pub struct SeedlingDefinition {
     pub published_ports: Vec<PortMapping>,
     pub command: Option<String>,
     pub added_capabilities: HashSet<Capability>,
+    #[serde(default)]
+    pub secrets: Option<SecretsAccess>,
 }
 
 impl SeedlingDefinition {
@@ -341,6 +349,7 @@ impl SeedlingDefinition {
             published_ports: Vec::new(),
             command: None,
             added_capabilities: HashSet::new(),
+            secrets: None,
         }
     }
 
@@ -358,6 +367,11 @@ impl SeedlingDefinition {
         self.added_capabilities.insert(capability);
         self
     }
+
+    pub fn with_secrets_access(mut self, secrets: Option<SecretsAccess>) -> Self {
+        self.secrets = secrets;
+        self
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -366,6 +380,8 @@ pub struct SeedlingSpec {
     pub ports: PortSpec,
     #[serde(default)]
     pub route: RouteSpec,
+    #[serde(default)]
+    pub secrets: Option<SecretsAccess>,
 }
 
 impl SeedlingSpec {
@@ -374,6 +390,7 @@ impl SeedlingSpec {
             mounts,
             ports,
             route: RouteSpec::default(),
+            secrets: None,
         }
     }
 }
@@ -419,7 +436,7 @@ pub enum Response {
     Names { names: Vec<Name> },
     Exists { exists: bool },
     Status { status: SeedlingStatus },
-    Seedling { seedling: Seedling },
+    Seedling { seedling: Box<Seedling> },
     Default { name: Option<Name> },
     Ok,
     Error { message: String },

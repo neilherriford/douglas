@@ -139,7 +139,7 @@ impl Server {
             ))
         };
 
-        let mut seeds = douglas_folders.service_root(SEEDBANK);
+        let mut seeds = douglas_folders.seedling_root(SEEDBANK);
         seeds.push(SEEDS_ROOT_NAME);
 
         let mut owned_sockets = service_definition(&douglas_folders)

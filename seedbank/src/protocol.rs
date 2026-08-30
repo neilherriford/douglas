@@ -12,7 +12,9 @@ pub fn handle(seedbank: &dyn Seedbank, request: Request) -> Response {
             Err(err) => error_response(err),
         },
         Request::Load { name } => match seedbank.load(&name) {
-            Ok(seedling) => Response::Seedling { seedling },
+            Ok(seedling) => Response::Seedling {
+                seedling: Box::new(seedling),
+            },
             Err(err) => error_response(err),
         },
         Request::Create {

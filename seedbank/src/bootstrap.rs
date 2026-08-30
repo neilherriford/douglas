@@ -37,7 +37,7 @@ pub async fn bootstrap(
     )
     .start_guard();
 
-    let root_path = douglas_folders.service_root(SEEDBANK);
+    let root_path = douglas_folders.seedling_root(SEEDBANK);
     let definition = service_definition(douglas_folders);
 
     let state = {
@@ -69,7 +69,7 @@ pub async fn bootstrap(
 }
 
 pub fn service_definition(douglas_folders: &DouglasFolders) -> ServiceDefinition {
-    let mut seeds = douglas_folders.service_root(SEEDBANK);
+    let mut seeds = douglas_folders.seedling_root(SEEDBANK);
     seeds.push(SEEDS_ROOT_NAME);
 
     ServiceDefinition::with_sockets(
