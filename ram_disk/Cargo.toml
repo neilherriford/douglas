@@ -1,0 +1,18 @@
+[package]
+name = "ram_disk"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[features]
+default = []
+mock = ["mockall"]
+
+[dependencies]
+mockall = { workspace = true, optional = true }
+nix = { workspace = true, features = ["fs"] }
+os = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+os = { workspace = true, features = ["mock"] }
