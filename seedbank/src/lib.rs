@@ -4,11 +4,11 @@ mod registration_protocol;
 
 pub use bootstrap::{DOUGLAS_SEEDBANK_GROUP, DOUGLAS_SEEDBANK_USER, service_definition};
 pub use protocol::handle;
+use seedbank_types::{DesiredRunStatus, SeedlingStatus, Version};
 pub use seedbank_types::{
     Id, IdParseError, MAX_SEEDLINGS, Mount, MountContents, MountFile, MountType, Name,
     NameParseError, NameRules, Request, Response, Seedling, SeedlingDefinition,
 };
-use seedbank_types::{SeedlingStatus, Version};
 
 use blueprint::listener::SocketListenerFactory;
 use config::DouglasFolders;
@@ -66,6 +66,9 @@ pub enum Error {
     SeedlingSerializationError(#[from] toml::ser::Error),
     #[error("Seedling deserialization error: {0}")]
     SeedlingDeserializationError(#[from] toml::de::Error),
+
+    #[error("Desired run status serialization error: {0}")]
+    DesiredRunStatusSerializationError(#[from] serde_json::Error),
 }
 
 #[cfg_attr(test, mockall::automock)]
@@ -90,6 +93,12 @@ pub trait Seedbank {
     fn default_seedling(&self) -> Result<Option<Name>, Error>;
     fn claim_default(&self, name: &Name) -> Result<(), Error>;
     fn release_default(&self, name: &Name) -> Result<(), Error>;
+    fn set_desired_run_status(
+        &self,
+        name: &Name,
+        desired_run_status: DesiredRunStatus,
+    ) -> Result<(), Error>;
+    fn get_desired_run_status(&self, name: &Name) -> Result<DesiredRunStatus, Error>;
 }
 
 pub struct Server {
@@ -209,6 +218,12 @@ impl Server {
     fn id_path(&self, name: &Name) -> PathBuf {
         let mut path = self.create_seedling_path(name);
         path.push("id");
+        path
+    }
+
+    fn desired_run_state_path(&self, name: &Name) -> PathBuf {
+        let mut path = self.create_seedling_path(name);
+        path.push("desired_run_state");
         path
     }
 
@@ -807,6 +822,44 @@ impl Seedbank for Server {
             Ok(_) => guard.finish(Ok(())),
             Err(err) => guard.finish(Err(err)),
         }
+    }
+
+    fn set_desired_run_status(
+        &self,
+        name: &Name,
+        desired_run_status: DesiredRunStatus,
+    ) -> Result<(), Error> {
+        if !self.exists(name)? {
+            return Err(Error::NotFound(name.clone()));
+        }
+
+        let path = self.desired_run_state_path(name);
+        let contents = serde_json::to_string(&desired_run_status)?;
+
+        self.file_writer.write_all(&path, &contents)?;
+
+        Ok(())
+    }
+
+    fn get_desired_run_status(&self, name: &Name) -> Result<DesiredRunStatus, Error> {
+        if !self.exists(name)? {
+            return Err(Error::NotFound(name.clone()));
+        }
+
+        let path = self.desired_run_state_path(name);
+        let contents = match self.file_reader.read_all(&path) {
+            Ok(contents) => contents,
+            Err(FileSystemError::IoErrorAtPath { error, .. })
+                if error.kind() == std::io::ErrorKind::NotFound =>
+            {
+                return Ok(DesiredRunStatus::Stopped);
+            }
+            Err(err) => return Err(err.into()),
+        };
+
+        let result: DesiredRunStatus = serde_json::from_str(&contents)?;
+
+        Ok(result)
     }
 }
 
@@ -1946,5 +1999,114 @@ mod tests {
         let names = server.list().expect("should list");
 
         assert_eq!(names, vec![name("foo")]);
+    }
+
+    #[test]
+    fn test_set_desired_run_status_should_write_the_status_to_disk() {
+        let mut folder = MockFolder::new();
+        folder.given_exists("/var/lib/seedbank/seeds/foo");
+
+        let mut file_writer = MockFileWriter::new();
+        file_writer.expect_write_to_file_with_contents(
+            "/var/lib/seedbank/seeds/foo/desired_run_state",
+            "\"Running\"",
+        );
+
+        let server = build_server(
+            folder,
+            MockFolderDeleter::new(),
+            MockFileReader::new(),
+            file_writer,
+        );
+
+        let result = server.set_desired_run_status(&name("foo"), DesiredRunStatus::Running);
+
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_set_desired_run_status_should_fail_when_the_seedling_does_not_exist() {
+        let mut folder = MockFolder::new();
+        folder.given_does_not_exist("/var/lib/seedbank/seeds/foo");
+
+        let server = build_server(
+            folder,
+            MockFolderDeleter::new(),
+            MockFileReader::new(),
+            MockFileWriter::new(),
+        );
+
+        let result = server.set_desired_run_status(&name("foo"), DesiredRunStatus::Running);
+
+        assert!(matches!(result, Err(Error::NotFound(_))));
+    }
+
+    #[test]
+    fn test_get_desired_run_status_should_return_the_stored_status() {
+        let mut folder = MockFolder::new();
+        folder.given_exists("/var/lib/seedbank/seeds/foo");
+
+        let mut file_reader = MockFileReader::new();
+        file_reader.given_can_read_all_with_contents(
+            "/var/lib/seedbank/seeds/foo/desired_run_state",
+            "\"Running\"",
+        );
+
+        let server = build_server(
+            folder,
+            MockFolderDeleter::new(),
+            file_reader,
+            MockFileWriter::new(),
+        );
+
+        let result = server
+            .get_desired_run_status(&name("foo"))
+            .expect("should read desired run status");
+
+        assert_eq!(result, DesiredRunStatus::Running);
+    }
+
+    #[test]
+    fn test_get_desired_run_status_should_default_to_stopped_when_never_set() {
+        let mut folder = MockFolder::new();
+        folder.given_exists("/var/lib/seedbank/seeds/foo");
+
+        let mut file_reader = MockFileReader::new();
+        file_reader.expect_read_all().returning(|path| {
+            Err(FileSystemError::IoErrorAtPath {
+                path: path.to_path_buf(),
+                error: std::io::Error::from(std::io::ErrorKind::NotFound),
+            })
+        });
+
+        let server = build_server(
+            folder,
+            MockFolderDeleter::new(),
+            file_reader,
+            MockFileWriter::new(),
+        );
+
+        let result = server
+            .get_desired_run_status(&name("foo"))
+            .expect("should default to stopped");
+
+        assert_eq!(result, DesiredRunStatus::Stopped);
+    }
+
+    #[test]
+    fn test_get_desired_run_status_should_fail_when_the_seedling_does_not_exist() {
+        let mut folder = MockFolder::new();
+        folder.given_does_not_exist("/var/lib/seedbank/seeds/foo");
+
+        let server = build_server(
+            folder,
+            MockFolderDeleter::new(),
+            MockFileReader::new(),
+            MockFileWriter::new(),
+        );
+
+        let result = server.get_desired_run_status(&name("foo"));
+
+        assert!(matches!(result, Err(Error::NotFound(_))));
     }
 }

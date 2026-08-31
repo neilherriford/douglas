@@ -53,6 +53,17 @@ pub fn handle(seedbank: &dyn Seedbank, request: Request) -> Response {
             Ok(()) => Response::Ok,
             Err(err) => error_response(err),
         },
+        Request::GetDesiredRunStatus { name } => match seedbank.get_desired_run_status(&name) {
+            Ok(status) => Response::DesiredRunStatus(status),
+            Err(err) => error_response(err),
+        },
+        Request::SetDesiredRunStatus {
+            name,
+            desired_run_status,
+        } => match seedbank.set_desired_run_status(&name, desired_run_status) {
+            Ok(()) => Response::Ok,
+            Err(err) => error_response(err),
+        },
     }
 }
 

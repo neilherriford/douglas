@@ -428,6 +428,13 @@ pub enum Request {
     ReleaseDefault {
         name: Name,
     },
+    GetDesiredRunStatus {
+        name: Name,
+    },
+    SetDesiredRunStatus {
+        name: Name,
+        desired_run_status: DesiredRunStatus,
+    },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -440,6 +447,13 @@ pub enum Response {
     Default { name: Option<Name> },
     Ok,
     Error { message: String },
+    DesiredRunStatus(DesiredRunStatus),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DesiredRunStatus {
+    Running,
+    Stopped,
 }
 
 #[cfg(test)]

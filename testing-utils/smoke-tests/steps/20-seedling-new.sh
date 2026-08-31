@@ -65,4 +65,11 @@ assert_failure "no docker network exists for hello-world yet" ssh_out \
 assert_failure "no docker container exists for hello-world yet" ssh_out \
     "docker ps -a | grep -q hello-world"
 
+# `create` doesn't record a desired run status (only explicit start/stop
+# do — see seedbank's DesiredRunStatus); it's meant to come back as
+# Stopped by default with no file on disk at all, not from a file `create`
+# wrote. 40-seedling-stop.sh is the first step that writes this file.
+assert_failure "no desired run state file exists yet" ssh_out \
+    "sudo test -e $SEED_DIR/desired_run_state"
+
 finish

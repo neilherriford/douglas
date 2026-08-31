@@ -2,7 +2,8 @@ use async_trait::async_trait;
 use config::DouglasFolders;
 use log::{Reporter, ScopeKind, Span};
 use seedbank_types::{
-    Name, Request, Response, Seedling, SeedlingDefinition, SeedlingStatus, Version,
+    DesiredRunStatus, Name, Request, Response, Seedling, SeedlingDefinition, SeedlingStatus,
+    Version,
 };
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -50,6 +51,12 @@ pub trait Client: Send + Sync {
     async fn default_seedling(&self) -> Result<Option<Name>, Error>;
     async fn claim_default(&self, name: &Name) -> Result<(), Error>;
     async fn release_default(&self, name: &Name) -> Result<(), Error>;
+    async fn get_desired_run_status(&self, name: &Name) -> Result<DesiredRunStatus, Error>;
+    async fn set_desired_run_status(
+        &self,
+        name: &Name,
+        desired_run_status: DesiredRunStatus,
+    ) -> Result<(), Error>;
 }
 
 pub struct UdsClient {
@@ -306,6 +313,59 @@ impl Client for UdsClient {
 
         let response = match self
             .request(Request::ReleaseDefault { name: name.clone() })
+            .await
+        {
+            Ok(response) => response,
+            Err(err) => return guard.finish(Err(err)),
+        };
+
+        guard.finish(match response {
+            Response::Ok => Ok(()),
+            Response::Error { message } => Err(Error::ServerError(message)),
+            _ => Err(Error::UnexpectedResponse),
+        })
+    }
+
+    async fn get_desired_run_status(&self, name: &Name) -> Result<DesiredRunStatus, Error> {
+        let guard = Span::new(
+            Arc::clone(&self.reporter),
+            "Getting desired run status",
+            ScopeKind::Task,
+        )
+        .start_guard();
+
+        let response = match self
+            .request(Request::GetDesiredRunStatus { name: name.clone() })
+            .await
+        {
+            Ok(response) => response,
+            Err(err) => return guard.finish(Err(err)),
+        };
+
+        guard.finish(match response {
+            Response::DesiredRunStatus(status) => Ok(status),
+            Response::Error { message } => Err(Error::ServerError(message)),
+            _ => Err(Error::UnexpectedResponse),
+        })
+    }
+
+    async fn set_desired_run_status(
+        &self,
+        name: &Name,
+        desired_run_status: DesiredRunStatus,
+    ) -> Result<(), Error> {
+        let guard = Span::new(
+            Arc::clone(&self.reporter),
+            "Setting desired run status",
+            ScopeKind::Task,
+        )
+        .start_guard();
+
+        let response = match self
+            .request(Request::SetDesiredRunStatus {
+                name: name.clone(),
+                desired_run_status,
+            })
             .await
         {
             Ok(response) => response,

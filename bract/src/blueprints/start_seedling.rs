@@ -41,6 +41,7 @@ pub enum StartSeedlingError {
 
 struct Context<'a> {
     docker_client: &'a mut dyn docker::client::Client,
+    seedbank_client: &'a dyn seedbank_client::Client,
 }
 
 #[derive(Debug, Default)]
@@ -109,6 +110,7 @@ pub async fn execute(
     let result = {
         let mut context = Context {
             docker_client: &mut *docker_client,
+            seedbank_client,
         };
         execute_plan(guard.span(), plan, &mut context, |reason| {
             StartSeedlingError::FailedBoostrap(vec![reason])
@@ -356,6 +358,7 @@ fn create_plan<'a>(
         ),
     );
 
+    push_step(&mut steps, SetDesiredRunStatusToRunning::new(name.clone()));
     Ok(steps)
 }
 
@@ -419,6 +422,58 @@ impl<'a> Command<Context<'a>> for StartSeedling {
     }
 }
 
+struct SetDesiredRunStatusToRunning {
+    seedling_name: seedbank_types::Name,
+}
+
+impl SetDesiredRunStatusToRunning {
+    pub fn new(seedling_name: seedbank_types::Name) -> Self {
+        Self { seedling_name }
+    }
+}
+
+impl std::fmt::Display for SetDesiredRunStatusToRunning {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Setting seedling '{}' desired running status to running",
+            self.seedling_name
+        )
+    }
+}
+
+#[async_trait]
+impl<'a> Command<Context<'a>> for SetDesiredRunStatusToRunning {
+    fn name(&self) -> String {
+        "Setting desired running state to running".to_string()
+    }
+
+    async fn run(
+        &mut self,
+        span: &Span,
+        context: &mut Context<'a>,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let guard = span
+            .create_child(
+                &format!(
+                    "Setting seedling '{}' desired running status to running",
+                    self.seedling_name
+                ),
+                ScopeKind::Step,
+            )
+            .start_guard();
+
+        context
+            .seedbank_client
+            .set_desired_run_status(
+                &self.seedling_name,
+                seedbank_types::DesiredRunStatus::Running,
+            )
+            .await?;
+        guard.finish(Ok(()))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -454,7 +509,10 @@ mod tests {
 
         assert_eq!(
             step_descriptions(steps),
-            vec!["Starting seedling 'traefik' (v1)"]
+            vec![
+                "Starting seedling 'traefik' (v1)",
+                "Setting seedling 'traefik' desired running status to running",
+            ]
         );
     }
 
@@ -552,6 +610,7 @@ mod tests {
             vec![
                 "Starting seedling 'traefik' (v1)",
                 "Starting seedling 'traefik' (v1)",
+                "Setting seedling 'traefik' desired running status to running",
             ]
         );
     }
@@ -570,7 +629,10 @@ mod tests {
 
         assert_eq!(
             step_descriptions(steps),
-            vec!["Starting seedling 'traefik' (v1)"]
+            vec![
+                "Starting seedling 'traefik' (v1)",
+                "Setting seedling 'traefik' desired running status to running",
+            ]
         );
     }
 
@@ -588,7 +650,10 @@ mod tests {
 
         assert_eq!(
             step_descriptions(steps),
-            vec!["Starting seedling 'traefik' (v1)"]
+            vec![
+                "Starting seedling 'traefik' (v1)",
+                "Setting seedling 'traefik' desired running status to running",
+            ]
         );
     }
 }

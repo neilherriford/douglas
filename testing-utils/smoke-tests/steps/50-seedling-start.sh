@@ -4,6 +4,8 @@ set -uo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")"
 source ../lib.sh
 
+SEED_DIR="/var/lib/douglas/seedbank/seeds/hello-world"
+
 assert_success "start hello-world seedling" ssh_out "~/douglas seedling start --name hello-world"
 
 assert_success "hello-world container is running again" ssh_out \
@@ -21,5 +23,10 @@ else
     fail "hello-world response through traefik has content again"
     FAILURES=$((FAILURES + 1))
 fi
+
+# 40-seedling-stop.sh already confirmed desired_run_state's ownership/mode
+# on first write; here just confirm `start` flips its content back.
+desired_run_state_content="$(ssh_out sudo cat "$SEED_DIR/desired_run_state")"
+assert_contains "desired run state recorded as running" "$desired_run_state_content" "Running"
 
 finish

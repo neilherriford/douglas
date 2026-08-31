@@ -695,9 +695,14 @@ impl Server for Bract {
     }
 
     async fn stop_seedling(&self, reporter: Arc<dyn Reporter>, name: &Name) -> Result<(), Error> {
-        blueprints::stop_seedling::execute(reporter, &*self.docker_client_builder, name)
-            .await
-            .map_err(Error::from)
+        blueprints::stop_seedling::execute(
+            reporter,
+            &*self.docker_client_builder,
+            self.seedbank_client.as_ref(),
+            name,
+        )
+        .await
+        .map_err(Error::from)
     }
 
     async fn drop_seedling(&self, reporter: Arc<dyn Reporter>, name: &Name) -> Result<(), Error> {

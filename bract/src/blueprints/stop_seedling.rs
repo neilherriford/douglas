@@ -25,6 +25,7 @@ pub enum StopSeedlingError {
 
 struct Context<'a> {
     docker_client: &'a mut dyn docker::client::Client,
+    seedbank_client: &'a dyn seedbank_client::Client,
 }
 
 #[derive(Debug)]
@@ -42,6 +43,7 @@ struct State {
 pub async fn execute(
     reporter: Arc<dyn Reporter>,
     docker_client_builder: &dyn ClientBuilder,
+    seedbank_client: &dyn seedbank_client::Client,
     name: &seedbank_types::Name,
 ) -> Result<(), StopSeedlingError> {
     let guard = Span::new(
@@ -73,6 +75,7 @@ pub async fn execute(
     let result = {
         let mut context = Context {
             docker_client: &mut *docker_client,
+            seedbank_client,
         };
         execute_plan(guard.span(), plan, &mut context, |reason| {
             StopSeedlingError::FailedBoostrap(vec![reason])
@@ -184,6 +187,8 @@ fn create_plan<'a>(
         );
     }
 
+    push_step(&mut steps, SetDesiredRunStatusToStopped::new(name.clone()));
+
     Ok(steps)
 }
 
@@ -242,6 +247,58 @@ impl<'a> Command<Context<'a>> for StopSeedling {
     }
 }
 
+struct SetDesiredRunStatusToStopped {
+    seedling_name: seedbank_types::Name,
+}
+
+impl SetDesiredRunStatusToStopped {
+    pub fn new(seedling_name: seedbank_types::Name) -> Self {
+        Self { seedling_name }
+    }
+}
+
+impl std::fmt::Display for SetDesiredRunStatusToStopped {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Setting seedling '{}' desired running status to stopped",
+            self.seedling_name
+        )
+    }
+}
+
+#[async_trait]
+impl<'a> Command<Context<'a>> for SetDesiredRunStatusToStopped {
+    fn name(&self) -> String {
+        "Setting desired running state to stopped".to_string()
+    }
+
+    async fn run(
+        &mut self,
+        span: &Span,
+        context: &mut Context<'a>,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let guard = span
+            .create_child(
+                &format!(
+                    "Setting seedling '{}' desired running status to stopped",
+                    self.seedling_name
+                ),
+                ScopeKind::Step,
+            )
+            .start_guard();
+
+        context
+            .seedbank_client
+            .set_desired_run_status(
+                &self.seedling_name,
+                seedbank_types::DesiredRunStatus::Stopped,
+            )
+            .await?;
+        guard.finish(Ok(()))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -273,7 +330,10 @@ mod tests {
 
         assert_eq!(
             step_descriptions(steps),
-            vec!["Stopping seedling 'traefik' (v1)"]
+            vec![
+                "Stopping seedling 'traefik' (v1)",
+                "Setting seedling 'traefik' desired running status to stopped",
+            ]
         );
     }
 
@@ -290,7 +350,10 @@ mod tests {
 
         assert_eq!(
             step_descriptions(steps),
-            vec!["Stopping seedling 'traefik'"]
+            vec![
+                "Stopping seedling 'traefik'",
+                "Setting seedling 'traefik' desired running status to stopped",
+            ]
         );
     }
 
@@ -305,7 +368,10 @@ mod tests {
         )
         .expect("should produce a plan");
 
-        assert!(step_descriptions(steps).is_empty());
+        assert_eq!(
+            step_descriptions(steps),
+            vec!["Setting seedling 'traefik' desired running status to stopped"]
+        );
     }
 
     #[test]
@@ -319,7 +385,10 @@ mod tests {
         )
         .expect("should produce a plan");
 
-        assert!(step_descriptions(steps).is_empty());
+        assert_eq!(
+            step_descriptions(steps),
+            vec!["Setting seedling 'traefik' desired running status to stopped"]
+        );
     }
 
     #[test]
@@ -352,6 +421,7 @@ mod tests {
             vec![
                 "Stopping seedling 'traefik' (v1)",
                 "Stopping seedling 'traefik'",
+                "Setting seedling 'traefik' desired running status to stopped",
             ]
         );
     }
@@ -370,7 +440,10 @@ mod tests {
 
         assert_eq!(
             step_descriptions(steps),
-            vec!["Stopping seedling 'traefik' (v1)"]
+            vec![
+                "Stopping seedling 'traefik' (v1)",
+                "Setting seedling 'traefik' desired running status to stopped",
+            ]
         );
     }
 }
