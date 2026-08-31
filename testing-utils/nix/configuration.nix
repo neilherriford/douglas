@@ -13,8 +13,8 @@ let
       (builtins.attrNames (builtins.readDir userKeysDir));
 
   # Version information for your dev image
-  devImageVersion = "0.0.2l";
-  devImageDate = "2026-08-18";
+  devImageVersion = "0.0.2m";
+  devImageDate = "2026-08-31";
   devImageName = "Douglas Development Environment";
 
   # Define our development packages explicitly
@@ -266,20 +266,24 @@ in
   # ./target under the tracked source tree. Keeps build artifacts out of
   # the repo directory and shares one target/ across multiple checkouts
   # (e.g. git worktrees) under /mnt/share, so dependency compiles aren't
-  # duplicated per checkout. Falls back to cargo's normal ./target when
-  # the share isn't mounted, same non-fatal pattern as the cargo/rustup
-  # symlinks.
+  # duplicated per checkout.
   #
-  # NOTE: NixOS does not source /etc/profile.d/*.sh the way Debian/RHEL
-  # do — dropping a script there is a no-op unless something explicitly
-  # loops over the directory. environment.interactiveShellInit is the
-  # option NixOS actually splices into every interactive shell's startup.
-  environment.interactiveShellInit = ''
-    if ${pkgs.util-linux}/bin/mountpoint -q /mnt/share 2>/dev/null; then
-      mkdir -p /mnt/share/cache/target
-      export CARGO_TARGET_DIR="/mnt/share/cache/target"
-    fi
-  '';
+  # environment.variables (not interactiveShellInit) so this applies to
+  # every session, including the smoke tests' non-interactive
+  # `ssh host 'cargo build'` invocations — those never source interactive
+  # shell startup, so a shell-init-only export silently never took effect
+  # there, leaving cargo build into the checkout's own ./target on the
+  # shared virtiofs mount — the same directory the host's native macOS
+  # cargo build writes into. Every time the two disagreed on toolchain
+  # host triple, cargo's fingerprinting invalidated the whole target dir
+  # and forced a full rebuild of every dependency and workspace crate.
+  #
+  # No runtime `mountpoint -q /mnt/share` guard here (unlike the
+  # cargo/rustup symlinks above): mount-utm-share.service runs at boot
+  # with RemainAfterExit, so by the time any session starts, the mount is
+  # already up or already failed. If it's down, cargo just errors clearly
+  # on the missing target dir instead of silently falling back.
+  environment.variables.CARGO_TARGET_DIR = "/mnt/share/cache/target";
 
   # Alternative approach: Create a wrapper script that ensures rustup is configured
   environment.etc."rustup-wrapper.sh" = {
