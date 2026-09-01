@@ -29,29 +29,23 @@ static ORIGIN_LABEL: &str = "douglas.origin";
 static ORIGIN_LABEL_KEY: LazyLock<docker_types::LabelKey> =
     LazyLock::new(|| docker_types::LabelKey::from_str(ORIGIN_LABEL).expect("valid label key"));
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Origin {
-    Core,
-    User,
-}
-
-pub fn get_origin(labels: &[docker_types::Label]) -> Option<Origin> {
+pub fn get_origin(labels: &[docker_types::Label]) -> Option<seedbank_types::Origin> {
     let value = &labels
         .iter()
         .find(|label| label.name == *ORIGIN_LABEL_KEY)?
         .value;
 
     match value.as_str() {
-        "core" => Some(Origin::Core),
-        "user" => Some(Origin::User),
+        "core" => Some(seedbank_types::Origin::Core),
+        "user" => Some(seedbank_types::Origin::User),
         _ => None,
     }
 }
 
-pub fn create_origin_label(origin: Origin) -> docker_types::Label {
+pub fn create_origin_label(origin: seedbank_types::Origin) -> docker_types::Label {
     let value = match origin {
-        Origin::Core => "core",
-        Origin::User => "user",
+        seedbank_types::Origin::Core => "core",
+        seedbank_types::Origin::User => "user",
     };
     docker_types::Label::new(ORIGIN_LABEL, value)
 }
@@ -85,11 +79,11 @@ mod tests {
 
     #[test]
     fn test_get_origin_should_round_trip_through_create_origin_label() {
-        let label = create_origin_label(Origin::Core);
+        let label = create_origin_label(seedbank_types::Origin::Core);
 
         let result = get_origin(&[label]);
 
-        assert_eq!(result, Some(Origin::Core));
+        assert_eq!(result, Some(seedbank_types::Origin::Core));
     }
 
     #[test]

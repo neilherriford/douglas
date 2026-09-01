@@ -1,4 +1,4 @@
-use seedbank_types::{Name, SeedlingDefinition, SeedlingSpec};
+use seedbank_types::{Name, SeedlingDefinition, UserSeedlingDefinition};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -112,7 +112,7 @@ pub enum Request {
     },
     NewSeedling {
         name: Name,
-        seedling_spec: SeedlingSpec,
+        user_seedling_definition: UserSeedlingDefinition,
     },
     FindOrphans,
     PruneOrphans {

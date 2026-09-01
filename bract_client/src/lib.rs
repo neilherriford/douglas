@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use bract_types::{Request, SeedlingStatus};
 use config::DouglasFolders;
 use log::{Reporter, ScopeKind, Span};
-use seedbank_types::{Name, SeedlingDefinition, SeedlingSpec, Version};
+use seedbank_types::{Name, SeedlingDefinition, UserSeedlingDefinition, Version};
 use std::path::PathBuf;
 use std::sync::Arc;
 use thiserror::Error;
@@ -43,7 +43,7 @@ pub trait Client: Send + Sync {
     async fn new_seedling(
         &self,
         name: &Name,
-        seedling_spec: &SeedlingSpec,
+        user_seedling_definition: &UserSeedlingDefinition,
     ) -> Result<String, Error>;
     async fn find_orphans(&self) -> Result<bract_types::Orphans, Error>;
     async fn prune_orphans(&self, orphans: &bract_types::Orphans) -> Result<(), Error>;
@@ -232,7 +232,7 @@ impl Client for UdsClient {
     async fn new_seedling(
         &self,
         name: &Name,
-        seedling_spec: &SeedlingSpec,
+        user_seedling_definition: &UserSeedlingDefinition,
     ) -> Result<String, Error> {
         let guard = Span::new(
             Arc::clone(&self.reporter),
@@ -246,7 +246,7 @@ impl Client for UdsClient {
                 guard.span(),
                 Request::NewSeedling {
                     name: name.clone(),
-                    seedling_spec: seedling_spec.clone(),
+                    user_seedling_definition: user_seedling_definition.clone(),
                 },
             )
             .await

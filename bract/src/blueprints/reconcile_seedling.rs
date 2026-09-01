@@ -81,7 +81,6 @@ struct Context<'a> {
     file_writer: &'a dyn FileWriter,
     permissions: &'a dyn Permissions,
     registry: &'a docker_types::Registry,
-    origin: labels::Origin,
     ram_disk: &'a dyn RamDisk,
 }
 
@@ -139,7 +138,6 @@ pub async fn execute(
     version: &seedbank_types::Version,
     seedling_definition: &seedbank_types::SeedlingDefinition,
     agent_provisioning: Option<&provision_seedling_secrets::AgentProvisioning>,
-    origin: labels::Origin,
     ram_disk: &dyn RamDisk,
 ) -> Result<(), ReconcileSeedlingError> {
     let guard = Span::new(
@@ -213,7 +211,6 @@ pub async fn execute(
             permissions,
             file_writer,
             registry,
-            origin,
             ram_disk,
         };
         execute_plan(guard.span(), plan, &mut context, |reason| {
@@ -1547,7 +1544,6 @@ fn build_new_container(
     gid: u32,
     mounts: Vec<MountDefinition>,
     version: &seedbank_types::Version,
-    origin: labels::Origin,
     environment_variables: Vec<docker_types::EnvironmentVariable>,
 ) -> NewContainer {
     NewContainer {
@@ -1563,7 +1559,7 @@ fn build_new_container(
         added_capabilities: seedling_definition.added_capabilities.clone(),
         labels: vec![
             labels::create_version_label(version),
-            labels::create_origin_label(origin),
+            labels::create_origin_label(seedling_definition.origin),
         ],
         published_ports: published_ports_for(seedling_definition),
     }
@@ -1658,7 +1654,6 @@ impl<'a> Command<Context<'a>> for BuildContainer {
             gid,
             mounts,
             context.version,
-            context.origin,
             environment_variables,
         );
 
@@ -1690,7 +1685,7 @@ impl<'a> Command<Context<'a>> for BuildContainer {
             )
             .await?;
 
-        if context.origin == labels::Origin::Core {
+        if context.seedling_definition.origin == seedbank_types::Origin::Core {
             let system_network: docker_types::NetworkName = SYSTEM_NETWORK_NAME
                 .parse()
                 .expect("SYSTEM_NETWORK_NAME is a valid network name");
@@ -1803,7 +1798,7 @@ impl<'a> Command<Context<'a>> for BuildAgentContainer {
             added_capabilities: std::collections::HashSet::new(),
             labels: vec![
                 labels::create_version_label(&self.version),
-                labels::create_origin_label(context.origin),
+                labels::create_origin_label(context.seedling_definition.origin),
             ],
             published_ports: Vec::new(),
         };
@@ -2349,7 +2344,6 @@ mod tests {
             1000,
             Vec::new(),
             &seedbank_types::Version(1),
-            labels::Origin::User,
             Vec::new(),
         );
 
@@ -2374,7 +2368,6 @@ mod tests {
             1000,
             Vec::new(),
             &seedbank_types::Version(1),
-            labels::Origin::User,
             Vec::new(),
         );
 
@@ -2397,10 +2390,49 @@ mod tests {
             1000,
             Vec::new(),
             &seedbank_types::Version(1),
-            labels::Origin::User,
             environment_variables.clone(),
         );
 
         assert_eq!(new_container.environment_variables, environment_variables);
+    }
+
+    #[test]
+    fn test_build_new_container_should_label_the_container_with_the_definitions_origin() {
+        let definition = seedling_definition().with_origin(seedbank_types::Origin::Core);
+
+        let new_container = build_new_container(
+            container_name(&name()).unwrap(),
+            &definition,
+            1000,
+            1000,
+            Vec::new(),
+            &seedbank_types::Version(1),
+            Vec::new(),
+        );
+
+        assert_eq!(
+            labels::get_origin(&new_container.labels),
+            Some(seedbank_types::Origin::Core)
+        );
+    }
+
+    #[test]
+    fn test_build_new_container_should_label_a_user_origin_seedling_accordingly() {
+        let definition = seedling_definition().with_origin(seedbank_types::Origin::User);
+
+        let new_container = build_new_container(
+            container_name(&name()).unwrap(),
+            &definition,
+            1000,
+            1000,
+            Vec::new(),
+            &seedbank_types::Version(1),
+            Vec::new(),
+        );
+
+        assert_eq!(
+            labels::get_origin(&new_container.labels),
+            Some(seedbank_types::Origin::User)
+        );
     }
 }

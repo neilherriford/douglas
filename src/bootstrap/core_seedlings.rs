@@ -222,7 +222,8 @@ pub mod definitions {
                 external: 80,
                 internal: 80,
             }])
-            .with_capability(docker_types::Capability::Chown);
+            .with_capability(docker_types::Capability::Chown)
+            .with_origin(seedbank_types::Origin::Core);
 
             Ok((name, version, definition))
         }
@@ -328,7 +329,8 @@ log:
                 ]),
                 seedbank_types::Routing::None,
             )
-            .with_command(&format!("server -config={CONFIG_PATH}/{CONFIG_FILE_NAME}"));
+            .with_command(&format!("server -config={CONFIG_PATH}/{CONFIG_FILE_NAME}"))
+            .with_origin(seedbank_types::Origin::Core);
 
             Ok((name, version, definition))
         }

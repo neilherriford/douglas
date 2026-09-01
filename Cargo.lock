@@ -2655,6 +2655,7 @@ dependencies = [
  "async-trait",
  "config",
  "log 0.1.0",
+ "mockall",
  "seedbank_types",
  "serde_json",
  "thiserror 1.0.69",

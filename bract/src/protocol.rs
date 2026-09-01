@@ -38,8 +38,11 @@ pub async fn handle(
         },
         Request::NewSeedling {
             name,
-            seedling_spec,
-        } => match server.new_seedling(reporter, &name, &seedling_spec).await {
+            user_seedling_definition,
+        } => match server
+            .new_seedling(reporter, &name, &user_seedling_definition)
+            .await
+        {
             Ok(message) => Response::Created { message },
             Err(err) => error_response(err),
         },

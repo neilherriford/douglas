@@ -34,7 +34,7 @@ struct State {
     container_is_running: bool,
     container_name: docker_types::ContainerName,
     version: Option<seedbank_types::Version>,
-    origin: Option<labels::Origin>,
+    origin: Option<seedbank_types::Origin>,
     agent_container_exists: bool,
     agent_container_is_running: bool,
     agent_container_name: docker_types::ContainerName,
@@ -169,7 +169,7 @@ fn create_plan<'a>(
     let mut steps: Vec<Box<dyn Command<Context>>> = Vec::new();
 
     if state.container_exists {
-        if state.origin == Some(labels::Origin::Core) {
+        if state.origin == Some(seedbank_types::Origin::Core) {
             return Err(StopSeedlingError::CoreSeedling(name.to_string()));
         }
         if state.container_is_running {
@@ -313,7 +313,7 @@ mod tests {
             container_is_running: true,
             container_name: container_name(&name()).unwrap(),
             version: Some(seedbank_types::Version(1)),
-            origin: Some(labels::Origin::User),
+            origin: Some(seedbank_types::Origin::User),
             agent_container_exists: false,
             agent_container_is_running: false,
             agent_container_name: agent_container_name(&name()).unwrap(),
@@ -396,7 +396,7 @@ mod tests {
         let result = create_plan(
             &name(),
             State {
-                origin: Some(labels::Origin::Core),
+                origin: Some(seedbank_types::Origin::Core),
                 ..stoppable_state()
             },
         );

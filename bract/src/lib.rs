@@ -2,6 +2,7 @@ mod blueprints;
 mod labels;
 mod protocol;
 mod rolodex;
+mod watchdog;
 
 pub use blueprints::bootstrap::service_definition;
 pub use blueprints::traefik_dynamic_dir;
@@ -121,7 +122,7 @@ pub trait Server: Send + Sync {
         &self,
         reporter: Arc<dyn Reporter>,
         name: &seedbank_types::Name,
-        seedling_spec: &seedbank_types::SeedlingSpec,
+        user_seedling_definition: &seedbank_types::UserSeedlingDefinition,
     ) -> Result<String, Error>;
     async fn find_orphans(
         &self,
@@ -485,7 +486,6 @@ impl Bract {
                 &seedling.version,
                 &seedling.definition,
                 Some(&seedling.id),
-                labels::Origin::User,
             )
             .await;
 
@@ -508,7 +508,6 @@ impl Bract {
         version: &seedbank_types::Version,
         seedling_definition: &seedbank_types::SeedlingDefinition,
         seedling_id: Option<&seedbank_types::Id>,
-        origin: labels::Origin,
     ) -> Result<(), Error> {
         let mut identity = identity::LocalIdentity::new(
             Arc::clone(&self.file_reader),
@@ -545,7 +544,6 @@ impl Bract {
             version,
             seedling_definition,
             agent_provisioning.as_ref(),
-            origin,
             self.ram_disk.as_ref(),
         )
         .await
@@ -666,15 +664,8 @@ impl Server for Bract {
         version: &seedbank_types::Version,
         seedling_definition: &seedbank_types::SeedlingDefinition,
     ) -> Result<(), Error> {
-        self.do_reconcile_seedling(
-            reporter,
-            name,
-            version,
-            seedling_definition,
-            None,
-            labels::Origin::Core,
-        )
-        .await
+        self.do_reconcile_seedling(reporter, name, version, seedling_definition, None)
+            .await
     }
 
     async fn start_seedling(&self, reporter: Arc<dyn Reporter>, name: &Name) -> Result<(), Error> {
@@ -769,7 +760,7 @@ impl Server for Bract {
         &self,
         reporter: Arc<dyn Reporter>,
         name: &seedbank_types::Name,
-        seedling_spec: &seedbank_types::SeedlingSpec,
+        user_seedling_definition: &seedbank_types::UserSeedlingDefinition,
     ) -> Result<String, Error> {
         blueprints::new_seedling::execute(
             reporter,
@@ -778,7 +769,7 @@ impl Server for Bract {
             self.seedbank_client.as_ref(),
             &self.registry,
             name,
-            seedling_spec,
+            user_seedling_definition,
         )
         .await
         .map_err(Error::from)

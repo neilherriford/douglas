@@ -46,3 +46,4 @@ docker = { workspace = true, features = ["mock"] }
 openbao = { workspace = true, features = ["mock"] }
 ram_disk = { workspace = true, features = ["mock"] }
 resin_client = { workspace = true, features = ["mock"] }
+seedbank_client = { workspace = true, features = ["mock"] }

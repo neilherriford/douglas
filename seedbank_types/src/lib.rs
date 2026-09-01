@@ -328,6 +328,13 @@ pub struct SecretsAccess {
     pub write: bool,
 }
 
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Origin {
+    Core,
+    #[default]
+    User,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SeedlingDefinition {
     pub image: VersionedImageName,
@@ -338,6 +345,8 @@ pub struct SeedlingDefinition {
     pub added_capabilities: HashSet<Capability>,
     #[serde(default)]
     pub secrets: Option<SecretsAccess>,
+    #[serde(default)]
+    pub origin: Origin,
 }
 
 impl SeedlingDefinition {
@@ -350,6 +359,7 @@ impl SeedlingDefinition {
             command: None,
             added_capabilities: HashSet::new(),
             secrets: None,
+            origin: Origin::default(),
         }
     }
 
@@ -372,10 +382,15 @@ impl SeedlingDefinition {
         self.secrets = secrets;
         self
     }
+
+    pub fn with_origin(mut self, origin: Origin) -> Self {
+        self.origin = origin;
+        self
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SeedlingSpec {
+pub struct UserSeedlingDefinition {
     pub mounts: HashMap<Name, Mount>,
     pub ports: PortSpec,
     #[serde(default)]
@@ -384,7 +399,7 @@ pub struct SeedlingSpec {
     pub secrets: Option<SecretsAccess>,
 }
 
-impl SeedlingSpec {
+impl UserSeedlingDefinition {
     pub fn new(mounts: HashMap<Name, Mount>, ports: PortSpec) -> Self {
         Self {
             mounts,
@@ -490,5 +505,46 @@ mod tests {
         let mount: Mount = toml::from_str(toml).expect("should deserialize");
 
         assert!(mount.contents().is_empty());
+    }
+
+    fn seedling_definition() -> SeedlingDefinition {
+        SeedlingDefinition::new(
+            docker_types::VersionedImageName::specific("hello-world", "1"),
+            HashMap::new(),
+            Routing::None,
+        )
+    }
+
+    #[test]
+    fn test_origin_should_default_to_user() {
+        assert_eq!(Origin::default(), Origin::User);
+    }
+
+    #[test]
+    fn test_seedling_definition_new_should_default_origin_to_user() {
+        assert_eq!(seedling_definition().origin, Origin::User);
+    }
+
+    #[test]
+    fn test_seedling_definition_should_carry_the_origin_set_via_with_origin() {
+        let definition = seedling_definition().with_origin(Origin::Core);
+
+        assert_eq!(definition.origin, Origin::Core);
+    }
+
+    #[test]
+    fn test_seedling_definition_should_default_origin_to_user_when_omitted_from_serialized_toml() {
+        let toml = toml::to_string(&seedling_definition().with_origin(Origin::Core))
+            .expect("should serialize");
+        let toml_without_origin: String = toml
+            .lines()
+            .filter(|line| !line.starts_with("origin"))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let definition: SeedlingDefinition =
+            toml::from_str(&toml_without_origin).expect("should deserialize");
+
+        assert_eq!(definition.origin, Origin::User);
     }
 }

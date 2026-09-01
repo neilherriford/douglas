@@ -59,7 +59,7 @@ struct State {
     container_is_stopped: bool,
     container_name: docker_types::ContainerName,
     version: Option<seedbank_types::Version>,
-    origin: Option<labels::Origin>,
+    origin: Option<seedbank_types::Origin>,
     network_exists: bool,
     seedbank_entry_exists: bool,
     route_exists: bool,
@@ -199,6 +199,9 @@ impl<'a> StateObserver<'a> {
             )?,
         };
 
+        result.origin =
+            determine_origin(self.seedbank_client, result.seedbank_entry_exists, name).await?;
+
         result.network_exists = self
             .docker_client
             .network_exists(&seedling_network_name(name)?)
@@ -240,11 +243,22 @@ impl<'a> StateObserver<'a> {
             .docker_client
             .container_labels(ContainerRef::FullName(result.container_name.clone()))
             .await?;
-        result.origin = labels::get_origin(&container_labels);
         result.version = labels::get_version(&container_labels).ok();
 
         guard.finish(Ok(result))
     }
+}
+
+async fn determine_origin(
+    seedbank_client: &dyn seedbank_client::Client,
+    seedbank_entry_exists: bool,
+    name: &seedbank_types::Name,
+) -> Result<Option<seedbank_types::Origin>, DropSeedlingError> {
+    if !seedbank_entry_exists {
+        return Ok(None);
+    }
+
+    Ok(Some(seedbank_client.load(name).await?.definition.origin))
 }
 
 type Step<'a> = Box<dyn Command<Context<'a>>>;
@@ -259,7 +273,7 @@ fn create_plan<'a>(
 ) -> Result<Vec<Step<'a>>, DropSeedlingError> {
     let mut steps: Vec<Box<dyn Command<Context>>> = Vec::new();
 
-    if state.origin == Some(labels::Origin::Core) {
+    if state.origin == Some(seedbank_types::Origin::Core) {
         return Err(DropSeedlingError::CoreSeedling(name.to_string()));
     }
     if state.container_exists && !state.container_is_stopped {
@@ -692,7 +706,7 @@ mod tests {
             container_is_stopped: true,
             container_name: container_name(&name()).unwrap(),
             version: Some(seedbank_types::Version(1)),
-            origin: Some(labels::Origin::User),
+            origin: Some(seedbank_types::Origin::User),
             network_exists: true,
             seedbank_entry_exists: true,
             route_exists: true,
@@ -841,7 +855,7 @@ mod tests {
         let result = create_plan(
             &name(),
             State {
-                origin: Some(labels::Origin::Core),
+                origin: Some(seedbank_types::Origin::Core),
                 ..droppable_state()
             },
         );
@@ -926,5 +940,58 @@ mod tests {
             result,
             Err(DropSeedlingError::CannotDropSeedling(_))
         ));
+    }
+
+    fn seedling(origin: seedbank_types::Origin) -> seedbank_types::Seedling {
+        seedbank_types::Seedling {
+            id: seedbank_types::Id { value: 0 },
+            name: name(),
+            version: seedbank_types::Version(1),
+            definition: seedbank_types::SeedlingDefinition::new(
+                docker_types::VersionedImageName::specific("hello-world", "1"),
+                std::collections::HashMap::new(),
+                seedbank_types::Routing::None,
+            )
+            .with_origin(origin),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_determine_origin_should_be_none_when_the_seedbank_entry_does_not_exist() {
+        let seedbank_client = seedbank_client::MockClient::new();
+
+        let result = determine_origin(&seedbank_client, false, &name())
+            .await
+            .expect("should determine origin");
+
+        assert_eq!(result, None);
+    }
+
+    #[tokio::test]
+    async fn test_determine_origin_should_load_the_persisted_origin_for_a_core_seedling() {
+        let mut seedbank_client = seedbank_client::MockClient::new();
+        seedbank_client
+            .expect_load()
+            .returning(|_| Ok(seedling(seedbank_types::Origin::Core)));
+
+        let result = determine_origin(&seedbank_client, true, &name())
+            .await
+            .expect("should determine origin");
+
+        assert_eq!(result, Some(seedbank_types::Origin::Core));
+    }
+
+    #[tokio::test]
+    async fn test_determine_origin_should_load_the_persisted_origin_for_a_user_seedling() {
+        let mut seedbank_client = seedbank_client::MockClient::new();
+        seedbank_client
+            .expect_load()
+            .returning(|_| Ok(seedling(seedbank_types::Origin::User)));
+
+        let result = determine_origin(&seedbank_client, true, &name())
+            .await
+            .expect("should determine origin");
+
+        assert_eq!(result, Some(seedbank_types::Origin::User));
     }
 }

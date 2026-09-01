@@ -56,7 +56,7 @@ pub async fn execute(
     seedbank_client: &dyn seedbank_client::Client,
     registry: &docker_types::Registry,
     name: &seedbank_types::Name,
-    seedling_spec: &seedbank_types::SeedlingSpec,
+    user_seedling_definition: &seedbank_types::UserSeedlingDefinition,
 ) -> Result<String, NewSeedlingError> {
     let guard = Span::new(
         Arc::clone(&reporter),
@@ -91,11 +91,14 @@ pub async fn execute(
             &mut *resin_client,
         );
         state_observer
-            .discover(guard.span(), name, seedling_spec)
+            .discover(guard.span(), name, user_seedling_definition)
             .await?
     };
 
-    let plan = match resolve_plan(guard.span(), create_plan(name, seedling_spec, state)) {
+    let plan = match resolve_plan(
+        guard.span(),
+        create_plan(name, user_seedling_definition, state),
+    ) {
         Ok(plan) => plan,
         Err(err) => return guard.finish(Err(err)),
     };
@@ -143,7 +146,7 @@ impl<'a> StateObserver<'a> {
         &mut self,
         span: &Span,
         name: &seedbank_types::Name,
-        seedling_spec: &seedbank_types::SeedlingSpec,
+        user_seedling_definition: &seedbank_types::UserSeedlingDefinition,
     ) -> Result<State, NewSeedlingError> {
         let guard = span
             .create_child(
@@ -203,7 +206,7 @@ impl<'a> StateObserver<'a> {
             result.registered = true;
         }
 
-        for mount in seedling_spec.mounts.values() {
+        for mount in user_seedling_definition.mounts.values() {
             let seedbank_types::MountType::PersistedShared(siblings) = mount.kind() else {
                 continue;
             };
@@ -226,7 +229,7 @@ fn push_step<'a>(steps: &mut Vec<Step<'a>>, command: impl Command<Context<'a>> +
 
 fn create_plan<'a>(
     name: &seedbank_types::Name,
-    seedling_spec: &seedbank_types::SeedlingSpec,
+    user_seedling_definition: &seedbank_types::UserSeedlingDefinition,
     state: State,
 ) -> Result<Vec<Step<'a>>, NewSeedlingError> {
     let mut steps: Vec<Box<dyn Command<Context>>> = Vec::new();
@@ -250,11 +253,11 @@ fn create_plan<'a>(
         NewSeedlingFromSpec::new(
             name.clone(),
             state.image_name.clone(),
-            seedling_spec.clone(),
+            user_seedling_definition.clone(),
         ),
     );
 
-    if seedling_spec.route == seedbank_types::RouteSpec::Root {
+    if user_seedling_definition.route == seedbank_types::RouteSpec::Root {
         push_step(&mut steps, ClaimDefault::new(name.clone()));
     }
 
@@ -264,19 +267,19 @@ fn create_plan<'a>(
 struct NewSeedlingFromSpec {
     seedling_name: seedbank_types::Name,
     image_name: docker_types::ImagePathComponent,
-    seedling_spec: seedbank_types::SeedlingSpec,
+    user_seedling_definition: seedbank_types::UserSeedlingDefinition,
 }
 
 impl NewSeedlingFromSpec {
     pub fn new(
         seedling_name: seedbank_types::Name,
         image_name: docker_types::ImagePathComponent,
-        seedling_spec: seedbank_types::SeedlingSpec,
+        user_seedling_definition: seedbank_types::UserSeedlingDefinition,
     ) -> Self {
         Self {
             seedling_name,
             image_name,
-            seedling_spec,
+            user_seedling_definition,
         }
     }
 }
@@ -312,13 +315,14 @@ impl<'a> Command<Context<'a>> for NewSeedlingFromSpec {
         };
         let definition = seedbank_types::SeedlingDefinition::new(
             image,
-            self.seedling_spec.mounts.clone(),
+            self.user_seedling_definition.mounts.clone(),
             seedbank_types::Routing::Routed {
-                route: self.seedling_spec.route.clone(),
-                ports: self.seedling_spec.ports.clone(),
+                route: self.user_seedling_definition.route.clone(),
+                ports: self.user_seedling_definition.ports.clone(),
             },
         )
-        .with_secrets_access(self.seedling_spec.secrets);
+        .with_secrets_access(self.user_seedling_definition.secrets)
+        .with_origin(seedbank_types::Origin::User);
 
         context
             .seedbank_client
@@ -407,8 +411,8 @@ mod tests {
         "foo".parse().expect("valid name")
     }
 
-    fn seedling_spec() -> seedbank_types::SeedlingSpec {
-        seedbank_types::SeedlingSpec::new(
+    fn user_seedling_definition() -> seedbank_types::UserSeedlingDefinition {
+        seedbank_types::UserSeedlingDefinition::new(
             std::collections::HashMap::new(),
             seedbank_types::PortSpec {
                 public: 8080,
@@ -434,7 +438,8 @@ mod tests {
 
     #[test]
     fn test_create_plan_should_create_the_seedling_and_claim_default() {
-        let steps = create_plan(&name(), &seedling_spec(), state()).expect("should produce a plan");
+        let steps = create_plan(&name(), &user_seedling_definition(), state())
+            .expect("should produce a plan");
 
         assert_eq!(
             step_descriptions(steps),
@@ -447,9 +452,9 @@ mod tests {
 
     #[test]
     fn test_create_plan_should_not_claim_default_for_a_subdomain_seedling() {
-        let spec = seedbank_types::SeedlingSpec {
+        let spec = seedbank_types::UserSeedlingDefinition {
             route: seedbank_types::RouteSpec::Subdomain,
-            ..seedling_spec()
+            ..user_seedling_definition()
         };
         let steps = create_plan(&name(), &spec, state()).expect("should produce a plan");
 
@@ -463,7 +468,7 @@ mod tests {
     fn test_create_plan_should_refuse_when_the_seedling_already_exists() {
         let result = create_plan(
             &name(),
-            &seedling_spec(),
+            &user_seedling_definition(),
             State {
                 seedling_exists: true,
                 ..state()
@@ -480,7 +485,7 @@ mod tests {
     fn test_create_plan_should_refuse_when_orphaned() {
         let result = create_plan(
             &name(),
-            &seedling_spec(),
+            &user_seedling_definition(),
             State {
                 container_exists: true,
                 ..state()
@@ -494,7 +499,7 @@ mod tests {
     fn test_create_plan_should_refuse_when_mount_siblings_are_missing() {
         let result = create_plan(
             &name(),
-            &seedling_spec(),
+            &user_seedling_definition(),
             State {
                 missing_mount_siblings: vec!["bar".to_string()],
                 ..state()

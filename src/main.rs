@@ -289,7 +289,7 @@ fn example_name(value: &str) -> seedbank_types::Name {
         .unwrap_or_else(|_| unreachable!("'{value}' is a valid seedling name literal"))
 }
 
-fn example_seedling_spec() -> seedbank_types::SeedlingSpec {
+fn example_user_seedling_definition() -> seedbank_types::UserSeedlingDefinition {
     let mut mounts = HashMap::new();
 
     mounts.insert(
@@ -325,7 +325,7 @@ fn example_seedling_spec() -> seedbank_types::SeedlingSpec {
         ),
     );
 
-    seedbank_types::SeedlingSpec::new(
+    seedbank_types::UserSeedlingDefinition::new(
         mounts,
         seedbank_types::PortSpec {
             public: 8080,
@@ -338,7 +338,7 @@ fn example_seedling_spec() -> seedbank_types::SeedlingSpec {
 }
 
 fn create_seedling_template(output_style: OutputStyle) -> ExitCode {
-    let toml = match toml::to_string_pretty(&example_seedling_spec()) {
+    let toml = match toml::to_string_pretty(&example_user_seedling_definition()) {
         Ok(toml) => toml,
         Err(err) => {
             eprintln!("{}", format!("Could not render template: {err}").red());
@@ -363,7 +363,7 @@ fn create_seedling_template(output_style: OutputStyle) -> ExitCode {
     ExitCode::from(0)
 }
 
-fn read_seedling_spec_input(
+fn read_user_seedling_definition_input(
     file_reader: &dyn FileReader,
     file: Option<&Path>,
 ) -> Result<String, FileSystemError> {
@@ -384,7 +384,7 @@ async fn create_seedling(name: &str, file: Option<&Path>, output_style: OutputSt
 
     let file_reader = UnixFileReader::new();
 
-    let input = match read_seedling_spec_input(&file_reader, file) {
+    let input = match read_user_seedling_definition_input(&file_reader, file) {
         Ok(input) => input,
         Err(err) => {
             print_error(
@@ -395,15 +395,19 @@ async fn create_seedling(name: &str, file: Option<&Path>, output_style: OutputSt
         }
     };
 
-    let spec: seedbank_types::SeedlingSpec = match toml::from_str(&input) {
-        Ok(spec) => spec,
-        Err(err) => {
-            print_error(output_style, &format!("Invalid seedling spec:\n\n{err}"));
-            return ExitCode::from(1);
-        }
-    };
+    let user_seedling_definition: seedbank_types::UserSeedlingDefinition =
+        match toml::from_str(&input) {
+            Ok(user_seedling_definition) => user_seedling_definition,
+            Err(err) => {
+                print_error(output_style, &format!("Invalid seedling spec:\n\n{err}"));
+                return ExitCode::from(1);
+            }
+        };
 
-    match client.new_seedling(&seedling_name, &spec).await {
+    match client
+        .new_seedling(&seedling_name, &user_seedling_definition)
+        .await
+    {
         Ok(message) => {
             match output_style {
                 OutputStyle::Plain => println!("{message}"),

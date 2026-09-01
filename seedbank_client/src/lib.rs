@@ -1,6 +1,8 @@
 use async_trait::async_trait;
 use config::DouglasFolders;
 use log::{Reporter, ScopeKind, Span};
+#[cfg(feature = "mock")]
+use mockall::automock;
 use seedbank_types::{
     DesiredRunStatus, Name, Request, Response, Seedling, SeedlingDefinition, SeedlingStatus,
     Version,
@@ -29,6 +31,7 @@ pub enum Error {
     UnexpectedResponse,
 }
 
+#[cfg_attr(feature = "mock", automock)]
 #[async_trait]
 pub trait Client: Send + Sync {
     async fn list(&self) -> Result<Vec<Name>, Error>;
