@@ -188,6 +188,7 @@ pub mod definitions {
         use docker_types::VersionedImageName;
         use seedbank::{Mount, MountContents, MountType, Name, SeedlingDefinition};
         use seedbank_types::Version;
+        use serde_json::json;
         use std::str::FromStr;
         use std::{
             collections::{HashMap, HashSet},
@@ -210,7 +211,7 @@ pub mod definitions {
                         HashSet::from([
                             MountContents::file(
                                 "traefik.yml",
-                                generate_default_static_definition(),
+                                &generate_default_static_definition()?,
                             )?,
                             MountContents::folder_only("dynamic")?,
                         ]),
@@ -234,20 +235,25 @@ pub mod definitions {
         // API/dashboard disabled (the default) keeps the only thing seedlings can reach on
         // that interface to the HTTP router itself — no different from what an external
         // client hitting the domain could already do.
-        fn generate_default_static_definition() -> &'static [u8] {
-            r#"entryPoints:
-  web:
-    address: ":80"
+        fn generate_default_static_definition() -> Result<Vec<u8>, serde_json::Error> {
+            let config = json!({
+                "entryPoints": {
+                    "web": {
+                        "address": ":80"
+                    }
+                },
+                "providers": {
+                    "file": {
+                        "directory": "/etc/traefik/dynamic",
+                        "watch": true
+                    }
+                },
+                "log": {
+                    "level": "INFO"
+                }
+            });
 
-providers:
-  file:
-    directory: "/etc/traefik/dynamic"
-    watch: true
-
-log:
-  level: INFO
-"#
-            .as_bytes()
+            serde_json::to_vec_pretty(&config)
         }
     }
 
