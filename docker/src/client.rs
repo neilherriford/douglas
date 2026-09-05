@@ -1,11 +1,12 @@
 use crate::{
     DockerError,
-    commands::{container, image, json_parser::ChunkedJsonParser, network, system},
+    commands::{container, exec, image, json_parser::ChunkedJsonParser, network, system},
 };
 use async_trait::async_trait;
 use docker_types::{
-    ContainerId, ContainerName, ContainerSnapshot, ImageDefinition, ImageId, Ipv4Subnet, Label,
-    MountName, NetworkName, NewContainer, Registry, Status, VersionedImageName,
+    ContainerId, ContainerName, ContainerSnapshot, ExecId, ExecInspectionResult,
+    ExecInstanceOptions, ExecStartOptions, ImageDefinition, ImageId, Ipv4Subnet, Label, MountName,
+    NetworkName, NewContainer, Registry, Status, VersionedImageName,
 };
 use log::Reporter;
 #[cfg(feature = "mock")]
@@ -79,6 +80,20 @@ pub trait Client: Send + Sync {
     async fn list_containers(&self) -> Result<Vec<ContainerName>, DockerError>;
     async fn list_networks(&self) -> Result<Vec<NetworkSummary>, DockerError>;
     async fn delete_network(&self, network: &NetworkName) -> Result<(), DockerError>;
+    async fn create_exec_instance(
+        &self,
+        container_ref: &ContainerRef,
+        options: &ExecInstanceOptions,
+    ) -> Result<ExecId, DockerError>;
+    async fn start_exec_instance(
+        &self,
+        exec_id: &ExecId,
+        options: &ExecStartOptions,
+    ) -> Result<(), DockerError>;
+    async fn inspect_exec_instance(
+        &self,
+        exec_id: &ExecId,
+    ) -> Result<ExecInspectionResult, DockerError>;
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -412,6 +427,48 @@ impl Client for UdsClient {
             Arc::clone(&self.reporter),
             &*self.rest_client,
             &target_network.id,
+        )
+        .await
+    }
+
+    async fn create_exec_instance(
+        &self,
+        container_ref: &ContainerRef,
+        options: &ExecInstanceOptions,
+    ) -> Result<ExecId, DockerError> {
+        exec::create(
+            Arc::clone(&self.reporter),
+            &*self.rest_client,
+            Arc::clone(&self.parser),
+            container_ref,
+            options,
+        )
+        .await
+    }
+
+    async fn start_exec_instance(
+        &self,
+        exec_id: &ExecId,
+        options: &ExecStartOptions,
+    ) -> Result<(), DockerError> {
+        exec::start(
+            Arc::clone(&self.reporter),
+            &*self.rest_client,
+            exec_id,
+            options,
+        )
+        .await
+    }
+
+    async fn inspect_exec_instance(
+        &self,
+        exec_id: &ExecId,
+    ) -> Result<ExecInspectionResult, DockerError> {
+        exec::inspect(
+            Arc::clone(&self.reporter),
+            &*self.rest_client,
+            Arc::clone(&self.parser),
+            exec_id,
         )
         .await
     }

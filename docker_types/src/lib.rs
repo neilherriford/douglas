@@ -7,6 +7,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::LazyLock;
+use thiserror::Error;
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum ImagePathComponentError {
@@ -49,6 +50,39 @@ impl StringRules for ImagePathComponentRules {
 }
 
 pub type ImagePathComponent = Validated<ImagePathComponentRules>;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Command(String);
+
+#[derive(Debug, Error)]
+#[error("command cannot be empty")]
+pub struct CommandParseError;
+
+impl FromStr for Command {
+    type Err = CommandParseError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if s.is_empty() {
+            Err(CommandParseError)
+        } else {
+            Ok(Self(s.to_string()))
+        }
+    }
+}
+
+impl Serialize for Command {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.0.serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for Command {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        String::deserialize(deserializer)?
+            .parse()
+            .map_err(serde::de::Error::custom)
+    }
+}
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum VersionTagError {
@@ -857,7 +891,7 @@ impl StringRules for ShortContainerIdRules {
 pub type FullContainerId = Validated<FullContainerIdRules>;
 pub type ShortContainerId = Validated<ShortContainerIdRules>;
 
-#[derive(Debug, PartialEq, Eq, Clone)]
+#[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
 pub enum ContainerId {
     Full(FullContainerId),
     Short(ShortContainerId),
@@ -1031,9 +1065,115 @@ pub struct ImageDefinition {
     pub labels: Vec<Label>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExecId(String);
+
+impl std::fmt::Display for ExecId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl From<String> for ExecId {
+    fn from(value: String) -> Self {
+        ExecId(value)
+    }
+}
+
+impl From<&str> for ExecId {
+    fn from(value: &str) -> Self {
+        ExecId(value.to_string())
+    }
+}
+
+#[derive(Debug, Serialize, PartialEq)]
+pub struct ExecInstanceOptions {
+    #[serde(rename = "AttachStdin")]
+    pub attach_stdin: bool,
+    #[serde(rename = "AttachStdout")]
+    pub attach_stdout: bool,
+    #[serde(rename = "AttachStderr")]
+    pub attach_stderr: bool,
+    #[serde(rename = "Cmd")]
+    pub cmd: Vec<String>,
+}
+
+#[derive(Debug, Serialize, PartialEq, Default)]
+pub struct ExecStartOptions {
+    #[serde(rename = "Detach")]
+    pub detach: bool,
+    #[serde(rename = "Tty")]
+    pub tty: bool,
+}
+
+#[derive(Debug, Deserialize, PartialEq)]
+pub struct ExecInspectionResult {
+    #[serde(rename = "CanRemove")]
+    pub can_remove: bool,
+    #[serde(rename = "ContainerID")]
+    pub container_id: FullContainerId,
+    #[serde(rename = "DetachKeys")]
+    pub detach_keys: String,
+    #[serde(rename = "ExitCode")]
+    pub exit_code: Option<i32>,
+    #[serde(rename = "ID")]
+    pub id: ExecId,
+    #[serde(rename = "OpenStderr")]
+    pub open_stderr: bool,
+    #[serde(rename = "OpenStdin")]
+    pub open_stdin: bool,
+    #[serde(rename = "OpenStdout")]
+    pub open_stdout: bool,
+    #[serde(rename = "ProcessConfig")]
+    pub process_config: ExecProcessConfig,
+    #[serde(rename = "Running")]
+    pub running: bool,
+    #[serde(rename = "Pid")]
+    pub pid: u32,
+}
+
+#[derive(Debug, Deserialize, PartialEq)]
+pub struct ExecProcessConfig {
+    arguments: Vec<String>,
+    #[serde(rename = "entrypoint")]
+    entry_point: String,
+    privileged: bool,
+    tty: bool,
+    user: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_exec_inspection_result_should_deserialize_a_real_docker_response() {
+        let body = r#"{
+            "ID": "c758ddfe5ec1e7fc04d520647e70e5dd4cc18fa0fdcbc03169edcd20bca24f86",
+            "Running": false,
+            "ExitCode": 1,
+            "ProcessConfig": {
+                "tty": false,
+                "entrypoint": "/bin/sh",
+                "arguments": ["-c", "false"],
+                "privileged": false,
+                "user": "988:1009"
+            },
+            "OpenStdin": false,
+            "OpenStderr": true,
+            "OpenStdout": true,
+            "CanRemove": false,
+            "ContainerID": "e2a86c20d38a9809f266350bbf4f287be533fe49ee576210ecc3346b5838c621",
+            "DetachKeys": "",
+            "Pid": 4183
+        }"#;
+
+        let result: ExecInspectionResult =
+            serde_json::from_str(body).expect("should deserialize a real exec inspect response");
+
+        assert_eq!(result.exit_code, Some(1));
+        assert!(!result.running);
+    }
 
     #[test]
     fn test_capability_should_serialize_to_its_docker_flag_name() {

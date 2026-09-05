@@ -1,4 +1,5 @@
 pub(crate) mod container;
+pub(crate) mod exec;
 pub(crate) mod image;
 pub(crate) mod json_parser;
 pub(crate) mod network;
