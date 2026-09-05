@@ -9,7 +9,7 @@ use blueprint::{
     bootstrap::{execute_plan, resolve_plan},
 };
 use config::DouglasFolders;
-use docker::client::{ClientBuilder, ContainerRef};
+use docker::client::ContainerRef;
 use docker_types::DockerNameError;
 use file_system::{FileDeleter, FileReader, FileSystemError, Folder, FolderDeleter};
 use log::{Reporter, ScopeKind, Span};
@@ -44,7 +44,7 @@ pub enum DropSeedlingError {
 }
 
 struct Context<'a> {
-    docker_client: &'a mut dyn docker::client::Client,
+    docker_client: &'a dyn docker::client::Client,
     resin_client: &'a mut dyn resin_client::Client,
     seedbank_client: &'a dyn seedbank_client::Client,
     file_deleter: &'a dyn FileDeleter,
@@ -72,7 +72,7 @@ struct State {
 
 pub async fn execute(
     reporter: Arc<dyn Reporter>,
-    docker_client_builder: &dyn ClientBuilder,
+    docker_client: &dyn docker::client::Client,
     resin_client_builder: &dyn resin_client::ClientBuilder,
     seedbank_client: &dyn seedbank_client::Client,
     file_deleter: &dyn FileDeleter,
@@ -90,16 +90,6 @@ pub async fn execute(
     )
     .start_guard();
 
-    let mut docker_client = match build_client(
-        docker_client_builder.build(Arc::clone(&reporter)),
-        DropSeedlingError::FailedBoostrap,
-    )
-    .await
-    {
-        Ok(docker_client) => docker_client,
-        Err(err) => return guard.finish(Err(err)),
-    };
-
     let mut resin_client = match build_client(
         resin_client_builder.build(Arc::clone(&reporter)),
         DropSeedlingError::FailedBoostrap,
@@ -112,7 +102,7 @@ pub async fn execute(
 
     let state = {
         let mut state_observer =
-            StateObserver::new(&mut *docker_client, seedbank_client, file_reader, folder);
+            StateObserver::new(docker_client, seedbank_client, file_reader, folder);
         state_observer
             .discover(guard.span(), douglas_folders, ram_disk, name)
             .await?
@@ -125,7 +115,7 @@ pub async fn execute(
 
     let result = {
         let mut context = Context {
-            docker_client: &mut *docker_client,
+            docker_client,
             resin_client: &mut *resin_client,
             seedbank_client,
             file_deleter,
@@ -143,7 +133,7 @@ pub async fn execute(
 }
 
 struct StateObserver<'a> {
-    docker_client: &'a mut dyn docker::client::Client,
+    docker_client: &'a dyn docker::client::Client,
     seedbank_client: &'a dyn seedbank_client::Client,
     file_reader: &'a dyn FileReader,
     folder: &'a dyn Folder,
@@ -151,7 +141,7 @@ struct StateObserver<'a> {
 
 impl<'a> StateObserver<'a> {
     pub fn new(
-        docker_client: &'a mut dyn docker::client::Client,
+        docker_client: &'a dyn docker::client::Client,
         seedbank_client: &'a dyn seedbank_client::Client,
         file_reader: &'a dyn FileReader,
         folder: &'a dyn Folder,

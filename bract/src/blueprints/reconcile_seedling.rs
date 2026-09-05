@@ -16,7 +16,7 @@ use config::DouglasFolders;
 use credentials::Credentials;
 use docker::{
     DockerError,
-    client::{ClientBuilder, ContainerRef, ImageRef},
+    client::{ContainerRef, ImageRef},
 };
 use docker_types::{
     ContainerName, ContainerUser, DockerNameError, MountDefinition, NewContainer,
@@ -74,7 +74,7 @@ struct Context<'a> {
     seedling_definition: &'a seedbank_types::SeedlingDefinition,
     agent_provisioning: Option<&'a provision_seedling_secrets::AgentProvisioning>,
     credentials: &'a dyn Credentials,
-    docker_client: &'a mut dyn docker::client::Client,
+    docker_client: &'a dyn docker::client::Client,
     seedbank_client: &'a dyn seedbank_client::Client,
     douglas_folders: &'a DouglasFolders,
     rolodex: &'a dyn Rolodex,
@@ -130,7 +130,7 @@ pub async fn execute(
     file_writer: &dyn FileWriter,
     permissions: &dyn Permissions,
     douglas_folders: &DouglasFolders,
-    docker_client_builder: &dyn ClientBuilder,
+    docker_client: &dyn docker::client::Client,
     resin_client_builder: &dyn resin_client::ClientBuilder,
     seedbank_client: &dyn seedbank_client::Client,
     registry: &docker_types::Registry,
@@ -147,15 +147,6 @@ pub async fn execute(
         log::ScopeKind::Group,
     )
     .start_guard();
-    let mut docker_client = match build_client(
-        docker_client_builder.build(Arc::clone(&reporter)),
-        ReconcileSeedlingError::FailedBoostrap,
-    )
-    .await
-    {
-        Ok(docker_client) => docker_client,
-        Err(err) => return guard.finish(Err(err)),
-    };
 
     let mut resin_client = match build_client(
         resin_client_builder.build(Arc::clone(&reporter)),
@@ -169,7 +160,7 @@ pub async fn execute(
 
     let state = {
         let mut state_observer = StateObserver::new(
-            &mut *docker_client,
+            docker_client,
             seedbank_client,
             &mut *resin_client,
             rolodex,
@@ -206,7 +197,7 @@ pub async fn execute(
             seedling_definition,
             agent_provisioning,
             credentials,
-            docker_client: &mut *docker_client,
+            docker_client,
             seedbank_client,
             rolodex,
             douglas_folders,
@@ -226,7 +217,7 @@ pub async fn execute(
 }
 
 struct StateObserver<'a> {
-    docker_client: &'a mut dyn docker::client::Client,
+    docker_client: &'a dyn docker::client::Client,
     seedbank_client: &'a dyn seedbank_client::Client,
     resin_client: &'a mut dyn resin_client::Client,
     rolodex: &'a dyn Rolodex,
@@ -240,7 +231,7 @@ struct StateObserver<'a> {
 
 impl<'a> StateObserver<'a> {
     pub fn new(
-        docker_client: &'a mut dyn docker::client::Client,
+        docker_client: &'a dyn docker::client::Client,
         seedbank_client: &'a dyn seedbank_client::Client,
         resin_client: &'a mut dyn resin_client::Client,
         rolodex: &'a dyn Rolodex,

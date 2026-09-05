@@ -4,7 +4,7 @@ use blueprint::{
     Command, Step, push_step,
     bootstrap::{execute_plan, resolve_plan},
 };
-use docker::client::{ClientBuilder, ContainerRef, ImageRef};
+use docker::client::{ContainerRef, ImageRef};
 use docker_types::DockerNameError;
 use log::{Reporter, ScopeKind, Span};
 use std::sync::Arc;
@@ -52,7 +52,7 @@ struct State {
 
 pub async fn execute(
     reporter: Arc<dyn Reporter>,
-    docker_client_builder: &dyn ClientBuilder,
+    docker_client: &dyn docker::client::Client,
     resin_client_builder: &dyn resin_client::ClientBuilder,
     seedbank_client: &dyn seedbank_client::Client,
     registry: &docker_types::Registry,
@@ -70,16 +70,6 @@ pub async fn execute(
         return guard.finish(Err(NewSeedlingError::ReservedName(name.to_string())));
     }
 
-    let mut docker_client = match build_client(
-        docker_client_builder.build(Arc::clone(&reporter)),
-        NewSeedlingError::FailedBoostrap,
-    )
-    .await
-    {
-        Ok(docker_client) => docker_client,
-        Err(err) => return guard.finish(Err(err)),
-    };
-
     let mut resin_client = match build_client(
         resin_client_builder.build(Arc::clone(&reporter)),
         NewSeedlingError::FailedBoostrap,
@@ -91,12 +81,8 @@ pub async fn execute(
     };
 
     let state = {
-        let mut state_observer = StateObserver::new(
-            &mut *docker_client,
-            registry,
-            seedbank_client,
-            &mut *resin_client,
-        );
+        let mut state_observer =
+            StateObserver::new(docker_client, registry, seedbank_client, &mut *resin_client);
         state_observer
             .discover(guard.span(), name, user_seedling_definition)
             .await?
@@ -128,7 +114,7 @@ pub async fn execute(
 }
 
 struct StateObserver<'a> {
-    docker_client: &'a mut dyn docker::client::Client,
+    docker_client: &'a dyn docker::client::Client,
     registry: &'a docker_types::Registry,
     seedbank_client: &'a dyn seedbank_client::Client,
     resin_client: &'a mut dyn resin_client::Client,
@@ -136,7 +122,7 @@ struct StateObserver<'a> {
 
 impl<'a> StateObserver<'a> {
     pub fn new(
-        docker_client: &'a mut dyn docker::client::Client,
+        docker_client: &'a dyn docker::client::Client,
         registry: &'a docker_types::Registry,
         seedbank_client: &'a dyn seedbank_client::Client,
         resin_client: &'a mut dyn resin_client::Client,

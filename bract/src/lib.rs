@@ -155,7 +155,6 @@ pub struct Bract {
     folder_deleter: Arc<dyn FolderDeleter>,
     permissions: Arc<dyn Permissions>,
     douglas_folders: DouglasFolders,
-    docker_client_builder: Arc<dyn ClientBuilder>,
     resin_client_builder: Arc<dyn resin_client::ClientBuilder>,
     openbao_client_factory: Arc<dyn openbao::ClientFactory>,
     rolodex: Arc<dyn Rolodex>,
@@ -230,7 +229,6 @@ impl Bract {
         let folder: Arc<dyn Folder> = Arc::new(UnixFolder::new());
         let file_reader: Arc<dyn FileReader> = Arc::new(UnixFileReader::new());
         let file_writer: Arc<dyn FileWriter> = Arc::new(UnixFileWriter::new());
-        let docker_client_builder = Arc::new(UdsClientBuilder);
         let resin_client_builder = Arc::new(LocalhostClientBuilder);
         let openbao_client_factory: Arc<dyn openbao::ClientFactory> =
             Arc::new(openbao::SocketClientFactory::new(Arc::clone(&reporter)));
@@ -258,7 +256,6 @@ impl Bract {
             folder_deleter,
             permissions: Arc::clone(&permissions),
             douglas_folders: DouglasFolders::new(),
-            docker_client_builder,
             resin_client_builder,
             openbao_client_factory,
             rolodex,
@@ -359,7 +356,7 @@ impl Bract {
 
             if let Err(err) = blueprints::watchdog::execute(
                 Arc::clone(&server.reporter),
-                &*server.docker_client_builder,
+                server.docker_client.as_ref(),
                 server.seedbank_client.as_ref(),
                 &*server.credentials,
                 &*server.inspect,
@@ -584,7 +581,7 @@ impl Bract {
             &*self.file_writer,
             &*self.permissions,
             &self.douglas_folders,
-            &*self.docker_client_builder,
+            self.docker_client.as_ref(),
             &*self.resin_client_builder,
             self.seedbank_client.as_ref(),
             &self.registry,
@@ -730,7 +727,7 @@ impl Server for Bract {
             &*self.file_reader,
             &*self.permissions,
             &self.douglas_folders,
-            &*self.docker_client_builder,
+            self.docker_client.as_ref(),
             self.seedbank_client.as_ref(),
             &*self.rolodex,
             &self.registry,
@@ -744,7 +741,7 @@ impl Server for Bract {
     async fn stop_seedling(&self, reporter: Arc<dyn Reporter>, name: &Name) -> Result<(), Error> {
         blueprints::stop_seedling::execute(
             reporter,
-            &*self.docker_client_builder,
+            self.docker_client.as_ref(),
             self.seedbank_client.as_ref(),
             name,
             blueprints::RequestedBy::Operator,
@@ -798,7 +795,7 @@ impl Server for Bract {
 
         blueprints::drop_seedling::execute(
             reporter,
-            &*self.docker_client_builder,
+            self.docker_client.as_ref(),
             &*self.resin_client_builder,
             self.seedbank_client.as_ref(),
             self.file_deleter.as_ref(),
@@ -821,7 +818,7 @@ impl Server for Bract {
     ) -> Result<String, Error> {
         blueprints::new_seedling::execute(
             reporter,
-            &*self.docker_client_builder,
+            self.docker_client.as_ref(),
             &*self.resin_client_builder,
             self.seedbank_client.as_ref(),
             &self.registry,

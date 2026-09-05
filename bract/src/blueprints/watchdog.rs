@@ -1,5 +1,5 @@
 use crate::{
-    blueprints::{RequestedBy, build_client, container_name, provision_seedling_secrets},
+    blueprints::{RequestedBy, container_name, provision_seedling_secrets},
     rolodex::Rolodex,
 };
 use async_trait::async_trait;
@@ -9,7 +9,7 @@ use blueprint::{
 };
 use config::DouglasFolders;
 use credentials::Credentials;
-use docker::client::{ClientBuilder, ContainerRef};
+use docker::client::ContainerRef;
 use docker_types::{ContainerName, DockerNameError};
 use file_system::{FileReader, FileWriter, Folder, Inspect, Permissions};
 use log::{Reporter, ScopeKind, Span};
@@ -31,7 +31,7 @@ pub enum WatchdogError {
 }
 
 struct Context<'a> {
-    docker_client_builder: &'a dyn ClientBuilder,
+    docker_client: &'a dyn docker::client::Client,
     seedbank_client: &'a dyn seedbank_client::Client,
     credentials: &'a dyn Credentials,
     inspect: &'a dyn Inspect,
@@ -56,7 +56,7 @@ struct State {
 
 pub async fn execute(
     reporter: Arc<dyn Reporter>,
-    docker_client_builder: &dyn ClientBuilder,
+    docker_client: &dyn docker::client::Client,
     seedbank_client: &dyn seedbank_client::Client,
     credentials: &dyn Credentials,
     inspect: &dyn Inspect,
@@ -78,18 +78,8 @@ pub async fn execute(
     )
     .start_guard();
 
-    let mut docker_client = match build_client(
-        docker_client_builder.build(Arc::clone(&reporter)),
-        WatchdogError::FailedBoostrap,
-    )
-    .await
-    {
-        Ok(docker_client) => docker_client,
-        Err(err) => return guard.finish(Err(err)),
-    };
-
     let state = {
-        let mut state_observer = StateObserver::new(&mut *docker_client, seedbank_client);
+        let mut state_observer = StateObserver::new(docker_client, seedbank_client);
         state_observer.discover(guard.span()).await?
     };
 
@@ -100,7 +90,7 @@ pub async fn execute(
 
     let result = {
         let mut context = Context {
-            docker_client_builder,
+            docker_client,
             seedbank_client,
             credentials,
             inspect,
@@ -125,13 +115,13 @@ pub async fn execute(
 }
 
 struct StateObserver<'a> {
-    docker_client: &'a mut dyn docker::client::Client,
+    docker_client: &'a dyn docker::client::Client,
     seedbank_client: &'a dyn seedbank_client::Client,
 }
 
 impl<'a> StateObserver<'a> {
     pub fn new(
-        docker_client: &'a mut dyn docker::client::Client,
+        docker_client: &'a dyn docker::client::Client,
         seedbank_client: &'a dyn seedbank_client::Client,
     ) -> Self {
         Self {
@@ -286,7 +276,7 @@ impl<'a> Command<Context<'a>> for StopSeedling {
 
         crate::blueprints::stop_seedling::execute(
             Arc::clone(&span.reporter),
-            context.docker_client_builder,
+            context.docker_client,
             context.seedbank_client,
             &self.seedling_name,
             RequestedBy::Watchdog,
@@ -342,7 +332,7 @@ impl<'a> Command<Context<'a>> for ReconcileSeedling {
             &*context.file_writer,
             &*context.permissions,
             &*context.douglas_folders,
-            &*context.docker_client_builder,
+            context.docker_client,
             &*context.resin_client_builder,
             &*context.seedbank_client,
             &*context.registry,
@@ -399,7 +389,7 @@ impl<'a> Command<Context<'a>> for StartSeedling {
             &*context.file_reader,
             &*context.permissions,
             &*context.douglas_folders,
-            &*context.docker_client_builder,
+            context.docker_client,
             &*context.seedbank_client,
             &*context.rolodex,
             &*context.registry,
@@ -446,17 +436,12 @@ impl<'a> Command<Context<'a>> for RecheckSeedlingHealth {
             )
             .start_guard();
 
-        let docker_client = context
-            .docker_client_builder
-            .build(Arc::clone(&span.reporter))
-            .await?;
-
         let seedling = context.seedbank_client.load(&self.seedling_name).await?;
         let container = container_name(&self.seedling_name)?;
 
         let is_healthy = crate::blueprints::start_seedling::run_shell_health_check(
             guard.span(),
-            &*docker_client,
+            context.docker_client,
             ContainerRef::FullName(container.clone()),
             &seedling.definition.health_check.command.to_string(),
         )
@@ -472,7 +457,7 @@ impl<'a> Command<Context<'a>> for RecheckSeedlingHealth {
 
         crate::blueprints::start_seedling::record_health_check_failure(
             guard.span(),
-            &*docker_client,
+            context.docker_client,
             context.seedbank_client,
             &self.seedling_name,
             ContainerRef::FullName(container),

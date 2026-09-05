@@ -1,5 +1,5 @@
 use crate::blueprints::{
-    RequestedBy, agent_container_name, build_client, container_name, core_seedling_forbidden_for,
+    RequestedBy, agent_container_name, container_name, core_seedling_forbidden_for,
 };
 use crate::labels;
 use async_trait::async_trait;
@@ -7,7 +7,7 @@ use blueprint::{
     Command, Step, push_step,
     bootstrap::{execute_plan, resolve_plan},
 };
-use docker::client::{ClientBuilder, ContainerRef};
+use docker::client::ContainerRef;
 use docker_types::DockerNameError;
 use log::{Reporter, ScopeKind, Span};
 use std::sync::Arc;
@@ -26,7 +26,7 @@ pub enum StopSeedlingError {
 }
 
 struct Context<'a> {
-    docker_client: &'a mut dyn docker::client::Client,
+    docker_client: &'a dyn docker::client::Client,
     seedbank_client: &'a dyn seedbank_client::Client,
 }
 
@@ -44,7 +44,7 @@ struct State {
 
 pub async fn execute(
     reporter: Arc<dyn Reporter>,
-    docker_client_builder: &dyn ClientBuilder,
+    docker_client: &dyn docker::client::Client,
     seedbank_client: &dyn seedbank_client::Client,
     name: &seedbank_types::Name,
     requested_by: RequestedBy,
@@ -56,18 +56,8 @@ pub async fn execute(
     )
     .start_guard();
 
-    let mut docker_client = match build_client(
-        docker_client_builder.build(Arc::clone(&reporter)),
-        StopSeedlingError::FailedBoostrap,
-    )
-    .await
-    {
-        Ok(docker_client) => docker_client,
-        Err(err) => return guard.finish(Err(err)),
-    };
-
     let state = {
-        let mut state_observer = StateObserver::new(&mut *docker_client);
+        let mut state_observer = StateObserver::new(docker_client);
         state_observer.discover(guard.span(), name).await?
     };
 
@@ -78,7 +68,7 @@ pub async fn execute(
 
     let result = {
         let mut context = Context {
-            docker_client: &mut *docker_client,
+            docker_client,
             seedbank_client,
         };
         execute_plan(guard.span(), plan, &mut context, |reason| {
@@ -91,11 +81,11 @@ pub async fn execute(
 }
 
 struct StateObserver<'a> {
-    docker_client: &'a mut dyn docker::client::Client,
+    docker_client: &'a dyn docker::client::Client,
 }
 
 impl<'a> StateObserver<'a> {
-    pub fn new(docker_client: &'a mut dyn docker::client::Client) -> Self {
+    pub fn new(docker_client: &'a dyn docker::client::Client) -> Self {
         Self { docker_client }
     }
 

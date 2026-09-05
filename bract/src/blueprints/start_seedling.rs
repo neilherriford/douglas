@@ -1,6 +1,6 @@
 use crate::{
     blueprints::{
-        EXPECTED_MOUNT_MODE, RequestedBy, agent_container_name, build_client, container_name,
+        EXPECTED_MOUNT_MODE, RequestedBy, agent_container_name, container_name,
         core_seedling_forbidden_for, provision_seedling_secrets,
     },
     labels,
@@ -12,7 +12,7 @@ use blueprint::{
     bootstrap::{execute_plan, resolve_plan},
 };
 use config::DouglasFolders;
-use docker::client::{ClientBuilder, ContainerRef, ImageRef};
+use docker::client::{ContainerRef, ImageRef};
 use docker_types::{ContainerName, DockerNameError, ExecInstanceOptions, ExecStartOptions};
 use file_system::{FileReader, FileSystemError, Inspect, Permissions};
 use log::{Reporter, ScopeKind, Span};
@@ -49,7 +49,7 @@ pub enum StartSeedlingError {
 }
 
 struct Context<'a> {
-    docker_client: &'a mut dyn docker::client::Client,
+    docker_client: &'a dyn docker::client::Client,
     seedbank_client: &'a dyn seedbank_client::Client,
 }
 
@@ -77,7 +77,7 @@ pub async fn execute(
     file_reader: &dyn FileReader,
     permissions: &dyn Permissions,
     douglas_folders: &DouglasFolders,
-    docker_client_builder: &dyn ClientBuilder,
+    docker_client: &dyn docker::client::Client,
     seedbank_client: &dyn seedbank_client::Client,
     rolodex: &dyn Rolodex,
     registry: &docker_types::Registry,
@@ -91,19 +91,9 @@ pub async fn execute(
     )
     .start_guard();
 
-    let mut docker_client = match build_client(
-        docker_client_builder.build(Arc::clone(&reporter)),
-        StartSeedlingError::FailedBoostrap,
-    )
-    .await
-    {
-        Ok(docker_client) => docker_client,
-        Err(err) => return guard.finish(Err(err)),
-    };
-
     let state = {
         let mut state_observer = StateObserver::new(
-            &mut *docker_client,
+            docker_client,
             seedbank_client,
             rolodex,
             douglas_folders,
@@ -135,7 +125,7 @@ pub async fn execute(
 
     let result = {
         let mut context = Context {
-            docker_client: &mut *docker_client,
+            docker_client,
             seedbank_client,
         };
         execute_plan(guard.span(), plan, &mut context, |reason| {
@@ -148,7 +138,7 @@ pub async fn execute(
 }
 
 struct StateObserver<'a> {
-    docker_client: &'a mut dyn docker::client::Client,
+    docker_client: &'a dyn docker::client::Client,
     seedbank_client: &'a dyn seedbank_client::Client,
     rolodex: &'a dyn Rolodex,
     douglas_folders: &'a DouglasFolders,
@@ -161,7 +151,7 @@ struct StateObserver<'a> {
 
 impl<'a> StateObserver<'a> {
     pub fn new(
-        docker_client: &'a mut dyn docker::client::Client,
+        docker_client: &'a dyn docker::client::Client,
         seedbank_client: &'a dyn seedbank_client::Client,
         rolodex: &'a dyn Rolodex,
         douglas_folders: &'a DouglasFolders,
