@@ -2,7 +2,6 @@ mod blueprints;
 mod labels;
 mod protocol;
 mod rolodex;
-mod watchdog;
 
 pub use blueprints::bootstrap::service_definition;
 pub use blueprints::traefik_dynamic_dir;
@@ -479,7 +478,7 @@ impl Bract {
             }
         };
 
-        let result = self
+        let result = match self
             .do_reconcile_seedling(
                 Arc::clone(&self.reporter),
                 &name,
@@ -487,7 +486,15 @@ impl Bract {
                 &seedling.definition,
                 Some(&seedling.id),
             )
-            .await;
+            .await
+        {
+            Ok(()) => self
+                .seedbank_client
+                .set_desired_run_status(&name, seedbank_types::DesiredRunStatus::Running)
+                .await
+                .map_err(Error::from),
+            Err(err) => Err(err),
+        };
 
         match result {
             Ok(()) => guard.finish_with_outcome(log::Outcome::Ok),
@@ -665,7 +672,13 @@ impl Server for Bract {
         seedling_definition: &seedbank_types::SeedlingDefinition,
     ) -> Result<(), Error> {
         self.do_reconcile_seedling(reporter, name, version, seedling_definition, None)
-            .await
+            .await?;
+
+        self.seedbank_client
+            .set_desired_run_status(name, seedbank_types::DesiredRunStatus::Running)
+            .await?;
+
+        Ok(())
     }
 
     async fn start_seedling(&self, reporter: Arc<dyn Reporter>, name: &Name) -> Result<(), Error> {
