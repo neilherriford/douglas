@@ -1,3 +1,4 @@
+use crate::blueprints::build_client;
 use async_trait::async_trait;
 use blueprint::{
     Command, Step, push_step,
@@ -69,18 +70,24 @@ pub async fn execute(
         return guard.finish(Err(NewSeedlingError::ReservedName(name.to_string())));
     }
 
-    let mut docker_client = match docker_client_builder.build(Arc::clone(&reporter)).await {
+    let mut docker_client = match build_client(
+        docker_client_builder.build(Arc::clone(&reporter)),
+        NewSeedlingError::FailedBoostrap,
+    )
+    .await
+    {
         Ok(docker_client) => docker_client,
-        Err(err) => {
-            return guard.finish(Err(NewSeedlingError::FailedBoostrap(vec![err.to_string()])));
-        }
+        Err(err) => return guard.finish(Err(err)),
     };
 
-    let mut resin_client = match resin_client_builder.build(Arc::clone(&reporter)).await {
+    let mut resin_client = match build_client(
+        resin_client_builder.build(Arc::clone(&reporter)),
+        NewSeedlingError::FailedBoostrap,
+    )
+    .await
+    {
         Ok(resin_client) => resin_client,
-        Err(err) => {
-            return guard.finish(Err(NewSeedlingError::FailedBoostrap(vec![err.to_string()])));
-        }
+        Err(err) => return guard.finish(Err(err)),
     };
 
     let state = {

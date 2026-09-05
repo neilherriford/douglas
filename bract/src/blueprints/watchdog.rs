@@ -1,5 +1,5 @@
 use crate::{
-    blueprints::{RequestedBy, container_name, provision_seedling_secrets},
+    blueprints::{RequestedBy, build_client, container_name, provision_seedling_secrets},
     rolodex::Rolodex,
 };
 use async_trait::async_trait;
@@ -78,11 +78,14 @@ pub async fn execute(
     )
     .start_guard();
 
-    let mut docker_client = match docker_client_builder.build(Arc::clone(&reporter)).await {
+    let mut docker_client = match build_client(
+        docker_client_builder.build(Arc::clone(&reporter)),
+        WatchdogError::FailedBoostrap,
+    )
+    .await
+    {
         Ok(docker_client) => docker_client,
-        Err(err) => {
-            return guard.finish(Err(WatchdogError::FailedBoostrap(vec![err.to_string()])));
-        }
+        Err(err) => return guard.finish(Err(err)),
     };
 
     let state = {

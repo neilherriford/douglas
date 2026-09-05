@@ -1,6 +1,6 @@
 use crate::blueprints::{
-    agent_container_name, container_name, provision_seedling_secrets, seedling_network_name,
-    traefik_dynamic_dir,
+    agent_container_name, build_client, container_name, provision_seedling_secrets,
+    seedling_network_name, traefik_dynamic_dir,
 };
 use crate::labels;
 use async_trait::async_trait;
@@ -90,22 +90,24 @@ pub async fn execute(
     )
     .start_guard();
 
-    let mut docker_client = match docker_client_builder.build(Arc::clone(&reporter)).await {
+    let mut docker_client = match build_client(
+        docker_client_builder.build(Arc::clone(&reporter)),
+        DropSeedlingError::FailedBoostrap,
+    )
+    .await
+    {
         Ok(docker_client) => docker_client,
-        Err(err) => {
-            return guard.finish(Err(DropSeedlingError::FailedBoostrap(vec![
-                err.to_string(),
-            ])));
-        }
+        Err(err) => return guard.finish(Err(err)),
     };
 
-    let mut resin_client = match resin_client_builder.build(Arc::clone(&reporter)).await {
+    let mut resin_client = match build_client(
+        resin_client_builder.build(Arc::clone(&reporter)),
+        DropSeedlingError::FailedBoostrap,
+    )
+    .await
+    {
         Ok(resin_client) => resin_client,
-        Err(err) => {
-            return guard.finish(Err(DropSeedlingError::FailedBoostrap(vec![
-                err.to_string(),
-            ])));
-        }
+        Err(err) => return guard.finish(Err(err)),
     };
 
     let state = {

@@ -40,6 +40,13 @@ pub(crate) fn core_seedling_forbidden_for(
     origin == Some(seedbank_types::Origin::Core) && requested_by == RequestedBy::Operator
 }
 
+pub(crate) async fn build_client<T, BuildErr: std::fmt::Display, E>(
+    build: impl std::future::Future<Output = Result<T, BuildErr>>,
+    to_error: impl FnOnce(Vec<String>) -> E,
+) -> Result<T, E> {
+    build.await.map_err(|err| to_error(vec![err.to_string()]))
+}
+
 pub fn traefik_dynamic_dir(
     douglas_folders: &DouglasFolders,
 ) -> Result<PathBuf, seedbank_types::NameParseError> {

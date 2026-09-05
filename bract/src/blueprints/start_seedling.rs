@@ -1,6 +1,6 @@
 use crate::{
     blueprints::{
-        EXPECTED_MOUNT_MODE, RequestedBy, agent_container_name, container_name,
+        EXPECTED_MOUNT_MODE, RequestedBy, agent_container_name, build_client, container_name,
         core_seedling_forbidden_for, provision_seedling_secrets,
     },
     labels,
@@ -91,13 +91,14 @@ pub async fn execute(
     )
     .start_guard();
 
-    let mut docker_client = match docker_client_builder.build(Arc::clone(&reporter)).await {
+    let mut docker_client = match build_client(
+        docker_client_builder.build(Arc::clone(&reporter)),
+        StartSeedlingError::FailedBoostrap,
+    )
+    .await
+    {
         Ok(docker_client) => docker_client,
-        Err(err) => {
-            return guard.finish(Err(StartSeedlingError::FailedBoostrap(vec![
-                err.to_string(),
-            ])));
-        }
+        Err(err) => return guard.finish(Err(err)),
     };
 
     let state = {
