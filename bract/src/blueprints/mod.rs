@@ -33,6 +33,13 @@ pub(crate) enum RequestedBy {
     Watchdog,
 }
 
+pub(crate) fn core_seedling_forbidden_for(
+    origin: Option<seedbank_types::Origin>,
+    requested_by: RequestedBy,
+) -> bool {
+    origin == Some(seedbank_types::Origin::Core) && requested_by == RequestedBy::Operator
+}
+
 pub fn traefik_dynamic_dir(
     douglas_folders: &DouglasFolders,
 ) -> Result<PathBuf, seedbank_types::NameParseError> {

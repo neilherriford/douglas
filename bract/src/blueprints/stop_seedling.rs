@@ -1,4 +1,6 @@
-use crate::blueprints::{RequestedBy, agent_container_name, container_name};
+use crate::blueprints::{
+    RequestedBy, agent_container_name, container_name, core_seedling_forbidden_for,
+};
 use crate::labels;
 use async_trait::async_trait;
 use blueprint::{
@@ -171,9 +173,7 @@ fn create_plan<'a>(
     let mut steps: Vec<Box<dyn Command<Context>>> = Vec::new();
 
     if state.container_exists {
-        if state.origin == Some(seedbank_types::Origin::Core)
-            && requested_by == RequestedBy::Operator
-        {
+        if core_seedling_forbidden_for(state.origin, requested_by) {
             return Err(StopSeedlingError::CoreSeedling(name.to_string()));
         }
         if state.container_is_running {

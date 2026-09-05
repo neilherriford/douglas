@@ -1,7 +1,7 @@
 use crate::{
     blueprints::{
         EXPECTED_MOUNT_MODE, RequestedBy, agent_container_name, container_name,
-        provision_seedling_secrets,
+        core_seedling_forbidden_for, provision_seedling_secrets,
     },
     labels,
     rolodex::{Rolodex, RolodexError},
@@ -370,7 +370,7 @@ fn create_plan<'a>(
         ));
     }
 
-    if state.origin == Some(seedbank_types::Origin::Core) && requested_by == RequestedBy::Operator {
+    if core_seedling_forbidden_for(state.origin, requested_by) {
         return Err(StartSeedlingError::CoreSeedling(name.to_string()));
     }
 

@@ -236,6 +236,34 @@ impl Server {
         path
     }
 
+    fn ensure_exists(&self, name: &Name) -> Result<(), Error> {
+        if !self.exists(name)? {
+            return Err(Error::NotFound(name.clone()));
+        }
+        Ok(())
+    }
+
+    fn read_json_blob<T: serde::de::DeserializeOwned>(
+        &self,
+        path: &Path,
+    ) -> Result<Option<T>, Error> {
+        match self.file_reader.read_all(path) {
+            Ok(contents) => Ok(Some(serde_json::from_str(&contents)?)),
+            Err(FileSystemError::IoErrorAtPath { error, .. })
+                if error.kind() == std::io::ErrorKind::NotFound =>
+            {
+                Ok(None)
+            }
+            Err(err) => Err(err.into()),
+        }
+    }
+
+    fn write_json_blob<T: serde::Serialize>(&self, path: &Path, value: &T) -> Result<(), Error> {
+        let contents = serde_json::to_string(value)?;
+        self.file_writer.write_all(path, &contents)?;
+        Ok(())
+    }
+
     fn version_path(&self, name: &Name) -> PathBuf {
         let mut path = self.create_seedling_path(name);
         path.push("version");
@@ -838,43 +866,19 @@ impl Seedbank for Server {
         name: &Name,
         desired_run_status: DesiredRunStatus,
     ) -> Result<(), Error> {
-        if !self.exists(name)? {
-            return Err(Error::NotFound(name.clone()));
-        }
-
-        let path = self.desired_run_state_path(name);
-        let contents = serde_json::to_string(&desired_run_status)?;
-
-        self.file_writer.write_all(&path, &contents)?;
-
-        Ok(())
+        self.ensure_exists(name)?;
+        self.write_json_blob(&self.desired_run_state_path(name), &desired_run_status)
     }
 
     fn get_desired_run_status(&self, name: &Name) -> Result<DesiredRunStatus, Error> {
-        if !self.exists(name)? {
-            return Err(Error::NotFound(name.clone()));
-        }
-
-        let path = self.desired_run_state_path(name);
-        let contents = match self.file_reader.read_all(&path) {
-            Ok(contents) => contents,
-            Err(FileSystemError::IoErrorAtPath { error, .. })
-                if error.kind() == std::io::ErrorKind::NotFound =>
-            {
-                return Ok(DesiredRunStatus::Stopped);
-            }
-            Err(err) => return Err(err.into()),
-        };
-
-        let result: DesiredRunStatus = serde_json::from_str(&contents)?;
-
-        Ok(result)
+        self.ensure_exists(name)?;
+        Ok(self
+            .read_json_blob(&self.desired_run_state_path(name))?
+            .unwrap_or(DesiredRunStatus::Stopped))
     }
 
     fn reset_health_log(&self, name: &Name) -> Result<(), Error> {
-        if !self.exists(name)? {
-            return Err(Error::NotFound(name.clone()));
-        }
+        self.ensure_exists(name)?;
         let path = self.health_log_path(name);
         if self.inspect.exists(&path) {
             self.file_deleter.delete(&path)?;
@@ -883,44 +887,25 @@ impl Seedbank for Server {
     }
 
     fn health_check_log(&self, name: &Name) -> Result<Option<HealthCheckLog>, Error> {
-        if !self.exists(name)? {
-            return Err(Error::NotFound(name.clone()));
-        }
-
-        let path = self.health_log_path(name);
-        let contents = match self.file_reader.read_all(&path) {
-            Ok(contents) => contents,
-            Err(FileSystemError::IoErrorAtPath { error, .. })
-                if error.kind() == std::io::ErrorKind::NotFound =>
-            {
-                return Ok(None);
-            }
-            Err(err) => return Err(err.into()),
-        };
-
-        let result: HealthCheckLog = serde_json::from_str(&contents)?;
-        Ok(Some(result))
+        self.ensure_exists(name)?;
+        self.read_json_blob(&self.health_log_path(name))
     }
 
     fn increment_health_log_fail_count(&self, name: &Name) -> Result<bool, Error> {
-        if !self.exists(name)? {
-            return Err(Error::NotFound(name.clone()));
-        }
+        self.ensure_exists(name)?;
         let path = self.health_log_path(name);
-        let health_log = if self.inspect.exists(&path) {
-            let contents = self.file_reader.read_all(&path)?;
 
-            let mut health_log: HealthCheckLog = serde_json::from_str(&contents)?;
-            health_log.increment();
-            health_log
-        } else {
-            HealthCheckLog::default()
+        let health_log = match self.read_json_blob::<HealthCheckLog>(&path)? {
+            Some(mut existing) => {
+                existing.increment();
+                existing
+            }
+            None => HealthCheckLog::default(),
         };
 
         let reached_max_fail_count = health_log.reached_max_fail_count();
         if !reached_max_fail_count {
-            let contents = serde_json::to_string(&health_log)?;
-            self.file_writer.write_all(&path, &contents)?;
+            self.write_json_blob(&path, &health_log)?;
         }
 
         Ok(reached_max_fail_count)
