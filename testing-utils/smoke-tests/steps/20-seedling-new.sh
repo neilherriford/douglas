@@ -49,6 +49,10 @@ assert_contains "default-seedling pointer names hello-world" "$default_content" 
 definition_content="$(ssh_out sudo cat "$SEED_DIR/seedling.toml")"
 assert_contains "definition records Routed routing" "$definition_content" "routing.Routed"
 assert_contains "definition records the declared public port" "$definition_content" "public = 3000"
+assert_contains "definition records the health check command" "$definition_content" \
+    "require(\"http\").get(\"http://localhost:3000/\""
+assert_contains "definition records the health check wait time" "$definition_content" \
+    "wait_time_in_seconds = 5"
 
 mount_content="$(ssh_out sudo cat "$SEED_DIR/mounts/public/index.html")"
 assert_contains "mounted index.html has the expected content" "$mount_content" "Hello, world!"

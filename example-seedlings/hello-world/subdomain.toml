@@ -25,3 +25,7 @@ contents = """
 [ports]
 public = 3000
 additional = []
+
+[health_check]
+command = '''node -e 'require("http").get("http://localhost:3000/", r => process.exit(r.statusCode === 200 ? 0 : 1)).on("error", () => process.exit(1))' '''
+wait_time_in_seconds = 5

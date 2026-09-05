@@ -1,4 +1,4 @@
-route = "root"
+route = "subdomain"
 
 [mounts.public]
 kind = "Persisted"
@@ -14,10 +14,10 @@ contents = """
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <title>hello-world</title>
+  <title>always-fails</title>
 </head>
 <body>
-  <h1>Hello, world! (from default)</h1>
+  <h1>Hello, world! (from always-fails)</h1>
 </body>
 </html>
 """
@@ -27,5 +27,5 @@ public = 3000
 additional = []
 
 [health_check]
-command = '''node -e 'require("http").get("http://localhost:3000/", r => process.exit(r.statusCode === 200 ? 0 : 1)).on("error", () => process.exit(1))' '''
-wait_time_in_seconds = 5
+command = "false"
+wait_time_in_seconds = 1

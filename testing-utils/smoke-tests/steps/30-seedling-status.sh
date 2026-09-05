@@ -22,4 +22,20 @@ overall_status="$(ssh_out '~/douglas --output-style plain status')"
 assert_contains "douglas status reports the hello-world traefik route" \
     "$overall_status" "hello-world"
 
+# hello-world reaches bract's docker only through resin's push-triggered
+# reconcile (trigger_reconcile in bract/src/lib.rs), never through the
+# explicit `reconcile_seedling` RPC — the two used to diverge, with only the
+# RPC path setting desired_run_status to Running after bringing the
+# container up. trigger_reconcile silently left it at its Stopped default,
+# so hello-world looked fine immediately but got stopped by the very next
+# watchdog sweep (every 30s) since desired=Stopped while running. Sleeping
+# past one full sweep and re-checking is the only way to catch that: the
+# assertions above run within a second of the push and would pass either
+# way.
+echo "Waiting out one watchdog sweep to confirm push-triggered reconcile set desired_run_status..."
+sleep 35
+
+assert_success "hello-world container survives a watchdog sweep after push-only reconcile" ssh_out \
+    "docker ps --filter name=doug.hello-world --filter status=running -q | grep -q ."
+
 finish
