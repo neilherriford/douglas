@@ -10,12 +10,6 @@ pub struct DouglasFolders {
 }
 
 impl DouglasFolders {
-    pub fn log_file(&self, name: &str) -> PathBuf {
-        let mut result = self.logs.clone();
-        result.push(format!("{name}.log"));
-        result
-    }
-
     pub fn log_dir(&self, name: &str) -> PathBuf {
         let mut result = self.logs.clone();
         result.push(name);
@@ -136,14 +130,6 @@ mod tests {
             seedlings_root: PathBuf::from("/var/lib/douglas/"),
             identity: PathBuf::from("/var/lib/douglas-identity/"),
         }
-    }
-
-    #[test]
-    fn test_log_file_should_be_flat_under_logs() {
-        assert_eq!(
-            folders().log_file("bract"),
-            PathBuf::from("/var/log/douglas/bract.log")
-        );
     }
 
     #[test]

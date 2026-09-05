@@ -669,7 +669,7 @@ fn build_cli_reporter(
     let cli_reporter = CliReporter::start()?;
     Ok(Arc::new(TeeReporter::new(vec![
         Box::new(BufferedFileReporter::new(
-            douglas_folders.log_file(log_name),
+            douglas_folders.service_log_file(log_name),
         )),
         Box::new(cli_reporter),
     ])))
@@ -677,7 +677,7 @@ fn build_cli_reporter(
 
 fn build_plain_reporter(douglas_folders: &DouglasFolders, log_name: &str) -> Arc<dyn Reporter> {
     Arc::new(BufferedFileReporter::new(
-        douglas_folders.log_file(log_name),
+        douglas_folders.service_log_file(log_name),
     ))
 }
 
