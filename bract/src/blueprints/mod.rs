@@ -26,6 +26,12 @@ const TRAEFIK_SEEDLING_NAME: &str = "traefik";
 const TRAEFIK_CONFIG_MOUNT_NAME: &str = "config";
 const TRAEFIK_DYNAMIC_DIR_NAME: &str = "dynamic";
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RequestedBy {
+    Operator,
+    Watchdog,
+}
+
 pub fn traefik_dynamic_dir(
     douglas_folders: &DouglasFolders,
 ) -> Result<PathBuf, seedbank_types::NameParseError> {

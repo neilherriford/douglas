@@ -693,6 +693,7 @@ impl Server for Bract {
             &*self.rolodex,
             &self.registry,
             name,
+            blueprints::RequestedBy::Operator,
         )
         .await
         .map_err(Error::from)
@@ -704,6 +705,7 @@ impl Server for Bract {
             &*self.docker_client_builder,
             self.seedbank_client.as_ref(),
             name,
+            blueprints::RequestedBy::Operator,
         )
         .await
         .map_err(Error::from)

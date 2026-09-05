@@ -1,4 +1,4 @@
-use crate::blueprints::{agent_container_name, container_name};
+use crate::blueprints::{RequestedBy, agent_container_name, container_name};
 use crate::labels;
 use async_trait::async_trait;
 use blueprint::{
@@ -45,6 +45,7 @@ pub async fn execute(
     docker_client_builder: &dyn ClientBuilder,
     seedbank_client: &dyn seedbank_client::Client,
     name: &seedbank_types::Name,
+    requested_by: RequestedBy,
 ) -> Result<(), StopSeedlingError> {
     let guard = Span::new(
         Arc::clone(&reporter),
@@ -67,7 +68,7 @@ pub async fn execute(
         state_observer.discover(guard.span(), name).await?
     };
 
-    let plan = match resolve_plan(guard.span(), create_plan(name, state)) {
+    let plan = match resolve_plan(guard.span(), create_plan(name, state, requested_by)) {
         Ok(plan) => plan,
         Err(err) => return guard.finish(Err(err)),
     };
@@ -165,11 +166,14 @@ fn push_step<'a>(steps: &mut Vec<Step<'a>>, command: impl Command<Context<'a>> +
 fn create_plan<'a>(
     name: &seedbank_types::Name,
     state: State,
+    requested_by: RequestedBy,
 ) -> Result<Vec<Step<'a>>, StopSeedlingError> {
     let mut steps: Vec<Box<dyn Command<Context>>> = Vec::new();
 
     if state.container_exists {
-        if state.origin == Some(seedbank_types::Origin::Core) {
+        if state.origin == Some(seedbank_types::Origin::Core)
+            && requested_by == RequestedBy::Operator
+        {
             return Err(StopSeedlingError::CoreSeedling(name.to_string()));
         }
         if state.container_is_running {
@@ -326,7 +330,8 @@ mod tests {
 
     #[test]
     fn test_create_plan_should_stop_a_running_container() {
-        let steps = create_plan(&name(), stoppable_state()).expect("should produce a plan");
+        let steps = create_plan(&name(), stoppable_state(), RequestedBy::Operator)
+            .expect("should produce a plan");
 
         assert_eq!(
             step_descriptions(steps),
@@ -345,6 +350,7 @@ mod tests {
                 version: None,
                 ..stoppable_state()
             },
+            RequestedBy::Operator,
         )
         .expect("should produce a plan");
 
@@ -365,6 +371,7 @@ mod tests {
                 container_exists: false,
                 ..stoppable_state()
             },
+            RequestedBy::Operator,
         )
         .expect("should produce a plan");
 
@@ -382,6 +389,7 @@ mod tests {
                 container_is_running: false,
                 ..stoppable_state()
             },
+            RequestedBy::Operator,
         )
         .expect("should produce a plan");
 
@@ -392,16 +400,38 @@ mod tests {
     }
 
     #[test]
-    fn test_create_plan_should_refuse_to_stop_a_core_seedling() {
+    fn test_create_plan_should_refuse_to_stop_a_core_seedling_for_an_operator() {
         let result = create_plan(
             &name(),
             State {
                 origin: Some(seedbank_types::Origin::Core),
                 ..stoppable_state()
             },
+            RequestedBy::Operator,
         );
 
         assert!(matches!(result, Err(StopSeedlingError::CoreSeedling(_))));
+    }
+
+    #[test]
+    fn test_create_plan_should_allow_the_watchdog_to_stop_a_core_seedling() {
+        let steps = create_plan(
+            &name(),
+            State {
+                origin: Some(seedbank_types::Origin::Core),
+                ..stoppable_state()
+            },
+            RequestedBy::Watchdog,
+        )
+        .expect("should produce a plan");
+
+        assert_eq!(
+            step_descriptions(steps),
+            vec![
+                "Stopping seedling 'traefik' (v1)",
+                "Setting seedling 'traefik' desired running status to stopped",
+            ]
+        );
     }
 
     #[test]
@@ -413,6 +443,7 @@ mod tests {
                 agent_container_is_running: true,
                 ..stoppable_state()
             },
+            RequestedBy::Operator,
         )
         .expect("should produce a plan");
 
@@ -435,6 +466,7 @@ mod tests {
                 agent_container_is_running: false,
                 ..stoppable_state()
             },
+            RequestedBy::Operator,
         )
         .expect("should produce a plan");
 
