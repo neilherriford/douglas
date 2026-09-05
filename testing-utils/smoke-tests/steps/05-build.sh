@@ -21,6 +21,6 @@ assert_success "build douglas" ssh_out \
     "cd /mnt/share/douglas && cargo build"
 
 assert_success "deploy douglas binary to home directory" ssh_out \
-    "cp /mnt/share/douglas/target/debug/douglas ~/douglas"
+    "cp /mnt/share/cache/target/debug/douglas ~/douglas"
 
 finish
