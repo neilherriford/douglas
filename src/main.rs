@@ -18,12 +18,15 @@ use identity::{Identity, LocalIdentity};
 use log::{BufferedFileReporter, Reporter, Span, TeeReporter};
 use os::{EnvironmentVariableReader, Os, Unix, UnixEnvironmentVariableReader};
 use resin_client::ClientBuilder as _;
+use seedbank_types::{HealthCheck, HealthCheckCommand};
 use std::{
     collections::{HashMap, HashSet},
     fmt::{Debug, Display},
     io,
+    num::NonZeroU8,
     path::{Path, PathBuf},
     process::ExitCode,
+    str::FromStr,
     sync::Arc,
 };
 
@@ -75,7 +78,7 @@ enum Commands {
     },
     #[command(about = "Stop Douglas")]
     Stop,
-    #[command(about = "Report the status of every seedling and of OpenBao's secrets state")]
+    #[command(about = "Report the status of seedlings and services")]
     Status,
     #[command(hide = true)]
     Service {
@@ -333,6 +336,12 @@ fn example_user_seedling_definition() -> seedbank_types::UserSeedlingDefinition 
                 external: 1234,
                 internal: 4321,
             }],
+        },
+        HealthCheck {
+            #[allow(clippy::unwrap_used)]
+            command: HealthCheckCommand::from_str("true").unwrap(),
+            #[allow(clippy::unwrap_used)]
+            wait_time_in_seconds: NonZeroU8::new(1).unwrap(),
         },
     )
 }

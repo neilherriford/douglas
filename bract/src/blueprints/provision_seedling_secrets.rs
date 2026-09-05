@@ -310,6 +310,10 @@ pub async fn provision_agent_if_requested(
 
 #[cfg(test)]
 mod tests {
+    use std::{num::NonZeroU8, str::FromStr};
+
+    use seedbank_types::{HealthCheck, HealthCheckCommand};
+
     use super::*;
 
     fn name(value: &str) -> Name {
@@ -495,6 +499,10 @@ mod tests {
             docker_types::VersionedImageName::latest("test"),
             HashMap::new(),
             seedbank_types::Routing::None,
+            HealthCheck {
+                command: HealthCheckCommand::from_str("true").unwrap(),
+                wait_time_in_seconds: NonZeroU8::new(1).unwrap(),
+            },
         )
         .with_secrets_access(access)
     }

@@ -4,8 +4,8 @@ use log::{Reporter, ScopeKind, Span};
 #[cfg(feature = "mock")]
 use mockall::automock;
 use seedbank_types::{
-    DesiredRunStatus, Name, Request, Response, Seedling, SeedlingDefinition, SeedlingStatus,
-    Version,
+    DesiredRunStatus, HealthCheckLog, Name, Request, Response, Seedling, SeedlingDefinition,
+    SeedlingStatus, Version,
 };
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -60,6 +60,9 @@ pub trait Client: Send + Sync {
         name: &Name,
         desired_run_status: DesiredRunStatus,
     ) -> Result<(), Error>;
+    async fn reset_health_log(&self, name: &Name) -> Result<(), Error>;
+    async fn health_check_log(&self, name: &Name) -> Result<Option<HealthCheckLog>, Error>;
+    async fn increment_health_log_fail_count(&self, name: &Name) -> Result<bool, Error>;
 }
 
 pub struct UdsClient {
@@ -346,7 +349,7 @@ impl Client for UdsClient {
         };
 
         guard.finish(match response {
-            Response::DesiredRunStatus(status) => Ok(status),
+            Response::DesiredRunStatus { desired_run_status } => Ok(desired_run_status),
             Response::Error { message } => Err(Error::ServerError(message)),
             _ => Err(Error::UnexpectedResponse),
         })
@@ -377,6 +380,77 @@ impl Client for UdsClient {
 
         guard.finish(match response {
             Response::Ok => Ok(()),
+            Response::Error { message } => Err(Error::ServerError(message)),
+            _ => Err(Error::UnexpectedResponse),
+        })
+    }
+
+    async fn reset_health_log(&self, name: &Name) -> Result<(), Error> {
+        let guard = Span::new(
+            Arc::clone(&self.reporter),
+            "Resetting health log",
+            ScopeKind::Task,
+        )
+        .start_guard();
+
+        let response = match self
+            .request(Request::ResetHealthLog { name: name.clone() })
+            .await
+        {
+            Ok(response) => response,
+            Err(err) => return guard.finish(Err(err)),
+        };
+
+        guard.finish(match response {
+            Response::Ok => Ok(()),
+            Response::Error { message } => Err(Error::ServerError(message)),
+            _ => Err(Error::UnexpectedResponse),
+        })
+    }
+
+    async fn health_check_log(&self, name: &Name) -> Result<Option<HealthCheckLog>, Error> {
+        let guard = Span::new(
+            Arc::clone(&self.reporter),
+            "Fetching health log status",
+            ScopeKind::Task,
+        )
+        .start_guard();
+
+        let response = match self
+            .request(Request::HealthCheckLog { name: name.clone() })
+            .await
+        {
+            Ok(response) => response,
+            Err(err) => return guard.finish(Err(err)),
+        };
+
+        guard.finish(match response {
+            Response::HealthCheckLog { log } => Ok(log),
+            Response::Error { message } => Err(Error::ServerError(message)),
+            _ => Err(Error::UnexpectedResponse),
+        })
+    }
+
+    async fn increment_health_log_fail_count(&self, name: &Name) -> Result<bool, Error> {
+        let guard = Span::new(
+            Arc::clone(&self.reporter),
+            "Incrementing health log fail count",
+            ScopeKind::Task,
+        )
+        .start_guard();
+
+        let response = match self
+            .request(Request::IncrementHealthLogFailCount { name: name.clone() })
+            .await
+        {
+            Ok(response) => response,
+            Err(err) => return guard.finish(Err(err)),
+        };
+
+        guard.finish(match response {
+            Response::IncrementHealthLogFailCount {
+                reached_max_fail_count,
+            } => Ok(reached_max_fail_count),
             Response::Error { message } => Err(Error::ServerError(message)),
             _ => Err(Error::UnexpectedResponse),
         })

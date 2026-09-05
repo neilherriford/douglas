@@ -1893,7 +1893,12 @@ impl<'a> Command<Context<'a>> for StartContainer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::{HashMap, HashSet};
+    use seedbank_types::{HealthCheck, HealthCheckCommand};
+    use std::{
+        collections::{HashMap, HashSet},
+        num::NonZeroU8,
+        str::FromStr,
+    };
 
     fn name() -> seedbank_types::Name {
         "traefik".parse().unwrap()
@@ -1908,6 +1913,10 @@ mod tests {
             VersionedImageName::specific("traefik", "v3.7.7"),
             HashMap::new(),
             seedbank_types::Routing::None,
+            HealthCheck {
+                command: HealthCheckCommand::from_str("true").unwrap(),
+                wait_time_in_seconds: NonZeroU8::new(1).unwrap(),
+            },
         )
     }
 

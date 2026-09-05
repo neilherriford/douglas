@@ -54,7 +54,7 @@ pub fn handle(seedbank: &dyn Seedbank, request: Request) -> Response {
             Err(err) => error_response(err),
         },
         Request::GetDesiredRunStatus { name } => match seedbank.get_desired_run_status(&name) {
-            Ok(status) => Response::DesiredRunStatus(status),
+            Ok(desired_run_status) => Response::DesiredRunStatus { desired_run_status },
             Err(err) => error_response(err),
         },
         Request::SetDesiredRunStatus {
@@ -64,6 +64,24 @@ pub fn handle(seedbank: &dyn Seedbank, request: Request) -> Response {
             Ok(()) => Response::Ok,
             Err(err) => error_response(err),
         },
+        Request::ResetHealthLog { name } => match seedbank.reset_health_log(&name) {
+            Ok(()) => Response::Ok,
+            Err(err) => error_response(err),
+        },
+        Request::HealthCheckLog { name } => match seedbank.health_check_log(&name) {
+            Ok(log) => Response::HealthCheckLog { log },
+            Err(err) => error_response(err),
+        },
+        Request::IncrementHealthLogFailCount { name } => {
+            match seedbank.increment_health_log_fail_count(&name) {
+                Ok(reached_max_fail_count) => {
+                    Response::IncrementHealthLogFailCount {
+                        reached_max_fail_count,
+                    }
+                }
+                Err(err) => error_response(err),
+            }
+        }
     }
 }
 
@@ -78,8 +96,8 @@ mod tests {
     use super::*;
     use crate::{Id, MockSeedbank, Name, Seedling, SeedlingDefinition};
     use docker_types::VersionedImageName;
-    use seedbank_types::Version;
-    use std::{collections::HashMap, str::FromStr};
+    use seedbank_types::{HealthCheck, HealthCheckCommand, Version};
+    use std::{collections::HashMap, num::NonZeroU8, str::FromStr};
 
     fn name(value: &str) -> Name {
         Name::from_str(value).expect("valid name")
@@ -98,6 +116,10 @@ mod tests {
             VersionedImageName::latest("test"),
             HashMap::new(),
             seedbank_types::Routing::None,
+            HealthCheck {
+                command: HealthCheckCommand::from_str("true").unwrap(),
+                wait_time_in_seconds: NonZeroU8::new(1).unwrap(),
+            },
         )
     }
 

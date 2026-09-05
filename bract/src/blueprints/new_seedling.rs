@@ -320,6 +320,7 @@ impl<'a> Command<Context<'a>> for NewSeedlingFromSpec {
                 route: self.user_seedling_definition.route.clone(),
                 ports: self.user_seedling_definition.ports.clone(),
             },
+            self.user_seedling_definition.health_check.clone(),
         )
         .with_secrets_access(self.user_seedling_definition.secrets)
         .with_origin(seedbank_types::Origin::User);
@@ -406,6 +407,8 @@ impl<'a> Command<Context<'a>> for ClaimDefault {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use seedbank_types::{HealthCheck, HealthCheckCommand};
+    use std::{num::NonZeroU8, str::FromStr};
 
     fn name() -> seedbank_types::Name {
         "foo".parse().expect("valid name")
@@ -417,6 +420,10 @@ mod tests {
             seedbank_types::PortSpec {
                 public: 8080,
                 additional: Vec::new(),
+            },
+            HealthCheck {
+                command: HealthCheckCommand::from_str("true").unwrap(),
+                wait_time_in_seconds: NonZeroU8::new(1).unwrap(),
             },
         )
     }

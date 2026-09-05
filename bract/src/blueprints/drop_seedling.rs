@@ -694,6 +694,10 @@ impl<'a> Command<Context<'a>> for DeleteResinRepository {
 
 #[cfg(test)]
 mod tests {
+    use std::{num::NonZeroU8, str::FromStr};
+
+    use seedbank_types::{HealthCheck, HealthCheckCommand};
+
     use super::*;
 
     fn name() -> seedbank_types::Name {
@@ -951,6 +955,10 @@ mod tests {
                 docker_types::VersionedImageName::specific("hello-world", "1"),
                 std::collections::HashMap::new(),
                 seedbank_types::Routing::None,
+                HealthCheck {
+                    command: HealthCheckCommand::from_str("true").unwrap(),
+                    wait_time_in_seconds: NonZeroU8::new(1).unwrap(),
+                },
             )
             .with_origin(origin),
         }

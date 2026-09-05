@@ -4,7 +4,7 @@ mod registration_protocol;
 
 pub use bootstrap::{DOUGLAS_SEEDBANK_GROUP, DOUGLAS_SEEDBANK_USER, service_definition};
 pub use protocol::handle;
-use seedbank_types::{DesiredRunStatus, SeedlingStatus, Version};
+use seedbank_types::{DesiredRunStatus, HealthCheckLog, SeedlingStatus, Version};
 pub use seedbank_types::{
     Id, IdParseError, MAX_SEEDLINGS, Mount, MountContents, MountFile, MountType, Name,
     NameParseError, NameRules, Request, Response, Seedling, SeedlingDefinition,
@@ -68,7 +68,7 @@ pub enum Error {
     SeedlingDeserializationError(#[from] toml::de::Error),
 
     #[error("Desired run status serialization error: {0}")]
-    DesiredRunStatusSerializationError(#[from] serde_json::Error),
+    SupportFileSerializationError(#[from] serde_json::Error),
 }
 
 #[cfg_attr(test, mockall::automock)]
@@ -99,6 +99,9 @@ pub trait Seedbank {
         desired_run_status: DesiredRunStatus,
     ) -> Result<(), Error>;
     fn get_desired_run_status(&self, name: &Name) -> Result<DesiredRunStatus, Error>;
+    fn reset_health_log(&self, name: &Name) -> Result<(), Error>;
+    fn increment_health_log_fail_count(&self, name: &Name) -> Result<bool, Error>;
+    fn health_check_log(&self, name: &Name) -> Result<Option<HealthCheckLog>, Error>;
 }
 
 pub struct Server {
@@ -218,6 +221,12 @@ impl Server {
     fn id_path(&self, name: &Name) -> PathBuf {
         let mut path = self.create_seedling_path(name);
         path.push("id");
+        path
+    }
+
+    fn health_log_path(&self, name: &Name) -> PathBuf {
+        let mut path = self.create_seedling_path(name);
+        path.push("health.log");
         path
     }
 
@@ -861,6 +870,61 @@ impl Seedbank for Server {
 
         Ok(result)
     }
+
+    fn reset_health_log(&self, name: &Name) -> Result<(), Error> {
+        if !self.exists(name)? {
+            return Err(Error::NotFound(name.clone()));
+        }
+        let path = self.health_log_path(name);
+        if self.inspect.exists(&path) {
+            self.file_deleter.delete(&path)?;
+        }
+        Ok(())
+    }
+
+    fn health_check_log(&self, name: &Name) -> Result<Option<HealthCheckLog>, Error> {
+        if !self.exists(name)? {
+            return Err(Error::NotFound(name.clone()));
+        }
+
+        let path = self.health_log_path(name);
+        let contents = match self.file_reader.read_all(&path) {
+            Ok(contents) => contents,
+            Err(FileSystemError::IoErrorAtPath { error, .. })
+                if error.kind() == std::io::ErrorKind::NotFound =>
+            {
+                return Ok(None);
+            }
+            Err(err) => return Err(err.into()),
+        };
+
+        let result: HealthCheckLog = serde_json::from_str(&contents)?;
+        Ok(Some(result))
+    }
+
+    fn increment_health_log_fail_count(&self, name: &Name) -> Result<bool, Error> {
+        if !self.exists(name)? {
+            return Err(Error::NotFound(name.clone()));
+        }
+        let path = self.health_log_path(name);
+        let health_log = if self.inspect.exists(&path) {
+            let contents = self.file_reader.read_all(&path)?;
+
+            let mut health_log: HealthCheckLog = serde_json::from_str(&contents)?;
+            health_log.increment();
+            health_log
+        } else {
+            HealthCheckLog::default()
+        };
+
+        let reached_max_fail_count = health_log.reached_max_fail_count();
+        if !reached_max_fail_count {
+            let contents = serde_json::to_string(&health_log)?;
+            self.file_writer.write_all(&path, &contents)?;
+        }
+
+        Ok(reached_max_fail_count)
+    }
 }
 
 #[cfg(test)]
@@ -873,6 +937,8 @@ mod tests {
         MockFolder, MockFolderDeleter, MockInspect, MockPermissions, Modes,
     };
     use log::Event;
+    use seedbank_types::{HealthCheck, HealthCheckCommand};
+    use std::num::NonZeroU8;
 
     struct NullReporter;
 
@@ -897,6 +963,10 @@ mod tests {
             VersionedImageName::latest("test"),
             HashMap::new(),
             seedbank_types::Routing::None,
+            HealthCheck {
+                command: HealthCheckCommand::from_str("true").unwrap(),
+                wait_time_in_seconds: NonZeroU8::new(1).unwrap(),
+            },
         )
     }
 
@@ -905,6 +975,10 @@ mod tests {
             VersionedImageName::latest("test"),
             mounts,
             seedbank_types::Routing::None,
+            HealthCheck {
+                command: HealthCheckCommand::from_str("true").unwrap(),
+                wait_time_in_seconds: NonZeroU8::new(1).unwrap(),
+            },
         )
     }
 

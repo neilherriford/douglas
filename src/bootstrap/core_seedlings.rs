@@ -168,13 +168,10 @@ impl<'a> Command<Context<'a>> for ReconcileSeedling {
 
 pub mod definitions {
     use crate::bootstrap::core_seedlings::BootstrapError;
-    // pub use openbao::AUDIT_LOG as OPENBAO_AUDIT_LOG;
-    // pub use openbao::LOG_PATH as OPENBAO_LOG_PATH;
     pub use openbao::NAME as OPENBAO_NAME;
     pub use openbao::SOCKET_MOUNT_NAME as OPENBAO_SOCKET_MOUNT_NAME;
     pub use openbao::SOCKET_NAME as OPENBAO_SOCKET_NAME;
     pub use openbao::TCP_PORT as OPENBAO_TCP_PORT;
-    // pub use openbao::SOCKET_PATH as OPENBAO_SOCKET_PATH;
 
     use seedbank::{Name, SeedlingDefinition};
     use seedbank_types::Version;
@@ -187,8 +184,9 @@ pub mod definitions {
         use crate::bootstrap::core_seedlings::BootstrapError;
         use docker_types::VersionedImageName;
         use seedbank::{Mount, MountContents, MountType, Name, SeedlingDefinition};
-        use seedbank_types::Version;
+        use seedbank_types::{HealthCheckCommand, Version};
         use serde_json::json;
+        use std::num::NonZeroU8;
         use std::str::FromStr;
         use std::{
             collections::{HashMap, HashSet},
@@ -218,6 +216,14 @@ pub mod definitions {
                     ),
                 )]),
                 seedbank_types::Routing::None,
+                seedbank_types::HealthCheck {
+                    command: match HealthCheckCommand::from_str("traefik healthcheck") {
+                        Ok(command) => command,
+                        _ => panic!("Failed to create traefik health check command"),
+                    },
+                    #[allow(clippy::unwrap_used)]
+                    wait_time_in_seconds: NonZeroU8::new(1).unwrap(),
+                },
             )
             .with_published_ports(vec![seedbank_types::PortMapping {
                 external: 80,
@@ -250,7 +256,8 @@ pub mod definitions {
                 },
                 "log": {
                     "level": "INFO"
-                }
+                },
+                "ping": {}
             });
 
             serde_json::to_vec_pretty(&config)
@@ -261,8 +268,9 @@ pub mod definitions {
         use crate::bootstrap::core_seedlings::BootstrapError;
         use docker_types::VersionedImageName;
         use seedbank::{Mount, MountContents, MountType, Name, SeedlingDefinition};
-        use seedbank_types::Version;
+        use seedbank_types::{HealthCheckCommand, Version};
         use serde_json::json;
+        use std::num::NonZeroU8;
         use std::str::FromStr;
         use std::{
             collections::{HashMap, HashSet},
@@ -277,6 +285,9 @@ pub mod definitions {
         pub const SOCKET_PATH: &str = "/run/bract/";
         pub use ::openbao::API_PORT as TCP_PORT;
         const DATA_PATH: &str = "/openbao/data";
+        const CLUSTER_ADDRESS: &str = "http://127.0.0.1";
+        const UNSEALED_STATUS: &str = "0";
+        const SEALED_STATUS: &str = "2";
 
         pub fn create() -> Result<(Name, Version, SeedlingDefinition), BootstrapError> {
             const CONFIG_PATH: &str = "/openbao/config";
@@ -334,11 +345,27 @@ pub mod definitions {
                     ),
                 ]),
                 seedbank_types::Routing::None,
+                seedbank_types::HealthCheck {
+                    command: create_health_check_command(),
+                    #[allow(clippy::unwrap_used)]
+                    wait_time_in_seconds: NonZeroU8::new(1).unwrap(),
+                },
             )
             .with_command(&format!("server -config={CONFIG_PATH}/{CONFIG_FILE_NAME}"))
             .with_origin(seedbank_types::Origin::Core);
 
             Ok((name, version, definition))
+        }
+
+        fn create_health_check_command() -> HealthCheckCommand {
+            let command = format!(
+                "BAO_ADDR={CLUSTER_ADDRESS}:{TCP_PORT} bao status >/dev/null 2>&1; code=$?; test \"$code\" -eq {UNSEALED_STATUS} -o \"$code\" -eq {SEALED_STATUS}"
+            );
+
+            match HealthCheckCommand::from_str(&command) {
+                Ok(command) => command,
+                _ => panic!("Failed to create OpenBao health check command"),
+            }
         }
 
         fn generate_config() -> Result<Vec<u8>, serde_json::Error> {
@@ -371,7 +398,7 @@ pub mod definitions {
                     { "tcp": { "address": format!("0.0.0.0:{TCP_PORT}"), "tls_disable": true } }
                 ],
                 "api_addr": api_addr,
-                "cluster_addr": format!("http://127.0.0.1:{TCP_PORT}")
+                "cluster_addr": format!("{CLUSTER_ADDRESS}:{TCP_PORT}")
             });
 
             serde_json::to_vec_pretty(&config)

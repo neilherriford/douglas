@@ -2,7 +2,7 @@ use docker_types::{Capability, VersionedImageName};
 use file_system::{RelativePath, RelativePathError};
 use refined_string::{StringRules, Validated};
 use regex::Regex;
-use serde::{Deserialize, Serialize, Serializer};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::{
     collections::{HashMap, HashSet},
     hash::Hasher,
@@ -335,6 +335,51 @@ pub enum Origin {
     User,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HealthCheckCommand(String);
+
+#[derive(Debug, Error)]
+#[error("command cannot be empty")]
+pub struct HealthCheckCommandParseError;
+
+impl FromStr for HealthCheckCommand {
+    type Err = HealthCheckCommandParseError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if s.is_empty() {
+            Err(HealthCheckCommandParseError)
+        } else {
+            Ok(Self(s.to_string()))
+        }
+    }
+}
+
+impl Serialize for HealthCheckCommand {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.0.serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for HealthCheckCommand {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        String::deserialize(deserializer)?
+            .parse()
+            .map_err(serde::de::Error::custom)
+    }
+}
+
+impl std::fmt::Display for HealthCheckCommand {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HealthCheck {
+    pub command: HealthCheckCommand,
+    pub wait_time_in_seconds: std::num::NonZeroU8,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SeedlingDefinition {
     pub image: VersionedImageName,
@@ -347,10 +392,16 @@ pub struct SeedlingDefinition {
     pub secrets: Option<SecretsAccess>,
     #[serde(default)]
     pub origin: Origin,
+    pub health_check: HealthCheck,
 }
 
 impl SeedlingDefinition {
-    pub fn new(image: VersionedImageName, mounts: HashMap<Name, Mount>, routing: Routing) -> Self {
+    pub fn new(
+        image: VersionedImageName,
+        mounts: HashMap<Name, Mount>,
+        routing: Routing,
+        health_check: HealthCheck,
+    ) -> Self {
         Self {
             image,
             mounts,
@@ -360,6 +411,7 @@ impl SeedlingDefinition {
             added_capabilities: HashSet::new(),
             secrets: None,
             origin: Origin::default(),
+            health_check,
         }
     }
 
@@ -397,15 +449,17 @@ pub struct UserSeedlingDefinition {
     pub route: RouteSpec,
     #[serde(default)]
     pub secrets: Option<SecretsAccess>,
+    pub health_check: HealthCheck,
 }
 
 impl UserSeedlingDefinition {
-    pub fn new(mounts: HashMap<Name, Mount>, ports: PortSpec) -> Self {
+    pub fn new(mounts: HashMap<Name, Mount>, ports: PortSpec, health_check: HealthCheck) -> Self {
         Self {
             mounts,
             ports,
             route: RouteSpec::default(),
             secrets: None,
+            health_check,
         }
     }
 }
@@ -450,6 +504,15 @@ pub enum Request {
         name: Name,
         desired_run_status: DesiredRunStatus,
     },
+    ResetHealthLog {
+        name: Name,
+    },
+    HealthCheckLog {
+        name: Name,
+    },
+    IncrementHealthLogFailCount {
+        name: Name,
+    },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -462,7 +525,9 @@ pub enum Response {
     Default { name: Option<Name> },
     Ok,
     Error { message: String },
-    DesiredRunStatus(DesiredRunStatus),
+    DesiredRunStatus { desired_run_status: DesiredRunStatus },
+    HealthCheckLog { log: Option<HealthCheckLog> },
+    IncrementHealthLogFailCount { reached_max_fail_count: bool },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -471,9 +536,72 @@ pub enum DesiredRunStatus {
     Stopped,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HealthCheckLog {
+    pub fail_count: u8,
+    pub updated_at: std::time::SystemTime,
+}
+
+impl Default for HealthCheckLog {
+    fn default() -> Self {
+        Self {
+            fail_count: 1,
+            updated_at: std::time::SystemTime::now(),
+        }
+    }
+}
+
+impl HealthCheckLog {
+    pub fn reached_max_fail_count(&self) -> bool {
+        self.fail_count > 5
+    }
+
+    pub fn increment(&mut self) {
+        self.fail_count += 1;
+        self.updated_at = std::time::SystemTime::now();
+    }
+}
+
 #[cfg(test)]
 mod tests {
+
+    use std::num::NonZeroU8;
+
     use super::*;
+
+    #[test]
+    fn test_response_desired_run_status_should_serialize() {
+        let response = Response::DesiredRunStatus {
+            desired_run_status: DesiredRunStatus::Running,
+        };
+
+        serde_json::to_string(&response).expect("should serialize");
+    }
+
+    #[test]
+    fn test_response_increment_health_log_fail_count_should_serialize() {
+        let response = Response::IncrementHealthLogFailCount {
+            reached_max_fail_count: true,
+        };
+
+        serde_json::to_string(&response).expect("should serialize");
+    }
+
+    #[test]
+    fn test_response_health_check_log_should_serialize_when_some() {
+        let response = Response::HealthCheckLog {
+            log: Some(HealthCheckLog::default()),
+        };
+
+        serde_json::to_string(&response).expect("should serialize");
+    }
+
+    #[test]
+    fn test_response_health_check_log_should_serialize_when_none() {
+        let response = Response::HealthCheckLog { log: None };
+
+        serde_json::to_string(&response).expect("should serialize");
+    }
 
     #[test]
     fn test_mount_file_contents_should_round_trip_through_toml_as_text() {
@@ -512,6 +640,10 @@ mod tests {
             docker_types::VersionedImageName::specific("hello-world", "1"),
             HashMap::new(),
             Routing::None,
+            HealthCheck {
+                command: HealthCheckCommand::from_str("true").unwrap(),
+                wait_time_in_seconds: NonZeroU8::new(1).unwrap(),
+            },
         )
     }
 
