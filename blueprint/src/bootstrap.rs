@@ -1,4 +1,4 @@
-use crate::{Command, CommandExecutor, ExecutionResult, JournalingExecutor};
+use crate::{CommandExecutor, ExecutionResult, JournalingExecutor, Step};
 use log::{BufferedFileReporter, Level, PipeReporter, Reporter, ScopeKind, Span, TeeReporter};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -13,8 +13,8 @@ pub fn build_boot_reporter(log_path: PathBuf, reporting_fd: Option<i32>) -> Arc<
 
 pub fn resolve_plan<TContext, E>(
     span: &Span,
-    plan: Result<Vec<Box<dyn Command<TContext>>>, E>,
-) -> Result<Vec<Box<dyn Command<TContext>>>, E> {
+    plan: Result<Vec<Step<TContext>>, E>,
+) -> Result<Vec<Step<TContext>>, E> {
     if let Ok(plan) = &plan {
         span.plan_hint(plan.iter().map(std::string::ToString::to_string).collect());
     }
@@ -23,7 +23,7 @@ pub fn resolve_plan<TContext, E>(
 
 pub async fn execute_plan<TContext: Send, E>(
     span: &Span,
-    plan: Vec<Box<dyn Command<TContext>>>,
+    plan: Vec<Step<TContext>>,
     context: &mut TContext,
     on_failed: impl FnOnce(String) -> E,
 ) -> Result<(), E> {
@@ -131,7 +131,7 @@ mod tests {
     async fn test_execute_plan_should_succeed_when_every_step_succeeds() {
         let span = root_span();
         let mut context = ();
-        let plan: Vec<Box<dyn crate::Command<()>>> = vec![Box::new(SucceedingCommand)];
+        let plan: Vec<Step<()>> = vec![Box::new(SucceedingCommand)];
 
         let result = execute_plan(&span, plan, &mut context, |reason| reason).await;
 
@@ -142,7 +142,7 @@ mod tests {
     async fn test_execute_plan_should_pass_the_failure_reason_to_on_failed() {
         let span = root_span();
         let mut context = ();
-        let plan: Vec<Box<dyn crate::Command<()>>> =
+        let plan: Vec<Step<()>> =
             vec![Box::new(SucceedingCommand), Box::new(FailingCommand)];
 
         let result = execute_plan(&span, plan, &mut context, |reason| reason).await;

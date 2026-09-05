@@ -1,6 +1,6 @@
 use crate::{
-    Command, FolderModeRequirement, FolderOwnershipRequirement, GroupMembershipRequirement,
-    HasCredentials, HasFolder, HasPermissions, commands, listener::ListenerDefinition,
+    FolderModeRequirement, FolderOwnershipRequirement, GroupMembershipRequirement, HasCredentials,
+    HasFolder, HasPermissions, Step, commands, listener::ListenerDefinition,
 };
 use credentials::Credentials;
 use file_system::{FileSystemError, Folder, Modes, Permissions};
@@ -215,11 +215,11 @@ fn discover_folder_state(
 pub fn plan_service_bootstrap<C>(
     definition: &ServiceDefinition,
     state: &ServiceState,
-) -> Vec<Box<dyn Command<C>>>
+) -> Vec<Step<C>>
 where
     C: HasCredentials + HasFolder + HasPermissions + Send,
 {
-    let mut steps: Vec<Box<dyn Command<C>>> = Vec::new();
+    let mut steps: Vec<Step<C>> = Vec::new();
 
     if state.group_missing {
         steps.push(Box::new(commands::CreateGroup::new(&definition.group)));

@@ -4,7 +4,7 @@ use crate::{
 };
 use async_trait::async_trait;
 use blueprint::{
-    Command,
+    Command, Step, push_step,
     bootstrap::{execute_plan, resolve_plan},
 };
 use config::DouglasFolders;
@@ -225,14 +225,8 @@ impl<'a> StateObserver<'a> {
     }
 }
 
-type Step<'a> = Box<dyn Command<Context<'a>>>;
-
-fn push_step<'a>(steps: &mut Vec<Step<'a>>, command: impl Command<Context<'a>> + 'static) {
-    steps.push(Box::new(command));
-}
-
-fn create_plan<'a>(state: State) -> Result<Vec<Step<'a>>, WatchdogError> {
-    let mut steps: Vec<Box<dyn Command<Context>>> = Vec::new();
+fn create_plan<'a>(state: State) -> Result<Vec<Step<Context<'a>>>, WatchdogError> {
+    let mut steps: Vec<Step<Context>> = Vec::new();
 
     for seedling_name in state.needing_stop.iter() {
         push_step(&mut steps, StopSeedling::new(seedling_name.clone()));
@@ -494,7 +488,7 @@ mod tests {
         "always-fails".parse().unwrap()
     }
 
-    fn step_descriptions(steps: Vec<Step<'_>>) -> Vec<String> {
+    fn step_descriptions(steps: Vec<Step<Context<'_>>>) -> Vec<String> {
         steps.iter().map(std::string::ToString::to_string).collect()
     }
 

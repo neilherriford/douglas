@@ -8,7 +8,7 @@ use crate::{
 };
 use async_trait::async_trait;
 use blueprint::{
-    Command,
+    Command, Step, push_step,
     bootstrap::{execute_plan, resolve_plan},
 };
 use config::DouglasFolders;
@@ -640,16 +640,14 @@ impl<'a> StateObserver<'a> {
     }
 }
 
-type Step<'a> = Box<dyn Command<Context<'a>>>;
-
 fn create_plan<'a>(
     name: &seedbank_types::Name,
     version: &seedbank_types::Version,
     seedling_definition: &seedbank_types::SeedlingDefinition,
     mut state: State,
     registry: &docker_types::Registry,
-) -> Result<Vec<Step<'a>>, ReconcileSeedlingError> {
-    let mut steps: Vec<Box<dyn Command<Context>>> = Vec::new();
+) -> Result<Vec<Step<Context<'a>>>, ReconcileSeedlingError> {
+    let mut steps: Vec<Step<Context>> = Vec::new();
 
     match state.seedling_version {
         VersionComparison::Missing => push_step(
@@ -778,10 +776,6 @@ fn create_plan<'a>(
     }
 
     Ok(steps)
-}
-
-fn push_step<'a>(steps: &mut Vec<Step<'a>>, command: impl Command<Context<'a>> + 'static) {
-    steps.push(Box::new(command));
 }
 
 struct CreateSeedling {
@@ -1940,7 +1934,7 @@ mod tests {
         }
     }
 
-    fn step_descriptions(steps: Vec<Step<'_>>) -> Vec<String> {
+    fn step_descriptions(steps: Vec<Step<Context<'_>>>) -> Vec<String> {
         steps.iter().map(std::string::ToString::to_string).collect()
     }
 

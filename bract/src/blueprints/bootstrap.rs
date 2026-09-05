@@ -1,6 +1,6 @@
 use crate::BootstrapError;
 use blueprint::{
-    Command, RunningStatus,
+    RunningStatus, Step,
     bootstrap::{build_boot_reporter, execute_plan, resolve_plan},
     listener::{ListenerDefinition, LivenessCheck, check_liveness},
     service::{
@@ -288,12 +288,10 @@ impl<'a> StateObserver<'a> {
     }
 }
 
-type Step<'a> = Box<dyn Command<Context<'a>>>;
-
 fn create_plan<'a>(
     definition: &ServiceDefinition,
     state: State,
-) -> Result<Vec<Step<'a>>, BootstrapError> {
+) -> Result<Vec<Step<Context<'a>>>, BootstrapError> {
     if state.bract_running_status == RunningStatus::Running {
         return Ok(Vec::new());
     }

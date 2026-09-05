@@ -4,7 +4,7 @@ use crate::blueprints::{
 use crate::labels;
 use async_trait::async_trait;
 use blueprint::{
-    Command,
+    Command, Step, push_step,
     bootstrap::{execute_plan, resolve_plan},
 };
 use docker::client::{ClientBuilder, ContainerRef};
@@ -159,18 +159,12 @@ impl<'a> StateObserver<'a> {
     }
 }
 
-type Step<'a> = Box<dyn Command<Context<'a>>>;
-
-fn push_step<'a>(steps: &mut Vec<Step<'a>>, command: impl Command<Context<'a>> + 'static) {
-    steps.push(Box::new(command));
-}
-
 fn create_plan<'a>(
     name: &seedbank_types::Name,
     state: State,
     requested_by: RequestedBy,
-) -> Result<Vec<Step<'a>>, StopSeedlingError> {
-    let mut steps: Vec<Box<dyn Command<Context>>> = Vec::new();
+) -> Result<Vec<Step<Context<'a>>>, StopSeedlingError> {
+    let mut steps: Vec<Step<Context>> = Vec::new();
 
     if state.container_exists {
         if core_seedling_forbidden_for(state.origin, requested_by) {
@@ -324,7 +318,7 @@ mod tests {
         }
     }
 
-    fn step_descriptions(steps: Vec<Step<'_>>) -> Vec<String> {
+    fn step_descriptions(steps: Vec<Step<Context<'_>>>) -> Vec<String> {
         steps.iter().map(std::string::ToString::to_string).collect()
     }
 

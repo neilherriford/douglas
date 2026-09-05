@@ -80,6 +80,15 @@ pub trait Command<TContext>: std::fmt::Display + Send {
     }
 }
 
+pub type Step<TContext> = Box<dyn Command<TContext>>;
+
+pub fn push_step<TContext>(
+    steps: &mut Vec<Step<TContext>>,
+    command: impl Command<TContext> + 'static,
+) {
+    steps.push(Box::new(command));
+}
+
 #[derive(Error, Debug)]
 pub enum HistoryError {
     #[error("No current state")]
@@ -139,7 +148,7 @@ pub trait CommandExecutor<TContext: Send> {
         &mut self,
         span: &Span,
         context: &mut TContext,
-        commands: Vec<Box<dyn Command<TContext>>>,
+        commands: Vec<Step<TContext>>,
     ) -> ExecutionResult;
 
     async fn rollback(
@@ -150,7 +159,7 @@ pub trait CommandExecutor<TContext: Send> {
 }
 
 pub struct JournalingExecutor<TContext> {
-    journal: Vec<Box<dyn Command<TContext>>>,
+    journal: Vec<Step<TContext>>,
 }
 
 impl<TContext> JournalingExecutor<TContext> {
@@ -171,7 +180,7 @@ impl<TContext: Send> CommandExecutor<TContext> for JournalingExecutor<TContext> 
         &mut self,
         span: &Span,
         context: &mut TContext,
-        commands: Vec<Box<dyn Command<TContext>>>,
+        commands: Vec<Step<TContext>>,
     ) -> ExecutionResult {
         for (step_index, mut command) in commands.into_iter().enumerate() {
             let step_name = command.name();

@@ -8,7 +8,7 @@ use crate::{
 };
 use async_trait::async_trait;
 use blueprint::{
-    Command,
+    Command, Step, push_step,
     bootstrap::{execute_plan, resolve_plan},
 };
 use config::DouglasFolders;
@@ -325,20 +325,14 @@ impl<'a> StateObserver<'a> {
     }
 }
 
-type Step<'a> = Box<dyn Command<Context<'a>>>;
-
-fn push_step<'a>(steps: &mut Vec<Step<'a>>, command: impl Command<Context<'a>> + 'static) {
-    steps.push(Box::new(command));
-}
-
 fn create_plan<'a>(
     name: &seedbank_types::Name,
     health_check: &seedbank_types::HealthCheck,
     agent_ip: std::net::Ipv4Addr,
     state: State,
     requested_by: RequestedBy,
-) -> Result<Vec<Step<'a>>, StartSeedlingError> {
-    let mut steps: Vec<Box<dyn Command<Context>>> = Vec::new();
+) -> Result<Vec<Step<Context<'a>>>, StartSeedlingError> {
+    let mut steps: Vec<Step<Context>> = Vec::new();
 
     if !state.seedling_exists {
         return Err(StartSeedlingError::CannotStartSeedling(
@@ -902,7 +896,7 @@ mod tests {
         std::net::Ipv4Addr::new(10, 0, 0, 2)
     }
 
-    fn step_descriptions(steps: Vec<Step<'_>>) -> Vec<String> {
+    fn step_descriptions(steps: Vec<Step<Context<'_>>>) -> Vec<String> {
         steps.iter().map(std::string::ToString::to_string).collect()
     }
 
