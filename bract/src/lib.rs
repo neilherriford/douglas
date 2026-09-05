@@ -310,9 +310,14 @@ impl Bract {
                     async move { Self::accept_trigger_loop(trigger_listener, server).await },
                 )
             };
+            let watchdog_task = {
+                let server = Arc::clone(&self);
+                tokio::spawn(async move { Self::watchdog_loop(server).await })
+            };
 
             main_task.await.map_err(std::io::Error::other)??;
             trigger_task.await.map_err(std::io::Error::other)??;
+            watchdog_task.await.map_err(std::io::Error::other)?;
             Ok::<_, Error>(())
         };
 
@@ -336,6 +341,43 @@ impl Bract {
             tokio::spawn(async move {
                 Self::handle_connection(stream, server).await;
             });
+        }
+    }
+
+    async fn watchdog_loop(server: Arc<Self>) {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+        loop {
+            interval.tick().await;
+
+            let span = Span::new(
+                Arc::clone(&server.reporter),
+                "Running watchdog sweep",
+                ScopeKind::Task,
+            );
+
+            if let Err(err) = blueprints::watchdog::execute(
+                Arc::clone(&server.reporter),
+                &*server.docker_client_builder,
+                server.seedbank_client.as_ref(),
+                &*server.credentials,
+                &*server.inspect,
+                &*server.folder,
+                &*server.file_reader,
+                &*server.file_writer,
+                &*server.permissions,
+                &server.douglas_folders,
+                &*server.resin_client_builder,
+                &server.registry,
+                &*server.rolodex,
+                None,
+                &*server.ram_disk,
+            )
+            .await
+            {
+                span.message(log::Level::Warn, &format!("Watchdog sweep failed: {err}"));
+            }
         }
     }
 

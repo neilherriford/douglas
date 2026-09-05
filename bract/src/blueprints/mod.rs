@@ -12,6 +12,7 @@ pub(crate) mod prune_orphans;
 pub(crate) mod reconcile_seedling;
 pub(crate) mod start_seedling;
 pub(crate) mod stop_seedling;
+pub(crate) mod watchdog;
 pub(crate) mod write_traefik_routes;
 
 const EXPECTED_MOUNT_MODE: Modes = Modes::InheritedOwnerReadWriteExecuteGroupReadWriteExecute;
