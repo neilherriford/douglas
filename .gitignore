@@ -15,3 +15,5 @@ DECISIONS.md
 m*-progress.md
 codebook.toml
 commit-me-not*
+testing-utils/memory-graph/memory-usage-*.csv
+testing-utils/memory-graph/memory-usage-*.png
