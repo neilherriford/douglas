@@ -33,6 +33,7 @@ thiserror = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 uuid = { workspace = true }
+woodward = { workspace = true }
 
 [features]
 mock = ["file_system/mock", "seedling_registration_client/mock", "reconcile_trigger_client/mock"]

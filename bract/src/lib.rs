@@ -6,6 +6,7 @@ mod rolodex;
 pub use blueprints::bootstrap::service_definition;
 pub use blueprints::traefik_dynamic_dir;
 pub use bract_types::{Mount, Request, Response, SeedlingStatus, ServerMessage, Service};
+use woodward::{HeartbeatWriter, LocalHeartbeatWriter};
 
 use crate::{
     labels::LabelError,
@@ -160,6 +161,7 @@ pub struct Bract {
     rolodex: Arc<dyn Rolodex>,
     registry: Registry,
     ram_disk: Arc<dyn ram_disk::RamDisk>,
+    heartbeat_writer: Box<dyn HeartbeatWriter>,
 }
 
 impl Bract {
@@ -240,6 +242,11 @@ impl Bract {
             Arc::clone(&file_writer),
         ));
 
+        let heartbeat_writer = Box::new(LocalHeartbeatWriter::new(
+            Arc::clone(&file_writer),
+            &douglas_folders.service_heartbeat_file(blueprints::bootstrap::BRACT),
+        ));
+
         Ok(Self {
             listener_factory,
             trigger_listener_factory,
@@ -263,6 +270,7 @@ impl Bract {
                 .parse()
                 .map_err(|err: docker_types::RegistryError| Error::BuildError(err.to_string()))?,
             ram_disk,
+            heartbeat_writer,
         })
     }
 
@@ -311,10 +319,15 @@ impl Bract {
                 let server = Arc::clone(&self);
                 tokio::spawn(async move { Self::watchdog_loop(server).await })
             };
+            let heartbeat_task = {
+                let server = Arc::clone(&self);
+                tokio::spawn(async move { Self::heartbeat_loop(server).await })
+            };
 
             main_task.await.map_err(std::io::Error::other)??;
             trigger_task.await.map_err(std::io::Error::other)??;
             watchdog_task.await.map_err(std::io::Error::other)?;
+            heartbeat_task.await.map_err(std::io::Error::other)?;
             Ok::<_, Error>(())
         };
 
@@ -374,6 +387,25 @@ impl Bract {
             .await
             {
                 span.message(log::Level::Warn, &format!("Watchdog sweep failed: {err}"));
+            }
+        }
+    }
+
+    async fn heartbeat_loop(server: Arc<Self>) {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+        loop {
+            interval.tick().await;
+
+            let span = Span::new(
+                Arc::clone(&server.reporter),
+                "Updating heartbeat",
+                ScopeKind::Task,
+            );
+
+            if let Err(err) = server.heartbeat_writer.write() {
+                span.message(log::Level::Warn, &format!("Heartbeat write failed: {err}"));
             }
         }
     }

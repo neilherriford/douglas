@@ -34,6 +34,18 @@ impl DouglasFolders {
         result
     }
 
+    pub fn heartbeat_dir(&self, name: &str) -> PathBuf {
+        let mut result = self.transients.clone();
+        result.push(format!("{name}-heartbeat"));
+        result
+    }
+
+    pub fn service_heartbeat_file(&self, name: &str) -> PathBuf {
+        let mut result = self.heartbeat_dir(name);
+        result.push("heartbeat");
+        result
+    }
+
     pub fn seedling_root(&self, name: &str) -> PathBuf {
         let mut result = self.seedlings_root.clone();
         result.push(name);
@@ -165,6 +177,22 @@ mod tests {
     }
 
     #[test]
+    fn test_heartbeat_dir_should_be_nested_under_transients() {
+        assert_eq!(
+            folders().heartbeat_dir("seedbank"),
+            PathBuf::from("/run/douglas/seedbank-heartbeat")
+        );
+    }
+
+    #[test]
+    fn test_service_heartbeat_file_should_be_nested_under_its_own_heartbeat_dir() {
+        assert_eq!(
+            folders().service_heartbeat_file("seedbank"),
+            PathBuf::from("/run/douglas/seedbank-heartbeat/heartbeat")
+        );
+    }
+
+    #[test]
     fn test_seedling_root_should_be_nested_under_seedlings_root() {
         assert_eq!(
             folders().seedling_root("resin"),
@@ -234,6 +262,10 @@ mod tests {
 
         assert_ne!(folders.log_dir("bract"), folders.log_dir("resin"));
         assert_ne!(folders.socket_dir("bract"), folders.socket_dir("resin"));
+        assert_ne!(
+            folders.heartbeat_dir("bract"),
+            folders.heartbeat_dir("resin")
+        );
         assert_ne!(
             folders.seedling_root("bract"),
             folders.seedling_root("resin")

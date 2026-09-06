@@ -83,6 +83,10 @@ pub fn service_definition(douglas_folders: &DouglasFolders) -> ServiceDefinition
                 douglas_folders.log_dir(RESIN),
                 Modes::OwnerReadWriteExecuteGroupReadWriteExecute,
             ),
+            (
+                douglas_folders.heartbeat_dir(RESIN),
+                Modes::OwnerReadWriteExecuteGroupReadWriteExecuteOtherExecute,
+            ),
         ],
         Vec::new(),
         &[DOUGLAS_RESIN_SEEDBANK_GROUP, DOUGLAS_RESIN_BRACT_GROUP],

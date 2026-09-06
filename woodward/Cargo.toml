@@ -1,0 +1,19 @@
+[package]
+name = "woodward"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+mock = ["mockall"]
+
+[dependencies]
+config = { workspace = true }
+file_system = { workspace = true }
+mockall = { workspace = true, optional = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+file_system = { workspace = true, features = ["mock"] }
+mockall = { workspace = true }

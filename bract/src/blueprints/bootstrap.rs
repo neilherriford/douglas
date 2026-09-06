@@ -172,6 +172,10 @@ pub fn service_definition(douglas_folders: &DouglasFolders) -> ServiceDefinition
                 douglas_folders.log_dir(BRACT),
                 Modes::OwnerReadWriteExecuteGroupReadWriteExecute,
             ),
+            (
+                douglas_folders.heartbeat_dir(BRACT),
+                Modes::OwnerReadWriteExecuteGroupReadWriteExecute,
+            ),
         ],
         vec![
             ListenerDefinition::new(

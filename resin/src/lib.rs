@@ -55,6 +55,7 @@ use serde_json::json;
 use std::path::Path;
 use std::{path::PathBuf, sync::Arc};
 use thiserror::Error;
+use woodward::{HeartbeatWriter, LocalHeartbeatWriter};
 
 #[derive(Debug, Error)]
 pub enum Error {
@@ -257,6 +258,7 @@ pub struct Server {
     repository_store: Arc<dyn RepositoryStore>,
     seedling_registration_client: Arc<dyn seedling_registration_client::Client>,
     reconcile_trigger_client: Arc<dyn reconcile_trigger_client::Client>,
+    heartbeat_writer: Box<dyn HeartbeatWriter>,
 }
 
 impl Server {
@@ -364,6 +366,11 @@ impl Server {
             reconcile_trigger_client::UdsClient::new(Arc::clone(&reporter), &douglas_folders),
         );
 
+        let heartbeat_writer = Box::new(LocalHeartbeatWriter::new(
+            Arc::clone(&file_writer),
+            &douglas_folders.service_heartbeat_file(RESIN),
+        ));
+
         Ok(Self {
             reporter,
             port,
@@ -374,6 +381,7 @@ impl Server {
             repository_store,
             seedling_registration_client,
             reconcile_trigger_client,
+            heartbeat_writer,
         })
     }
 
@@ -501,14 +509,35 @@ impl Server {
             &format!("listening on {:?}", listener.local_addr()),
         );
 
-        match axum::serve(listener, app).await {
-            Ok(()) => {
-                guard.finish_with_outcome(Outcome::Ok);
-                Ok(())
-            }
-            Err(err) => {
-                guard.span().message(log::Level::Warn, &err.to_string());
-                Err(Error::IoError(err))
+        tokio::select! {
+            result = axum::serve(listener, app) => match result {
+                Ok(()) => {
+                    guard.finish_with_outcome(Outcome::Ok);
+                    Ok(())
+                }
+                Err(err) => {
+                    guard.span().message(log::Level::Warn, &err.to_string());
+                    Err(Error::IoError(err))
+                }
+            },
+            () = self.heartbeat_loop() => unreachable!("heartbeat loop never returns"),
+        }
+    }
+
+    async fn heartbeat_loop(&self) {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
+
+        loop {
+            interval.tick().await;
+
+            let span = Span::new(
+                Arc::clone(&self.reporter),
+                "Updating heartbeat",
+                ScopeKind::Task,
+            );
+
+            if let Err(err) = self.heartbeat_writer.write() {
+                span.message(log::Level::Warn, &format!("Heartbeat write failed: {err}"));
             }
         }
     }

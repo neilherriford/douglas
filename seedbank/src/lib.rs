@@ -29,6 +29,7 @@ use std::{
 };
 use thiserror::Error;
 use tokio::sync::broadcast::{self, Sender};
+use woodward::{HeartbeatWriter, LocalHeartbeatWriter};
 
 pub(crate) static SEEDS_ROOT_NAME: &str = "seeds";
 pub static SEEDBANK: &str = "seedbank";
@@ -117,6 +118,7 @@ pub struct Server {
     registration_listener_factory: SocketListenerFactory,
     shutdown_sender: Sender<()>,
     global_lock: Mutex<()>,
+    heartbeat_writer: Box<dyn HeartbeatWriter>,
 }
 
 impl Server {
@@ -174,6 +176,11 @@ impl Server {
             Arc::clone(&unix_domain_socket),
         );
 
+        let heartbeat_writer = Box::new(LocalHeartbeatWriter::new(
+            Arc::clone(&file_writer),
+            &douglas_folders.service_heartbeat_file(SEEDBANK),
+        ));
+
         Ok(Self {
             reporter,
             folder,
@@ -187,6 +194,7 @@ impl Server {
             registration_listener_factory,
             shutdown_sender,
             global_lock: Mutex::new(()),
+            heartbeat_writer,
         })
     }
 
@@ -388,9 +396,14 @@ impl Server {
                     Self::accept_registration_loop(registration_listener, server).await
                 })
             };
+            let heartbeat_task = {
+                let server = Arc::clone(&self);
+                tokio::spawn(async move { Self::heartbeat_loop(server).await })
+            };
 
             main_task.await.map_err(std::io::Error::other)??;
             registration_task.await.map_err(std::io::Error::other)??;
+            heartbeat_task.await.map_err(std::io::Error::other)?;
             Ok::<_, Error>(())
         };
 
@@ -401,6 +414,24 @@ impl Server {
 
         span.create_scoped_reporter().finish(log::Outcome::Ok);
         Ok(())
+    }
+
+    async fn heartbeat_loop(server: Arc<Self>) {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
+
+        loop {
+            interval.tick().await;
+
+            let span = Span::new(
+                Arc::clone(&server.reporter),
+                "Updating heartbeat",
+                ScopeKind::Task,
+            );
+
+            if let Err(err) = server.heartbeat_writer.write() {
+                span.message(log::Level::Warn, &format!("Heartbeat write failed: {err}"));
+            }
+        }
     }
 
     async fn accept_loop(
@@ -924,6 +955,7 @@ mod tests {
     use log::Event;
     use seedbank_types::{HealthCheck, HealthCheckCommand};
     use std::num::NonZeroU8;
+    use woodward::MockHeartbeatWriter;
 
     struct NullReporter;
 
@@ -1015,6 +1047,7 @@ mod tests {
             registration_listener_factory: dummy_listener_factory("seedbank-registration"),
             shutdown_sender,
             global_lock: std::sync::Mutex::new(()),
+            heartbeat_writer: Box::new(MockHeartbeatWriter::new()),
         }
     }
 
@@ -1991,6 +2024,7 @@ mod tests {
             registration_listener_factory: dummy_listener_factory("seedbank-registration"),
             shutdown_sender,
             global_lock: std::sync::Mutex::new(()),
+            heartbeat_writer: Box::new(MockHeartbeatWriter::new()),
         };
 
         let result = server.release_default(&name("foo"));

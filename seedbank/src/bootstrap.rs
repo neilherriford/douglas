@@ -89,6 +89,10 @@ pub fn service_definition(douglas_folders: &DouglasFolders) -> ServiceDefinition
                 douglas_folders.log_dir(SEEDBANK),
                 Modes::OwnerReadWriteExecuteGroupReadWriteExecute,
             ),
+            (
+                douglas_folders.heartbeat_dir(SEEDBANK),
+                Modes::OwnerReadWriteExecuteGroupReadWriteExecuteOtherExecute,
+            ),
         ],
         vec![
             ListenerDefinition::new(
