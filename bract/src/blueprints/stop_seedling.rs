@@ -158,16 +158,17 @@ fn create_plan<'a>(
 ) -> Result<Vec<Step<Context<'a>>>, StopSeedlingError> {
     let mut steps: Vec<Step<Context>> = Vec::new();
 
-    if state.container_exists {
-        if core_seedling_forbidden_for(state.origin, requested_by) {
-            return Err(StopSeedlingError::CoreSeedling(name.to_string()));
-        }
-        if state.container_is_running {
-            push_step(
-                &mut steps,
-                StopSeedling::new(name.clone(), state.container_name, state.version),
-            );
-        }
+    if state.container_exists && core_seedling_forbidden_for(state.origin, requested_by) {
+        return Err(StopSeedlingError::CoreSeedling(name.to_string()));
+    }
+
+    push_step(&mut steps, SetDesiredRunStatusToStopped::new(name.clone()));
+
+    if state.container_exists && state.container_is_running {
+        push_step(
+            &mut steps,
+            StopSeedling::new(name.clone(), state.container_name, state.version),
+        );
     }
 
     if state.agent_container_is_running {
@@ -176,8 +177,6 @@ fn create_plan<'a>(
             StopSeedling::new(name.clone(), state.agent_container_name, None),
         );
     }
-
-    push_step(&mut steps, SetDesiredRunStatusToStopped::new(name.clone()));
 
     Ok(steps)
 }
@@ -322,8 +321,8 @@ mod tests {
         assert_eq!(
             step_descriptions(steps),
             vec![
-                "Stopping seedling 'traefik' (v1)",
                 "Setting seedling 'traefik' desired running status to stopped",
+                "Stopping seedling 'traefik' (v1)",
             ]
         );
     }
@@ -343,8 +342,8 @@ mod tests {
         assert_eq!(
             step_descriptions(steps),
             vec![
-                "Stopping seedling 'traefik'",
                 "Setting seedling 'traefik' desired running status to stopped",
+                "Stopping seedling 'traefik'",
             ]
         );
     }
@@ -414,8 +413,8 @@ mod tests {
         assert_eq!(
             step_descriptions(steps),
             vec![
-                "Stopping seedling 'traefik' (v1)",
                 "Setting seedling 'traefik' desired running status to stopped",
+                "Stopping seedling 'traefik' (v1)",
             ]
         );
     }
@@ -436,9 +435,9 @@ mod tests {
         assert_eq!(
             step_descriptions(steps),
             vec![
+                "Setting seedling 'traefik' desired running status to stopped",
                 "Stopping seedling 'traefik' (v1)",
                 "Stopping seedling 'traefik'",
-                "Setting seedling 'traefik' desired running status to stopped",
             ]
         );
     }
@@ -459,8 +458,8 @@ mod tests {
         assert_eq!(
             step_descriptions(steps),
             vec![
-                "Stopping seedling 'traefik' (v1)",
                 "Setting seedling 'traefik' desired running status to stopped",
+                "Stopping seedling 'traefik' (v1)",
             ]
         );
     }

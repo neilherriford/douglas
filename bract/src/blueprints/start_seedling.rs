@@ -378,6 +378,8 @@ fn create_plan<'a>(
             "Docker instance not initialized".to_string(),
         ))?;
 
+    push_step(&mut steps, SetDesiredRunStatusToRunning::new(name.clone()));
+
     if state.agent_container_exists
         && !state.agent_container_is_running
         && let Some(agent_container_name) = state.agent_container_name
@@ -404,7 +406,6 @@ fn create_plan<'a>(
     );
 
     push_step(&mut steps, ClearHealthCheckLogs::new(name.clone()));
-    push_step(&mut steps, SetDesiredRunStatusToRunning::new(name.clone()));
     Ok(steps)
 }
 
@@ -906,9 +907,9 @@ mod tests {
         assert_eq!(
             step_descriptions(steps),
             vec![
+                "Setting seedling 'traefik' desired running status to running",
                 "Starting seedling 'traefik' (v1)",
                 "Clearing seedling 'traefik' health check logs",
-                "Setting seedling 'traefik' desired running status to running",
             ]
         );
     }
@@ -1007,9 +1008,9 @@ mod tests {
         assert_eq!(
             step_descriptions(steps),
             vec![
+                "Setting seedling 'traefik' desired running status to running",
                 "Starting seedling 'traefik' (v1)",
                 "Clearing seedling 'traefik' health check logs",
-                "Setting seedling 'traefik' desired running status to running",
             ]
         );
     }
@@ -1047,9 +1048,9 @@ mod tests {
         assert_eq!(
             step_descriptions(steps),
             vec![
+                "Setting seedling 'traefik' desired running status to running",
                 "Starting seedling 'traefik' (v1)",
                 "Clearing seedling 'traefik' health check logs",
-                "Setting seedling 'traefik' desired running status to running",
             ]
         );
     }
@@ -1072,10 +1073,10 @@ mod tests {
         assert_eq!(
             step_descriptions(steps),
             vec![
+                "Setting seedling 'traefik' desired running status to running",
                 "Starting agent container 'doug-agent.traefik'",
                 "Starting seedling 'traefik' (v1)",
                 "Clearing seedling 'traefik' health check logs",
-                "Setting seedling 'traefik' desired running status to running",
             ]
         );
     }
@@ -1098,9 +1099,9 @@ mod tests {
         assert_eq!(
             step_descriptions(steps),
             vec![
+                "Setting seedling 'traefik' desired running status to running",
                 "Starting seedling 'traefik' (v1)",
                 "Clearing seedling 'traefik' health check logs",
-                "Setting seedling 'traefik' desired running status to running",
             ]
         );
     }
@@ -1123,9 +1124,9 @@ mod tests {
         assert_eq!(
             step_descriptions(steps),
             vec![
+                "Setting seedling 'traefik' desired running status to running",
                 "Starting seedling 'traefik' (v1)",
                 "Clearing seedling 'traefik' health check logs",
-                "Setting seedling 'traefik' desired running status to running",
             ]
         );
     }
