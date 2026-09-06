@@ -18,6 +18,8 @@ use file_system::{Folder, Modes, Permissions};
 use log::{Level, Reporter, ScopeKind, Span};
 use std::sync::Arc;
 
+pub(crate) static BRACT: &str = "bract";
+
 pub async fn bootstrap(
     reporting_fd: i32,
     credentials: &dyn Credentials,
@@ -26,10 +28,8 @@ pub async fn bootstrap(
     douglas_folders: &DouglasFolders,
     docker_client_builder: &dyn ClientBuilder,
 ) -> Result<(), BootstrapError> {
-    let boot_reporter = build_boot_reporter(
-        douglas_folders.service_log_file("bract"),
-        Some(reporting_fd),
-    );
+    let boot_reporter =
+        build_boot_reporter(douglas_folders.service_log_file(BRACT), Some(reporting_fd));
 
     bootstrap_with_reporter(
         boot_reporter,
@@ -161,7 +161,7 @@ pub fn service_definition(douglas_folders: &DouglasFolders) -> ServiceDefinition
                 Modes::OwnerReadWriteExecute,
             ),
             (
-                douglas_folders.socket_dir("bract"),
+                douglas_folders.socket_dir(BRACT),
                 Modes::OwnerReadWriteExecuteGroupReadWriteExecute,
             ),
             (
@@ -169,13 +169,13 @@ pub fn service_definition(douglas_folders: &DouglasFolders) -> ServiceDefinition
                 Modes::OwnerReadWriteExecuteGroupReadWriteExecute,
             ),
             (
-                douglas_folders.log_dir("bract"),
+                douglas_folders.log_dir(BRACT),
                 Modes::OwnerReadWriteExecuteGroupReadWriteExecute,
             ),
         ],
         vec![
             ListenerDefinition::new(
-                &douglas_folders.socket_file("bract"),
+                &douglas_folders.socket_file(BRACT),
                 credentials::ROOT_USER_NAME,
                 DOUGLAS_ADMIN_GROUP,
                 Modes::OwnerReadWriteGroupReadWrite,
@@ -309,7 +309,7 @@ fn create_plan<'a>(
 
 #[cfg(test)]
 mod tests {
-    use super::{bootstrap_with_reporter, service_definition};
+    use super::{BRACT, bootstrap_with_reporter, service_definition};
     use crate::BootstrapError;
     use config::DouglasFolders;
     use credentials::{
@@ -341,7 +341,7 @@ mod tests {
                 .map(|listener| listener.socket_path.clone())
                 .collect::<Vec<_>>(),
             vec![
-                douglas_folders.socket_file("bract"),
+                douglas_folders.socket_file(BRACT),
                 douglas_folders.socket_file(reconcile_trigger_types::SOCKET_NAME),
             ]
         );
@@ -356,7 +356,7 @@ mod tests {
         let main_socket = definition
             .owned_sockets
             .iter()
-            .find(|listener| listener.socket_path == douglas_folders.socket_file("bract"))
+            .find(|listener| listener.socket_path == douglas_folders.socket_file(BRACT))
             .expect("main socket should be declared");
 
         assert_eq!(main_socket.owning_group, DOUGLAS_ADMIN_GROUP);

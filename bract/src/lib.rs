@@ -208,7 +208,7 @@ impl Bract {
         );
 
         let reporter: Arc<dyn Reporter> = Arc::new(BufferedFileReporter::new(
-            douglas_folders.service_log_file("bract"),
+            douglas_folders.service_log_file(blueprints::bootstrap::BRACT),
         ));
 
         let docker_client: Arc<dyn docker::client::Client> = Arc::from(
