@@ -349,6 +349,7 @@ impl Client for UdsClient {
         network::connect(
             Arc::clone(&self.reporter),
             &*self.rest_client,
+            Arc::clone(&self.parser),
             &target_network.id,
             &container_id,
             static_ipv4,

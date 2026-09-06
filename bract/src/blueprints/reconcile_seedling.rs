@@ -656,6 +656,8 @@ fn create_plan<'a>(
         ),
     }
 
+    push_step(&mut steps, SetDesiredRunStatusToRunning::new(name.clone()));
+
     if state.missing_service_credentials {
         push_step(&mut steps, CreateServiceAccount::new(name.clone()));
     }
@@ -831,6 +833,55 @@ impl<'a> Command<Context<'a>> for CreateSeedling {
 
         guard.finish_with_outcome(log::Outcome::Ok);
         Ok(())
+    }
+}
+
+struct SetDesiredRunStatusToRunning {
+    seedling_name: seedbank_types::Name,
+}
+
+impl SetDesiredRunStatusToRunning {
+    pub fn new(seedling_name: seedbank_types::Name) -> Self {
+        Self { seedling_name }
+    }
+}
+
+impl std::fmt::Display for SetDesiredRunStatusToRunning {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Setting seedling '{}' desired running status to running",
+            self.seedling_name
+        )
+    }
+}
+
+#[async_trait]
+impl<'a> Command<Context<'a>> for SetDesiredRunStatusToRunning {
+    fn name(&self) -> String {
+        "Setting desired running state to running".to_string()
+    }
+
+    async fn run(
+        &mut self,
+        span: &Span,
+        context: &mut Context<'a>,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let guard = span
+            .create_child(
+                &format!(
+                    "Setting seedling '{}' desired running status to running",
+                    self.seedling_name
+                ),
+                ScopeKind::Step,
+            )
+            .start_guard();
+
+        context
+            .seedbank_client
+            .set_desired_run_status(&self.seedling_name, seedbank_types::DesiredRunStatus::Running)
+            .await?;
+        guard.finish(Ok(()))
     }
 }
 
@@ -1980,7 +2031,10 @@ mod tests {
         )
         .expect("should produce a plan");
 
-        assert!(step_descriptions(steps).is_empty());
+        assert_eq!(
+            step_descriptions(steps),
+            vec!["Setting seedling 'traefik' desired running status to running"]
+        );
     }
 
     #[test]
@@ -2001,7 +2055,10 @@ mod tests {
 
         assert_eq!(
             step_descriptions(steps),
-            vec!["Creating share group 'config' for 'traefik'"]
+            vec![
+                "Setting seedling 'traefik' desired running status to running",
+                "Creating share group 'config' for 'traefik'",
+            ]
         );
     }
 
@@ -2028,10 +2085,10 @@ mod tests {
 
         assert_eq!(
             step_descriptions(steps),
-            vec![format!(
-                "Setting mount ownership '{}'",
-                path_to_string(&path)
-            )]
+            vec![
+                "Setting seedling 'traefik' desired running status to running".to_string(),
+                format!("Setting mount ownership '{}'", path_to_string(&path)),
+            ]
         );
     }
 
@@ -2054,6 +2111,7 @@ mod tests {
         assert_eq!(
             step_descriptions(steps),
             vec![
+                "Setting seedling 'traefik' desired running status to running",
                 "Building container 'traefik' (v2)",
                 "Starting container 'doug.traefik' (v2)",
             ]
@@ -2085,6 +2143,7 @@ mod tests {
         assert_eq!(
             step_descriptions(steps),
             vec![
+                "Setting seedling 'traefik' desired running status to running",
                 "Ensuring OpenBao agent mount for 'traefik'",
                 "Building OpenBao agent container for 'traefik' (v1)",
                 "Starting container 'doug-agent.traefik' (v1)",
@@ -2110,6 +2169,7 @@ mod tests {
         assert_eq!(
             step_descriptions(steps),
             vec![
+                "Setting seedling 'traefik' desired running status to running",
                 "Ensuring OpenBao agent mount for 'traefik'",
                 "Starting container 'doug-agent.traefik' (v1)",
             ]
@@ -2152,7 +2212,10 @@ mod tests {
         )
         .expect("should produce a plan");
 
-        assert!(step_descriptions(steps).is_empty());
+        assert_eq!(
+            step_descriptions(steps),
+            vec!["Setting seedling 'traefik' desired running status to running"]
+        );
     }
 
     #[test]
@@ -2168,7 +2231,10 @@ mod tests {
 
         assert_eq!(
             step_descriptions(steps),
-            vec!["Ensuring OpenBao agent mount for 'traefik'"]
+            vec![
+                "Setting seedling 'traefik' desired running status to running",
+                "Ensuring OpenBao agent mount for 'traefik'",
+            ]
         );
     }
 
@@ -2191,6 +2257,7 @@ mod tests {
         assert_eq!(
             step_descriptions(steps),
             vec![
+                "Setting seedling 'traefik' desired running status to running",
                 "Stopping container 'doug.traefik' (v1)",
                 "Dropping container 'doug.traefik' (v1)",
                 "Building container 'traefik' (v2)",
@@ -2218,6 +2285,7 @@ mod tests {
         assert_eq!(
             step_descriptions(steps),
             vec![
+                "Setting seedling 'traefik' desired running status to running",
                 "Dropping container 'doug.traefik' (v1)",
                 "Building container 'traefik' (v2)",
                 "Starting container 'doug.traefik' (v2)",

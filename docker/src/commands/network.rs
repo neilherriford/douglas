@@ -238,6 +238,7 @@ pub async fn create(
 pub async fn connect(
     reporter: Arc<dyn Reporter>,
     rest_client: &tokio::sync::Mutex<dyn RestClient + Send + Sync + 'static>,
+    parser: Arc<dyn Parser<Json, ParseError = JsonParserError>>,
     network_id: &str,
     container_id: &str,
     static_ipv4: Option<std::net::Ipv4Addr>,
@@ -276,7 +277,29 @@ pub async fn connect(
             .map_err(to_general_error)?
     };
 
+    if is_already_connected(&parser, &response) {
+        return guard.finish(Ok(()));
+    }
+
     guard.finish(assert_okay(response).map(|_| ()).map_err(DockerError::from))
+}
+
+fn is_already_connected(
+    parser: &Arc<dyn Parser<Json, ParseError = JsonParserError>>,
+    response: &simple_rest_client::Response,
+) -> bool {
+    if let simple_rest_client::Response::Error {
+        status: 403,
+        body: Some(body),
+        ..
+    } = response
+        && let Ok(json) = parser.parse(body.to_string())
+        && let Ok(connection_error) = from_value::<ConnectionError>(json)
+    {
+        return connection_error.message.contains("already exists in network");
+    }
+
+    false
 }
 
 pub async fn disconnect(
@@ -379,5 +402,44 @@ mod tests {
         };
 
         assert!(!is_already_disconnected(&parser(), &response));
+    }
+
+    #[test]
+    fn test_is_already_connected_should_be_true_for_an_already_exists_error() {
+        let response = Response::Error {
+            status: 403,
+            headers: Vec::new(),
+            body: Some(
+                r#"{"message": "endpoint with name doug.traefik already exists in network doug.hello-world"}"#
+                    .to_string(),
+            ),
+        };
+
+        assert!(is_already_connected(&parser(), &response));
+    }
+
+    #[test]
+    fn test_is_already_connected_should_be_false_for_an_unrelated_error() {
+        let response = Response::Error {
+            status: 403,
+            headers: Vec::new(),
+            body: Some(r#"{"message": "something else went wrong"}"#.to_string()),
+        };
+
+        assert!(!is_already_connected(&parser(), &response));
+    }
+
+    #[test]
+    fn test_is_already_connected_should_be_false_for_a_non_403_error() {
+        let response = Response::Error {
+            status: 404,
+            headers: Vec::new(),
+            body: Some(
+                r#"{"message": "endpoint with name doug.traefik already exists in network doug.hello-world"}"#
+                    .to_string(),
+            ),
+        };
+
+        assert!(!is_already_connected(&parser(), &response));
     }
 }

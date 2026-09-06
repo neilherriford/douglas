@@ -549,7 +549,7 @@ impl Bract {
             }
         };
 
-        let result = match self
+        let result = self
             .do_reconcile_seedling(
                 Arc::clone(&self.reporter),
                 &name,
@@ -557,15 +557,7 @@ impl Bract {
                 &seedling.definition,
                 Some(&seedling.id),
             )
-            .await
-        {
-            Ok(()) => self
-                .seedbank_client
-                .set_desired_run_status(&name, seedbank_types::DesiredRunStatus::Running)
-                .await
-                .map_err(Error::from),
-            Err(err) => Err(err),
-        };
+            .await;
 
         match result {
             Ok(()) => guard.finish_with_outcome(log::Outcome::Ok),
@@ -743,10 +735,6 @@ impl Server for Bract {
         seedling_definition: &seedbank_types::SeedlingDefinition,
     ) -> Result<(), Error> {
         self.do_reconcile_seedling(reporter, name, version, seedling_definition, None)
-            .await?;
-
-        self.seedbank_client
-            .set_desired_run_status(name, seedbank_types::DesiredRunStatus::Running)
             .await?;
 
         Ok(())
