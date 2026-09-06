@@ -741,6 +741,9 @@ pub(crate) async fn record_health_check_failure(
                 "Seedling '{seedling_name}' exceeded its maximum health check failures, stopping container"
             ),
         );
+        seedbank_client
+            .set_desired_run_status(seedling_name, seedbank_types::DesiredRunStatus::Stopped)
+            .await?;
         docker_client.stop_container(container_ref).await?;
     }
 
@@ -891,6 +894,12 @@ mod tests {
 
     fn step_descriptions(steps: Vec<Step<Context<'_>>>) -> Vec<String> {
         steps.iter().map(std::string::ToString::to_string).collect()
+    }
+
+    fn test_span() -> Span {
+        let (sender, _receiver) = tokio::sync::mpsc::unbounded_channel();
+        let reporter: Arc<dyn Reporter> = Arc::new(log::ChannelReporter::new(sender));
+        Span::new(reporter, "test", ScopeKind::Task)
     }
 
     #[test]
@@ -1129,5 +1138,56 @@ mod tests {
                 "Clearing seedling 'traefik' health check logs",
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn test_record_health_check_failure_should_leave_desired_status_alone_below_the_threshold()
+     {
+        let mut docker_client = docker::MockClient::new();
+        docker_client.expect_stop_container().times(0);
+
+        let mut seedbank_client = seedbank_client::MockClient::new();
+        seedbank_client
+            .expect_increment_health_log_fail_count()
+            .returning(|_| Ok(false));
+        seedbank_client.expect_set_desired_run_status().times(0);
+
+        let span = test_span();
+        record_health_check_failure(
+            &span,
+            &docker_client,
+            &seedbank_client,
+            &name(),
+            ContainerRef::FullName(container_name(&name()).unwrap()),
+        )
+        .await
+        .expect("should record the failure");
+    }
+
+    #[tokio::test]
+    async fn test_record_health_check_failure_should_stop_the_container_and_mark_desired_status_stopped_at_the_threshold()
+     {
+        let mut docker_client = docker::MockClient::new();
+        docker_client.expect_stop_container().returning(|_| Ok(()));
+
+        let mut seedbank_client = seedbank_client::MockClient::new();
+        seedbank_client
+            .expect_increment_health_log_fail_count()
+            .returning(|_| Ok(true));
+        seedbank_client
+            .expect_set_desired_run_status()
+            .withf(|_, status| *status == seedbank_types::DesiredRunStatus::Stopped)
+            .returning(|_, _| Ok(()));
+
+        let span = test_span();
+        record_health_check_failure(
+            &span,
+            &docker_client,
+            &seedbank_client,
+            &name(),
+            ContainerRef::FullName(container_name(&name()).unwrap()),
+        )
+        .await
+        .expect("should record the failure");
     }
 }
