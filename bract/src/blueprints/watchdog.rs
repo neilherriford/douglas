@@ -4,8 +4,9 @@ use crate::{
 };
 use async_trait::async_trait;
 use blueprint::{
-    Command, Step, push_step,
+    Command, Step,
     bootstrap::{execute_plan, resolve_plan},
+    push_step,
 };
 use config::DouglasFolders;
 use credentials::Credentials;
@@ -414,7 +415,11 @@ impl RecheckSeedlingHealth {
 
 impl std::fmt::Display for RecheckSeedlingHealth {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Rechecking health for seedling '{}' ", self.seedling_name)
+        write!(
+            f,
+            "Rechecking health for seedling '{}' ",
+            self.seedling_name
+        )
     }
 }
 

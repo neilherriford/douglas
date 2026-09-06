@@ -5,8 +5,9 @@ use crate::blueprints::{
 use crate::labels;
 use async_trait::async_trait;
 use blueprint::{
-    Command, Step, push_step,
+    Command, Step,
     bootstrap::{execute_plan, resolve_plan},
+    push_step,
 };
 use config::DouglasFolders;
 use docker::client::ContainerRef;

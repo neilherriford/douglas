@@ -74,11 +74,9 @@ pub fn handle(seedbank: &dyn Seedbank, request: Request) -> Response {
         },
         Request::IncrementHealthLogFailCount { name } => {
             match seedbank.increment_health_log_fail_count(&name) {
-                Ok(reached_max_fail_count) => {
-                    Response::IncrementHealthLogFailCount {
-                        reached_max_fail_count,
-                    }
-                }
+                Ok(reached_max_fail_count) => Response::IncrementHealthLogFailCount {
+                    reached_max_fail_count,
+                },
                 Err(err) => error_response(err),
             }
         }
