@@ -13,8 +13,8 @@ let
       (builtins.attrNames (builtins.readDir userKeysDir));
 
   # Version information for your dev image
-  devImageVersion = "0.0.2m";
-  devImageDate = "2026-08-31";
+  devImageVersion = "0.0.2n";
+  devImageDate = "2026-09-07";
   devImageName = "Douglas Development Environment";
 
   # Define our development packages explicitly
@@ -467,6 +467,13 @@ in
   };
 
   security.sudo.wheelNeedsPassword = false;
+  # Enables /etc/sudoers.d/ as a drop-in directory — off by default on NixOS
+  # (unlike Debian/Ubuntu/Fedora/RHEL/macOS, which ship it enabled). Needed
+  # for woodward's own narrow, argument-free sudoers rule (see the M1 design
+  # discussion) once that bootstrap step exists.
+  security.sudo.extraConfig = ''
+    #includedir /etc/sudoers.d
+  '';
   # Allow trusted users to override Nix settings
   nix.settings = {
     trusted-users = [ "root" "dev" "@wheel" ];
