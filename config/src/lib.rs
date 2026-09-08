@@ -1,5 +1,17 @@
 use std::path::PathBuf;
 
+pub mod services {
+    pub static BRACT: &str = "bract";
+    pub static RESIN: &str = "resin";
+    pub static SEEDBANK: &str = "seedbank";
+    pub static WOODWARD: &str = "woodward";
+}
+
+pub mod seedlings {
+    pub static TRAEFIK: &str = "traefik";
+    pub static OPENBAO: &str = "openbao";
+}
+
 #[derive(Debug, Clone)]
 pub struct DouglasFolders {
     pub logs: PathBuf,

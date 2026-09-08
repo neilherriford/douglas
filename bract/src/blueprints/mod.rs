@@ -23,7 +23,7 @@ pub(crate) const SYSTEM_NETWORK_NAME: &str = "douglas-system";
 pub(crate) const AGENT_MOUNT_RAM_DISK_SIZE_MB: u32 = 1;
 #[cfg(target_os = "macos")]
 pub(crate) const AGENT_MOUNT_RAM_DISK_SIZE_MB: u32 = 8;
-const TRAEFIK_SEEDLING_NAME: &str = "traefik";
+use config::seedlings::TRAEFIK as TRAEFIK_SEEDLING_NAME;
 const TRAEFIK_CONFIG_MOUNT_NAME: &str = "config";
 const TRAEFIK_DYNAMIC_DIR_NAME: &str = "dynamic";
 

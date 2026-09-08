@@ -32,7 +32,7 @@ use tokio::sync::broadcast::{self, Sender};
 use woodward::{HeartbeatWriter, LocalHeartbeatWriter};
 
 pub(crate) static SEEDS_ROOT_NAME: &str = "seeds";
-pub static SEEDBANK: &str = "seedbank";
+pub use config::services::SEEDBANK;
 
 #[derive(Error, Debug)]
 pub enum Error {

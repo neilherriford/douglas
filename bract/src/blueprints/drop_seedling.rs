@@ -18,7 +18,7 @@ use ram_disk::{RamDisk, RamDiskError};
 use std::sync::Arc;
 use thiserror::Error;
 
-const TRAEFIK_SEEDLING_NAME: &str = "traefik";
+use config::seedlings::TRAEFIK as TRAEFIK_SEEDLING_NAME;
 
 #[derive(Error, Debug)]
 pub enum DropSeedlingError {

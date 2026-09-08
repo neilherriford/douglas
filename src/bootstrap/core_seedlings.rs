@@ -168,7 +168,7 @@ impl<'a> Command<Context<'a>> for ReconcileSeedling {
 
 pub mod definitions {
     use crate::bootstrap::core_seedlings::BootstrapError;
-    pub use openbao::NAME as OPENBAO_NAME;
+    pub use config::seedlings::OPENBAO as OPENBAO_NAME;
     pub use openbao::SOCKET_MOUNT_NAME as OPENBAO_SOCKET_MOUNT_NAME;
     pub use openbao::SOCKET_NAME as OPENBAO_SOCKET_NAME;
     pub use openbao::TCP_PORT as OPENBAO_TCP_PORT;
@@ -194,7 +194,7 @@ pub mod definitions {
         };
 
         pub fn create() -> Result<(Name, Version, SeedlingDefinition), BootstrapError> {
-            let name = Name::from_str("traefik")?;
+            let name = Name::from_str(config::seedlings::TRAEFIK)?;
             let version = Version(1);
             let mount_name: Name = "config".parse()?;
 
@@ -277,7 +277,7 @@ pub mod definitions {
             path::PathBuf,
         };
 
-        pub use ::openbao::SEEDLING_NAME as NAME;
+        pub use config::seedlings::OPENBAO as NAME;
         pub use ::openbao::SOCKET_MOUNT_NAME;
         pub use ::openbao::SOCKET_NAME;
         pub const LOG_PATH: &str = "/var/log/douglas";

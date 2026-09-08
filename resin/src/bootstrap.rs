@@ -18,7 +18,7 @@ use std::{path::Path, sync::Arc};
 
 pub static DOUGLAS_RESIN_USER: &str = "douglas-resin";
 pub static DOUGLAS_RESIN_GROUP: &str = "douglas-resin";
-pub static RESIN: &str = "resin";
+pub use config::services::RESIN;
 
 pub async fn bootstrap(
     reporting_fd: Option<i32>,

@@ -18,7 +18,7 @@ use file_system::{Folder, Modes, Permissions};
 use log::{Level, Reporter, ScopeKind, Span};
 use std::sync::Arc;
 
-pub(crate) static BRACT: &str = "bract";
+pub(crate) use config::services::BRACT;
 
 pub async fn bootstrap(
     reporting_fd: i32,

@@ -7,7 +7,7 @@ pub use client::{Client, ClientFactory, SocketClient, SocketClientFactory};
 #[cfg(feature = "mock")]
 pub use client::{MockClient, MockClientFactory};
 
-pub const SEEDLING_NAME: &str = "openbao";
+pub use config::seedlings::OPENBAO as SEEDLING_NAME;
 pub const SOCKET_MOUNT_NAME: &str = "socket";
 pub const SOCKET_NAME: &str = "openbao.sock";
 pub const IMAGE_VERSION: &str = "2.6.2";

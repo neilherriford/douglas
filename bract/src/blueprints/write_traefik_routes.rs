@@ -10,7 +10,7 @@ use serde::Serialize;
 use std::{collections::HashMap, sync::Arc};
 use thiserror::Error;
 
-const TRAEFIK_SEEDLING_NAME: &str = "traefik";
+use config::seedlings::TRAEFIK as TRAEFIK_SEEDLING_NAME;
 
 #[derive(Error, Debug)]
 pub enum WriteTraefikRoutesError {
