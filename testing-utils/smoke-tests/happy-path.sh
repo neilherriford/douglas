@@ -18,17 +18,15 @@
 # anything else runs (set DOUGLAS_SMOKE_SKIP_REBOOT=1 to skip that).
 #
 # Usage:
-#   ./run.sh                              # against $DOUGLAS_SMOKE_VM or "dev@douglas-dev.local"
-#   DOUGLAS_SMOKE_VM=my-host ./run.sh
-#   DOUGLAS_SMOKE_SSH_KEY=/path/to/key ./run.sh
-#   DOUGLAS_SMOKE_SKIP_REBOOT=1 ./run.sh  # reuse the VM's current state as-is
-#   ./steps/20-seedling-new.sh            # run a single step while iterating
+#   ./happy-path.sh                              # against $DOUGLAS_SMOKE_VM or "dev@douglas-dev.local"
+#   DOUGLAS_SMOKE_VM=my-host ./happy-path.sh
+#   DOUGLAS_SMOKE_SSH_KEY=/path/to/key ./happy-path.sh
+#   DOUGLAS_SMOKE_SKIP_REBOOT=1 ./happy-path.sh  # reuse the VM's current state as-is
+#   ./steps/20-seedling-new.sh                   # run a single step while iterating
 set -uo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")"
-
-ORANGE=$'\033[38;5;208m'
-RESET=$'\033[0m'
+source lib.sh
 
 run_started_at=$SECONDS
 

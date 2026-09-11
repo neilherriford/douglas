@@ -1,5 +1,5 @@
 # Shared helpers for smoke test steps. Sourced by each script in steps/
-# (and by run.sh, which just executes each step as its own process).
+# (and by happy-path.sh, which just executes each step as its own process).
 #
 # Not meant to be run directly.
 
@@ -10,6 +10,7 @@ FAILURES=0
 
 BOLD_GREEN=$'\033[1;32m'
 BOLD_RED=$'\033[1;31m'
+ORANGE=$'\033[38;5;208m'
 RESET=$'\033[0m'
 
 # pass/fail <description> — the shared "  PASS: ...\"/\"  FAIL: ...\" line
@@ -20,6 +21,10 @@ pass() {
 
 fail() {
     echo "  ${BOLD_RED}FAIL${RESET}: $1"
+}
+
+section() {
+    echo "${ORANGE}=== $1 ===${RESET}"
 }
 
 # ssh_out <remote command...>
@@ -105,7 +110,7 @@ assert_owner_group_mode() {
 assert_no_log_errors() {
     local desc="$1" log_path="$2" marker="$3"
     local new_lines
-    new_lines="$(ssh_out tail -n "+$((marker + 1))" "$log_path")"
+    new_lines="$(ssh_out sudo tail -n "+$((marker + 1))" "$log_path")"
     if echo "$new_lines" | grep -Eq 'level=(Warn|Error)'; then
         fail "$desc"
         echo "$new_lines" | grep -E 'level=(Warn|Error)' | sed 's/^/    /'
@@ -137,12 +142,23 @@ wait_until() {
     pass "$desc"
 }
 
+run_prelude() {
+    section "setup"
+    for step in "$@"; do
+        if ! bash "$step"; then
+            fail "prelude step $step failed"
+            FAILURES=$((FAILURES + 1))
+            finish
+        fi
+    done
+}
+
 # log_line_count <remote log path> — captured before a step, passed to
 # assert_no_log_errors afterward so only newly-appended lines are checked.
 # The `wc -l < path` redirection must happen on the remote shell, hence
 # passing it as a single command string rather than separate ssh arguments.
 log_line_count() {
-    ssh_out "wc -l < '$1' 2>/dev/null || echo 0"
+    ssh_out "sudo cat '$1' 2>/dev/null | wc -l"
 }
 
 finish() {
