@@ -323,11 +323,16 @@ impl Bract {
                 let server = Arc::clone(&self);
                 tokio::spawn(async move { Self::heartbeat_loop(server).await })
             };
+            let log_rotation_task = {
+                let server = Arc::clone(&self);
+                tokio::spawn(async move { Self::log_rotation_loop(server).await })
+            };
 
             main_task.await.map_err(std::io::Error::other)??;
             trigger_task.await.map_err(std::io::Error::other)??;
             watchdog_task.await.map_err(std::io::Error::other)?;
             heartbeat_task.await.map_err(std::io::Error::other)?;
+            log_rotation_task.await.map_err(std::io::Error::other)?;
             Ok::<_, Error>(())
         };
 
@@ -387,6 +392,35 @@ impl Bract {
             .await
             {
                 span.message(log::Level::Warn, &format!("Watchdog sweep failed: {err}"));
+            }
+        }
+    }
+
+    async fn log_rotation_loop(server: Arc<Self>) {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+        loop {
+            interval.tick().await;
+
+            if let Err(err) = blueprints::rotate_seedling_logs::execute(
+                Arc::clone(&server.reporter),
+                server.seedbank_client.as_ref(),
+                server.folder.as_ref(),
+                &file_system::UnixFileRotator::new(),
+                &server.douglas_folders,
+            )
+            .await
+            {
+                let span = Span::new(
+                    Arc::clone(&server.reporter),
+                    "Rotating seedling logs",
+                    ScopeKind::Task,
+                );
+                span.message(
+                    log::Level::Warn,
+                    &format!("Seedling log rotation sweep failed: {err}"),
+                );
             }
         }
     }

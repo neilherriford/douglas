@@ -248,6 +248,8 @@ pub struct Mount {
     #[serde(default)]
     contents: HashSet<MountContents>,
     access_mode: AccessMode,
+    #[serde(default)]
+    rotate_logs: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -268,11 +270,17 @@ impl Mount {
             remote_path,
             access_mode,
             contents,
+            rotate_logs: false,
         }
     }
 
     pub fn empty(kind: MountType, remote_path: PathBuf, access_mode: AccessMode) -> Self {
         Self::with_files(kind, remote_path, access_mode, HashSet::new())
+    }
+
+    pub fn rotating_logs(mut self) -> Self {
+        self.rotate_logs = true;
+        self
     }
 
     pub fn contents(&self) -> &HashSet<MountContents> {
@@ -293,6 +301,10 @@ impl Mount {
 
     pub fn access_mode(&self) -> &AccessMode {
         &self.access_mode
+    }
+
+    pub fn rotate_logs(&self) -> bool {
+        self.rotate_logs
     }
 }
 
@@ -633,6 +645,46 @@ mod tests {
         let mount: Mount = toml::from_str(toml).expect("should deserialize");
 
         assert!(mount.contents().is_empty());
+    }
+
+    #[test]
+    fn test_mount_rotate_logs_should_default_to_false_when_omitted() {
+        let toml = r#"
+            kind = "Persisted"
+            remote_path = "/etc/example/config"
+            access_mode = "ReadOnly"
+        "#;
+
+        let mount: Mount = toml::from_str(toml).expect("should deserialize");
+
+        assert!(!mount.rotate_logs());
+    }
+
+    #[test]
+    fn test_mount_rotating_logs_should_opt_the_mount_into_rotation() {
+        let mount = Mount::empty(
+            MountType::Persisted,
+            PathBuf::from("/var/log/douglas"),
+            AccessMode::Writable,
+        )
+        .rotating_logs();
+
+        assert!(mount.rotate_logs());
+    }
+
+    #[test]
+    fn test_mount_rotate_logs_should_round_trip_through_toml() {
+        let mount = Mount::empty(
+            MountType::Persisted,
+            PathBuf::from("/var/log/douglas"),
+            AccessMode::Writable,
+        )
+        .rotating_logs();
+
+        let toml = toml::to_string(&mount).expect("should serialize");
+        let round_tripped: Mount = toml::from_str(&toml).expect("should deserialize");
+
+        assert_eq!(round_tripped, mount);
     }
 
     fn seedling_definition() -> SeedlingDefinition {

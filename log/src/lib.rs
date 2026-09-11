@@ -720,10 +720,6 @@ mod tests {
         result
     }
 
-    // The real UnixFileRotator, for tests exercising BufferedFileReporter's
-    // actual end-to-end write-then-rotate behavior against real files —
-    // whether rotate() itself got *called* at the right threshold is
-    // covered separately below with a mock, with no filesystem involved.
     fn real_rotator() -> Arc<dyn file_system::FileRotator> {
         Arc::new(file_system::UnixFileRotator::new())
     }

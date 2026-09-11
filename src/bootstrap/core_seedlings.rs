@@ -313,7 +313,8 @@ pub mod definitions {
                             MountType::Persisted,
                             PathBuf::from(LOG_PATH),
                             seedbank_types::AccessMode::Writable,
-                        ),
+                        )
+                        .rotating_logs(),
                     ),
                     (
                         socket_mount,

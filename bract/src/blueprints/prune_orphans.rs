@@ -167,9 +167,13 @@ async fn disconnect_traefik(
     let traefik_container = container_name(&traefik_name)?;
     let seedling_network = seedling_network_name(seedling_name)?;
 
-    docker_client
+    match docker_client
         .disconnect_network(&seedling_network, ContainerRef::FullName(traefik_container))
-        .await?;
+        .await
+    {
+        Ok(()) | Err(docker::DockerError::ResourceNotFound) => {}
+        Err(err) => return Err(err.into()),
+    }
 
     Ok(())
 }
@@ -374,6 +378,67 @@ mod tests {
             .returning(|_| Ok(()));
 
         let orphans = Orphans {
+            route_files: vec![name("stale")],
+            ..Orphans::default()
+        };
+
+        let result = prune(
+            &docker_client,
+            &mut MockResinClient::new(),
+            &file_deleter,
+            &MockFolderDeleter::new(),
+            &openbao::MockClientFactory::new(),
+            &MockFileReader::new(),
+            &mut MockIdentity::new(),
+            &douglas_folders,
+            &orphans,
+        )
+        .await;
+
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_prune_should_tolerate_traefik_already_disconnected_when_a_name_is_orphaned_as_both_a_network_and_a_route_file()
+     {
+        let douglas_folders = DouglasFolders::new();
+        let expected_path = traefik_dynamic_dir(&douglas_folders)
+            .expect("should build a dynamic dir path")
+            .join("stale.yml");
+
+        let disconnect_calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let disconnect_calls_for_closure = std::sync::Arc::clone(&disconnect_calls);
+
+        let mut docker_client = MockClient::new();
+        docker_client
+            .expect_disconnect_network()
+            .withf(|network, container_ref| {
+                network.as_ref() == "doug.stale"
+                    && matches!(container_ref, ContainerRef::FullName(name) if name.as_ref() == "doug.traefik")
+            })
+            .times(2)
+            .returning(move |_, _| {
+                let call_number =
+                    disconnect_calls_for_closure.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if call_number == 0 {
+                    Ok(())
+                } else {
+                    Err(docker::DockerError::ResourceNotFound)
+                }
+            });
+        docker_client
+            .expect_delete_network()
+            .withf(|network| network.as_ref() == "doug.stale")
+            .returning(|_| Ok(()));
+
+        let mut file_deleter = MockFileDeleter::new();
+        file_deleter
+            .expect_delete()
+            .withf(move |path| path == expected_path)
+            .returning(|_| Ok(()));
+
+        let orphans = Orphans {
+            networks: vec![name("stale")],
             route_files: vec![name("stale")],
             ..Orphans::default()
         };

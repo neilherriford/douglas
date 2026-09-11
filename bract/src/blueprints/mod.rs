@@ -10,6 +10,7 @@ pub(crate) mod openbao_status;
 pub(crate) mod provision_seedling_secrets;
 pub(crate) mod prune_orphans;
 pub(crate) mod reconcile_seedling;
+pub(crate) mod rotate_seedling_logs;
 pub(crate) mod start_seedling;
 pub(crate) mod stop_seedling;
 pub(crate) mod watchdog;
