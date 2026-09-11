@@ -418,53 +418,60 @@ impl Drop for ScopeGuard {
     }
 }
 
+const MAX_LOG_BYTES: u64 = 10 * 1024 * 1024;
+const MAX_ROTATED_FILES: u32 = 5;
+
 enum WriteState {
     Buffering {
         pending: VecDeque<String>,
         last_try: Instant,
     },
-    Writing(BufWriter<File>),
+    Writing {
+        writer: BufWriter<File>,
+        bytes_written: u64,
+    },
 }
 
 pub struct BufferedFileReporter {
     path: PathBuf,
     state: Mutex<WriteState>,
     max_buffered: usize,
+    max_bytes: u64,
+    max_rotated_files: u32,
+    rotator: Arc<dyn file_system::FileRotator>,
 }
 
 impl Reporter for BufferedFileReporter {
     fn emit(&self, event: Event) {
         let line = self.format_logfmt(&event);
         let mut state = self.state.lock().unwrap();
-        match &mut *state {
-            WriteState::Buffering { pending, last_try } => {
-                if last_try.elapsed() > Duration::from_millis(500) {
-                    *last_try = Instant::now();
-                    if let Some(mut writer) = self.try_open() {
-                        for old in pending.drain(..) {
-                            let _ = writeln!(writer, "{old}");
-                        }
-                        let _ = writeln!(writer, "{line}");
-                        let _ = writer.flush();
-                        *state = WriteState::Writing(writer);
-                        return;
-                    }
-                }
-                if pending.len() >= self.max_buffered {
-                    pending.pop_front();
-                }
-                pending.push_back(line);
-            }
-            WriteState::Writing(buffer) => {
-                let _ = writeln!(buffer, "{line}");
-                let _ = buffer.flush();
-            }
-        }
+        let current = std::mem::replace(
+            &mut *state,
+            WriteState::Buffering {
+                pending: VecDeque::new(),
+                last_try: Instant::now(),
+            },
+        );
+        *state = self.write_line(current, line);
     }
 }
 
 impl BufferedFileReporter {
     pub fn new(path: impl Into<PathBuf>) -> Self {
+        Self::with_limits(
+            path,
+            MAX_LOG_BYTES,
+            MAX_ROTATED_FILES,
+            Arc::new(file_system::UnixFileRotator::new()),
+        )
+    }
+
+    fn with_limits(
+        path: impl Into<PathBuf>,
+        max_bytes: u64,
+        max_rotated_files: u32,
+        rotator: Arc<dyn file_system::FileRotator>,
+    ) -> Self {
         Self {
             path: path.into(),
             state: Mutex::new(WriteState::Buffering {
@@ -472,16 +479,84 @@ impl BufferedFileReporter {
                 last_try: Instant::now() - Duration::from_secs(60),
             }),
             max_buffered: 10_000,
+            max_bytes,
+            max_rotated_files,
+            rotator,
         }
     }
 
-    fn try_open(&self) -> Option<BufWriter<File>> {
-        OpenOptions::new()
+    fn write_line(&self, state: WriteState, line: String) -> WriteState {
+        match state {
+            WriteState::Buffering {
+                mut pending,
+                mut last_try,
+            } => {
+                if last_try.elapsed() > Duration::from_millis(500) {
+                    last_try = Instant::now();
+                    if let Some((mut writer, mut bytes_written)) = self.try_open() {
+                        for old in pending.drain(..) {
+                            bytes_written += Self::write_and_count(&mut writer, &old);
+                        }
+                        bytes_written += Self::write_and_count(&mut writer, &line);
+                        let _ = writer.flush();
+                        return self.rotate_if_needed(writer, bytes_written);
+                    }
+                }
+                if pending.len() >= self.max_buffered {
+                    pending.pop_front();
+                }
+                pending.push_back(line);
+                WriteState::Buffering { pending, last_try }
+            }
+            WriteState::Writing {
+                mut writer,
+                mut bytes_written,
+            } => {
+                bytes_written += Self::write_and_count(&mut writer, &line);
+                let _ = writer.flush();
+                self.rotate_if_needed(writer, bytes_written)
+            }
+        }
+    }
+
+    fn write_and_count(writer: &mut BufWriter<File>, line: &str) -> u64 {
+        let _ = writeln!(writer, "{line}");
+        (line.len() + 1) as u64
+    }
+
+    fn rotate_if_needed(&self, writer: BufWriter<File>, bytes_written: u64) -> WriteState {
+        if bytes_written < self.max_bytes {
+            return WriteState::Writing {
+                writer,
+                bytes_written,
+            };
+        }
+        drop(writer);
+        self.rotate();
+        match self.try_open() {
+            Some((writer, bytes_written)) => WriteState::Writing {
+                writer,
+                bytes_written,
+            },
+            None => WriteState::Buffering {
+                pending: VecDeque::new(),
+                last_try: Instant::now() - Duration::from_secs(60),
+            },
+        }
+    }
+
+    fn rotate(&self) {
+        self.rotator.rotate(&self.path, self.max_rotated_files);
+    }
+
+    fn try_open(&self) -> Option<(BufWriter<File>, u64)> {
+        let file = OpenOptions::new()
             .create(true)
             .append(true)
             .open(&self.path)
-            .ok()
-            .map(BufWriter::new)
+            .ok()?;
+        let bytes_written = file.metadata().map(|metadata| metadata.len()).unwrap_or(0);
+        Some((BufWriter::new(file), bytes_written))
     }
 
     fn format_logfmt(&self, event: &Event) -> String {
@@ -600,5 +675,164 @@ impl Reporter for PipeReporter {
             let _ = writeln!(w, "{line}");
             let _ = w.flush();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Read;
+
+    fn temp_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "douglas-log-test-{name}-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn message_event(text: &str) -> Event {
+        Event::new(
+            ScopeId::new(),
+            EventKind::Message {
+                level: Level::Info,
+                text: text.to_string(),
+            },
+        )
+    }
+
+    fn emit_messages(reporter: &BufferedFileReporter, texts: &[&str]) {
+        for text in texts {
+            reporter.emit(message_event(text));
+        }
+    }
+
+    fn read_to_string(path: &std::path::Path) -> String {
+        let mut result = String::new();
+        std::fs::File::open(path)
+            .unwrap()
+            .read_to_string(&mut result)
+            .unwrap();
+        result
+    }
+
+    // The real UnixFileRotator, for tests exercising BufferedFileReporter's
+    // actual end-to-end write-then-rotate behavior against real files —
+    // whether rotate() itself got *called* at the right threshold is
+    // covered separately below with a mock, with no filesystem involved.
+    fn real_rotator() -> Arc<dyn file_system::FileRotator> {
+        Arc::new(file_system::UnixFileRotator::new())
+    }
+
+    #[test]
+    fn test_emit_should_not_rotate_when_under_the_size_limit() {
+        let dir = temp_dir("under-limit");
+        let path = dir.join("test.log");
+        let reporter = BufferedFileReporter::with_limits(&path, 1024 * 1024, 5, real_rotator());
+
+        emit_messages(&reporter, &["one", "two", "three"]);
+
+        let contents = read_to_string(&path);
+        assert!(contents.contains("one"));
+        assert!(contents.contains("two"));
+        assert!(contents.contains("three"));
+        assert!(!dir.join("test.log.1").exists());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_emit_should_rotate_the_previous_file_when_exceeding_the_size_limit() {
+        let dir = temp_dir("rotate-once");
+        let path = dir.join("test.log");
+        let reporter = BufferedFileReporter::with_limits(&path, 150, 5, real_rotator());
+
+        emit_messages(&reporter, &["first line"]);
+        emit_messages(&reporter, &["second line"]);
+        emit_messages(&reporter, &["third line"]);
+
+        let rotated = read_to_string(&dir.join("test.log.1"));
+        let current = read_to_string(&path);
+        assert!(rotated.contains("first line"));
+        assert!(rotated.contains("second line"));
+        assert!(!rotated.contains("third line"));
+        assert!(current.contains("third line"));
+        assert!(!current.contains("first line"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_rotate_should_cap_the_number_of_historical_files() {
+        let dir = temp_dir("rotate-cap");
+        let path = dir.join("test.log");
+        let reporter = BufferedFileReporter::with_limits(&path, 10, 2, real_rotator());
+
+        emit_messages(
+            &reporter,
+            &["line a", "line b", "line c", "line d", "line e"],
+        );
+
+        assert!(dir.join("test.log.1").exists());
+        assert!(dir.join("test.log.2").exists());
+        assert!(!dir.join("test.log.3").exists());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_emit_should_account_for_an_already_large_existing_file() {
+        let dir = temp_dir("existing-size");
+        let path = dir.join("test.log");
+        std::fs::write(&path, "x".repeat(100)).unwrap();
+        let reporter = BufferedFileReporter::with_limits(&path, 10, 5, real_rotator());
+
+        emit_messages(&reporter, &["triggers rotation"]);
+
+        assert!(dir.join("test.log.1").exists());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_emit_should_call_the_rotator_when_the_threshold_is_exceeded() {
+        let dir = temp_dir("mock-rotate-called");
+        let path = dir.join("test.log");
+        let expected_path = path.clone();
+
+        let mut mock_rotator = file_system::MockFileRotator::new();
+        mock_rotator
+            .expect_rotate()
+            .withf(move |rotated_path, max_rotated_files| {
+                rotated_path == expected_path && *max_rotated_files == 5
+            })
+            .times(1)
+            .returning(|_, _| ());
+
+        let reporter = BufferedFileReporter::with_limits(&path, 10, 5, Arc::new(mock_rotator));
+
+        emit_messages(&reporter, &["long enough to cross a 10 byte threshold"]);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_emit_should_not_call_the_rotator_when_under_the_threshold() {
+        let dir = temp_dir("mock-rotate-not-called");
+        let path = dir.join("test.log");
+
+        let mut mock_rotator = file_system::MockFileRotator::new();
+        mock_rotator.expect_rotate().times(0);
+
+        let reporter =
+            BufferedFileReporter::with_limits(&path, 1024 * 1024, 5, Arc::new(mock_rotator));
+
+        emit_messages(&reporter, &["short"]);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
