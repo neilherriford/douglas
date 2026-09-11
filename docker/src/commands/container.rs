@@ -30,6 +30,23 @@ struct CreationResponse {
 }
 
 #[derive(Debug, Serialize)]
+struct CreateContainerLogConfig {
+    #[serde(rename = "Type")]
+    kind: &'static str,
+    #[serde(rename = "Config")]
+    config: HashMap<&'static str, &'static str>,
+}
+
+impl Default for CreateContainerLogConfig {
+    fn default() -> Self {
+        Self {
+            kind: "json-file",
+            config: HashMap::from([("max-size", "10m"), ("max-file", "5")]),
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
 struct CreateContainerHostConfig {
     #[serde(rename = "Mounts")]
     mounts: Vec<MountDefinition>,
@@ -37,6 +54,8 @@ struct CreateContainerHostConfig {
     added_capabilities: HashSet<Capability>,
     #[serde(rename = "PortBindings", serialize_with = "serialize_port_bindings")]
     published_ports: Vec<PortMapping>,
+    #[serde(rename = "LogConfig")]
+    log_config: CreateContainerLogConfig,
 }
 
 #[derive(Debug, Serialize)]
@@ -77,6 +96,7 @@ impl CreateContainerRequest {
                 mounts: new_container.mounts.clone(),
                 added_capabilities: new_container.added_capabilities.clone(),
                 published_ports: new_container.published_ports.clone(),
+                log_config: CreateContainerLogConfig::default(),
             },
         }
     }
@@ -635,6 +655,21 @@ mod tests {
 
         assert_eq!(actual["ExposedPorts"], json!({}));
         assert_eq!(actual["HostConfig"]["PortBindings"], json!({}));
+    }
+
+    #[test]
+    fn test_build_should_cap_container_logs_for_every_container() {
+        let registry: Registry = "localhost:7376".parse().unwrap();
+
+        let json_str =
+            serde_json::to_string(&CreateContainerRequest::build(&registry, &new_container()))
+                .unwrap();
+        let actual: Value = serde_json::from_str(&json_str).unwrap();
+
+        assert_eq!(
+            actual["HostConfig"]["LogConfig"],
+            json!({"Type": "json-file", "Config": {"max-size": "10m", "max-file": "5"}})
+        );
     }
 
     #[test]
