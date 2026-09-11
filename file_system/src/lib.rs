@@ -220,6 +220,36 @@ pub fn path_to_string<T: AsRef<Path>>(path: T) -> String {
         .to_string()
 }
 
+pub fn rotated_path(path: &Path, n: u32) -> PathBuf {
+    let mut result = path.as_os_str().to_os_string();
+    result.push(format!(".{n}"));
+    PathBuf::from(result)
+}
+
+#[cfg_attr(feature = "mock", mockall::automock)]
+pub trait FileRotator: Send + Sync {
+    fn rotate(&self, path: &Path, max_rotated_files: u32);
+}
+
+#[derive(Default)]
+pub struct UnixFileRotator {}
+
+impl UnixFileRotator {
+    pub fn new() -> Self {
+        Self {}
+    }
+}
+
+impl FileRotator for UnixFileRotator {
+    fn rotate(&self, path: &Path, max_rotated_files: u32) {
+        let _ = remove_file(rotated_path(path, max_rotated_files));
+        for n in (1..max_rotated_files).rev() {
+            let _ = rename(rotated_path(path, n), rotated_path(path, n + 1));
+        }
+        let _ = rename(path, rotated_path(path, 1));
+    }
+}
+
 #[repr(u16)]
 #[derive(PartialEq, Eq, Debug, Copy, Clone)]
 pub enum Masks {
@@ -1867,6 +1897,90 @@ mod tests {
                 std::fs::read(&file_path).expect("should read back original bytes"),
                 b"original"
             );
+
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    mod unix_file_rotator {
+        use super::*;
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        fn unique_temp_dir() -> PathBuf {
+            static COUNTER: AtomicU64 = AtomicU64::new(0);
+            let mut dir = std::env::temp_dir();
+            dir.push(format!(
+                "douglas-rotate-file-test-{}-{}",
+                std::process::id(),
+                COUNTER.fetch_add(1, Ordering::Relaxed)
+            ));
+            dir
+        }
+
+        #[test]
+        fn test_rotate_should_rename_the_current_file_to_dot_1() {
+            let dir = unique_temp_dir();
+            std::fs::create_dir_all(&dir).expect("should create temp dir");
+            let path = dir.join("test.log");
+            std::fs::write(&path, b"current contents").expect("should seed the file");
+
+            UnixFileRotator::new().rotate(&path, 5);
+
+            assert!(!path.exists());
+            assert_eq!(
+                std::fs::read(dir.join("test.log.1")).expect("should read rotated file"),
+                b"current contents"
+            );
+
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn test_rotate_should_shift_existing_rotated_files_up() {
+            let dir = unique_temp_dir();
+            std::fs::create_dir_all(&dir).expect("should create temp dir");
+            let path = dir.join("test.log");
+            std::fs::write(&path, b"newest").expect("should seed the file");
+            std::fs::write(dir.join("test.log.1"), b"was one").expect("should seed .1");
+            std::fs::write(dir.join("test.log.2"), b"was two").expect("should seed .2");
+
+            UnixFileRotator::new().rotate(&path, 5);
+
+            assert_eq!(std::fs::read(dir.join("test.log.1")).unwrap(), b"newest");
+            assert_eq!(std::fs::read(dir.join("test.log.2")).unwrap(), b"was one");
+            assert_eq!(std::fs::read(dir.join("test.log.3")).unwrap(), b"was two");
+
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn test_rotate_should_discard_the_oldest_file_beyond_the_cap() {
+            let dir = unique_temp_dir();
+            std::fs::create_dir_all(&dir).expect("should create temp dir");
+            let path = dir.join("test.log");
+            std::fs::write(&path, b"newest").expect("should seed the file");
+            std::fs::write(dir.join("test.log.1"), b"was one").expect("should seed .1");
+            std::fs::write(dir.join("test.log.2"), b"oldest, should be discarded")
+                .expect("should seed .2");
+
+            UnixFileRotator::new().rotate(&path, 2);
+
+            assert!(dir.join("test.log.1").exists());
+            assert!(dir.join("test.log.2").exists());
+            assert_eq!(std::fs::read(dir.join("test.log.2")).unwrap(), b"was one");
+
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn test_rotate_should_do_nothing_when_the_file_does_not_exist() {
+            let dir = unique_temp_dir();
+            std::fs::create_dir_all(&dir).expect("should create temp dir");
+            let path = dir.join("missing.log");
+
+            UnixFileRotator::new().rotate(&path, 5);
+
+            assert!(!dir.join("missing.log.1").exists());
 
             let _ = std::fs::remove_dir_all(&dir);
         }
