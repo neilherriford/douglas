@@ -2,7 +2,7 @@ use crate::{Error, SEEDBANK, SEEDS_ROOT_NAME};
 use blueprint::{
     Command,
     bootstrap::{build_boot_reporter, execute_plan, resolve_plan},
-    listener::ListenerDefinition,
+    listener::{ListenerDefinition, LivenessCheck},
     service::{
         BootstrapReporting, ServiceDefinition, ServiceState, ServiceUser, discover_service_state,
         plan_service_bootstrap,
@@ -110,6 +110,7 @@ pub fn service_definition(douglas_folders: &DouglasFolders) -> ServiceDefinition
         ],
         &[well_known::DOUGLAS_RESIN_SEEDBANK_GROUP],
         BootstrapReporting::Pipe,
+        Some(LivenessCheck::UnixSocket(douglas_folders.socket_file(SEEDBANK))),
     )
 }
 

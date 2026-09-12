@@ -105,6 +105,30 @@ impl DouglasFolders {
         result.push(name);
         result
     }
+
+    pub fn supervisor_dir(&self) -> PathBuf {
+        let mut result = self.transients.clone();
+        result.push(services::WOODWARD);
+        result
+    }
+
+    pub fn supervisor_failure_marker(&self, service_name: &str) -> PathBuf {
+        let mut result = self.supervisor_dir();
+        result.push(format!("{service_name}.failed"));
+        result
+    }
+
+    pub fn binary_dir(&self) -> PathBuf {
+        let mut result = self.seedlings_root.clone();
+        result.push("bin");
+        result
+    }
+
+    pub fn binary_link(&self) -> PathBuf {
+        let mut result = self.binary_dir();
+        result.push("douglas");
+        result
+    }
 }
 
 impl Default for DouglasFolders {

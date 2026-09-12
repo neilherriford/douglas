@@ -1,3 +1,4 @@
+use crate::util::{spawn_service, wait_until_running};
 use async_trait::async_trait;
 use blueprint::{
     Command, GroupMembershipRequirement, HasCredentials, HasFolder, HasPermissions, RunningStatus,
@@ -9,20 +10,14 @@ use blueprint::{
         plan_service_bootstrap,
     },
 };
-use command_fds::{CommandFdExt, FdMapping, FdMappingCollision};
+use command_fds::FdMappingCollision;
 use config::DouglasFolders;
 use credentials::{Credentials, well_known::DOUGLAS_ADMIN_GROUP};
-use file_system::{FileSystemError, Folder, Permissions};
+use file_system::{FileSystemError, Folder, Modes, Permissions};
 use log::{Level, Outcome, Reporter, ScopeKind, Span};
 use os::{EnvironmentVariableReader, Os};
 use os_pipe::{PipeReader, PipeWriter};
-use std::{
-    collections::HashMap,
-    env::VarError,
-    os::{fd::OwnedFd, unix::io::AsRawFd},
-    sync::Arc,
-    time::{Duration, Instant},
-};
+use std::{collections::HashMap, env::VarError, sync::Arc};
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -35,8 +30,10 @@ pub enum BootstrapError {
     SpawnError(#[from] FdMappingCollision),
     #[error("Timed out waiting for {0} to start (5 minutes exceeded)")]
     StartTimeout(String),
-    #[error("Service '{0}' has no configured control socket")]
-    MissingControlSocket(&'static str),
+    #[error("Service '{0}' has no configured liveness check")]
+    MissingLivenessCheck(String),
+    #[error("Unknown service '{0}'")]
+    UnknownService(String),
     #[error("File system error: {0}")]
     FileSystemError(#[from] FileSystemError),
 }
@@ -54,42 +51,70 @@ struct DouglasService {
     definition: ServiceDefinition,
 }
 
+pub(crate) fn liveness_check(
+    service_name: &str,
+    douglas_folders: &DouglasFolders,
+) -> Result<LivenessCheck, BootstrapError> {
+    let definition = if service_name == config::services::BRACT {
+        bract::service_definition(douglas_folders)
+    } else if service_name == config::services::SEEDBANK {
+        seedbank::service_definition(douglas_folders)
+    } else if service_name == config::services::RESIN {
+        resin::service_definition(douglas_folders)
+    } else {
+        return Err(BootstrapError::UnknownService(service_name.to_string()));
+    };
+
+    require_liveness(&definition, service_name)
+}
+
+fn require_liveness(
+    definition: &ServiceDefinition,
+    service_name: &str,
+) -> Result<LivenessCheck, BootstrapError> {
+    definition
+        .liveness
+        .clone()
+        .ok_or_else(|| BootstrapError::MissingLivenessCheck(service_name.to_string()))
+}
+
 fn known_services(douglas_folders: &DouglasFolders) -> Result<Vec<DouglasService>, BootstrapError> {
     let bract_definition = bract::service_definition(douglas_folders);
-    let Some(bract_socket) = bract_definition.owned_sockets.first() else {
-        return Err(BootstrapError::MissingControlSocket("bract"));
-    };
-    let bract_liveness = LivenessCheck::UnixSocket(bract_socket.socket_path.clone());
+    let bract_liveness = require_liveness(&bract_definition, config::services::BRACT)?;
 
     let seedbank_definition = seedbank::service_definition(douglas_folders);
-    let Some(seedbank_socket) = seedbank_definition.owned_sockets.first() else {
-        return Err(BootstrapError::MissingControlSocket(seedbank::SEEDBANK));
-    };
-    let seedbank_liveness = LivenessCheck::UnixSocket(seedbank_socket.socket_path.clone());
+    let seedbank_liveness = require_liveness(&seedbank_definition, config::services::SEEDBANK)?;
 
     let resin_definition = resin::service_definition(douglas_folders);
+    let resin_liveness = require_liveness(&resin_definition, config::services::RESIN)?;
+
+    let woodward_definition = woodward::service_definition(douglas_folders);
+    let woodward_liveness = require_liveness(&woodward_definition, config::services::WOODWARD)?;
 
     Ok(vec![
         DouglasService {
-            name: "bract",
+            name: config::services::BRACT,
             bootstrap_reporting: bract_definition.bootstrap_reporting,
             liveness: bract_liveness,
             definition: bract_definition,
         },
         DouglasService {
-            name: resin::RESIN,
+            name: config::services::RESIN,
             bootstrap_reporting: resin_definition.bootstrap_reporting,
-            liveness: LivenessCheck::TcpPort {
-                host: "127.0.0.1".to_string(),
-                port: resin_types::DEFAULT_PORT,
-            },
+            liveness: resin_liveness,
             definition: resin_definition,
         },
         DouglasService {
-            name: seedbank::SEEDBANK,
+            name: config::services::SEEDBANK,
             bootstrap_reporting: seedbank_definition.bootstrap_reporting,
             liveness: seedbank_liveness,
             definition: seedbank_definition,
+        },
+        DouglasService {
+            name: config::services::WOODWARD,
+            bootstrap_reporting: woodward_definition.bootstrap_reporting,
+            liveness: woodward_liveness,
+            definition: woodward_definition,
         },
     ])
 }
@@ -380,7 +405,13 @@ impl<'a> Command<Context<'a>> for StartService {
             None
         };
 
-        spawn_service(self.name, pipe, context.os, guard.span())?;
+        spawn_service(
+            self.name,
+            pipe,
+            self.needs_reporting_pipe,
+            context.os,
+            guard.span(),
+        )?;
 
         guard.finish_with_outcome(Outcome::Ok);
         Ok(())
@@ -419,86 +450,14 @@ impl<'a> Command<Context<'a>> for WaitForServiceReady {
             .create_child(&format!("Waiting for {}…", self.name), ScopeKind::Step)
             .start_guard();
 
-        wait_until_running(self.name, &self.liveness, guard.span()).await?;
+        if !wait_until_running(&self.liveness, guard.span()).await {
+            return Err(Box::new(BootstrapError::StartTimeout(
+                self.name.to_string(),
+            )));
+        }
 
         guard.finish_with_outcome(Outcome::Ok);
         Ok(())
-    }
-}
-
-fn spawn_service(
-    name: &'static str,
-    pipe: Option<(PipeReader, PipeWriter)>,
-    os: &dyn Os,
-    span: &Span,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let mut command = std::process::Command::new(os.current_executable()?);
-    command.args(["service", name]);
-
-    match pipe {
-        Some((pipe_reader, pipe_writer)) => {
-            let fd = pipe_writer.as_raw_fd();
-            command.args(["--notify-fd", &fd.to_string()]);
-            match command.fd_mappings(vec![FdMapping {
-                parent_fd: OwnedFd::from(pipe_writer),
-                child_fd: fd,
-            }]) {
-                Ok(cmd) => {
-                    cmd.spawn()?;
-                }
-                Err(err) => return Err(Box::new(BootstrapError::SpawnError(err))),
-            }
-            forward_logs_in_background(name, pipe_reader, span.clone());
-        }
-        None => {
-            command.spawn()?;
-        }
-    }
-
-    Ok(())
-}
-
-fn forward_logs_in_background(service_name: &'static str, pipe_reader: PipeReader, span: Span) {
-    std::thread::spawn(move || {
-        use std::io::BufRead;
-        let reader = std::io::BufReader::new(pipe_reader);
-        for line in reader.lines() {
-            let Ok(line) = line else { break };
-            let Ok(mut event) = serde_json::from_str::<log::Event>(&line) else {
-                continue;
-            };
-            tag_event_with_service(&mut event, service_name);
-            span.reporter.emit(event);
-        }
-    });
-}
-
-fn tag_event_with_service(event: &mut log::Event, service_name: &str) {
-    match &mut event.kind {
-        log::EventKind::ScopeStarted { label, .. } | log::EventKind::ScopeEnded { label, .. } => {
-            *label = format!("[{service_name}] {label}");
-        }
-        log::EventKind::Message { text, .. } => {
-            *text = format!("[{service_name}] {text}");
-        }
-        log::EventKind::PlanHint { .. } | log::EventKind::Progress { .. } => {}
-    }
-}
-
-async fn wait_until_running(
-    name: &str,
-    liveness: &LivenessCheck,
-    span: &Span,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let deadline = Instant::now() + Duration::from_mins(5);
-    loop {
-        if check_liveness(span, liveness) == RunningStatus::Running {
-            return Ok(());
-        }
-        if Instant::now() >= deadline {
-            return Err(Box::new(BootstrapError::StartTimeout(name.to_string())));
-        }
-        tokio::time::sleep(Duration::from_millis(200)).await;
     }
 }
 
@@ -555,7 +514,18 @@ pub async fn perform(
         pipes: HashMap::new(),
     };
 
-    if let Ok(()) = execute_plan(guard.span(), plan, &mut context, |_reason| ()).await {
+    let result = execute_plan(guard.span(), plan, &mut context, |_reason| ()).await;
+
+    if result.is_ok()
+        && let Err(err) =
+            ensure_supervised_heartbeat_dirs_accessible(permissions.as_ref(), &douglas_folders)
+    {
+        guard.span().message(Level::Warn, &err.to_string());
+        guard.finish_with_outcome(Outcome::Failed);
+        return false;
+    }
+
+    if result.is_ok() {
         guard.finish_with_outcome(Outcome::Ok);
         true
     } else {
@@ -564,38 +534,59 @@ pub async fn perform(
     }
 }
 
+fn ensure_supervised_heartbeat_dirs_accessible(
+    permissions: &dyn Permissions,
+    douglas_folders: &DouglasFolders,
+) -> Result<(), FileSystemError> {
+    for (service_name, service_user) in [
+        (config::services::BRACT, credentials::ROOT_USER_NAME),
+        (resin::RESIN, resin::DOUGLAS_RESIN_USER),
+        (seedbank::SEEDBANK, seedbank::DOUGLAS_SEEDBANK_USER),
+    ] {
+        let heartbeat_dir = douglas_folders.heartbeat_dir(service_name);
+        permissions.change_user_and_group_ownership(
+            &heartbeat_dir,
+            service_user,
+            DOUGLAS_ADMIN_GROUP,
+        )?;
+        permissions.change_mode(
+            &heartbeat_dir,
+            &Modes::InheritedOwnerReadWriteExecuteGroupReadWriteExecute,
+        )?;
+
+        let heartbeat_file = douglas_folders.service_heartbeat_file(service_name);
+        match permissions.change_user_and_group_ownership(
+            &heartbeat_file,
+            service_user,
+            DOUGLAS_ADMIN_GROUP,
+        ) {
+            Ok(()) | Err(FileSystemError::NotFoundError(_)) => {}
+            Err(err) => return Err(err),
+        }
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{
-        BootstrapError, DouglasService, State, create_plan, tag_event_with_service,
-        wait_until_running,
-    };
+    use super::{BootstrapError, DouglasService, State, create_plan, liveness_check, require_liveness};
     use blueprint::{
         listener::LivenessCheck,
         service::{BootstrapReporting, ServiceDefinition, ServiceState, ServiceUser},
     };
-    use log::{Event, EventKind, Level, ScopeId, ScopeKind, Span};
-    use std::sync::Arc;
-
-    struct NullReporter;
-    impl log::Reporter for NullReporter {
-        fn emit(&self, _event: Event) {}
-    }
-
-    fn span() -> Span {
-        Span::new(Arc::new(NullReporter), "test", ScopeKind::Group)
-    }
-
     fn service(name: &'static str, liveness: LivenessCheck) -> DouglasService {
         DouglasService {
             name,
             bootstrap_reporting: BootstrapReporting::Pipe,
-            liveness,
+            liveness: liveness.clone(),
             definition: ServiceDefinition::new(
                 ServiceUser::create_managed(name),
                 name,
                 Vec::new(),
+                &[],
                 BootstrapReporting::Pipe,
+                Some(liveness),
             ),
         }
     }
@@ -609,6 +600,102 @@ mod tests {
 
     fn step_descriptions(steps: &[Box<dyn blueprint::Command<super::Context<'_>>>]) -> Vec<String> {
         steps.iter().map(std::string::ToString::to_string).collect()
+    }
+
+    #[test]
+    fn test_ensure_supervised_heartbeat_dirs_accessible_should_chown_every_supervised_service_to_the_admin_group()
+     {
+        let douglas_folders = config::DouglasFolders::new();
+        let expected_paths = [
+            (
+                douglas_folders.heartbeat_dir(config::services::BRACT),
+                credentials::ROOT_USER_NAME,
+            ),
+            (
+                douglas_folders.service_heartbeat_file(config::services::BRACT),
+                credentials::ROOT_USER_NAME,
+            ),
+            (
+                douglas_folders.heartbeat_dir(resin::RESIN),
+                resin::DOUGLAS_RESIN_USER,
+            ),
+            (
+                douglas_folders.service_heartbeat_file(resin::RESIN),
+                resin::DOUGLAS_RESIN_USER,
+            ),
+            (
+                douglas_folders.heartbeat_dir(seedbank::SEEDBANK),
+                seedbank::DOUGLAS_SEEDBANK_USER,
+            ),
+            (
+                douglas_folders.service_heartbeat_file(seedbank::SEEDBANK),
+                seedbank::DOUGLAS_SEEDBANK_USER,
+            ),
+        ];
+
+        let mut permissions = file_system::MockPermissions::new();
+        permissions
+            .expect_change_user_and_group_ownership()
+            .withf(move |path, user, group| {
+                expected_paths.iter().any(|(expected_path, expected_user)| {
+                    path == expected_path && user == *expected_user
+                }) && group == credentials::well_known::DOUGLAS_ADMIN_GROUP
+            })
+            .times(6)
+            .returning(|_, _, _| Ok(()));
+        permissions
+            .expect_change_mode()
+            .times(3)
+            .returning(|_, _| Ok(()));
+
+        let result =
+            super::ensure_supervised_heartbeat_dirs_accessible(&permissions, &douglas_folders);
+
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_ensure_supervised_heartbeat_dirs_accessible_should_tolerate_a_missing_heartbeat_file() {
+        let douglas_folders = config::DouglasFolders::new();
+        let bract_heartbeat_file = douglas_folders.service_heartbeat_file(config::services::BRACT);
+
+        let mut permissions = file_system::MockPermissions::new();
+        permissions
+            .expect_change_user_and_group_ownership()
+            .withf(move |path, _, _| path == bract_heartbeat_file)
+            .returning(|path, _, _| {
+                Err(file_system::FileSystemError::NotFoundError(
+                    path.to_path_buf(),
+                ))
+            });
+        permissions
+            .expect_change_user_and_group_ownership()
+            .returning(|_, _, _| Ok(()));
+        permissions.expect_change_mode().returning(|_, _| Ok(()));
+
+        let result =
+            super::ensure_supervised_heartbeat_dirs_accessible(&permissions, &douglas_folders);
+
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_ensure_supervised_heartbeat_dirs_accessible_should_propagate_directory_errors() {
+        let douglas_folders = config::DouglasFolders::new();
+
+        let mut permissions = file_system::MockPermissions::new();
+        permissions
+            .expect_change_user_and_group_ownership()
+            .returning(|_, _, _| {
+                Err(file_system::FileSystemError::GroupNotFoundError(
+                    credentials::well_known::DOUGLAS_ADMIN_GROUP.to_string(),
+                ))
+            });
+
+        let result =
+            super::ensure_supervised_heartbeat_dirs_accessible(&permissions, &douglas_folders);
+
+        assert!(result.is_err());
     }
 
     #[test]
@@ -680,69 +767,64 @@ mod tests {
     }
 
     #[test]
-    fn test_tag_event_with_service_should_prefix_scope_started_label() {
-        let mut event = Event::start_scope(ScopeId::new(), "Bootstrapping", ScopeKind::Group);
+    fn test_require_liveness_should_return_the_configured_check() {
+        let definition = ServiceDefinition::new(
+            ServiceUser::create_managed("foo"),
+            "foo",
+            Vec::new(),
+            &[],
+            BootstrapReporting::Pipe,
+            Some(tcp_liveness(1234)),
+        );
 
-        tag_event_with_service(&mut event, "seedbank");
+        let result = require_liveness(&definition, "foo");
 
         assert!(matches!(
-            event.kind,
-            EventKind::ScopeStarted { ref label, .. } if label == "[seedbank] Bootstrapping"
+            result,
+            Ok(LivenessCheck::TcpPort { port: 1234, .. })
         ));
     }
 
     #[test]
-    fn test_tag_event_with_service_should_prefix_message_text() {
-        let mut event = Event::new(
-            ScopeId::new(),
-            EventKind::Message {
-                level: Level::Info,
-                text: "hello".to_string(),
-            },
+    fn test_require_liveness_should_error_when_none_is_configured() {
+        let definition = ServiceDefinition::new(
+            ServiceUser::create_managed("foo"),
+            "foo",
+            Vec::new(),
+            &[],
+            BootstrapReporting::Pipe,
+            None,
         );
 
-        tag_event_with_service(&mut event, "resin");
+        let result = require_liveness(&definition, "foo");
 
-        assert!(matches!(
-            event.kind,
-            EventKind::Message { ref text, .. } if text == "[resin] hello"
-        ));
+        assert!(matches!(result, Err(BootstrapError::MissingLivenessCheck(name)) if name == "foo"));
     }
 
     #[test]
-    fn test_tag_event_with_service_should_leave_plan_hint_untouched() {
-        let mut event = Event::new(
-            ScopeId::new(),
-            EventKind::PlanHint {
-                steps: vec!["one".to_string()],
-            },
-        );
+    fn test_liveness_check_should_resolve_bract_to_a_unix_socket() {
+        let douglas_folders = config::DouglasFolders::new();
 
-        tag_event_with_service(&mut event, "resin");
+        let result = liveness_check(config::services::BRACT, &douglas_folders);
 
-        assert!(matches!(
-            event.kind,
-            EventKind::PlanHint { ref steps } if steps == &vec!["one".to_string()]
-        ));
+        assert!(matches!(result, Ok(LivenessCheck::UnixSocket(_))));
     }
 
-    #[tokio::test]
-    async fn test_wait_until_running_should_return_immediately_when_already_running() {
-        let Ok(listener) = std::net::TcpListener::bind("127.0.0.1:0") else {
-            panic!("should bind");
-        };
-        let Ok(local_addr) = listener.local_addr() else {
-            panic!("should have local addr");
-        };
-        let port = local_addr.port();
-        std::thread::spawn(move || {
-            for stream in listener.incoming() {
-                drop(stream);
-            }
-        });
+    #[test]
+    fn test_liveness_check_should_resolve_resin_to_a_tcp_port() {
+        let douglas_folders = config::DouglasFolders::new();
 
-        let result = wait_until_running("test-service", &tcp_liveness(port), &span()).await;
+        let result = liveness_check(config::services::RESIN, &douglas_folders);
 
-        assert!(result.is_ok());
+        assert!(matches!(result, Ok(LivenessCheck::TcpPort { .. })));
+    }
+
+    #[test]
+    fn test_liveness_check_should_reject_an_unknown_service() {
+        let douglas_folders = config::DouglasFolders::new();
+
+        let result = liveness_check("not-a-real-service", &douglas_folders);
+
+        assert!(matches!(result, Err(BootstrapError::UnknownService(name)) if name == "not-a-real-service"));
     }
 }

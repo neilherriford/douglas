@@ -38,6 +38,7 @@ FOLDER_CHECKS=(
     "/run/douglas|root:douglas-admin:771|douglas transients root"
     "/var/lib/douglas|root:douglas-admin:771|douglas applications root"
     "/var/lib/douglas/services|root:douglas-admin:770|application services dir"
+    "/var/lib/douglas/bin|root:douglas-admin:771|douglas binary-link dir"
     "/var/lib/douglas/mounts|root:douglas-admin:770|application mounts dir"
     "/etc/douglas|root:douglas-admin:2770|douglas configs dir"
     "/var/lib/douglas/rolodex|root:douglas-admin:2770|rolodex dir"
@@ -45,15 +46,15 @@ FOLDER_CHECKS=(
     "/var/lib/douglas-identity|root:douglas-admin:700|identity dir"
     "/run/douglas/bract|root:douglas-admin:770|bract socket dir"
     "/run/douglas/bract-trigger|root:douglas-resin-bract:770|bract-trigger socket dir"
-    "/run/douglas/bract-heartbeat|root:douglas-admin:770|bract heartbeat dir"
+    "/run/douglas/bract-heartbeat|root:douglas-admin:2770|bract heartbeat dir"
     "/var/log/douglas/bract|root:douglas-admin:770|bract log dir"
     "/var/lib/douglas/resin/repositories|douglas-resin:douglas-resin:770|resin repositories dir"
     "/var/log/douglas/resin|douglas-resin:douglas-resin:770|resin log dir"
-    "/run/douglas/resin-heartbeat|douglas-resin:douglas-resin:771|resin heartbeat dir"
+    "/run/douglas/resin-heartbeat|douglas-resin:douglas-admin:2770|resin heartbeat dir"
     "/var/lib/douglas/seedbank/seeds|douglas-seedbank:douglas-seedbank:770|seedbank seeds dir"
     "/run/douglas/seedbank|douglas-seedbank:douglas-seedbank:771|seedbank socket dir"
     "/run/douglas/seedbank-registration|douglas-seedbank:douglas-seedbank:771|seedbank-registration socket dir"
-    "/run/douglas/seedbank-heartbeat|douglas-seedbank:douglas-seedbank:771|seedbank heartbeat dir"
+    "/run/douglas/seedbank-heartbeat|douglas-seedbank:douglas-admin:2770|seedbank heartbeat dir"
     "/var/log/douglas/seedbank|douglas-seedbank:douglas-seedbank:770|seedbank log dir"
 )
 
@@ -99,6 +100,10 @@ assert_success "resin responds on its registry API" ssh_out \
 ## own unprivileged service accounts, which have no write access to
 ## /run/douglas (root:douglas-admin, mode 771); each service is instead
 ## granted ownership of its own <name>-heartbeat directory to write into.
+## The directory's *group* is douglas-admin with the setgid bit (2770), and
+## woodward is a douglas-admin member — so it can read every service's
+## heartbeat file to supervise it, without needing write access itself (see
+## bootstrap::system::ensure_supervised_heartbeat_dirs_accessible).
 ## Confirming the file's content actually changes catches a heartbeat loop
 ## that wrote once at startup and then silently stopped ticking — a
 ## process-exists check alone would never notice that.
@@ -134,5 +139,45 @@ assert_owner_group_mode "traefik dynamic routes dir owned by traefik service acc
 
 assert_success "traefik container is running" ssh_out \
     "docker ps --filter name=doug.traefik --filter status=running -q | grep -q ."
+
+BINARY_LINK="/var/lib/douglas/bin/douglas"
+SUDOERS_DIR="/etc/sudoers.d"
+SUDOERS_FILE="$SUDOERS_DIR/douglas-kick"
+running_binary="$(ssh_out 'readlink -f ~/douglas')"
+link_target="$(ssh_out "readlink -f '$BINARY_LINK'")"
+sudoers_content="$(ssh_out sudo cat "$SUDOERS_FILE")"
+
+assert_success "binary-link path is a symlink" ssh_out "test -L '$BINARY_LINK'"
+assert_contains "binary link resolves to the running douglas binary" \
+    "$link_target" "$running_binary"
+
+assert_owner_group_mode "sudoers.d drop-in directory is root-owned and mode 0755" \
+    "$SUDOERS_DIR" "root:root:755"
+assert_success "main sudoers includes the drop-in directory" ssh_out \
+    "sudo grep -qE '^[@#]includedir[[:space:]]+$SUDOERS_DIR' /etc/sudoers"
+
+assert_success "sudoers drop-in for woodward kicks exists" ssh_out \
+    "sudo test -f '$SUDOERS_FILE'"
+
+assert_owner_group_mode "sudoers drop-in is root-owned and mode 0440" \
+    "$SUDOERS_FILE" "root:root:440"
+
+assert_contains "sudoers rule targets the woodward user" \
+    "$sudoers_content" "woodward "
+assert_contains "sudoers rule runs as root with no password" \
+    "$sudoers_content" "ALL=(root) NOPASSWD:"
+assert_contains "sudoers rule permits kicking bract via the binary link" \
+    "$sudoers_content" "$BINARY_LINK kick bract"
+assert_contains "sudoers rule permits kicking resin via the binary link" \
+    "$sudoers_content" "$BINARY_LINK kick resin"
+assert_contains "sudoers rule permits kicking seedbank via the binary link" \
+    "$sudoers_content" "$BINARY_LINK kick seedbank"
+
+assert_success "sudoers drop-in passes visudo syntax check" ssh_out \
+    "sudo visudo -c -f '$SUDOERS_FILE'"
+
+rule_lines="$(ssh_out "sudo grep -cvE '^[[:space:]]*(#|$)' '$SUDOERS_FILE'")"
+assert_success "sudoers drop-in contains exactly one rule line" \
+    test "$rule_lines" = "1"
 
 finish

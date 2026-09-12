@@ -351,9 +351,9 @@ fn create_plan<'a>(state: &State) -> Result<Vec<Step<'a>>, OpenBaoError> {
             }
             if !state.ca_configured_installed {
                 push_step(&mut result, GenerateRootCA::default());
+                push_step(&mut result, SetIssuingCRL::default());
+                push_step(&mut result, ConfigureClusterPath::default());
             }
-            push_step(&mut result, SetIssuingCRL::default());
-            push_step(&mut result, ConfigureClusterPath::default());
             if !state.acme_installed {
                 push_step(&mut result, EnableAcme::default());
             }
@@ -1357,7 +1357,7 @@ mod tests {
     }
 
     #[test]
-    fn create_plan_only_reapplies_url_config_when_unsealed_and_everything_else_is_installed() {
+    fn create_plan_does_nothing_when_unsealed_and_everything_is_already_installed() {
         let state = State {
             is_running: true,
             socket_exists: true,
@@ -1374,7 +1374,35 @@ mod tests {
             app_role_installed: true,
         };
 
-        assert_plan_steps(&state, &["Set issuing/CRL URLs", "Configure cluster path"]);
+        assert_plan_steps(&state, &[]);
+    }
+
+    #[test]
+    fn create_plan_does_not_reapply_url_config_once_the_root_token_has_been_revoked() {
+        let state = State {
+            is_running: true,
+            socket_exists: true,
+            is_initialized: true,
+            is_sealed: false,
+            has_unseal_codes: false,
+            douglas_credentials_available: true,
+            douglas_credentials_work: true,
+            kv_installed: true,
+            pki_installed: true,
+            ca_configured_installed: false,
+            acme_installed: true,
+            acme_pki_role_created: true,
+            app_role_installed: true,
+        };
+
+        assert_plan_steps(
+            &state,
+            &[
+                "Generate root CA",
+                "Set issuing/CRL URLs",
+                "Configure cluster path",
+            ],
+        );
     }
 
     #[test]

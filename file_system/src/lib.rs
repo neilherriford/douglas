@@ -284,6 +284,7 @@ impl std::fmt::Display for Masks {
 pub enum Modes {
     None,
     OwnerReadWrite,
+    OwnerReadGroupRead,
     OwnerReadWriteExecute,
     OwnerReadWriteGroupRead,
     OwnerReadWriteGroupReadWrite,
@@ -298,6 +299,7 @@ impl From<Modes> for u32 {
     fn from(value: Modes) -> Self {
         match value {
             Modes::None => 0,
+            Modes::OwnerReadGroupRead => 0o440,
             Modes::OwnerReadWrite => 0o600,
             Modes::OwnerReadWriteExecute => 0o700,
             Modes::OwnerReadWriteGroupRead => 0o640,
@@ -1051,6 +1053,7 @@ pub trait Links: Send + Sync {
     fn create_symbolic(&self, from: &Path, to: &Path) -> Result<(), FileSystemError>;
     fn follow_symbolic(&self, path: &Path) -> Result<PathBuf, FileSystemError>;
     fn create_hard(&self, from: &Path, to: &Path) -> Result<(), FileSystemError>;
+    fn remove(&self, path: &Path) -> Result<(), FileSystemError>;
 }
 
 #[derive(Default)]
@@ -1073,6 +1076,17 @@ impl Links for UnixLinks {
 
     fn create_hard(&self, from: &Path, to: &Path) -> Result<(), FileSystemError> {
         Ok(hard_link(from, to)?)
+    }
+
+    fn remove(&self, path: &Path) -> Result<(), FileSystemError> {
+        match remove_file(path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(FileSystemError::IoErrorAtPath {
+                path: path.to_path_buf(),
+                error,
+            }),
+        }
     }
 }
 

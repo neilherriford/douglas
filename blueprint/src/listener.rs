@@ -8,6 +8,7 @@ use std::net::TcpStream;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::{Duration, SystemTime};
 
 #[derive(Debug)]
 pub struct ListenerDefinition {
@@ -81,15 +82,18 @@ impl SocketListenerFactory {
     }
 }
 
+#[derive(Debug, Clone)]
 pub enum LivenessCheck {
     UnixSocket(PathBuf),
     TcpPort { host: String, port: u16 },
+    Heartbeat { path: PathBuf, max_age: Duration },
 }
 
 pub fn check_liveness(span: &Span, check: &LivenessCheck) -> RunningStatus {
     match check {
         LivenessCheck::UnixSocket(socket_path) => check_unix_socket(span, socket_path),
         LivenessCheck::TcpPort { host, port } => check_tcp_port(span, host, *port),
+        LivenessCheck::Heartbeat { path, max_age } => check_heartbeat(span, path, *max_age),
     }
 }
 
@@ -97,18 +101,31 @@ pub fn check_liveness(span: &Span, check: &LivenessCheck) -> RunningStatus {
 fn check_unix_socket(span: &Span, socket_path: &Path) -> RunningStatus {
     match UnixStream::connect(socket_path) {
         Ok(_) => RunningStatus::Running,
-        Err(err) => classify_connect_error(span, &socket_path.to_string_lossy(), err),
+        Err(err) => classify_io_error(span, &socket_path.to_string_lossy(), err),
     }
 }
 
 fn check_tcp_port(span: &Span, host: &str, port: u16) -> RunningStatus {
     match TcpStream::connect((host, port)) {
         Ok(_) => RunningStatus::Running,
-        Err(err) => classify_connect_error(span, &format!("{host}:{port}"), err),
+        Err(err) => classify_io_error(span, &format!("{host}:{port}"), err),
     }
 }
 
-fn classify_connect_error(span: &Span, target: &str, err: std::io::Error) -> RunningStatus {
+fn check_heartbeat(span: &Span, path: &Path, max_age: Duration) -> RunningStatus {
+    let modified = match std::fs::metadata(path).and_then(|metadata| metadata.modified()) {
+        Ok(modified) => modified,
+        Err(err) => return classify_io_error(span, &path.to_string_lossy(), err),
+    };
+
+    match SystemTime::now().duration_since(modified) {
+        Ok(elapsed) if elapsed <= max_age => RunningStatus::Running,
+        Ok(_) => RunningStatus::NotRunning,
+        Err(_) => RunningStatus::Unknown,
+    }
+}
+
+fn classify_io_error(span: &Span, target: &str, err: std::io::Error) -> RunningStatus {
     let status = running_status_for_error_kind(err.kind());
     if status == RunningStatus::Unknown {
         span.message(
@@ -142,6 +159,7 @@ mod tests {
     use std::io::ErrorKind;
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
+    use std::time::{Duration, SystemTime};
 
     struct NullReporter;
 
@@ -191,6 +209,61 @@ mod tests {
         let status = check_liveness(
             &span(),
             &LivenessCheck::UnixSocket(PathBuf::from("/run/douglas/definitely-missing.sock")),
+        );
+
+        assert!(status == RunningStatus::NotRunning);
+    }
+
+    #[test]
+    fn test_should_report_running_when_heartbeat_is_recent() {
+        let mut path = std::env::temp_dir();
+        path.push(format!("blueprint-heartbeat-test-{}-recent", std::process::id()));
+        std::fs::write(&path, "").expect("should write heartbeat file");
+
+        let status = check_liveness(
+            &span(),
+            &LivenessCheck::Heartbeat {
+                path: path.clone(),
+                max_age: Duration::from_secs(15),
+            },
+        );
+
+        let _ = std::fs::remove_file(&path);
+        assert!(status == RunningStatus::Running);
+    }
+
+    #[test]
+    fn test_should_report_not_running_when_heartbeat_is_stale() {
+        let mut path = std::env::temp_dir();
+        path.push(format!("blueprint-heartbeat-test-{}-stale", std::process::id()));
+        std::fs::write(&path, "").expect("should write heartbeat file");
+        let file = std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .expect("should open heartbeat file");
+        file.set_modified(SystemTime::now() - Duration::from_secs(60))
+            .expect("should backdate mtime");
+
+        let status = check_liveness(
+            &span(),
+            &LivenessCheck::Heartbeat {
+                path: path.clone(),
+                max_age: Duration::from_secs(15),
+            },
+        );
+
+        let _ = std::fs::remove_file(&path);
+        assert!(status == RunningStatus::NotRunning);
+    }
+
+    #[test]
+    fn test_should_report_not_running_when_heartbeat_file_is_missing() {
+        let status = check_liveness(
+            &span(),
+            &LivenessCheck::Heartbeat {
+                path: PathBuf::from("/run/douglas/definitely-missing-heartbeat"),
+                max_age: Duration::from_secs(15),
+            },
         );
 
         assert!(status == RunningStatus::NotRunning);

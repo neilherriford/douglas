@@ -24,7 +24,7 @@ use docker_types::{ContainerName, Registry};
 use file_system::{
     BindableUnixDomainSocketFile, FileDeleter, FileReader, FileSystemError, FileWriter, Folder,
     FolderDeleter, Inspect, Permissions, UnixDomainSocket, UnixFileDeleter, UnixFileReader,
-    UnixFileWriter, UnixFolder, UnixFolderDeleter, UnixInspect, UnixPermissions,
+    UnixFileWriter, UnixFolder, UnixFolderDeleter, UnixInspect, UnixLinks, UnixPermissions,
 };
 use log::{BufferedFileReporter, ChannelReporter, Reporter, ScopeKind, Span, TeeReporter};
 use os::{Os, Unix};
@@ -92,6 +92,8 @@ pub enum BootstrapError {
     FileSystemError(#[from] FileSystemError),
     #[error("Credentials error: {0}")]
     CredentialsError(#[from] CredentialsError),
+    #[error("OS error: {0}")]
+    OsError(#[from] os::OsError),
     #[error("Must be root to proceed")]
     MustBeRoot,
     #[error("Docker must be running")]
@@ -174,6 +176,9 @@ impl Bract {
         let unix_domain_socket: Arc<dyn BindableUnixDomainSocketFile> =
             Arc::new(UnixDomainSocket::new());
         let permissions = Box::new(UnixPermissions::new());
+        let inspect = Box::new(UnixInspect::new());
+        let file_writer = UnixFileWriter::new();
+        let links = UnixLinks::new();
         let douglas_folders = DouglasFolders::new();
         let (shutdown_sender, _) = broadcast::channel::<()>(1);
 
@@ -181,7 +186,12 @@ impl Bract {
             reporting_fd,
             &*credentials,
             &*folder,
+            &file_writer,
+            &*file_deleter,
+            &links,
             &*permissions,
+            &*inspect,
+            &*os,
             &douglas_folders,
             &docker::client::UdsClientBuilder,
         )

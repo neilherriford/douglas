@@ -1,9 +1,13 @@
 mod bootstrap;
+mod util;
 #[macro_use]
 pub(crate) mod macros;
 mod cli_reporter;
 
-use crate::cli_reporter::CliReporter;
+use crate::{
+    cli_reporter::CliReporter,
+    util::{spawn_service, wait_until_running},
+};
 use ::config::DouglasFolders;
 use bract_client::Client;
 use clap::{Parser, Subcommand, ValueEnum};
@@ -29,6 +33,7 @@ use std::{
     str::FromStr,
     sync::Arc,
 };
+use woodward::{HeartbeatReader, LocalHeartbeatReader};
 
 #[derive(ValueEnum, Clone, Debug, Copy)]
 enum OutputStyle {
@@ -40,6 +45,33 @@ enum OutputStyle {
 enum Switch {
     Enabled,
     Disabled,
+}
+
+#[derive(ValueEnum, Clone, Debug, Copy)]
+enum KickTarget {
+    Bract,
+    Resin,
+    Seedbank,
+}
+
+impl std::fmt::Display for KickTarget {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            KickTarget::Bract => f.write_str(config::services::BRACT),
+            KickTarget::Resin => f.write_str(config::services::RESIN),
+            KickTarget::Seedbank => f.write_str(config::services::SEEDBANK),
+        }
+    }
+}
+
+impl KickTarget {
+    fn service_name(self) -> &'static str {
+        match self {
+            KickTarget::Bract => config::services::BRACT,
+            KickTarget::Resin => config::services::RESIN,
+            KickTarget::Seedbank => config::services::SEEDBANK,
+        }
+    }
 }
 
 #[derive(Parser, Debug)]
@@ -85,6 +117,11 @@ enum Commands {
         #[command(subcommand)]
         service: ServiceCommand,
     },
+    #[command(hide = true)]
+    Kick {
+        #[arg(value_enum)]
+        name: KickTarget,
+    },
     #[command(about = "Seedling commands")]
     Seedling {
         #[command(subcommand)]
@@ -125,6 +162,14 @@ enum ServiceCommand {
             required_unless_present = "dbg"
         )]
         notify_fd: Option<i32>,
+    },
+    Woodward {
+        #[arg(
+            long,
+            default_value_t = false,
+            help = "Debug mode — runs in foreground with TUI"
+        )]
+        dbg: bool,
     },
 }
 
@@ -211,6 +256,10 @@ impl Display for Commands {
             Commands::Seedling {
                 seedling: SeedlingCommand::Prune { .. },
             } => f.write_str("prune orphans"),
+            Commands::Service {
+                service: ServiceCommand::Woodward { .. },
+            } => f.write_str("service woodward"),
+            Commands::Kick { name } => write!(f, "kick {}", name.service_name()),
         }
     }
 }
@@ -250,6 +299,13 @@ fn main() -> ExitCode {
         Commands::Service {
             service: ServiceCommand::Resin { .. } | ServiceCommand::Seedbank { .. },
         } => unreachable!("clap requires --notify-fd when --dbg is not set"),
+        Commands::Service {
+            service: ServiceCommand::Woodward { dbg: true },
+        } => run_with_tokio(woodward_debug_mode()),
+        Commands::Service {
+            service: ServiceCommand::Woodward { dbg: false },
+        } => start_woodward(),
+        Commands::Kick { name } => run_with_tokio(kick(name)),
         Commands::Seedling {
             seedling: SeedlingCommand::Status { name },
         } => run_with_tokio(get_seedling_status(&name, output_style)),
@@ -644,6 +700,85 @@ async fn seedbank_debug_mode() -> ExitCode {
     }
 }
 
+fn start_woodward() -> ExitCode {
+    let mut daemonize = Daemonize::new()
+        .user(woodward::DOUGLAS_WOODWARD_USER)
+        .group(woodward::DOUGLAS_WOODWARD_GROUP)
+        .privileged_action(|| initgroups_for(woodward::DOUGLAS_WOODWARD_USER));
+    let crash_log_path = DouglasFolders::new()
+        .log_dir(woodward::WOODWARD)
+        .join(format!("{}.crash.log", woodward::WOODWARD));
+    if let Some((stdout, stderr)) = open_daemon_crash_log(&crash_log_path) {
+        daemonize = daemonize.stdout(stdout).stderr(stderr);
+    }
+
+    match daemonize.start() {
+        Ok(()) => run_with_tokio(run_woodward_server()),
+        Err(err) => {
+            eprintln!("Failed to daemonize seedbank server: {err:?}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+async fn run_woodward_server() -> ExitCode {
+    let douglas_folders = DouglasFolders::new();
+    let reporter: Arc<dyn Reporter> = Arc::new(BufferedFileReporter::new(
+        douglas_folders.service_log_file(woodward::WOODWARD),
+    ));
+    let file_reader: Arc<dyn FileReader> = Arc::new(UnixFileReader::new());
+    let file_writer: Arc<dyn FileWriter> = Arc::new(UnixFileWriter::new());
+    let file_deleter: Arc<dyn FileDeleter> = Arc::new(UnixFileDeleter::new());
+    let os: Arc<dyn Os> = Arc::new(Unix::new());
+
+    let server = Arc::new(woodward::Server::new(
+        reporter,
+        file_reader,
+        file_writer,
+        file_deleter,
+        os,
+        douglas_folders,
+    ));
+
+    if let Err(err) = server.start().await {
+        eprintln!("Failed to start woodward: {err:?}");
+        return ExitCode::from(1);
+    }
+    ExitCode::from(0)
+}
+
+async fn woodward_debug_mode() -> ExitCode {
+    let douglas_folders = DouglasFolders::new();
+    let reporter: Arc<dyn Reporter> =
+        if let Ok(reporter) = build_cli_reporter(&douglas_folders, woodward::WOODWARD) {
+            reporter
+        } else {
+            eprintln!("Failed to start TUI reporter");
+            return ExitCode::from(1);
+        };
+    let file_reader: Arc<dyn FileReader> = Arc::new(UnixFileReader::new());
+    let file_writer: Arc<dyn FileWriter> = Arc::new(UnixFileWriter::new());
+    let file_deleter: Arc<dyn FileDeleter> = Arc::new(UnixFileDeleter::new());
+    let os: Arc<dyn Os> = Arc::new(Unix::new());
+
+    let server = Arc::new(woodward::Server::new(
+        reporter,
+        file_reader,
+        file_writer,
+        file_deleter,
+        os,
+        douglas_folders,
+    ));
+
+    match server.start().await {
+        Ok(()) => ExitCode::from(0),
+        Err(err) => {
+            eprintln!("woodward: {err}");
+            ExitCode::from(1)
+        }
+    }
+}
+
 async fn resin_debug_mode() -> ExitCode {
     let server = match resin::Server::build(None, resin_types::DEFAULT_PORT).await {
         Ok(s) => s,
@@ -803,6 +938,7 @@ struct CoreServiceStatus {
     name: String,
     running: bool,
     detail: String,
+    supervisor_gave_up: Option<woodward::SupervisionFailure>,
 }
 
 #[derive(serde::Serialize)]
@@ -838,6 +974,7 @@ fn probe_bract(
         name: "bract".to_string(),
         running,
         detail,
+        supervisor_gave_up: None,
     }
 }
 
@@ -856,6 +993,7 @@ fn probe_seedbank(
         name: "seedbank".to_string(),
         running,
         detail,
+        supervisor_gave_up: None,
     }
 }
 
@@ -871,6 +1009,29 @@ async fn probe_resin(reporter: Arc<dyn Reporter>) -> CoreServiceStatus {
         name: "resin".to_string(),
         running,
         detail,
+        supervisor_gave_up: None,
+    }
+}
+
+fn probe_woodward(douglas_folders: &DouglasFolders, span: &Span) -> CoreServiceStatus {
+    let (running, detail) = match woodward::service_definition(douglas_folders).liveness {
+        Some(liveness) => match blueprint::listener::check_liveness(span, &liveness) {
+            blueprint::RunningStatus::Running => (true, "heartbeat is current".to_string()),
+            blueprint::RunningStatus::NotRunning => {
+                (false, "heartbeat is stale or missing".to_string())
+            }
+            blueprint::RunningStatus::Unknown => {
+                (false, "could not determine heartbeat freshness".to_string())
+            }
+        },
+        None => (false, "no liveness check configured".to_string()),
+    };
+
+    CoreServiceStatus {
+        name: config::services::WOODWARD.to_string(),
+        running,
+        detail,
+        supervisor_gave_up: None,
     }
 }
 
@@ -922,11 +1083,21 @@ async fn status(output_style: OutputStyle) -> ExitCode {
         Err(err) => (Vec::new(), Some(err.to_string())),
     };
 
-    let core_services = vec![
+    let mut core_services = vec![
         probe_bract(&seedling_names_result),
         probe_resin(Arc::clone(&reporter)).await,
         probe_seedbank(&seedling_names_result),
+        probe_woodward(&douglas_folders, guard.span()),
     ];
+
+    let supervisor_reader = UnixFileReader::new();
+    for service in &mut core_services {
+        service.supervisor_gave_up = woodward::read_supervision_failure(
+            &supervisor_reader,
+            &douglas_folders.supervisor_failure_marker(&service.name),
+        )
+        .unwrap_or(None);
+    }
 
     let folder: Arc<dyn Folder> = Arc::new(UnixFolder::new());
     let (traefik_routes, traefik_routes_error) =
@@ -973,6 +1144,12 @@ fn print_status_report(output_style: OutputStyle, report: &StatusReport) {
                     "unavailable"
                 };
                 println!("  {}: {} ({})", service.name, state, service.detail);
+                if let Some(failure) = &service.supervisor_gave_up {
+                    println!(
+                        "    supervisor gave up after {} restarts and {} failed kicks",
+                        failure.restart_count, failure.kick_failures
+                    );
+                }
             }
 
             println!("Seedlings:");
@@ -1367,6 +1544,115 @@ async fn prune_orphans(output_style: OutputStyle, skip_confirmation: bool) -> Ex
     guard.finish_with_outcome(log::Outcome::Ok);
 
     ExitCode::from(0)
+}
+
+async fn kick(kick_target: KickTarget) -> ExitCode {
+    let (douglas_folders, guard) =
+        seedling_command_context(&format!("Kicking target {kick_target}"));
+
+    let heartbeat_file = douglas_folders.service_heartbeat_file(kick_target.service_name());
+    let file_reader: Arc<dyn FileReader> = Arc::new(UnixFileReader::new());
+
+    if !file_reader.exists(&heartbeat_file) {
+        guard.span().message(
+            log::Level::Warn,
+            &format!("No heartbeat file for {kick_target}"),
+        );
+        guard.finish_with_outcome(log::Outcome::Failed);
+        return ExitCode::from(1);
+    }
+
+    let local_heartbeat_reader = LocalHeartbeatReader::new(&heartbeat_file, file_reader);
+    let pid = match local_heartbeat_reader.read() {
+        Ok(heartbeat) => heartbeat.pid,
+        Err(err) => {
+            guard.span().message(
+                log::Level::Warn,
+                &format!("Error inspecting {kick_target}: {err}"),
+            );
+            guard.finish_with_outcome(log::Outcome::Failed);
+            return ExitCode::from(1);
+        }
+    };
+
+    let os = Unix::new();
+    let is_running = match os.is_active_pid(pid) {
+        Ok(state) => state,
+        Err(err) => {
+            guard.span().message(
+                log::Level::Warn,
+                &format!("Could not determine if {kick_target} is running: {err}"),
+            );
+            guard.finish_with_outcome(log::Outcome::Failed);
+            return ExitCode::from(1);
+        }
+    };
+
+    if is_running {
+        match os.kill(pid) {
+            Ok(()) => {
+                guard
+                    .span()
+                    .message(log::Level::Info, &format!("Stopped service {kick_target}"));
+            }
+            Err(err) => {
+                guard.span().message(
+                    log::Level::Warn,
+                    &format!("Error kicking {kick_target}: {err}"),
+                );
+                guard.finish_with_outcome(log::Outcome::Failed);
+                return ExitCode::from(1);
+            }
+        }
+    } else {
+        guard.span().message(
+            log::Level::Info,
+            &format!("Service {kick_target} is not running"),
+        );
+    }
+
+    match spawn_service(kick_target.service_name(), None, true, &os, guard.span()) {
+        Ok(()) => {
+            let liveness = match bootstrap::system::liveness_check(
+                kick_target.service_name(),
+                &douglas_folders,
+            ) {
+                Ok(liveness) => liveness,
+                Err(err) => {
+                    guard.span().message(
+                        log::Level::Warn,
+                        &format!("Could not determine liveness check for {kick_target}: {err}"),
+                    );
+                    guard.finish_with_outcome(log::Outcome::Failed);
+                    return ExitCode::from(1);
+                }
+            };
+
+            if wait_until_running(&liveness, guard.span()).await {
+                guard.span().message(
+                    log::Level::Info,
+                    &format!("Service {kick_target} restarted"),
+                );
+                guard.finish_with_outcome(log::Outcome::Ok);
+                ExitCode::from(0)
+            } else {
+                guard.span().message(
+                    log::Level::Warn,
+                    &format!("Service {kick_target} did not become ready in time"),
+                );
+                guard.finish_with_outcome(log::Outcome::Failed);
+                ExitCode::from(1)
+            }
+        }
+        Err(err) => {
+            guard.span().message(
+                log::Level::Warn,
+                &format!("Error kicking {kick_target}: {err}"),
+            );
+            guard.finish_with_outcome(log::Outcome::Failed);
+            ExitCode::from(1)
+        }
+    }
 }
 
 #[cfg(test)]

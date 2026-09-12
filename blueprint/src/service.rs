@@ -1,6 +1,7 @@
 use crate::{
     FolderModeRequirement, FolderOwnershipRequirement, GroupMembershipRequirement, HasCredentials,
-    HasFolder, HasPermissions, Step, commands, listener::ListenerDefinition,
+    HasFolder, HasPermissions, Step, commands,
+    listener::{ListenerDefinition, LivenessCheck},
 };
 use credentials::Credentials;
 use file_system::{FileSystemError, Folder, Modes, Permissions};
@@ -42,6 +43,7 @@ pub struct ServiceDefinition {
     pub owned_sockets: Vec<ListenerDefinition>,
     pub additional_groups: Vec<String>,
     pub bootstrap_reporting: BootstrapReporting,
+    pub liveness: Option<LivenessCheck>,
 }
 
 impl ServiceDefinition {
@@ -52,6 +54,7 @@ impl ServiceDefinition {
         owned_sockets: Vec<ListenerDefinition>,
         additional_groups: &[&str],
         bootstrap_reporting: BootstrapReporting,
+        liveness: Option<LivenessCheck>,
     ) -> Self {
         Self {
             user,
@@ -63,6 +66,7 @@ impl ServiceDefinition {
                 .map(|name| name.to_string())
                 .collect(),
             bootstrap_reporting,
+            liveness,
         }
     }
 
@@ -70,15 +74,18 @@ impl ServiceDefinition {
         user: ServiceUser,
         group: &str,
         owned_folders: Vec<(PathBuf, Modes)>,
+        additional_groups: &[&str],
         bootstrap_reporting: BootstrapReporting,
+        liveness: Option<LivenessCheck>,
     ) -> Self {
         Self::with_sockets(
             user,
             group,
             owned_folders,
             Vec::new(),
-            &[],
+            additional_groups,
             bootstrap_reporting,
+            liveness,
         )
     }
 }
@@ -286,7 +293,9 @@ mod tests {
                 ServiceUser::create_managed("foo"),
                 "foo",
                 vec![(PathBuf::from("/var/lib/foo"), Modes::OwnerReadWrite)],
+                &[],
                 BootstrapReporting::Pipe,
+                None,
             )
         }
 
@@ -295,7 +304,9 @@ mod tests {
                 ServiceUser::create_system(credentials::ROOT_USER_NAME),
                 "douglas-admin",
                 vec![(PathBuf::from("/var/lib/foo"), Modes::OwnerReadWrite)],
+                &[],
                 BootstrapReporting::None,
+                None,
             )
         }
 
@@ -307,6 +318,7 @@ mod tests {
                 Vec::new(),
                 &["shared"],
                 BootstrapReporting::Pipe,
+                None,
             )
         }
 
@@ -318,6 +330,7 @@ mod tests {
                 Vec::new(),
                 &["shared"],
                 BootstrapReporting::Pipe,
+                None,
             )
         }
 
@@ -766,7 +779,9 @@ mod tests {
                 ServiceUser::create_managed("foo"),
                 "foo",
                 Vec::new(),
+                &[],
                 BootstrapReporting::Pipe,
+                None,
             )
         }
 

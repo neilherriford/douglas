@@ -3912,12 +3912,18 @@ dependencies = [
 name = "woodward"
 version = "0.1.0"
 dependencies = [
+ "blueprint",
  "config",
+ "credentials",
  "file_system",
+ "log 0.1.0",
  "mockall",
+ "os",
+ "seedling_registration_types",
  "serde",
  "serde_json",
  "thiserror 1.0.69",
+ "tokio",
 ]
 
 [[package]]

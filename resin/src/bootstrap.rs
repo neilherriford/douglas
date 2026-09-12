@@ -2,6 +2,7 @@ use crate::Error;
 use blueprint::{
     Command,
     bootstrap::{build_boot_reporter, execute_plan, resolve_plan},
+    listener::LivenessCheck,
     service::{
         BootstrapReporting, ServiceDefinition, ServiceState, ServiceUser, discover_service_state,
         plan_service_bootstrap,
@@ -91,6 +92,10 @@ pub fn service_definition(douglas_folders: &DouglasFolders) -> ServiceDefinition
         Vec::new(),
         &[DOUGLAS_RESIN_SEEDBANK_GROUP, DOUGLAS_RESIN_BRACT_GROUP],
         BootstrapReporting::Pipe,
+        Some(LivenessCheck::TcpPort {
+            host: "127.0.0.1".to_string(),
+            port: resin_types::DEFAULT_PORT,
+        }),
     )
 }
 
