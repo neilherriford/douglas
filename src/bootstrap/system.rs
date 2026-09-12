@@ -570,7 +570,9 @@ fn ensure_supervised_heartbeat_dirs_accessible(
 
 #[cfg(test)]
 mod tests {
-    use super::{BootstrapError, DouglasService, State, create_plan, liveness_check, require_liveness};
+    use super::{
+        BootstrapError, DouglasService, State, create_plan, liveness_check, require_liveness,
+    };
     use blueprint::{
         listener::LivenessCheck,
         service::{BootstrapReporting, ServiceDefinition, ServiceState, ServiceUser},
@@ -825,6 +827,8 @@ mod tests {
 
         let result = liveness_check("not-a-real-service", &douglas_folders);
 
-        assert!(matches!(result, Err(BootstrapError::UnknownService(name)) if name == "not-a-real-service"));
+        assert!(
+            matches!(result, Err(BootstrapError::UnknownService(name)) if name == "not-a-real-service")
+        );
     }
 }

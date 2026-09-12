@@ -45,8 +45,8 @@ pub trait Client: Send + Sync {
         name: &Name,
         user_seedling_definition: &UserSeedlingDefinition,
     ) -> Result<String, Error>;
-    async fn find_orphans(&self) -> Result<bract_types::Orphans, Error>;
-    async fn prune_orphans(&self, orphans: &bract_types::Orphans) -> Result<(), Error>;
+    async fn find_deadwood(&self) -> Result<bract_types::Deadwood, Error>;
+    async fn prune_deadwood(&self, deadwood: &bract_types::Deadwood) -> Result<(), Error>;
     async fn list_seedlings(&self) -> Result<Vec<Name>, Error>;
     async fn openbao_status(&self) -> Result<bract_types::OpenBaoReport, Error>;
 }
@@ -262,30 +262,30 @@ impl Client for UdsClient {
         })
     }
 
-    async fn find_orphans(&self) -> Result<bract_types::Orphans, Error> {
+    async fn find_deadwood(&self) -> Result<bract_types::Deadwood, Error> {
         let guard = Span::new(
             Arc::clone(&self.reporter),
-            "Finding orphans",
+            "Finding deadwood",
             ScopeKind::Task,
         )
         .start_guard();
 
-        let response = match self.request(guard.span(), Request::FindOrphans).await {
+        let response = match self.request(guard.span(), Request::FindDeadwood).await {
             Ok(response) => response,
             Err(err) => return guard.finish(Err(err)),
         };
 
         guard.finish(match response {
-            bract_types::Response::Orphans(orphans) => Ok(orphans),
+            bract_types::Response::Deadwood(deadwood) => Ok(deadwood),
             bract_types::Response::Error { message } => Err(Error::ServerError(message)),
             unexpected => Err(Error::UnexpectedResponse(Box::new(unexpected))),
         })
     }
 
-    async fn prune_orphans(&self, orphans: &bract_types::Orphans) -> Result<(), Error> {
+    async fn prune_deadwood(&self, deadwood: &bract_types::Deadwood) -> Result<(), Error> {
         let guard = Span::new(
             Arc::clone(&self.reporter),
-            "Pruning orphans",
+            "Pruning deadwood",
             ScopeKind::Task,
         )
         .start_guard();
@@ -293,8 +293,8 @@ impl Client for UdsClient {
         let response = match self
             .request(
                 guard.span(),
-                Request::PruneOrphans {
-                    orphans: orphans.clone(),
+                Request::PruneDeadwood {
+                    deadwood: deadwood.clone(),
                 },
             )
             .await

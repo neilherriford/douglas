@@ -46,14 +46,16 @@ pub async fn handle(
             Ok(message) => Response::Created { message },
             Err(err) => error_response(err),
         },
-        Request::FindOrphans => match server.find_orphans(reporter).await {
-            Ok(orphans) => Response::Orphans(orphans),
+        Request::FindDeadwood => match server.find_deadwood(reporter).await {
+            Ok(deadwood) => Response::Deadwood(deadwood),
             Err(err) => error_response(err),
         },
-        Request::PruneOrphans { orphans } => match server.prune_orphans(reporter, &orphans).await {
-            Ok(()) => Response::Pruned,
-            Err(err) => error_response(err),
-        },
+        Request::PruneDeadwood { deadwood } => {
+            match server.prune_deadwood(reporter, &deadwood).await {
+                Ok(()) => Response::Pruned,
+                Err(err) => error_response(err),
+            }
+        }
         Request::ListSeedlings => match server.list_seedlings(reporter).await {
             Ok(names) => Response::Seedlings { names },
             Err(err) => error_response(err),

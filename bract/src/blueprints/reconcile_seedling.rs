@@ -879,7 +879,10 @@ impl<'a> Command<Context<'a>> for SetDesiredRunStatusToRunning {
 
         context
             .seedbank_client
-            .set_desired_run_status(&self.seedling_name, seedbank_types::DesiredRunStatus::Running)
+            .set_desired_run_status(
+                &self.seedling_name,
+                seedbank_types::DesiredRunStatus::Running,
+            )
             .await?;
         guard.finish(Ok(()))
     }

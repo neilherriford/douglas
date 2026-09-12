@@ -53,6 +53,7 @@ bract_client = { workspace = true, features = ["mock"] }
 file_system = { workspace = true, features = ["mock"] }
 identity = { workspace = true, features = ["mock"] }
 openbao = { workspace = true, features = ["mock"] }
+os = { workspace = true, features = ["mock"] }
 
 [workspace]
 members = [

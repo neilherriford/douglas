@@ -4,11 +4,11 @@ use std::path::PathBuf;
 
 pub mod bootstrap;
 pub(crate) mod drop_seedling;
-pub(crate) mod find_orphans;
+pub(crate) mod find_deadwood;
 pub(crate) mod new_seedling;
 pub(crate) mod openbao_status;
 pub(crate) mod provision_seedling_secrets;
-pub(crate) mod prune_orphans;
+pub(crate) mod prune_deadwood;
 pub(crate) mod reconcile_seedling;
 pub(crate) mod rotate_seedling_logs;
 pub(crate) mod start_seedling;

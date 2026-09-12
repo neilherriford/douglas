@@ -120,7 +120,10 @@ async fn bootstrap_with_reporter(
         Err(err) => return guard.finish(Err(BootstrapError::from(err))),
     };
 
-    let plan = match resolve_plan(guard.span(), create_plan(&definition, state, douglas_folders)) {
+    let plan = match resolve_plan(
+        guard.span(),
+        create_plan(&definition, state, douglas_folders),
+    ) {
         Ok(plan) => plan,
         Err(err) => return guard.finish(Err(err)),
     };
@@ -255,7 +258,9 @@ pub fn service_definition(douglas_folders: &DouglasFolders) -> ServiceDefinition
         ],
         &[],
         BootstrapReporting::Pipe,
-        Some(LivenessCheck::UnixSocket(douglas_folders.socket_file(BRACT))),
+        Some(LivenessCheck::UnixSocket(
+            douglas_folders.socket_file(BRACT),
+        )),
     )
 }
 
@@ -1006,7 +1011,7 @@ mod tests {
 
     #[test]
     fn test_create_plan_should_ensure_the_directory_and_validate_when_the_file_is_present_and_correct()
-    {
+     {
         let douglas_folders = DouglasFolders::new();
         let definition = service_definition(&douglas_folders);
 
@@ -1017,8 +1022,7 @@ mod tests {
             ..bootstrappable_state()
         };
 
-        let plan = create_plan(&definition, state, &douglas_folders)
-            .expect("plan should resolve");
+        let plan = create_plan(&definition, state, &douglas_folders).expect("plan should resolve");
 
         assert_eq!(
             step_descriptions(&plan),
@@ -1041,8 +1045,7 @@ mod tests {
             ..bootstrappable_state()
         };
 
-        let plan = create_plan(&definition, state, &douglas_folders)
-            .expect("plan should resolve");
+        let plan = create_plan(&definition, state, &douglas_folders).expect("plan should resolve");
 
         assert!(plan.is_empty());
     }

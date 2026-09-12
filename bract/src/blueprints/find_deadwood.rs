@@ -3,7 +3,7 @@ use crate::blueprints::{
     TRAEFIK_SEEDLING_NAME, openbao_socket_path, seedling_name_from_agent_prefixed,
     seedling_name_from_doug_prefixed, traefik_dynamic_dir,
 };
-use bract_types::Orphans;
+use bract_types::Deadwood;
 use config::DouglasFolders;
 use file_system::{FileReader, FileSystemError, Folder};
 use identity::Identity;
@@ -12,7 +12,7 @@ use std::collections::HashSet;
 use thiserror::Error;
 
 #[derive(Error, Debug)]
-pub enum FindOrphansError {
+pub enum FindDeadwoodError {
     #[error("Seedbank error: {0}")]
     Seedbank(#[from] seedbank_client::Error),
     #[error("Docker error: {0}")]
@@ -34,7 +34,7 @@ pub async fn execute(
     openbao_client_factory: &dyn openbao::ClientFactory,
     file_reader: &dyn FileReader,
     identity: &mut dyn Identity,
-) -> Result<Orphans, FindOrphansError> {
+) -> Result<Deadwood, FindDeadwoodError> {
     let seedling_names = seedbank_client.list().await?;
     let seedbank_names = protect_core_seedling_names(
         seedling_names
@@ -78,7 +78,7 @@ pub async fn execute(
     )
     .await;
 
-    Ok(compute_orphans(
+    Ok(compute_deadwood(
         &seedbank_names,
         &known_image_repositories,
         &container_names,
@@ -115,7 +115,7 @@ fn seedling_names_from_live_containers(
 fn list_mount_names(
     folder: &dyn Folder,
     douglas_folders: &DouglasFolders,
-) -> Result<Vec<Name>, FindOrphansError> {
+) -> Result<Vec<Name>, FindDeadwoodError> {
     let mounts_dir = douglas_folders.seedling_mounts();
 
     if !folder.exists(&mounts_dir) {
@@ -170,7 +170,7 @@ async fn list_openbao_secret_names(
 fn list_route_file_names(
     folder: &dyn Folder,
     douglas_folders: &DouglasFolders,
-) -> Result<Vec<Name>, FindOrphansError> {
+) -> Result<Vec<Name>, FindDeadwoodError> {
     let dynamic_dir = traefik_dynamic_dir(douglas_folders)?;
 
     if !folder.exists(&dynamic_dir) {
@@ -185,7 +185,7 @@ fn list_route_file_names(
         .collect())
 }
 
-fn compute_orphans(
+fn compute_deadwood(
     seedbank_names: &HashSet<String>,
     known_image_repositories: &HashSet<String>,
     container_names: &[Name],
@@ -194,8 +194,8 @@ fn compute_orphans(
     resin_repository_names: &[String],
     mount_names: &[Name],
     openbao_secret_names: &[Name],
-) -> Orphans {
-    Orphans {
+) -> Deadwood {
+    Deadwood {
         containers: not_in(seedbank_names, container_names),
         networks: not_in(seedbank_names, network_names),
         route_files: not_in(seedbank_names, route_file_names),
@@ -266,11 +266,11 @@ mod tests {
     }
 
     #[test]
-    fn test_compute_orphans_should_never_flag_a_core_seedling_missing_from_seedbank() {
+    fn test_compute_deadwood_should_never_flag_a_core_seedling_missing_from_seedbank() {
         let seedbank = protect_core_seedling_names(seedbank_names(&[]));
         let repos = known_repos(&[]);
 
-        let result = compute_orphans(
+        let result = compute_deadwood(
             &seedbank,
             &repos,
             &[name("traefik"), name("openbao")],
@@ -288,11 +288,11 @@ mod tests {
     }
 
     #[test]
-    fn test_compute_orphans_should_be_empty_when_everything_is_known() {
+    fn test_compute_deadwood_should_be_empty_when_everything_is_known() {
         let seedbank = seedbank_names(&["hello-world"]);
         let repos = known_repos(&["hello-world"]);
 
-        let result = compute_orphans(
+        let result = compute_deadwood(
             &seedbank,
             &repos,
             &[name("hello-world")],
@@ -307,42 +307,42 @@ mod tests {
     }
 
     #[test]
-    fn test_compute_orphans_should_find_a_container_with_no_seedbank_record() {
+    fn test_compute_deadwood_should_find_a_container_with_no_seedbank_record() {
         let seedbank = seedbank_names(&[]);
         let repos = known_repos(&[]);
 
-        let result = compute_orphans(&seedbank, &repos, &[name("stale")], &[], &[], &[], &[], &[]);
+        let result = compute_deadwood(&seedbank, &repos, &[name("stale")], &[], &[], &[], &[], &[]);
 
         assert_eq!(result.containers, vec![name("stale")]);
         assert!(result.networks.is_empty());
     }
 
     #[test]
-    fn test_compute_orphans_should_find_a_network_with_no_seedbank_record() {
+    fn test_compute_deadwood_should_find_a_network_with_no_seedbank_record() {
         let seedbank = seedbank_names(&[]);
         let repos = known_repos(&[]);
 
-        let result = compute_orphans(&seedbank, &repos, &[], &[name("stale")], &[], &[], &[], &[]);
+        let result = compute_deadwood(&seedbank, &repos, &[], &[name("stale")], &[], &[], &[], &[]);
 
         assert_eq!(result.networks, vec![name("stale")]);
     }
 
     #[test]
-    fn test_compute_orphans_should_find_a_route_file_with_no_seedbank_record() {
+    fn test_compute_deadwood_should_find_a_route_file_with_no_seedbank_record() {
         let seedbank = seedbank_names(&[]);
         let repos = known_repos(&[]);
 
-        let result = compute_orphans(&seedbank, &repos, &[], &[], &[name("stale")], &[], &[], &[]);
+        let result = compute_deadwood(&seedbank, &repos, &[], &[], &[name("stale")], &[], &[], &[]);
 
         assert_eq!(result.route_files, vec![name("stale")]);
     }
 
     #[test]
-    fn test_compute_orphans_should_find_a_resin_repository_with_no_matching_seedling_image() {
+    fn test_compute_deadwood_should_find_a_resin_repository_with_no_matching_seedling_image() {
         let seedbank = seedbank_names(&[]);
         let repos = known_repos(&[]);
 
-        let result = compute_orphans(
+        let result = compute_deadwood(
             &seedbank,
             &repos,
             &[],
@@ -357,11 +357,11 @@ mod tests {
     }
 
     #[test]
-    fn test_compute_orphans_should_flag_a_namespaced_resin_repository_as_orphaned() {
+    fn test_compute_deadwood_should_flag_a_namespaced_resin_repository_as_deadwood() {
         let seedbank = seedbank_names(&["hello-world"]);
         let repos = known_repos(&["hello-world"]);
 
-        let result = compute_orphans(
+        let result = compute_deadwood(
             &seedbank,
             &repos,
             &[],
@@ -379,11 +379,11 @@ mod tests {
     }
 
     #[test]
-    fn test_compute_orphans_should_not_flag_a_registered_seedlings_own_pulled_image_repository() {
+    fn test_compute_deadwood_should_not_flag_a_registered_seedlings_own_pulled_image_repository() {
         let seedbank = seedbank_names(&["openbao"]);
         let repos = known_repos(&["openbao/openbao"]);
 
-        let result = compute_orphans(
+        let result = compute_deadwood(
             &seedbank,
             &repos,
             &[],
@@ -398,21 +398,21 @@ mod tests {
     }
 
     #[test]
-    fn test_compute_orphans_should_find_a_mount_dir_with_no_seedbank_record() {
+    fn test_compute_deadwood_should_find_a_mount_dir_with_no_seedbank_record() {
         let seedbank = seedbank_names(&[]);
         let repos = known_repos(&[]);
 
-        let result = compute_orphans(&seedbank, &repos, &[], &[], &[], &[], &[name("stale")], &[]);
+        let result = compute_deadwood(&seedbank, &repos, &[], &[], &[], &[], &[name("stale")], &[]);
 
         assert_eq!(result.mounts, vec![name("stale")]);
     }
 
     #[test]
-    fn test_compute_orphans_should_find_an_openbao_secret_with_no_seedbank_record() {
+    fn test_compute_deadwood_should_find_an_openbao_secret_with_no_seedbank_record() {
         let seedbank = seedbank_names(&[]);
         let repos = known_repos(&[]);
 
-        let result = compute_orphans(&seedbank, &repos, &[], &[], &[], &[], &[], &[name("stale")]);
+        let result = compute_deadwood(&seedbank, &repos, &[], &[], &[], &[], &[], &[name("stale")]);
 
         assert_eq!(result.openbao_secrets, vec![name("stale")]);
     }

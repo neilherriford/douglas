@@ -72,10 +72,10 @@ pub enum Error {
     NewSeedlingError(#[from] blueprints::new_seedling::NewSeedlingError),
     #[error("Failed to write traefik routes: {0}")]
     WriteTraefikRoutesError(#[from] blueprints::write_traefik_routes::WriteTraefikRoutesError),
-    #[error("Failed to find orphans: {0}")]
-    FindOrphansError(#[from] blueprints::find_orphans::FindOrphansError),
-    #[error("Failed to prune orphans: {0}")]
-    PruneOrphansError(#[from] blueprints::prune_orphans::PruneOrphansError),
+    #[error("Failed to find deadwood: {0}")]
+    FindDeadwoodError(#[from] blueprints::find_deadwood::FindDeadwoodError),
+    #[error("Failed to prune deadwood: {0}")]
+    PruneDeadwoodError(#[from] blueprints::prune_deadwood::PruneDeadwoodError),
     #[error("Failed to determine OpenBao status: {0}")]
     OpenBaoStatusError(#[from] blueprints::openbao_status::OpenBaoStatusError),
     #[error("Failed to provision seedling secrets: {0}")]
@@ -126,14 +126,14 @@ pub trait Server: Send + Sync {
         name: &seedbank_types::Name,
         user_seedling_definition: &seedbank_types::UserSeedlingDefinition,
     ) -> Result<String, Error>;
-    async fn find_orphans(
+    async fn find_deadwood(
         &self,
         reporter: Arc<dyn Reporter>,
-    ) -> Result<bract_types::Orphans, Error>;
-    async fn prune_orphans(
+    ) -> Result<bract_types::Deadwood, Error>;
+    async fn prune_deadwood(
         &self,
         reporter: Arc<dyn Reporter>,
-        orphans: &bract_types::Orphans,
+        deadwood: &bract_types::Deadwood,
     ) -> Result<(), Error>;
     async fn list_seedlings(&self, reporter: Arc<dyn Reporter>) -> Result<Vec<Name>, Error>;
     async fn openbao_status(
@@ -893,10 +893,10 @@ impl Server for Bract {
         .map_err(Error::from)
     }
 
-    async fn find_orphans(
+    async fn find_deadwood(
         &self,
         reporter: Arc<dyn Reporter>,
-    ) -> Result<bract_types::Orphans, Error> {
+    ) -> Result<bract_types::Deadwood, Error> {
         let mut resin_client = self
             .resin_client_builder
             .build(Arc::clone(&reporter))
@@ -908,7 +908,7 @@ impl Server for Bract {
             Arc::clone(&self.file_writer),
         );
 
-        blueprints::find_orphans::execute(
+        blueprints::find_deadwood::execute(
             self.seedbank_client.as_ref(),
             self.docker_client.as_ref(),
             resin_client.as_mut(),
@@ -922,10 +922,10 @@ impl Server for Bract {
         .map_err(Error::from)
     }
 
-    async fn prune_orphans(
+    async fn prune_deadwood(
         &self,
         reporter: Arc<dyn Reporter>,
-        orphans: &bract_types::Orphans,
+        deadwood: &bract_types::Deadwood,
     ) -> Result<(), Error> {
         let mut resin_client = self
             .resin_client_builder
@@ -938,7 +938,7 @@ impl Server for Bract {
             Arc::clone(&self.file_writer),
         );
 
-        blueprints::prune_orphans::execute(
+        blueprints::prune_deadwood::execute(
             reporter,
             self.docker_client.as_ref(),
             resin_client.as_mut(),
@@ -948,7 +948,7 @@ impl Server for Bract {
             self.file_reader.as_ref(),
             &mut identity,
             &self.douglas_folders,
-            orphans,
+            deadwood,
         )
         .await
         .map_err(Error::from)

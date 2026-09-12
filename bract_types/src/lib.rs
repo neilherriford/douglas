@@ -53,7 +53,7 @@ impl std::fmt::Display for SeedlingStatus {
 }
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct Orphans {
+pub struct Deadwood {
     pub containers: Vec<Name>,
     pub networks: Vec<Name>,
     pub route_files: Vec<Name>,
@@ -62,7 +62,7 @@ pub struct Orphans {
     pub openbao_secrets: Vec<Name>,
 }
 
-impl Orphans {
+impl Deadwood {
     pub fn is_empty(&self) -> bool {
         self.containers.is_empty()
             && self.networks.is_empty()
@@ -114,9 +114,9 @@ pub enum Request {
         name: Name,
         user_seedling_definition: UserSeedlingDefinition,
     },
-    FindOrphans,
-    PruneOrphans {
-        orphans: Orphans,
+    FindDeadwood,
+    PruneDeadwood {
+        deadwood: Deadwood,
     },
     ListSeedlings,
     OpenBaoStatus,
@@ -131,7 +131,7 @@ pub enum Response {
     Started,
     Stopped,
     Dropped,
-    Orphans(Orphans),
+    Deadwood(Deadwood),
     Pruned,
     Seedlings { names: Vec<Name> },
     OpenBaoStatus(OpenBaoReport),
@@ -149,7 +149,7 @@ impl std::fmt::Display for Response {
             Response::Started => f.write_str("started"),
             Response::Stopped => f.write_str("stopped"),
             Response::Dropped => f.write_str("dropped"),
-            Response::Orphans(_) => f.write_str("orphans"),
+            Response::Deadwood(_) => f.write_str("deadwood"),
             Response::Pruned => f.write_str("pruned"),
             Response::Seedlings { names } => f.write_str(&format!("{} seedling(s)", names.len())),
             Response::OpenBaoStatus(_) => f.write_str("openbao status"),

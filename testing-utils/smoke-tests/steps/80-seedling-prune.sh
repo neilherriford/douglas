@@ -31,7 +31,7 @@ assert_success "delete orphan-app's seedbank record directly (simulating a lost 
     "sudo rm -rf '$SEED_DIR'"
 
 prune_output="$(ssh_out '~/douglas' seedling prune --yes)"
-assert_contains "prune output lists the orphaned container" "$prune_output" "orphan-app"
+assert_contains "prune output lists the deadwood container" "$prune_output" "orphan-app"
 assert_contains "prune output confirms pruning happened" "$prune_output" "Pruned."
 
 assert_failure "orphan-app container is gone after pruning" ssh_out \
@@ -44,6 +44,6 @@ assert_failure "orphan-app mount dir is gone after pruning" ssh_out \
     "sudo test -e '$MOUNT_DIR'"
 
 rerun_output="$(ssh_out '~/douglas' seedling prune --yes)"
-assert_contains "a second prune finds nothing left to do" "$rerun_output" "No orphans found."
+assert_contains "a second prune finds nothing left to do" "$rerun_output" "No deadwood found."
 
 finish

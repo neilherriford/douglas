@@ -2,7 +2,7 @@ use crate::blueprints::{
     agent_container_name, container_name, openbao_socket_path, seedling_network_name,
     traefik_dynamic_dir,
 };
-use bract_types::Orphans;
+use bract_types::Deadwood;
 use config::DouglasFolders;
 use docker::client::ContainerRef;
 use docker_types::DockerNameError;
@@ -16,7 +16,7 @@ use thiserror::Error;
 use config::seedlings::TRAEFIK as TRAEFIK_SEEDLING_NAME;
 
 #[derive(Error, Debug)]
-pub enum PruneOrphansError {
+pub enum PruneDeadwoodError {
     #[error("Docker error: {0}")]
     Docker(#[from] docker::DockerError),
     #[error("Docker name error: {0}")]
@@ -47,9 +47,9 @@ pub async fn execute(
     file_reader: &dyn FileReader,
     identity: &mut dyn Identity,
     douglas_folders: &DouglasFolders,
-    orphans: &Orphans,
-) -> Result<(), PruneOrphansError> {
-    let guard = Span::new(Arc::clone(&reporter), "Pruning orphans", ScopeKind::Task).start_guard();
+    deadwood: &Deadwood,
+) -> Result<(), PruneDeadwoodError> {
+    let guard = Span::new(Arc::clone(&reporter), "Pruning deadwood", ScopeKind::Task).start_guard();
 
     let result = prune(
         docker_client,
@@ -60,7 +60,7 @@ pub async fn execute(
         file_reader,
         identity,
         douglas_folders,
-        orphans,
+        deadwood,
     )
     .await;
 
@@ -79,9 +79,9 @@ async fn prune(
     file_reader: &dyn FileReader,
     identity: &mut dyn Identity,
     douglas_folders: &DouglasFolders,
-    orphans: &Orphans,
-) -> Result<(), PruneOrphansError> {
-    for name in &orphans.containers {
+    deadwood: &Deadwood,
+) -> Result<(), PruneDeadwoodError> {
+    for name in &deadwood.containers {
         let container = container_name(name)?;
         let _ = docker_client
             .stop_container(ContainerRef::FullName(container.clone()))
@@ -107,15 +107,15 @@ async fn prune(
         }
     }
 
-    for name in &orphans.networks {
+    for name in &deadwood.networks {
         disconnect_traefik(docker_client, name).await?;
         let network = seedling_network_name(name)?;
         docker_client.delete_network(&network).await?;
     }
 
-    if !orphans.route_files.is_empty() {
+    if !deadwood.route_files.is_empty() {
         let dynamic_dir = traefik_dynamic_dir(douglas_folders)?;
-        for name in &orphans.route_files {
+        for name in &deadwood.route_files {
             disconnect_traefik(docker_client, name).await?;
             let mut path = dynamic_dir.clone();
             path.push(format!("{name}.yml"));
@@ -123,19 +123,19 @@ async fn prune(
         }
     }
 
-    for name in &orphans.resin_repositories {
+    for name in &deadwood.resin_repositories {
         let Ok(resin_name) = name.parse::<resin_types::Name>() else {
             continue;
         };
         resin_client.delete_repository(&resin_name).await?;
     }
 
-    for name in &orphans.mounts {
+    for name in &deadwood.mounts {
         let mounts_dir = douglas_folders.seedling_mounts_dir(name.as_ref());
         folder_deleter.delete(&mounts_dir)?;
     }
 
-    if !orphans.openbao_secrets.is_empty() {
+    if !deadwood.openbao_secrets.is_empty() {
         let socket_path = openbao_socket_path(douglas_folders);
         let mut openbao_client = openbao_client_factory.build(&socket_path).await?;
         let admin_token = openbao::app_role::login(
@@ -146,7 +146,7 @@ async fn prune(
         )
         .await?;
 
-        for name in &orphans.openbao_secrets {
+        for name in &deadwood.openbao_secrets {
             crate::blueprints::provision_seedling_secrets::revoke(
                 openbao_client.as_mut(),
                 &admin_token,
@@ -162,7 +162,7 @@ async fn prune(
 async fn disconnect_traefik(
     docker_client: &dyn docker::client::Client,
     seedling_name: &seedbank_types::Name,
-) -> Result<(), PruneOrphansError> {
+) -> Result<(), PruneDeadwoodError> {
     let traefik_name: seedbank_types::Name = TRAEFIK_SEEDLING_NAME.parse()?;
     let traefik_container = container_name(&traefik_name)?;
     let seedling_network = seedling_network_name(seedling_name)?;
@@ -191,7 +191,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_prune_should_stop_and_delete_orphaned_containers() {
+    async fn test_prune_should_stop_and_delete_deadwood_containers() {
         let mut docker_client = MockClient::new();
         docker_client
             .expect_stop_container()
@@ -218,9 +218,9 @@ mod tests {
             })
             .returning(|_| Err(docker::DockerError::ResourceNotFound));
 
-        let orphans = Orphans {
+        let deadwood = Deadwood {
             containers: vec![name("stale")],
-            ..Orphans::default()
+            ..Deadwood::default()
         };
 
         let result = prune(
@@ -232,7 +232,7 @@ mod tests {
             &MockFileReader::new(),
             &mut MockIdentity::new(),
             &DouglasFolders::new(),
-            &orphans,
+            &deadwood,
         )
         .await;
 
@@ -249,9 +249,9 @@ mod tests {
             .expect_delete_container()
             .returning(|_| Ok(()));
 
-        let orphans = Orphans {
+        let deadwood = Deadwood {
             containers: vec![name("stale")],
-            ..Orphans::default()
+            ..Deadwood::default()
         };
 
         let result = prune(
@@ -263,7 +263,7 @@ mod tests {
             &MockFileReader::new(),
             &mut MockIdentity::new(),
             &DouglasFolders::new(),
-            &orphans,
+            &deadwood,
         )
         .await;
 
@@ -271,7 +271,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_prune_should_also_stop_and_delete_an_orphaned_agent_container() {
+    async fn test_prune_should_also_stop_and_delete_an_deadwood_agent_container() {
         let mut docker_client = MockClient::new();
         docker_client
             .expect_stop_container()
@@ -298,9 +298,9 @@ mod tests {
             })
             .returning(|_| Ok(()));
 
-        let orphans = Orphans {
+        let deadwood = Deadwood {
             containers: vec![name("stale")],
-            ..Orphans::default()
+            ..Deadwood::default()
         };
 
         let result = prune(
@@ -312,7 +312,7 @@ mod tests {
             &MockFileReader::new(),
             &mut MockIdentity::new(),
             &DouglasFolders::new(),
-            &orphans,
+            &deadwood,
         )
         .await;
 
@@ -320,7 +320,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_prune_should_disconnect_traefik_before_deleting_orphaned_networks() {
+    async fn test_prune_should_disconnect_traefik_before_deleting_deadwood_networks() {
         let mut docker_client = MockClient::new();
         docker_client
             .expect_disconnect_network()
@@ -334,9 +334,9 @@ mod tests {
             .withf(|network| network.as_ref() == "doug.stale")
             .returning(|_| Ok(()));
 
-        let orphans = Orphans {
+        let deadwood = Deadwood {
             networks: vec![name("stale")],
-            ..Orphans::default()
+            ..Deadwood::default()
         };
 
         let result = prune(
@@ -348,7 +348,7 @@ mod tests {
             &MockFileReader::new(),
             &mut MockIdentity::new(),
             &DouglasFolders::new(),
-            &orphans,
+            &deadwood,
         )
         .await;
 
@@ -356,7 +356,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_prune_should_disconnect_traefik_before_deleting_orphaned_route_files() {
+    async fn test_prune_should_disconnect_traefik_before_deleting_deadwood_route_files() {
         let douglas_folders = DouglasFolders::new();
         let expected_path = traefik_dynamic_dir(&douglas_folders)
             .expect("should build a dynamic dir path")
@@ -377,9 +377,9 @@ mod tests {
             .withf(move |path| path == expected_path)
             .returning(|_| Ok(()));
 
-        let orphans = Orphans {
+        let deadwood = Deadwood {
             route_files: vec![name("stale")],
-            ..Orphans::default()
+            ..Deadwood::default()
         };
 
         let result = prune(
@@ -391,7 +391,7 @@ mod tests {
             &MockFileReader::new(),
             &mut MockIdentity::new(),
             &douglas_folders,
-            &orphans,
+            &deadwood,
         )
         .await;
 
@@ -399,7 +399,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_prune_should_tolerate_traefik_already_disconnected_when_a_name_is_orphaned_as_both_a_network_and_a_route_file()
+    async fn test_prune_should_tolerate_traefik_already_disconnected_when_a_name_is_deadwood_as_both_a_network_and_a_route_file()
      {
         let douglas_folders = DouglasFolders::new();
         let expected_path = traefik_dynamic_dir(&douglas_folders)
@@ -437,10 +437,10 @@ mod tests {
             .withf(move |path| path == expected_path)
             .returning(|_| Ok(()));
 
-        let orphans = Orphans {
+        let deadwood = Deadwood {
             networks: vec![name("stale")],
             route_files: vec![name("stale")],
-            ..Orphans::default()
+            ..Deadwood::default()
         };
 
         let result = prune(
@@ -452,7 +452,7 @@ mod tests {
             &MockFileReader::new(),
             &mut MockIdentity::new(),
             &douglas_folders,
-            &orphans,
+            &deadwood,
         )
         .await;
 
@@ -460,16 +460,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_prune_should_delete_orphaned_resin_repositories() {
+    async fn test_prune_should_delete_deadwood_resin_repositories() {
         let mut resin_client = MockResinClient::new();
         resin_client
             .expect_delete_repository()
             .withf(|name| name.to_string() == "stale")
             .returning(|_| Ok(()));
 
-        let orphans = Orphans {
+        let deadwood = Deadwood {
             resin_repositories: vec!["stale".to_string()],
-            ..Orphans::default()
+            ..Deadwood::default()
         };
 
         let result = prune(
@@ -481,7 +481,7 @@ mod tests {
             &MockFileReader::new(),
             &mut MockIdentity::new(),
             &DouglasFolders::new(),
-            &orphans,
+            &deadwood,
         )
         .await;
 
@@ -490,9 +490,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_prune_should_skip_a_resin_repository_name_that_does_not_parse() {
-        let orphans = Orphans {
+        let deadwood = Deadwood {
             resin_repositories: vec!["Not-A-Valid-Name!".to_string()],
-            ..Orphans::default()
+            ..Deadwood::default()
         };
 
         let result = prune(
@@ -504,7 +504,7 @@ mod tests {
             &MockFileReader::new(),
             &mut MockIdentity::new(),
             &DouglasFolders::new(),
-            &orphans,
+            &deadwood,
         )
         .await;
 
@@ -512,7 +512,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_prune_should_delete_orphaned_mount_directories() {
+    async fn test_prune_should_delete_deadwood_mount_directories() {
         let douglas_folders = DouglasFolders::new();
         let expected_path = douglas_folders.seedling_mounts_dir("stale");
 
@@ -522,9 +522,9 @@ mod tests {
             .withf(move |path| path == expected_path)
             .returning(|_| Ok(()));
 
-        let orphans = Orphans {
+        let deadwood = Deadwood {
             mounts: vec![name("stale")],
-            ..Orphans::default()
+            ..Deadwood::default()
         };
 
         let result = prune(
@@ -536,7 +536,7 @@ mod tests {
             &MockFileReader::new(),
             &mut MockIdentity::new(),
             &douglas_folders,
-            &orphans,
+            &deadwood,
         )
         .await;
 
@@ -544,7 +544,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_prune_should_revoke_orphaned_openbao_secrets() {
+    async fn test_prune_should_revoke_deadwood_openbao_secrets() {
         let mut file_reader = MockFileReader::new();
         file_reader.expect_exists().returning(|_| true);
         file_reader
@@ -576,9 +576,9 @@ mod tests {
             .expect_build()
             .return_once(move |_| Ok(Box::new(openbao_client)));
 
-        let orphans = Orphans {
+        let deadwood = Deadwood {
             openbao_secrets: vec![name("stale")],
-            ..Orphans::default()
+            ..Deadwood::default()
         };
 
         let result = prune(
@@ -590,7 +590,7 @@ mod tests {
             &file_reader,
             &mut identity,
             &DouglasFolders::new(),
-            &orphans,
+            &deadwood,
         )
         .await;
 
