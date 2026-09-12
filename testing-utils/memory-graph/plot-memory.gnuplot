@@ -42,13 +42,18 @@ set key outside right top title "service (avg / median RSS)"
 set grid
 set style fill solid 0.85 border -1
 
-series = "bract resin seedbank traefik openbao hello-world secrets secrets-agent"
+series = "bract resin seedbank woodward traefik openbao hello-world secrets secrets-agent"
 n = words(series)
+
+# Hardcoded palette (in series order) — the default gnuplot colors were
+# hard to tell apart band-to-band on the stacked chart.
+colors = "#ff7f00 #a6cee3 #1f78b4 #b2df8a #33a02c #fb9a99 #e31a1c #fdbf6f #cab2d6"
+color_for(i) = word(colors, i)
 
 data = "< awk -f stack-memory.awk -v order='".series."' ".csv
 
 stats_for(name) = system("awk -f series-stats.awk -v name='".name."' ".csv)
 label_for(name) = name." (avg ".word(stats_for(name), 1)." / med ".word(stats_for(name), 2)." MiB)"
 
-plot for [i=n:1:-1] data using 1:(column(i + 1)) with filledcurves y1=0 \
+plot for [i=n:1:-1] data using 1:(column(i + 1)) with filledcurves y1=0 lc rgb color_for(i) \
     title label_for(word(series, i))

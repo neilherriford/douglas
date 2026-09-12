@@ -23,12 +23,6 @@
 # steps for everything short of the actual build (which needs --release
 # here, not the smoke suite's debug build).
 #
-# woodward itself isn't a row here: today it's a library bract/resin/
-# seedbank each link in and run as an internal task, not a standalone
-# process — its overhead already shows up inside their own RSS. Once M1's
-# external heartbeat reader/restarter exists as its own process, add it to
-# CORE_PROCESSES below like any other host process.
-#
 # Usage:
 #   ./measure-memory.sh                              # full provision + 5min sample, starting pre-launch
 #   DURATION_SECONDS=1800 ./measure-memory.sh         # 30min sample window (still starts pre-launch)
@@ -65,6 +59,7 @@ CORE_PROCESSES=(
     "bract:bract"
     "resin:resin"
     "seedbank:seedbank"
+    "woodward:woodward"
 )
 
 # "container-name:series-name" — core containers first, then every seedling
@@ -151,17 +146,25 @@ to_bytes() {
 }
 
 sample_processes() {
-    local remote_script='
-for suffix in bract resin seedbank; do
-    pid=$(pgrep -f "[s]ervice $suffix" | head -1)
-    if [ -n "$pid" ]; then
-        rss_kb=$(ps -o rss= -p "$pid" 2>/dev/null | tr -d " ")
+    local suffixes=()
+    local entry
+    for entry in "${CORE_PROCESSES[@]}"; do
+        suffixes+=("${entry%%:*}")
+    done
+    local suffixes_str="${suffixes[*]}"
+
+    local remote_script="
+for suffix in $suffixes_str; do
+    pid=\$(pgrep -f \"[s]ervice \$suffix\" | head -1)
+    if [ -n \"\$pid\" ]; then
+        rss_kb=\$(ps -o rss= -p \"\$pid\" 2>/dev/null | tr -d ' ')
     else
-        rss_kb=""
+        rss_kb=\"\"
     fi
-    echo "$suffix:${rss_kb:-0}"
-done'
-    ssh_out bash -c "'$remote_script'"
+    echo \"\$suffix:\${rss_kb:-0}\"
+done"
+    ssh -o LogLevel=ERROR -i "$SSH_KEY" "$VM" bash -s <<<"$remote_script" \
+        | grep -vE '^(🚀|📁|📦|🔧)|^$'
 }
 
 sample_containers() {
@@ -190,7 +193,8 @@ if [ -n \"\$to_check\" ]; then
     docker stats --no-stream --format \"{{.Name}},{{.MemUsage}}\" \$to_check
 fi
 "
-    ssh_out bash -c "'$remote_script'"
+    ssh -o LogLevel=ERROR -i "$SSH_KEY" "$VM" bash -s <<<"$remote_script" \
+        | grep -vE '^(🚀|📁|📦|🔧)|^$'
 }
 
 measure() {
@@ -282,6 +286,12 @@ fi
 
 measure &
 measure_pid=$!
+
+# `measure` runs as a background job, so an interactive Ctrl+C (SIGINT) goes
+# to this script's own foreground process group, not to it — left alone,
+# the sampling loop (and cleanup()) never even sees the interrupt and just
+# keeps going for the full DURATION_SECONDS. Forward it explicitly.
+trap 'echo; echo "Interrupted — stopping sampling..."; kill "$measure_pid" 2>/dev/null; wait "$measure_pid" 2>/dev/null; exit 130' INT TERM
 
 if [ "$SKIP_PROVISION" != "1" ]; then
     if ! provision_post_start; then
