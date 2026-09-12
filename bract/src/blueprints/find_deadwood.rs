@@ -83,14 +83,18 @@ pub async fn execute(deps: Dependencies<'_>) -> Result<Deadwood, FindDeadwoodErr
     .await;
 
     Ok(compute_deadwood(
-        &seedbank_names,
-        &known_image_repositories,
-        &container_names,
-        &network_names,
-        &route_file_names,
-        &resin_repository_names,
-        &mount_names,
-        &openbao_secret_names,
+        Known {
+            seedbank_names: &seedbank_names,
+            image_repositories: &known_image_repositories,
+        },
+        Observed {
+            containers: &container_names,
+            networks: &network_names,
+            route_files: &route_file_names,
+            resin_repositories: &resin_repository_names,
+            mounts: &mount_names,
+            openbao_secrets: &openbao_secret_names,
+        },
     ))
 }
 
@@ -189,27 +193,33 @@ fn list_route_file_names(
         .collect())
 }
 
-fn compute_deadwood(
-    seedbank_names: &HashSet<String>,
-    known_image_repositories: &HashSet<String>,
-    container_names: &[Name],
-    network_names: &[Name],
-    route_file_names: &[Name],
-    resin_repository_names: &[String],
-    mount_names: &[Name],
-    openbao_secret_names: &[Name],
-) -> Deadwood {
+struct Known<'a> {
+    seedbank_names: &'a HashSet<String>,
+    image_repositories: &'a HashSet<String>,
+}
+
+struct Observed<'a> {
+    containers: &'a [Name],
+    networks: &'a [Name],
+    route_files: &'a [Name],
+    resin_repositories: &'a [String],
+    mounts: &'a [Name],
+    openbao_secrets: &'a [Name],
+}
+
+fn compute_deadwood(known: Known<'_>, observed: Observed<'_>) -> Deadwood {
     Deadwood {
-        containers: not_in(seedbank_names, container_names),
-        networks: not_in(seedbank_names, network_names),
-        route_files: not_in(seedbank_names, route_file_names),
-        resin_repositories: resin_repository_names
+        containers: not_in(known.seedbank_names, observed.containers),
+        networks: not_in(known.seedbank_names, observed.networks),
+        route_files: not_in(known.seedbank_names, observed.route_files),
+        resin_repositories: observed
+            .resin_repositories
             .iter()
-            .filter(|name| !known_image_repositories.contains(*name))
+            .filter(|name| !known.image_repositories.contains(*name))
             .cloned()
             .collect(),
-        mounts: not_in(seedbank_names, mount_names),
-        openbao_secrets: not_in(seedbank_names, openbao_secret_names),
+        mounts: not_in(known.seedbank_names, observed.mounts),
+        openbao_secrets: not_in(known.seedbank_names, observed.openbao_secrets),
     }
 }
 
@@ -275,14 +285,18 @@ mod tests {
         let repos = known_repos(&[]);
 
         let result = compute_deadwood(
-            &seedbank,
-            &repos,
-            &[name("traefik"), name("openbao")],
-            &[name("traefik"), name("openbao")],
-            &[name("traefik")],
-            &[],
-            &[name("openbao")],
-            &[],
+            Known {
+                seedbank_names: &seedbank,
+                image_repositories: &repos,
+            },
+            Observed {
+                containers: &[name("traefik"), name("openbao")],
+                networks: &[name("traefik"), name("openbao")],
+                route_files: &[name("traefik")],
+                resin_repositories: &[],
+                mounts: &[name("openbao")],
+                openbao_secrets: &[],
+            },
         );
 
         assert!(result.containers.is_empty());
@@ -297,14 +311,18 @@ mod tests {
         let repos = known_repos(&["hello-world"]);
 
         let result = compute_deadwood(
-            &seedbank,
-            &repos,
-            &[name("hello-world")],
-            &[name("hello-world")],
-            &[name("hello-world")],
-            &["hello-world".to_string()],
-            &[name("hello-world")],
-            &[name("hello-world")],
+            Known {
+                seedbank_names: &seedbank,
+                image_repositories: &repos,
+            },
+            Observed {
+                containers: &[name("hello-world")],
+                networks: &[name("hello-world")],
+                route_files: &[name("hello-world")],
+                resin_repositories: &["hello-world".to_string()],
+                mounts: &[name("hello-world")],
+                openbao_secrets: &[name("hello-world")],
+            },
         );
 
         assert!(result.is_empty());
@@ -315,7 +333,20 @@ mod tests {
         let seedbank = seedbank_names(&[]);
         let repos = known_repos(&[]);
 
-        let result = compute_deadwood(&seedbank, &repos, &[name("stale")], &[], &[], &[], &[], &[]);
+        let result = compute_deadwood(
+            Known {
+                seedbank_names: &seedbank,
+                image_repositories: &repos,
+            },
+            Observed {
+                containers: &[name("stale")],
+                networks: &[],
+                route_files: &[],
+                resin_repositories: &[],
+                mounts: &[],
+                openbao_secrets: &[],
+            },
+        );
 
         assert_eq!(result.containers, vec![name("stale")]);
         assert!(result.networks.is_empty());
@@ -326,7 +357,20 @@ mod tests {
         let seedbank = seedbank_names(&[]);
         let repos = known_repos(&[]);
 
-        let result = compute_deadwood(&seedbank, &repos, &[], &[name("stale")], &[], &[], &[], &[]);
+        let result = compute_deadwood(
+            Known {
+                seedbank_names: &seedbank,
+                image_repositories: &repos,
+            },
+            Observed {
+                containers: &[],
+                networks: &[name("stale")],
+                route_files: &[],
+                resin_repositories: &[],
+                mounts: &[],
+                openbao_secrets: &[],
+            },
+        );
 
         assert_eq!(result.networks, vec![name("stale")]);
     }
@@ -336,7 +380,20 @@ mod tests {
         let seedbank = seedbank_names(&[]);
         let repos = known_repos(&[]);
 
-        let result = compute_deadwood(&seedbank, &repos, &[], &[], &[name("stale")], &[], &[], &[]);
+        let result = compute_deadwood(
+            Known {
+                seedbank_names: &seedbank,
+                image_repositories: &repos,
+            },
+            Observed {
+                containers: &[],
+                networks: &[],
+                route_files: &[name("stale")],
+                resin_repositories: &[],
+                mounts: &[],
+                openbao_secrets: &[],
+            },
+        );
 
         assert_eq!(result.route_files, vec![name("stale")]);
     }
@@ -347,14 +404,18 @@ mod tests {
         let repos = known_repos(&[]);
 
         let result = compute_deadwood(
-            &seedbank,
-            &repos,
-            &[],
-            &[],
-            &[],
-            &["stale".to_string()],
-            &[],
-            &[],
+            Known {
+                seedbank_names: &seedbank,
+                image_repositories: &repos,
+            },
+            Observed {
+                containers: &[],
+                networks: &[],
+                route_files: &[],
+                resin_repositories: &["stale".to_string()],
+                mounts: &[],
+                openbao_secrets: &[],
+            },
         );
 
         assert_eq!(result.resin_repositories, vec!["stale".to_string()]);
@@ -366,14 +427,18 @@ mod tests {
         let repos = known_repos(&["hello-world"]);
 
         let result = compute_deadwood(
-            &seedbank,
-            &repos,
-            &[],
-            &[],
-            &[],
-            &["someone/hello-world".to_string()],
-            &[],
-            &[],
+            Known {
+                seedbank_names: &seedbank,
+                image_repositories: &repos,
+            },
+            Observed {
+                containers: &[],
+                networks: &[],
+                route_files: &[],
+                resin_repositories: &["someone/hello-world".to_string()],
+                mounts: &[],
+                openbao_secrets: &[],
+            },
         );
 
         assert_eq!(
@@ -388,14 +453,18 @@ mod tests {
         let repos = known_repos(&["openbao/openbao"]);
 
         let result = compute_deadwood(
-            &seedbank,
-            &repos,
-            &[],
-            &[],
-            &[],
-            &["openbao/openbao".to_string()],
-            &[],
-            &[],
+            Known {
+                seedbank_names: &seedbank,
+                image_repositories: &repos,
+            },
+            Observed {
+                containers: &[],
+                networks: &[],
+                route_files: &[],
+                resin_repositories: &["openbao/openbao".to_string()],
+                mounts: &[],
+                openbao_secrets: &[],
+            },
         );
 
         assert!(result.resin_repositories.is_empty());
@@ -406,7 +475,20 @@ mod tests {
         let seedbank = seedbank_names(&[]);
         let repos = known_repos(&[]);
 
-        let result = compute_deadwood(&seedbank, &repos, &[], &[], &[], &[], &[name("stale")], &[]);
+        let result = compute_deadwood(
+            Known {
+                seedbank_names: &seedbank,
+                image_repositories: &repos,
+            },
+            Observed {
+                containers: &[],
+                networks: &[],
+                route_files: &[],
+                resin_repositories: &[],
+                mounts: &[name("stale")],
+                openbao_secrets: &[],
+            },
+        );
 
         assert_eq!(result.mounts, vec![name("stale")]);
     }
@@ -416,7 +498,20 @@ mod tests {
         let seedbank = seedbank_names(&[]);
         let repos = known_repos(&[]);
 
-        let result = compute_deadwood(&seedbank, &repos, &[], &[], &[], &[], &[], &[name("stale")]);
+        let result = compute_deadwood(
+            Known {
+                seedbank_names: &seedbank,
+                image_repositories: &repos,
+            },
+            Observed {
+                containers: &[],
+                networks: &[],
+                route_files: &[],
+                resin_repositories: &[],
+                mounts: &[],
+                openbao_secrets: &[name("stale")],
+            },
+        );
 
         assert_eq!(result.openbao_secrets, vec![name("stale")]);
     }
