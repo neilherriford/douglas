@@ -161,20 +161,6 @@ struct StateObserver<'a> {
 }
 
 impl<'a> StateObserver<'a> {
-    pub fn new(
-        credentials: &'a dyn Credentials,
-        environment_variable_reader: &'a dyn EnvironmentVariableReader,
-        folder: &'a dyn Folder,
-        permissions: &'a dyn Permissions,
-    ) -> Self {
-        Self {
-            credentials,
-            environment_variable_reader,
-            folder,
-            permissions,
-        }
-    }
-
     pub fn discover(
         &mut self,
         span: &Span,
@@ -461,16 +447,16 @@ impl<'a> Command<Context<'a>> for WaitForServiceReady {
     }
 }
 
-pub async fn perform(
-    reporter: Arc<dyn Reporter>,
-    plan_only: bool,
-    credentials: Arc<dyn Credentials>,
-    permissions: Arc<dyn Permissions>,
-    environment_variable_reader: Arc<dyn EnvironmentVariableReader>,
-    folder: Arc<dyn Folder>,
-    os: Arc<dyn Os>,
-    douglas_folders: DouglasFolders,
-) -> bool {
+pub(crate) struct Dependencies {
+    pub credentials: Arc<dyn Credentials>,
+    pub permissions: Arc<dyn Permissions>,
+    pub environment_variable_reader: Arc<dyn EnvironmentVariableReader>,
+    pub folder: Arc<dyn Folder>,
+    pub os: Arc<dyn Os>,
+    pub douglas_folders: DouglasFolders,
+}
+
+pub async fn perform(reporter: Arc<dyn Reporter>, plan_only: bool, deps: Dependencies) -> bool {
     let guard = Span::new(
         Arc::clone(&reporter),
         "Starting douglas system",
@@ -478,13 +464,13 @@ pub async fn perform(
     )
     .start_guard();
 
-    let mut state_observer = StateObserver::new(
-        credentials.as_ref(),
-        environment_variable_reader.as_ref(),
-        folder.as_ref(),
-        permissions.as_ref(),
-    );
-    let state = match state_observer.discover(guard.span(), &douglas_folders) {
+    let mut state_observer = StateObserver {
+        credentials: deps.credentials.as_ref(),
+        environment_variable_reader: deps.environment_variable_reader.as_ref(),
+        folder: deps.folder.as_ref(),
+        permissions: deps.permissions.as_ref(),
+    };
+    let state = match state_observer.discover(guard.span(), &deps.douglas_folders) {
         Ok(state) => state,
         Err(err) => {
             guard.span().message(Level::Warn, &err.to_string());
@@ -507,18 +493,20 @@ pub async fn perform(
     }
 
     let mut context = Context {
-        os: os.as_ref(),
-        credentials: credentials.as_ref(),
-        folder: folder.as_ref(),
-        permissions: permissions.as_ref(),
+        os: deps.os.as_ref(),
+        credentials: deps.credentials.as_ref(),
+        folder: deps.folder.as_ref(),
+        permissions: deps.permissions.as_ref(),
         pipes: HashMap::new(),
     };
 
     let result = execute_plan(guard.span(), plan, &mut context, |_reason| ()).await;
 
     if result.is_ok()
-        && let Err(err) =
-            ensure_supervised_heartbeat_dirs_accessible(permissions.as_ref(), &douglas_folders)
+        && let Err(err) = ensure_supervised_heartbeat_dirs_accessible(
+            deps.permissions.as_ref(),
+            &deps.douglas_folders,
+        )
     {
         guard.span().message(Level::Warn, &err.to_string());
         guard.finish_with_outcome(Outcome::Failed);

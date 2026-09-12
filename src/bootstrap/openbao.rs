@@ -113,24 +113,6 @@ struct StateObserver<'a> {
 }
 
 impl<'a> StateObserver<'a> {
-    pub fn new(
-        inspect: &'a dyn Inspect,
-        openbao_client_factory: &'a dyn openbao::ClientFactory,
-        bract_client: &'a dyn bract_client::Client,
-        file_reader: &'a dyn FileReader,
-        identity: &'a mut dyn Identity,
-        douglas_folders: &'a DouglasFolders,
-    ) -> Self {
-        Self {
-            inspect,
-            file_reader,
-            identity,
-            douglas_folders,
-            openbao_client_factory,
-            bract_client,
-        }
-    }
-
     pub async fn discover(&mut self, span: &Span) -> Result<State, OpenBaoError> {
         let guard = span
             .create_child("Checking OpenBao status", ScopeKind::Phase)
@@ -1121,18 +1103,31 @@ impl<'a> Command<Context<'a>> for RevokeAdminToken {
     }
 }
 
-pub async fn perform(
-    reporter: Arc<dyn Reporter>,
-    inspect: Arc<dyn Inspect>,
-    openbao_client_factory: Arc<dyn openbao::ClientFactory>,
-    bract_client: Arc<dyn bract_client::Client>,
-    file_reader: Arc<dyn FileReader>,
-    file_writer: Arc<dyn FileWriter>,
-    file_deleter: Arc<dyn FileDeleter>,
-    permissions: Arc<dyn Permissions>,
-    identity: &mut dyn Identity,
-    douglas_folders: &DouglasFolders,
-) -> bool {
+pub(crate) struct Dependencies<'a> {
+    pub inspect: Arc<dyn Inspect>,
+    pub openbao_client_factory: Arc<dyn openbao::ClientFactory>,
+    pub bract_client: Arc<dyn bract_client::Client>,
+    pub file_reader: Arc<dyn FileReader>,
+    pub file_writer: Arc<dyn FileWriter>,
+    pub file_deleter: Arc<dyn FileDeleter>,
+    pub permissions: Arc<dyn Permissions>,
+    pub identity: &'a mut dyn Identity,
+    pub douglas_folders: &'a DouglasFolders,
+}
+
+pub async fn perform(reporter: Arc<dyn Reporter>, deps: Dependencies<'_>) -> bool {
+    let Dependencies {
+        inspect,
+        openbao_client_factory,
+        bract_client,
+        file_reader,
+        file_writer,
+        file_deleter,
+        permissions,
+        identity,
+        douglas_folders,
+    } = deps;
+
     let guard = Span::new(
         Arc::clone(&reporter),
         "Bootstrapping OpenBao",
@@ -1141,14 +1136,14 @@ pub async fn perform(
     .start_guard();
 
     let state = {
-        let mut state_observer = StateObserver::new(
-            inspect.as_ref(),
-            openbao_client_factory.as_ref(),
-            bract_client.as_ref(),
-            file_reader.as_ref(),
-            identity,
+        let mut state_observer = StateObserver {
+            inspect: inspect.as_ref(),
+            file_reader: file_reader.as_ref(),
+            identity: &mut *identity,
             douglas_folders,
-        );
+            openbao_client_factory: openbao_client_factory.as_ref(),
+            bract_client: bract_client.as_ref(),
+        };
 
         match state_observer.discover(guard.span()).await {
             Ok(state) => state,

@@ -38,12 +38,14 @@ pub(crate) async fn start(plan_only: bool, output_style: Option<OutputStyle>) ->
     let succeeded = bootstrap::system::perform(
         Arc::clone(&reporter),
         plan_only,
-        credentials,
-        permissions,
-        environment_variable_reader,
-        folder,
-        os,
-        douglas_folders.clone(),
+        bootstrap::system::Dependencies {
+            credentials,
+            permissions,
+            environment_variable_reader,
+            folder,
+            os,
+            douglas_folders: douglas_folders.clone(),
+        },
     )
     .await;
 
@@ -96,15 +98,17 @@ pub(crate) async fn start(plan_only: bool, output_style: Option<OutputStyle>) ->
 
     let succeeded = bootstrap::openbao::perform(
         Arc::clone(&reporter),
-        inspect,
-        openbao_client_factory,
-        Arc::clone(&bract_client),
-        openbao_file_reader,
-        openbao_file_writer,
-        openbao_file_deleter,
-        Arc::new(UnixPermissions::new()),
-        &mut identity,
-        &douglas_folders,
+        bootstrap::openbao::Dependencies {
+            inspect,
+            openbao_client_factory,
+            bract_client: Arc::clone(&bract_client),
+            file_reader: openbao_file_reader,
+            file_writer: openbao_file_writer,
+            file_deleter: openbao_file_deleter,
+            permissions: Arc::new(UnixPermissions::new()),
+            identity: &mut identity,
+            douglas_folders: &douglas_folders,
+        },
     )
     .await;
 
