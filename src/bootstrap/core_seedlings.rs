@@ -277,9 +277,9 @@ pub mod definitions {
             path::PathBuf,
         };
 
-        pub use config::seedlings::OPENBAO as NAME;
         pub use ::openbao::SOCKET_MOUNT_NAME;
         pub use ::openbao::SOCKET_NAME;
+        pub use config::seedlings::OPENBAO as NAME;
         pub const LOG_PATH: &str = "/var/log/douglas";
         pub const AUDIT_LOG: &str = "openbao_audit.log";
         pub const SOCKET_PATH: &str = "/run/bract/";
