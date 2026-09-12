@@ -25,17 +25,19 @@ pub enum FindDeadwoodError {
     FileSystem(#[from] FileSystemError),
 }
 
-pub async fn execute(
-    seedbank_client: &dyn seedbank_client::Client,
-    docker_client: &dyn docker::client::Client,
-    resin_client: &mut dyn resin_client::Client,
-    folder: &dyn Folder,
-    douglas_folders: &DouglasFolders,
-    openbao_client_factory: &dyn openbao::ClientFactory,
-    file_reader: &dyn FileReader,
-    identity: &mut dyn Identity,
-) -> Result<Deadwood, FindDeadwoodError> {
-    let seedling_names = seedbank_client.list().await?;
+pub(crate) struct Dependencies<'a> {
+    pub seedbank_client: &'a dyn seedbank_client::Client,
+    pub docker_client: &'a dyn docker::client::Client,
+    pub resin_client: &'a mut dyn resin_client::Client,
+    pub folder: &'a dyn Folder,
+    pub douglas_folders: &'a DouglasFolders,
+    pub openbao_client_factory: &'a dyn openbao::ClientFactory,
+    pub file_reader: &'a dyn FileReader,
+    pub identity: &'a mut dyn Identity,
+}
+
+pub async fn execute(deps: Dependencies<'_>) -> Result<Deadwood, FindDeadwoodError> {
+    let seedling_names = deps.seedbank_client.list().await?;
     let seedbank_names = protect_core_seedling_names(
         seedling_names
             .iter()
@@ -45,36 +47,38 @@ pub async fn execute(
 
     let mut known_image_repositories: HashSet<String> = HashSet::new();
     for name in &seedling_names {
-        let seedling = seedbank_client.load(name).await?;
+        let seedling = deps.seedbank_client.load(name).await?;
         known_image_repositories.insert(seedling.definition.image.formatted_name());
     }
 
-    let live_containers = docker_client.list_containers().await?;
+    let live_containers = deps.docker_client.list_containers().await?;
     let container_names = seedling_names_from_live_containers(&live_containers);
 
-    let network_names: Vec<Name> = docker_client
+    let network_names: Vec<Name> = deps
+        .docker_client
         .list_networks()
         .await?
         .iter()
         .filter_map(|network| seedling_name_from_doug_prefixed(network.name.as_ref()))
         .collect();
 
-    let route_file_names = list_route_file_names(folder, douglas_folders)?;
+    let route_file_names = list_route_file_names(deps.folder, deps.douglas_folders)?;
 
-    let resin_repository_names: Vec<String> = resin_client
+    let resin_repository_names: Vec<String> = deps
+        .resin_client
         .list_repositories()
         .await?
         .iter()
         .map(std::string::ToString::to_string)
         .collect();
 
-    let mount_names = list_mount_names(folder, douglas_folders)?;
+    let mount_names = list_mount_names(deps.folder, deps.douglas_folders)?;
 
     let openbao_secret_names = list_openbao_secret_names(
-        openbao_client_factory,
-        file_reader,
-        identity,
-        douglas_folders,
+        deps.openbao_client_factory,
+        deps.file_reader,
+        deps.identity,
+        deps.douglas_folders,
     )
     .await;
 

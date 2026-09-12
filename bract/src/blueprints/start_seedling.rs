@@ -72,16 +72,20 @@ struct State {
     agent_container_name: Option<docker_types::ContainerName>,
 }
 
+pub(crate) struct Dependencies<'a> {
+    pub inspect: &'a dyn Inspect,
+    pub file_reader: &'a dyn FileReader,
+    pub permissions: &'a dyn Permissions,
+    pub douglas_folders: &'a DouglasFolders,
+    pub docker_client: &'a dyn docker::client::Client,
+    pub seedbank_client: &'a dyn seedbank_client::Client,
+    pub rolodex: &'a dyn Rolodex,
+    pub registry: &'a docker_types::Registry,
+}
+
 pub async fn execute(
     reporter: Arc<dyn Reporter>,
-    inspect: &dyn Inspect,
-    file_reader: &dyn FileReader,
-    permissions: &dyn Permissions,
-    douglas_folders: &DouglasFolders,
-    docker_client: &dyn docker::client::Client,
-    seedbank_client: &dyn seedbank_client::Client,
-    rolodex: &dyn Rolodex,
-    registry: &docker_types::Registry,
+    deps: Dependencies<'_>,
     name: &seedbank_types::Name,
     requested_by: RequestedBy,
 ) -> Result<(), StartSeedlingError> {
@@ -93,21 +97,21 @@ pub async fn execute(
     .start_guard();
 
     let state = {
-        let mut state_observer = StateObserver::new(
-            docker_client,
-            seedbank_client,
-            rolodex,
-            douglas_folders,
-            inspect,
-            file_reader,
-            permissions,
-            registry,
+        let mut state_observer = StateObserver {
+            docker_client: deps.docker_client,
+            seedbank_client: deps.seedbank_client,
+            rolodex: deps.rolodex,
+            douglas_folders: deps.douglas_folders,
+            inspect: deps.inspect,
+            file_reader: deps.file_reader,
+            permissions: deps.permissions,
+            registry: deps.registry,
             requested_by,
-        );
+        };
         state_observer.discover(guard.span(), name).await?
     };
 
-    let seedling = seedbank_client.load(name).await?;
+    let seedling = deps.seedbank_client.load(name).await?;
     let (_, agent_ip) = provision_seedling_secrets::agent_private_network(&seedling.id);
 
     let plan = match resolve_plan(
@@ -126,8 +130,8 @@ pub async fn execute(
 
     let result = {
         let mut context = Context {
-            docker_client,
-            seedbank_client,
+            docker_client: deps.docker_client,
+            seedbank_client: deps.seedbank_client,
         };
         execute_plan(guard.span(), plan, &mut context, |reason| {
             StartSeedlingError::FailedBoostrap(vec![reason])
@@ -151,30 +155,6 @@ struct StateObserver<'a> {
 }
 
 impl<'a> StateObserver<'a> {
-    pub fn new(
-        docker_client: &'a dyn docker::client::Client,
-        seedbank_client: &'a dyn seedbank_client::Client,
-        rolodex: &'a dyn Rolodex,
-        douglas_folders: &'a DouglasFolders,
-        inspect: &'a dyn Inspect,
-        file_reader: &'a dyn FileReader,
-        permissions: &'a dyn Permissions,
-        registry: &'a docker_types::Registry,
-        requested_by: RequestedBy,
-    ) -> Self {
-        Self {
-            docker_client,
-            seedbank_client,
-            rolodex,
-            douglas_folders,
-            inspect,
-            file_reader,
-            permissions,
-            registry,
-            requested_by,
-        }
-    }
-
     pub async fn discover(
         &mut self,
         span: &Span,

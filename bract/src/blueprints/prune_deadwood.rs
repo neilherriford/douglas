@@ -37,21 +37,34 @@ pub enum PruneDeadwoodError {
     ),
 }
 
+pub(crate) struct Dependencies<'a> {
+    pub docker_client: &'a dyn docker::client::Client,
+    pub resin_client: &'a mut dyn resin_client::Client,
+    pub file_deleter: &'a dyn FileDeleter,
+    pub folder_deleter: &'a dyn FolderDeleter,
+    pub openbao_client_factory: &'a dyn openbao::ClientFactory,
+    pub file_reader: &'a dyn FileReader,
+    pub identity: &'a mut dyn Identity,
+    pub douglas_folders: &'a DouglasFolders,
+}
+
 pub async fn execute(
     reporter: Arc<dyn Reporter>,
-    docker_client: &dyn docker::client::Client,
-    resin_client: &mut dyn resin_client::Client,
-    file_deleter: &dyn FileDeleter,
-    folder_deleter: &dyn FolderDeleter,
-    openbao_client_factory: &dyn openbao::ClientFactory,
-    file_reader: &dyn FileReader,
-    identity: &mut dyn Identity,
-    douglas_folders: &DouglasFolders,
+    deps: Dependencies<'_>,
     deadwood: &Deadwood,
 ) -> Result<(), PruneDeadwoodError> {
     let guard = Span::new(Arc::clone(&reporter), "Pruning deadwood", ScopeKind::Task).start_guard();
 
-    let result = prune(
+    let result = prune(deps, deadwood).await;
+
+    match result {
+        Ok(()) => guard.finish(Ok(())),
+        Err(err) => guard.finish(Err(err)),
+    }
+}
+
+async fn prune(deps: Dependencies<'_>, deadwood: &Deadwood) -> Result<(), PruneDeadwoodError> {
+    let Dependencies {
         docker_client,
         resin_client,
         file_deleter,
@@ -60,27 +73,8 @@ pub async fn execute(
         file_reader,
         identity,
         douglas_folders,
-        deadwood,
-    )
-    .await;
+    } = deps;
 
-    match result {
-        Ok(()) => guard.finish(Ok(())),
-        Err(err) => guard.finish(Err(err)),
-    }
-}
-
-async fn prune(
-    docker_client: &dyn docker::client::Client,
-    resin_client: &mut dyn resin_client::Client,
-    file_deleter: &dyn FileDeleter,
-    folder_deleter: &dyn FolderDeleter,
-    openbao_client_factory: &dyn openbao::ClientFactory,
-    file_reader: &dyn FileReader,
-    identity: &mut dyn Identity,
-    douglas_folders: &DouglasFolders,
-    deadwood: &Deadwood,
-) -> Result<(), PruneDeadwoodError> {
     for name in &deadwood.containers {
         let container = container_name(name)?;
         let _ = docker_client
@@ -224,14 +218,16 @@ mod tests {
         };
 
         let result = prune(
-            &docker_client,
-            &mut MockResinClient::new(),
-            &MockFileDeleter::new(),
-            &MockFolderDeleter::new(),
-            &openbao::MockClientFactory::new(),
-            &MockFileReader::new(),
-            &mut MockIdentity::new(),
-            &DouglasFolders::new(),
+            Dependencies {
+                docker_client: &docker_client,
+                resin_client: &mut MockResinClient::new(),
+                file_deleter: &MockFileDeleter::new(),
+                folder_deleter: &MockFolderDeleter::new(),
+                openbao_client_factory: &openbao::MockClientFactory::new(),
+                file_reader: &MockFileReader::new(),
+                identity: &mut MockIdentity::new(),
+                douglas_folders: &DouglasFolders::new(),
+            },
             &deadwood,
         )
         .await;
@@ -255,14 +251,16 @@ mod tests {
         };
 
         let result = prune(
-            &docker_client,
-            &mut MockResinClient::new(),
-            &MockFileDeleter::new(),
-            &MockFolderDeleter::new(),
-            &openbao::MockClientFactory::new(),
-            &MockFileReader::new(),
-            &mut MockIdentity::new(),
-            &DouglasFolders::new(),
+            Dependencies {
+                docker_client: &docker_client,
+                resin_client: &mut MockResinClient::new(),
+                file_deleter: &MockFileDeleter::new(),
+                folder_deleter: &MockFolderDeleter::new(),
+                openbao_client_factory: &openbao::MockClientFactory::new(),
+                file_reader: &MockFileReader::new(),
+                identity: &mut MockIdentity::new(),
+                douglas_folders: &DouglasFolders::new(),
+            },
             &deadwood,
         )
         .await;
@@ -304,14 +302,16 @@ mod tests {
         };
 
         let result = prune(
-            &docker_client,
-            &mut MockResinClient::new(),
-            &MockFileDeleter::new(),
-            &MockFolderDeleter::new(),
-            &openbao::MockClientFactory::new(),
-            &MockFileReader::new(),
-            &mut MockIdentity::new(),
-            &DouglasFolders::new(),
+            Dependencies {
+                docker_client: &docker_client,
+                resin_client: &mut MockResinClient::new(),
+                file_deleter: &MockFileDeleter::new(),
+                folder_deleter: &MockFolderDeleter::new(),
+                openbao_client_factory: &openbao::MockClientFactory::new(),
+                file_reader: &MockFileReader::new(),
+                identity: &mut MockIdentity::new(),
+                douglas_folders: &DouglasFolders::new(),
+            },
             &deadwood,
         )
         .await;
@@ -340,14 +340,16 @@ mod tests {
         };
 
         let result = prune(
-            &docker_client,
-            &mut MockResinClient::new(),
-            &MockFileDeleter::new(),
-            &MockFolderDeleter::new(),
-            &openbao::MockClientFactory::new(),
-            &MockFileReader::new(),
-            &mut MockIdentity::new(),
-            &DouglasFolders::new(),
+            Dependencies {
+                docker_client: &docker_client,
+                resin_client: &mut MockResinClient::new(),
+                file_deleter: &MockFileDeleter::new(),
+                folder_deleter: &MockFolderDeleter::new(),
+                openbao_client_factory: &openbao::MockClientFactory::new(),
+                file_reader: &MockFileReader::new(),
+                identity: &mut MockIdentity::new(),
+                douglas_folders: &DouglasFolders::new(),
+            },
             &deadwood,
         )
         .await;
@@ -383,14 +385,16 @@ mod tests {
         };
 
         let result = prune(
-            &docker_client,
-            &mut MockResinClient::new(),
-            &file_deleter,
-            &MockFolderDeleter::new(),
-            &openbao::MockClientFactory::new(),
-            &MockFileReader::new(),
-            &mut MockIdentity::new(),
-            &douglas_folders,
+            Dependencies {
+                docker_client: &docker_client,
+                resin_client: &mut MockResinClient::new(),
+                file_deleter: &file_deleter,
+                folder_deleter: &MockFolderDeleter::new(),
+                openbao_client_factory: &openbao::MockClientFactory::new(),
+                file_reader: &MockFileReader::new(),
+                identity: &mut MockIdentity::new(),
+                douglas_folders: &douglas_folders,
+            },
             &deadwood,
         )
         .await;
@@ -444,14 +448,16 @@ mod tests {
         };
 
         let result = prune(
-            &docker_client,
-            &mut MockResinClient::new(),
-            &file_deleter,
-            &MockFolderDeleter::new(),
-            &openbao::MockClientFactory::new(),
-            &MockFileReader::new(),
-            &mut MockIdentity::new(),
-            &douglas_folders,
+            Dependencies {
+                docker_client: &docker_client,
+                resin_client: &mut MockResinClient::new(),
+                file_deleter: &file_deleter,
+                folder_deleter: &MockFolderDeleter::new(),
+                openbao_client_factory: &openbao::MockClientFactory::new(),
+                file_reader: &MockFileReader::new(),
+                identity: &mut MockIdentity::new(),
+                douglas_folders: &douglas_folders,
+            },
             &deadwood,
         )
         .await;
@@ -473,14 +479,16 @@ mod tests {
         };
 
         let result = prune(
-            &MockClient::new(),
-            &mut resin_client,
-            &MockFileDeleter::new(),
-            &MockFolderDeleter::new(),
-            &openbao::MockClientFactory::new(),
-            &MockFileReader::new(),
-            &mut MockIdentity::new(),
-            &DouglasFolders::new(),
+            Dependencies {
+                docker_client: &MockClient::new(),
+                resin_client: &mut resin_client,
+                file_deleter: &MockFileDeleter::new(),
+                folder_deleter: &MockFolderDeleter::new(),
+                openbao_client_factory: &openbao::MockClientFactory::new(),
+                file_reader: &MockFileReader::new(),
+                identity: &mut MockIdentity::new(),
+                douglas_folders: &DouglasFolders::new(),
+            },
             &deadwood,
         )
         .await;
@@ -496,14 +504,16 @@ mod tests {
         };
 
         let result = prune(
-            &MockClient::new(),
-            &mut MockResinClient::new(),
-            &MockFileDeleter::new(),
-            &MockFolderDeleter::new(),
-            &openbao::MockClientFactory::new(),
-            &MockFileReader::new(),
-            &mut MockIdentity::new(),
-            &DouglasFolders::new(),
+            Dependencies {
+                docker_client: &MockClient::new(),
+                resin_client: &mut MockResinClient::new(),
+                file_deleter: &MockFileDeleter::new(),
+                folder_deleter: &MockFolderDeleter::new(),
+                openbao_client_factory: &openbao::MockClientFactory::new(),
+                file_reader: &MockFileReader::new(),
+                identity: &mut MockIdentity::new(),
+                douglas_folders: &DouglasFolders::new(),
+            },
             &deadwood,
         )
         .await;
@@ -528,14 +538,16 @@ mod tests {
         };
 
         let result = prune(
-            &MockClient::new(),
-            &mut MockResinClient::new(),
-            &MockFileDeleter::new(),
-            &folder_deleter,
-            &openbao::MockClientFactory::new(),
-            &MockFileReader::new(),
-            &mut MockIdentity::new(),
-            &douglas_folders,
+            Dependencies {
+                docker_client: &MockClient::new(),
+                resin_client: &mut MockResinClient::new(),
+                file_deleter: &MockFileDeleter::new(),
+                folder_deleter: &folder_deleter,
+                openbao_client_factory: &openbao::MockClientFactory::new(),
+                file_reader: &MockFileReader::new(),
+                identity: &mut MockIdentity::new(),
+                douglas_folders: &douglas_folders,
+            },
             &deadwood,
         )
         .await;
@@ -582,14 +594,16 @@ mod tests {
         };
 
         let result = prune(
-            &MockClient::new(),
-            &mut MockResinClient::new(),
-            &MockFileDeleter::new(),
-            &MockFolderDeleter::new(),
-            &openbao_client_factory,
-            &file_reader,
-            &mut identity,
-            &DouglasFolders::new(),
+            Dependencies {
+                docker_client: &MockClient::new(),
+                resin_client: &mut MockResinClient::new(),
+                file_deleter: &MockFileDeleter::new(),
+                folder_deleter: &MockFolderDeleter::new(),
+                openbao_client_factory: &openbao_client_factory,
+                file_reader: &file_reader,
+                identity: &mut identity,
+                douglas_folders: &DouglasFolders::new(),
+            },
             &deadwood,
         )
         .await;

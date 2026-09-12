@@ -30,24 +30,33 @@ use thiserror::Error;
 
 pub(crate) use config::services::BRACT;
 
-pub async fn bootstrap(
-    reporting_fd: i32,
-    credentials: &dyn Credentials,
-    folder: &dyn Folder,
-    file_writer: &dyn FileWriter,
-    file_deleter: &dyn FileDeleter,
-    links: &dyn Links,
-    permissions: &dyn Permissions,
-    inspect: &dyn Inspect,
-    os: &dyn Os,
-    douglas_folders: &DouglasFolders,
-    docker_client_builder: &dyn ClientBuilder,
-) -> Result<(), BootstrapError> {
-    let boot_reporter =
-        build_boot_reporter(douglas_folders.service_log_file(BRACT), Some(reporting_fd));
+pub(crate) struct Dependencies<'a> {
+    pub credentials: &'a dyn Credentials,
+    pub folder: &'a dyn Folder,
+    pub file_writer: &'a dyn FileWriter,
+    pub file_deleter: &'a dyn FileDeleter,
+    pub links: &'a dyn Links,
+    pub permissions: &'a dyn Permissions,
+    pub inspect: &'a dyn Inspect,
+    pub os: &'a dyn Os,
+    pub douglas_folders: &'a DouglasFolders,
+    pub docker_client_builder: &'a dyn ClientBuilder,
+}
 
-    bootstrap_with_reporter(
-        boot_reporter,
+pub async fn bootstrap(reporting_fd: i32, deps: Dependencies<'_>) -> Result<(), BootstrapError> {
+    let boot_reporter = build_boot_reporter(
+        deps.douglas_folders.service_log_file(BRACT),
+        Some(reporting_fd),
+    );
+
+    bootstrap_with_reporter(boot_reporter, deps).await
+}
+
+async fn bootstrap_with_reporter(
+    boot_reporter: Arc<dyn Reporter>,
+    deps: Dependencies<'_>,
+) -> Result<(), BootstrapError> {
+    let Dependencies {
         credentials,
         folder,
         file_writer,
@@ -58,23 +67,8 @@ pub async fn bootstrap(
         os,
         douglas_folders,
         docker_client_builder,
-    )
-    .await
-}
+    } = deps;
 
-async fn bootstrap_with_reporter(
-    boot_reporter: Arc<dyn Reporter>,
-    credentials: &dyn Credentials,
-    folder: &dyn Folder,
-    file_writer: &dyn FileWriter,
-    file_deleter: &dyn FileDeleter,
-    links: &dyn Links,
-    permissions: &dyn Permissions,
-    inspect: &dyn Inspect,
-    os: &dyn Os,
-    douglas_folders: &DouglasFolders,
-    docker_client_builder: &dyn ClientBuilder,
-) -> Result<(), BootstrapError> {
     let guard = Span::new(
         Arc::clone(&boot_reporter),
         "Bootstrapping douglas-bract system",
@@ -93,7 +87,10 @@ async fn bootstrap_with_reporter(
     };
 
     let state = {
-        let mut state_observer = StateObserver::new(credentials, docker_client.as_mut());
+        let mut state_observer = StateObserver {
+            credentials,
+            docker_client: docker_client.as_mut(),
+        };
         state_observer
             .discover(guard.span(), &definition, folder, inspect, permissions)
             .await?
@@ -341,16 +338,6 @@ struct StateObserver<'a> {
 }
 
 impl<'a> StateObserver<'a> {
-    pub fn new(
-        credentials: &'a dyn Credentials,
-        docker_client: &'a mut dyn docker::client::Client,
-    ) -> Self {
-        Self {
-            credentials,
-            docker_client,
-        }
-    }
-
     pub async fn discover(
         &mut self,
         span: &Span,
@@ -609,9 +596,9 @@ impl<'a> Command<Context<'a>> for ValidateSudoersFile {
 #[cfg(test)]
 mod tests {
     use super::{
-        BRACT, Context, CreateSudoersFile, State, VISUDO_CANDIDATES, ValidateSudoersFile,
-        ValidateSudoersFileError, bootstrap_with_reporter, create_plan, ensure_binary_link,
-        service_definition, sudoers_rule,
+        BRACT, Context, CreateSudoersFile, Dependencies, State, VISUDO_CANDIDATES,
+        ValidateSudoersFile, ValidateSudoersFileError, bootstrap_with_reporter, create_plan,
+        ensure_binary_link, service_definition, sudoers_rule,
     };
     use crate::BootstrapError;
     use blueprint::{Command, RunningStatus, service::ServiceState};
@@ -764,16 +751,18 @@ mod tests {
 
         let result = bootstrap_with_reporter(
             Arc::new(NullReporter),
-            &credentials,
-            &MockFolder::new(),
-            &MockFileWriter::new(),
-            &MockFileDeleter::new(),
-            &MockLinks::new(),
-            &MockPermissions::new(),
-            &MockInspect::new(),
-            &MockOs::new(),
-            &DouglasFolders::new(),
-            &docker_client_builder,
+            Dependencies {
+                credentials: &credentials,
+                folder: &MockFolder::new(),
+                file_writer: &MockFileWriter::new(),
+                file_deleter: &MockFileDeleter::new(),
+                links: &MockLinks::new(),
+                permissions: &MockPermissions::new(),
+                inspect: &MockInspect::new(),
+                os: &MockOs::new(),
+                douglas_folders: &DouglasFolders::new(),
+                docker_client_builder: &docker_client_builder,
+            },
         )
         .await;
 
@@ -798,16 +787,18 @@ mod tests {
 
         let result = bootstrap_with_reporter(
             Arc::new(NullReporter),
-            &credentials,
-            &MockFolder::new(),
-            &MockFileWriter::new(),
-            &MockFileDeleter::new(),
-            &MockLinks::new(),
-            &MockPermissions::new(),
-            &MockInspect::new(),
-            &os,
-            &DouglasFolders::new(),
-            &docker_client_builder,
+            Dependencies {
+                credentials: &credentials,
+                folder: &MockFolder::new(),
+                file_writer: &MockFileWriter::new(),
+                file_deleter: &MockFileDeleter::new(),
+                links: &MockLinks::new(),
+                permissions: &MockPermissions::new(),
+                inspect: &MockInspect::new(),
+                os: &os,
+                douglas_folders: &DouglasFolders::new(),
+                docker_client_builder: &docker_client_builder,
+            },
         )
         .await;
 

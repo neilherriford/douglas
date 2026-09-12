@@ -55,22 +55,26 @@ struct State {
     needing_health_recheck: Vec<seedbank_types::Name>,
 }
 
+pub(crate) struct Dependencies<'a> {
+    pub docker_client: &'a dyn docker::client::Client,
+    pub seedbank_client: &'a dyn seedbank_client::Client,
+    pub credentials: &'a dyn Credentials,
+    pub inspect: &'a dyn Inspect,
+    pub folder: &'a dyn Folder,
+    pub file_reader: &'a dyn FileReader,
+    pub file_writer: &'a dyn FileWriter,
+    pub permissions: &'a dyn Permissions,
+    pub douglas_folders: &'a DouglasFolders,
+    pub resin_client_builder: &'a dyn resin_client::ClientBuilder,
+    pub registry: &'a docker_types::Registry,
+    pub rolodex: &'a dyn Rolodex,
+    pub agent_provisioning: Option<&'a provision_seedling_secrets::AgentProvisioning>,
+    pub ram_disk: &'a dyn RamDisk,
+}
+
 pub async fn execute(
     reporter: Arc<dyn Reporter>,
-    docker_client: &dyn docker::client::Client,
-    seedbank_client: &dyn seedbank_client::Client,
-    credentials: &dyn Credentials,
-    inspect: &dyn Inspect,
-    folder: &dyn Folder,
-    file_reader: &dyn FileReader,
-    file_writer: &dyn FileWriter,
-    permissions: &dyn Permissions,
-    douglas_folders: &DouglasFolders,
-    resin_client_builder: &dyn resin_client::ClientBuilder,
-    registry: &docker_types::Registry,
-    rolodex: &dyn Rolodex,
-    agent_provisioning: Option<&provision_seedling_secrets::AgentProvisioning>,
-    ram_disk: &dyn RamDisk,
+    deps: Dependencies<'_>,
 ) -> Result<(), WatchdogError> {
     let guard = Span::new(
         Arc::clone(&reporter),
@@ -80,7 +84,10 @@ pub async fn execute(
     .start_guard();
 
     let state = {
-        let mut state_observer = StateObserver::new(docker_client, seedbank_client);
+        let mut state_observer = StateObserver {
+            docker_client: deps.docker_client,
+            seedbank_client: deps.seedbank_client,
+        };
         state_observer.discover(guard.span()).await?
     };
 
@@ -91,20 +98,20 @@ pub async fn execute(
 
     let result = {
         let mut context = Context {
-            docker_client,
-            seedbank_client,
-            credentials,
-            inspect,
-            folder,
-            file_reader,
-            file_writer,
-            permissions,
-            douglas_folders,
-            resin_client_builder,
-            registry,
-            rolodex,
-            agent_provisioning,
-            ram_disk,
+            docker_client: deps.docker_client,
+            seedbank_client: deps.seedbank_client,
+            credentials: deps.credentials,
+            inspect: deps.inspect,
+            folder: deps.folder,
+            file_reader: deps.file_reader,
+            file_writer: deps.file_writer,
+            permissions: deps.permissions,
+            douglas_folders: deps.douglas_folders,
+            resin_client_builder: deps.resin_client_builder,
+            registry: deps.registry,
+            rolodex: deps.rolodex,
+            agent_provisioning: deps.agent_provisioning,
+            ram_disk: deps.ram_disk,
         };
         execute_plan(guard.span(), plan, &mut context, |reason| {
             WatchdogError::FailedBoostrap(vec![reason])
@@ -121,16 +128,6 @@ struct StateObserver<'a> {
 }
 
 impl<'a> StateObserver<'a> {
-    pub fn new(
-        docker_client: &'a dyn docker::client::Client,
-        seedbank_client: &'a dyn seedbank_client::Client,
-    ) -> Self {
-        Self {
-            docker_client,
-            seedbank_client,
-        }
-    }
-
     pub async fn discover(&mut self, span: &Span) -> Result<State, WatchdogError> {
         let guard = span
             .create_child(
@@ -326,23 +323,25 @@ impl<'a> Command<Context<'a>> for ReconcileSeedling {
 
         crate::blueprints::reconcile_seedling::execute(
             Arc::clone(&span.reporter),
-            &*context.credentials,
-            &*context.inspect,
-            &*context.folder,
-            &*context.file_reader,
-            &*context.file_writer,
-            &*context.permissions,
-            &*context.douglas_folders,
-            context.docker_client,
-            &*context.resin_client_builder,
-            &*context.seedbank_client,
-            &*context.registry,
-            &*context.rolodex,
+            crate::blueprints::reconcile_seedling::Dependencies {
+                credentials: &*context.credentials,
+                inspect: &*context.inspect,
+                folder: &*context.folder,
+                file_reader: &*context.file_reader,
+                file_writer: &*context.file_writer,
+                permissions: &*context.permissions,
+                douglas_folders: &*context.douglas_folders,
+                docker_client: context.docker_client,
+                resin_client_builder: &*context.resin_client_builder,
+                seedbank_client: &*context.seedbank_client,
+                registry: &*context.registry,
+                rolodex: &*context.rolodex,
+                ram_disk: &*context.ram_disk,
+            },
             &self.seedling_name,
             &seedling.version,
             &seedling.definition,
             context.agent_provisioning,
-            &*context.ram_disk,
         )
         .await?;
 
@@ -386,14 +385,16 @@ impl<'a> Command<Context<'a>> for StartSeedling {
 
         crate::blueprints::start_seedling::execute(
             Arc::clone(&span.reporter),
-            &*context.inspect,
-            &*context.file_reader,
-            &*context.permissions,
-            &*context.douglas_folders,
-            context.docker_client,
-            &*context.seedbank_client,
-            &*context.rolodex,
-            &*context.registry,
+            crate::blueprints::start_seedling::Dependencies {
+                inspect: &*context.inspect,
+                file_reader: &*context.file_reader,
+                permissions: &*context.permissions,
+                douglas_folders: &*context.douglas_folders,
+                docker_client: context.docker_client,
+                seedbank_client: &*context.seedbank_client,
+                rolodex: &*context.rolodex,
+                registry: &*context.registry,
+            },
             &self.seedling_name,
             RequestedBy::Watchdog,
         )

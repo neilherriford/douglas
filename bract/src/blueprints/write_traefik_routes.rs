@@ -67,15 +67,19 @@ struct LoadBalancerServer {
     url: String,
 }
 
+pub(crate) struct Dependencies<'a> {
+    pub seedbank_client: &'a dyn seedbank_client::Client,
+    pub docker_client: &'a dyn docker::client::Client,
+    pub folder: &'a dyn Folder,
+    pub file_writer: &'a dyn FileWriter,
+    pub permissions: &'a dyn Permissions,
+    pub rolodex: &'a dyn Rolodex,
+    pub douglas_folders: &'a DouglasFolders,
+}
+
 pub async fn execute(
     reporter: Arc<dyn Reporter>,
-    seedbank_client: &dyn seedbank_client::Client,
-    docker_client: &dyn docker::client::Client,
-    folder: &dyn Folder,
-    file_writer: &dyn FileWriter,
-    permissions: &dyn Permissions,
-    rolodex: &dyn Rolodex,
-    douglas_folders: &DouglasFolders,
+    deps: Dependencies<'_>,
 ) -> Result<(), WriteTraefikRoutesError> {
     let guard = Span::new(
         Arc::clone(&reporter),
@@ -84,16 +88,7 @@ pub async fn execute(
     )
     .start_guard();
 
-    let result = write_routes(
-        seedbank_client,
-        docker_client,
-        folder,
-        file_writer,
-        permissions,
-        rolodex,
-        douglas_folders,
-    )
-    .await;
+    let result = write_routes(deps).await;
 
     match result {
         Ok(()) => guard.finish(Ok(())),
@@ -101,36 +96,29 @@ pub async fn execute(
     }
 }
 
-async fn write_routes(
-    seedbank_client: &dyn seedbank_client::Client,
-    docker_client: &dyn docker::client::Client,
-    folder: &dyn Folder,
-    file_writer: &dyn FileWriter,
-    permissions: &dyn Permissions,
-    rolodex: &dyn Rolodex,
-    douglas_folders: &DouglasFolders,
-) -> Result<(), WriteTraefikRoutesError> {
+async fn write_routes(deps: Dependencies<'_>) -> Result<(), WriteTraefikRoutesError> {
     let traefik_name: Name = TRAEFIK_SEEDLING_NAME.parse()?;
     let traefik_container = container_name(&traefik_name)?;
 
-    let traefik_service_account = rolodex
+    let traefik_service_account = deps
+        .rolodex
         .find_service_account(traefik_name.as_ref())?
         .ok_or(WriteTraefikRoutesError::MissingServiceAccount)?;
 
-    let dynamic_dir = traefik_dynamic_dir(douglas_folders)?;
-    folder.create_recursively(&dynamic_dir)?;
-    permissions.change_user_and_group_ownership(
+    let dynamic_dir = traefik_dynamic_dir(deps.douglas_folders)?;
+    deps.folder.create_recursively(&dynamic_dir)?;
+    deps.permissions.change_user_and_group_ownership(
         &dynamic_dir,
         &traefik_service_account.user.system_name,
         &traefik_service_account.group.system_name,
     )?;
-    permissions.change_mode(
+    deps.permissions.change_mode(
         &dynamic_dir,
         &Modes::InheritedOwnerReadWriteExecuteGroupReadWriteExecute,
     )?;
 
-    for name in seedbank_client.list().await? {
-        let seedling = seedbank_client.load(&name).await?;
+    for name in deps.seedbank_client.list().await? {
+        let seedling = deps.seedbank_client.load(&name).await?;
 
         let Routing::Routed { route, ports } = &seedling.definition.routing else {
             continue;
@@ -138,7 +126,7 @@ async fn write_routes(
 
         // Don't route prior to reconciliation
         let seedling_network = seedling_network_name(&name)?;
-        if !docker_client.network_exists(&seedling_network).await? {
+        if !deps.docker_client.network_exists(&seedling_network).await? {
             continue;
         }
 
@@ -147,15 +135,16 @@ async fn write_routes(
 
         let mut path = dynamic_dir.clone();
         path.push(format!("{name}.yml"));
-        file_writer.write_all(&path, &contents)?;
-        permissions.change_user_and_group_ownership(
+        deps.file_writer.write_all(&path, &contents)?;
+        deps.permissions.change_user_and_group_ownership(
             &path,
             &traefik_service_account.user.system_name,
             &traefik_service_account.group.system_name,
         )?;
-        permissions.change_mode(&path, &Modes::OwnerReadWriteGroupRead)?;
+        deps.permissions
+            .change_mode(&path, &Modes::OwnerReadWriteGroupRead)?;
 
-        docker_client
+        deps.docker_client
             .connect_network(
                 &seedling_network,
                 ContainerRef::FullName(traefik_container.clone()),

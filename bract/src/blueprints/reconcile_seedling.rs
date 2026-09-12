@@ -122,25 +122,29 @@ enum VersionComparison {
     Newer,
 }
 
+pub(crate) struct Dependencies<'a> {
+    pub credentials: &'a dyn Credentials,
+    pub inspect: &'a dyn Inspect,
+    pub folder: &'a dyn Folder,
+    pub file_reader: &'a dyn FileReader,
+    pub file_writer: &'a dyn FileWriter,
+    pub permissions: &'a dyn Permissions,
+    pub douglas_folders: &'a DouglasFolders,
+    pub docker_client: &'a dyn docker::client::Client,
+    pub resin_client_builder: &'a dyn resin_client::ClientBuilder,
+    pub seedbank_client: &'a dyn seedbank_client::Client,
+    pub registry: &'a docker_types::Registry,
+    pub rolodex: &'a dyn Rolodex,
+    pub ram_disk: &'a dyn RamDisk,
+}
+
 pub async fn execute(
     reporter: Arc<dyn Reporter>,
-    credentials: &dyn Credentials,
-    inspect: &dyn Inspect,
-    folder: &dyn Folder,
-    file_reader: &dyn FileReader,
-    file_writer: &dyn FileWriter,
-    permissions: &dyn Permissions,
-    douglas_folders: &DouglasFolders,
-    docker_client: &dyn docker::client::Client,
-    resin_client_builder: &dyn resin_client::ClientBuilder,
-    seedbank_client: &dyn seedbank_client::Client,
-    registry: &docker_types::Registry,
-    rolodex: &dyn Rolodex,
+    deps: Dependencies<'_>,
     name: &seedbank_types::Name,
     version: &seedbank_types::Version,
     seedling_definition: &seedbank_types::SeedlingDefinition,
     agent_provisioning: Option<&provision_seedling_secrets::AgentProvisioning>,
-    ram_disk: &dyn RamDisk,
 ) -> Result<(), ReconcileSeedlingError> {
     let guard = Span::new(
         Arc::clone(&reporter),
@@ -150,7 +154,7 @@ pub async fn execute(
     .start_guard();
 
     let mut resin_client = match build_client(
-        resin_client_builder.build(Arc::clone(&reporter)),
+        deps.resin_client_builder.build(Arc::clone(&reporter)),
         ReconcileSeedlingError::FailedBoostrap,
     )
     .await
@@ -160,18 +164,18 @@ pub async fn execute(
     };
 
     let state = {
-        let mut state_observer = StateObserver::new(
-            docker_client,
-            seedbank_client,
-            &mut *resin_client,
-            rolodex,
-            douglas_folders,
-            folder,
-            inspect,
-            file_reader,
-            permissions,
-            registry,
-        );
+        let mut state_observer = StateObserver {
+            docker_client: deps.docker_client,
+            seedbank_client: deps.seedbank_client,
+            resin_client: &mut *resin_client,
+            rolodex: deps.rolodex,
+            douglas_folders: deps.douglas_folders,
+            folder: deps.folder,
+            inspect: deps.inspect,
+            file_reader: deps.file_reader,
+            permissions: deps.permissions,
+            registry: deps.registry,
+        };
         state_observer
             .discover(
                 guard.span(),
@@ -185,7 +189,7 @@ pub async fn execute(
 
     let plan = match resolve_plan(
         guard.span(),
-        create_plan(name, version, seedling_definition, state, registry),
+        create_plan(name, version, seedling_definition, state, deps.registry),
     ) {
         Ok(plan) => plan,
         Err(err) => return guard.finish(Err(err)),
@@ -197,16 +201,16 @@ pub async fn execute(
             version,
             seedling_definition,
             agent_provisioning,
-            credentials,
-            docker_client,
-            seedbank_client,
-            rolodex,
-            douglas_folders,
-            folder,
-            permissions,
-            file_writer,
-            registry,
-            ram_disk,
+            credentials: deps.credentials,
+            docker_client: deps.docker_client,
+            seedbank_client: deps.seedbank_client,
+            rolodex: deps.rolodex,
+            douglas_folders: deps.douglas_folders,
+            folder: deps.folder,
+            permissions: deps.permissions,
+            file_writer: deps.file_writer,
+            registry: deps.registry,
+            ram_disk: deps.ram_disk,
         };
         execute_plan(guard.span(), plan, &mut context, |reason| {
             ReconcileSeedlingError::FailedBoostrap(vec![reason])
@@ -231,32 +235,6 @@ struct StateObserver<'a> {
 }
 
 impl<'a> StateObserver<'a> {
-    pub fn new(
-        docker_client: &'a dyn docker::client::Client,
-        seedbank_client: &'a dyn seedbank_client::Client,
-        resin_client: &'a mut dyn resin_client::Client,
-        rolodex: &'a dyn Rolodex,
-        douglas_folders: &'a DouglasFolders,
-        folder: &'a dyn Folder,
-        inspect: &'a dyn Inspect,
-        file_reader: &'a dyn FileReader,
-        permissions: &'a dyn Permissions,
-        registry: &'a docker_types::Registry,
-    ) -> Self {
-        Self {
-            docker_client,
-            seedbank_client,
-            resin_client,
-            rolodex,
-            douglas_folders,
-            folder,
-            inspect,
-            file_reader,
-            permissions,
-            registry,
-        }
-    }
-
     pub async fn discover(
         &mut self,
         span: &Span,

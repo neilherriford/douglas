@@ -71,17 +71,21 @@ struct State {
     agent_mount_is_ram_disk: bool,
 }
 
+pub(crate) struct Dependencies<'a> {
+    pub docker_client: &'a dyn docker::client::Client,
+    pub resin_client_builder: &'a dyn resin_client::ClientBuilder,
+    pub seedbank_client: &'a dyn seedbank_client::Client,
+    pub file_deleter: &'a dyn FileDeleter,
+    pub folder_deleter: &'a dyn FolderDeleter,
+    pub file_reader: &'a dyn FileReader,
+    pub folder: &'a dyn Folder,
+    pub douglas_folders: &'a DouglasFolders,
+    pub ram_disk: &'a dyn RamDisk,
+}
+
 pub async fn execute(
     reporter: Arc<dyn Reporter>,
-    docker_client: &dyn docker::client::Client,
-    resin_client_builder: &dyn resin_client::ClientBuilder,
-    seedbank_client: &dyn seedbank_client::Client,
-    file_deleter: &dyn FileDeleter,
-    folder_deleter: &dyn FolderDeleter,
-    file_reader: &dyn FileReader,
-    folder: &dyn Folder,
-    douglas_folders: &DouglasFolders,
-    ram_disk: &dyn RamDisk,
+    deps: Dependencies<'_>,
     name: &seedbank_types::Name,
 ) -> Result<(), DropSeedlingError> {
     let guard = Span::new(
@@ -92,7 +96,7 @@ pub async fn execute(
     .start_guard();
 
     let mut resin_client = match build_client(
-        resin_client_builder.build(Arc::clone(&reporter)),
+        deps.resin_client_builder.build(Arc::clone(&reporter)),
         DropSeedlingError::FailedBoostrap,
     )
     .await
@@ -102,10 +106,14 @@ pub async fn execute(
     };
 
     let state = {
-        let mut state_observer =
-            StateObserver::new(docker_client, seedbank_client, file_reader, folder);
+        let mut state_observer = StateObserver {
+            docker_client: deps.docker_client,
+            seedbank_client: deps.seedbank_client,
+            file_reader: deps.file_reader,
+            folder: deps.folder,
+        };
         state_observer
-            .discover(guard.span(), douglas_folders, ram_disk, name)
+            .discover(guard.span(), deps.douglas_folders, deps.ram_disk, name)
             .await?
     };
 
@@ -116,13 +124,13 @@ pub async fn execute(
 
     let result = {
         let mut context = Context {
-            docker_client,
+            docker_client: deps.docker_client,
             resin_client: &mut *resin_client,
-            seedbank_client,
-            file_deleter,
-            folder_deleter,
-            douglas_folders,
-            ram_disk,
+            seedbank_client: deps.seedbank_client,
+            file_deleter: deps.file_deleter,
+            folder_deleter: deps.folder_deleter,
+            douglas_folders: deps.douglas_folders,
+            ram_disk: deps.ram_disk,
         };
         execute_plan(guard.span(), plan, &mut context, |reason| {
             DropSeedlingError::FailedBoostrap(vec![reason])
@@ -141,20 +149,6 @@ struct StateObserver<'a> {
 }
 
 impl<'a> StateObserver<'a> {
-    pub fn new(
-        docker_client: &'a dyn docker::client::Client,
-        seedbank_client: &'a dyn seedbank_client::Client,
-        file_reader: &'a dyn FileReader,
-        folder: &'a dyn Folder,
-    ) -> Self {
-        Self {
-            docker_client,
-            seedbank_client,
-            file_reader,
-            folder,
-        }
-    }
-
     pub async fn discover(
         &mut self,
         span: &Span,

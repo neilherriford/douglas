@@ -166,6 +166,71 @@ pub struct Bract {
     heartbeat_writer: Box<dyn HeartbeatWriter>,
 }
 
+impl<'a> From<&'a Bract> for blueprints::drop_seedling::Dependencies<'a> {
+    fn from(bract: &'a Bract) -> Self {
+        Self {
+            docker_client: bract.docker_client.as_ref(),
+            resin_client_builder: bract.resin_client_builder.as_ref(),
+            seedbank_client: bract.seedbank_client.as_ref(),
+            file_deleter: bract.file_deleter.as_ref(),
+            folder_deleter: bract.folder_deleter.as_ref(),
+            file_reader: bract.file_reader.as_ref(),
+            folder: bract.folder.as_ref(),
+            douglas_folders: &bract.douglas_folders,
+            ram_disk: bract.ram_disk.as_ref(),
+        }
+    }
+}
+
+impl<'a> From<&'a Bract> for blueprints::reconcile_seedling::Dependencies<'a> {
+    fn from(bract: &'a Bract) -> Self {
+        Self {
+            credentials: bract.credentials.as_ref(),
+            inspect: bract.inspect.as_ref(),
+            folder: bract.folder.as_ref(),
+            file_reader: bract.file_reader.as_ref(),
+            file_writer: bract.file_writer.as_ref(),
+            permissions: bract.permissions.as_ref(),
+            douglas_folders: &bract.douglas_folders,
+            docker_client: bract.docker_client.as_ref(),
+            resin_client_builder: bract.resin_client_builder.as_ref(),
+            seedbank_client: bract.seedbank_client.as_ref(),
+            registry: &bract.registry,
+            rolodex: bract.rolodex.as_ref(),
+            ram_disk: bract.ram_disk.as_ref(),
+        }
+    }
+}
+
+impl<'a> From<&'a Bract> for blueprints::start_seedling::Dependencies<'a> {
+    fn from(bract: &'a Bract) -> Self {
+        Self {
+            inspect: bract.inspect.as_ref(),
+            file_reader: bract.file_reader.as_ref(),
+            permissions: bract.permissions.as_ref(),
+            douglas_folders: &bract.douglas_folders,
+            docker_client: bract.docker_client.as_ref(),
+            seedbank_client: bract.seedbank_client.as_ref(),
+            rolodex: bract.rolodex.as_ref(),
+            registry: &bract.registry,
+        }
+    }
+}
+
+impl<'a> From<&'a Bract> for blueprints::write_traefik_routes::Dependencies<'a> {
+    fn from(bract: &'a Bract) -> Self {
+        Self {
+            seedbank_client: bract.seedbank_client.as_ref(),
+            docker_client: bract.docker_client.as_ref(),
+            folder: bract.folder.as_ref(),
+            file_writer: bract.file_writer.as_ref(),
+            permissions: bract.permissions.as_ref(),
+            rolodex: bract.rolodex.as_ref(),
+            douglas_folders: &bract.douglas_folders,
+        }
+    }
+}
+
 impl Bract {
     pub async fn build(reporting_fd: i32) -> Result<Self, Error> {
         let os: Arc<dyn Os> = Arc::new(Unix::new());
@@ -184,16 +249,18 @@ impl Bract {
 
         blueprints::bootstrap::bootstrap(
             reporting_fd,
-            &*credentials,
-            &*folder,
-            &file_writer,
-            &*file_deleter,
-            &links,
-            &*permissions,
-            &*inspect,
-            &*os,
-            &douglas_folders,
-            &docker::client::UdsClientBuilder,
+            blueprints::bootstrap::Dependencies {
+                credentials: &*credentials,
+                folder: &*folder,
+                file_writer: &file_writer,
+                file_deleter: &*file_deleter,
+                links: &links,
+                permissions: &*permissions,
+                inspect: &*inspect,
+                os: &*os,
+                douglas_folders: &douglas_folders,
+                docker_client_builder: &docker::client::UdsClientBuilder,
+            },
         )
         .await?;
 
@@ -295,13 +362,7 @@ impl Bract {
 
         if let Err(err) = blueprints::write_traefik_routes::execute(
             Arc::clone(&self.reporter),
-            self.seedbank_client.as_ref(),
-            self.docker_client.as_ref(),
-            self.folder.as_ref(),
-            self.file_writer.as_ref(),
-            &*self.permissions,
-            &*self.rolodex,
-            &self.douglas_folders,
+            self.as_ref().into(),
         )
         .await
         {
@@ -384,20 +445,22 @@ impl Bract {
 
             if let Err(err) = blueprints::watchdog::execute(
                 Arc::clone(&server.reporter),
-                server.docker_client.as_ref(),
-                server.seedbank_client.as_ref(),
-                &*server.credentials,
-                &*server.inspect,
-                &*server.folder,
-                &*server.file_reader,
-                &*server.file_writer,
-                &*server.permissions,
-                &server.douglas_folders,
-                &*server.resin_client_builder,
-                &server.registry,
-                &*server.rolodex,
-                None,
-                &*server.ram_disk,
+                blueprints::watchdog::Dependencies {
+                    docker_client: server.docker_client.as_ref(),
+                    seedbank_client: server.seedbank_client.as_ref(),
+                    credentials: server.credentials.as_ref(),
+                    inspect: server.inspect.as_ref(),
+                    folder: server.folder.as_ref(),
+                    file_reader: server.file_reader.as_ref(),
+                    file_writer: server.file_writer.as_ref(),
+                    permissions: server.permissions.as_ref(),
+                    douglas_folders: &server.douglas_folders,
+                    resin_client_builder: server.resin_client_builder.as_ref(),
+                    registry: &server.registry,
+                    rolodex: server.rolodex.as_ref(),
+                    agent_provisioning: None,
+                    ram_disk: server.ram_disk.as_ref(),
+                },
             )
             .await
             {
@@ -642,39 +705,18 @@ impl Bract {
 
         blueprints::reconcile_seedling::execute(
             Arc::clone(&reporter),
-            &*self.credentials,
-            &*self.inspect,
-            &*self.folder,
-            &*self.file_reader,
-            &*self.file_writer,
-            &*self.permissions,
-            &self.douglas_folders,
-            self.docker_client.as_ref(),
-            &*self.resin_client_builder,
-            self.seedbank_client.as_ref(),
-            &self.registry,
-            &*self.rolodex,
+            self.into(),
             name,
             version,
             seedling_definition,
             agent_provisioning.as_ref(),
-            self.ram_disk.as_ref(),
         )
         .await
         .map_err(Error::from)?;
 
-        blueprints::write_traefik_routes::execute(
-            reporter,
-            self.seedbank_client.as_ref(),
-            self.docker_client.as_ref(),
-            self.folder.as_ref(),
-            self.file_writer.as_ref(),
-            &*self.permissions,
-            &*self.rolodex,
-            &self.douglas_folders,
-        )
-        .await
-        .map_err(Error::from)
+        blueprints::write_traefik_routes::execute(reporter, self.into())
+            .await
+            .map_err(Error::from)
     }
 
     async fn write_message(
@@ -787,14 +829,7 @@ impl Server for Bract {
     async fn start_seedling(&self, reporter: Arc<dyn Reporter>, name: &Name) -> Result<(), Error> {
         blueprints::start_seedling::execute(
             reporter,
-            &*self.inspect,
-            &*self.file_reader,
-            &*self.permissions,
-            &self.douglas_folders,
-            self.docker_client.as_ref(),
-            self.seedbank_client.as_ref(),
-            &*self.rolodex,
-            &self.registry,
+            self.into(),
             name,
             blueprints::RequestedBy::Operator,
         )
@@ -857,21 +892,9 @@ impl Server for Bract {
             }
         }
 
-        blueprints::drop_seedling::execute(
-            reporter,
-            self.docker_client.as_ref(),
-            &*self.resin_client_builder,
-            self.seedbank_client.as_ref(),
-            self.file_deleter.as_ref(),
-            self.folder_deleter.as_ref(),
-            &*self.file_reader,
-            self.folder.as_ref(),
-            &self.douglas_folders,
-            self.ram_disk.as_ref(),
-            name,
-        )
-        .await
-        .map_err(Error::from)
+        blueprints::drop_seedling::execute(reporter, self.into(), name)
+            .await
+            .map_err(Error::from)
     }
 
     async fn new_seedling(
@@ -908,16 +931,16 @@ impl Server for Bract {
             Arc::clone(&self.file_writer),
         );
 
-        blueprints::find_deadwood::execute(
-            self.seedbank_client.as_ref(),
-            self.docker_client.as_ref(),
-            resin_client.as_mut(),
-            self.folder.as_ref(),
-            &self.douglas_folders,
-            self.openbao_client_factory.as_ref(),
-            self.file_reader.as_ref(),
-            &mut identity,
-        )
+        blueprints::find_deadwood::execute(blueprints::find_deadwood::Dependencies {
+            seedbank_client: self.seedbank_client.as_ref(),
+            docker_client: self.docker_client.as_ref(),
+            resin_client: resin_client.as_mut(),
+            folder: self.folder.as_ref(),
+            douglas_folders: &self.douglas_folders,
+            openbao_client_factory: self.openbao_client_factory.as_ref(),
+            file_reader: self.file_reader.as_ref(),
+            identity: &mut identity,
+        })
         .await
         .map_err(Error::from)
     }
@@ -940,14 +963,16 @@ impl Server for Bract {
 
         blueprints::prune_deadwood::execute(
             reporter,
-            self.docker_client.as_ref(),
-            resin_client.as_mut(),
-            self.file_deleter.as_ref(),
-            self.folder_deleter.as_ref(),
-            self.openbao_client_factory.as_ref(),
-            self.file_reader.as_ref(),
-            &mut identity,
-            &self.douglas_folders,
+            blueprints::prune_deadwood::Dependencies {
+                docker_client: self.docker_client.as_ref(),
+                resin_client: resin_client.as_mut(),
+                file_deleter: self.file_deleter.as_ref(),
+                folder_deleter: self.folder_deleter.as_ref(),
+                openbao_client_factory: self.openbao_client_factory.as_ref(),
+                file_reader: self.file_reader.as_ref(),
+                identity: &mut identity,
+                douglas_folders: &self.douglas_folders,
+            },
             deadwood,
         )
         .await
