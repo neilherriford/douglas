@@ -29,6 +29,7 @@ GONE_CHECKS=(
     "$SEED_DIR/mounts|mounts dir"
     "$SEED_DIR/mounts/public|public mount dir"
     "$SEED_DIR/mounts/public/index.html|public mount's index.html"
+    "$SEED_DIR/mounts/log|log mount dir"
 )
 
 for entry in "${GONE_CHECKS[@]}"; do

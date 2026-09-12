@@ -22,6 +22,12 @@ contents = """
 </html>
 """
 
+[mounts.log]
+kind = "Persisted"
+remote_path = "/var/log/hello-world"
+access_mode = "Writable"
+rotate_logs = true
+
 [ports]
 public = 3000
 additional = []

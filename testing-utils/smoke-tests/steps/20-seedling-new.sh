@@ -30,6 +30,7 @@ FILE_CHECKS=(
     "$SEED_DIR/mounts|douglas-seedbank:douglas-seedbank:750|mounts dir"
     "$SEED_DIR/mounts/public|douglas-seedbank:douglas-seedbank:750|public mount dir"
     "$SEED_DIR/mounts/public/index.html|douglas-seedbank:douglas-seedbank:640|public mount's index.html"
+    "$SEED_DIR/mounts/log|douglas-seedbank:douglas-seedbank:750|log mount dir"
     "/var/lib/douglas/seedbank/seeds/default|douglas-seedbank:douglas-seedbank:640|default-seedling pointer file"
 )
 
@@ -53,6 +54,8 @@ assert_contains "definition records the health check command" "$definition_conte
     "require(\"http\").get(\"http://localhost:3000/\""
 assert_contains "definition records the health check wait time" "$definition_content" \
     "wait_time_in_seconds = 5"
+assert_contains "definition records the log mount opted into rotation" "$definition_content" \
+    "rotate_logs = true"
 
 mount_content="$(ssh_out sudo cat "$SEED_DIR/mounts/public/index.html")"
 assert_contains "mounted index.html has the expected content" "$mount_content" "Hello, world!"

@@ -119,6 +119,7 @@ The steps walk through the CLI's full happy path, in order:
 | `17-log-rotation-skips-errors.sh` | (setup only — the same sweep degrading gracefully: breaks openbao's "log" mount and confirms the sweep logs a warning and keeps bract running instead of wedging, then confirms it recovers on its own once the mount is restored — not a genuine dead end, so it stays in the shared happy-path run rather than becoming its own scenario) |
 | `20-seedling-new.sh` | `douglas seedling new` — comprehensive: every file/dir seedbank writes for the new seedling (exact owner:group:mode + content), and negative checks confirming reconcile *hasn't* run yet (no rolodex account, no docker network/container) |
 | `25-push-image.sh` | (setup only — pushes an image so later steps have something to operate on; also verifies reconcile's docker network and that the seedling is actually reachable through traefik with HTTP 200 + a real response body) |
+| `26-seedling-log-rotation.sh` | (setup only — the same periodic sweep as `16-log-rotation-happy.sh`, this time against a user-declared mount opted into rotation via hello-world's own spec, rather than a core service's hardcoded one) |
 | `30-seedling-status.sh` | `douglas seedling status` |
 | `40-seedling-stop.sh` | `douglas seedling stop` — also confirms traefik no longer routes to it (HTTP non-200), not just that the container object reports stopped |
 | `50-seedling-start.sh` | `douglas seedling start` — also confirms traefik routes to it again with HTTP 200 + a real response body |

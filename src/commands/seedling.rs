@@ -341,6 +341,25 @@ mod tests {
     }
 
     #[test]
+    fn test_hello_world_example_definition_should_opt_its_log_mount_into_rotation() {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("example-seedlings/hello-world/default.toml");
+        let Ok(contents) = std::fs::read_to_string(&path) else {
+            panic!("should read {}", path.display());
+        };
+        let Ok(definition) = toml::from_str::<seedbank_types::UserSeedlingDefinition>(&contents)
+        else {
+            panic!("should parse hello-world's example seedling definition");
+        };
+
+        let Some(log_mount) = definition.mounts.get(&example_name("log")) else {
+            panic!("should declare a log mount");
+        };
+
+        assert!(log_mount.rotate_logs());
+    }
+
+    #[test]
     fn test_read_user_seedling_definition_input_should_read_the_given_file_when_present() {
         let mut file_reader = MockFileReader::new();
         file_reader
