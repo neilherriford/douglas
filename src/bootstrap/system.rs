@@ -160,7 +160,7 @@ struct StateObserver<'a> {
     permissions: &'a dyn Permissions,
 }
 
-impl<'a> StateObserver<'a> {
+impl StateObserver<'_> {
     pub fn discover(
         &mut self,
         span: &Span,

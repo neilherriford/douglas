@@ -112,7 +112,7 @@ struct StateObserver<'a> {
     bract_client: &'a dyn bract_client::Client,
 }
 
-impl<'a> StateObserver<'a> {
+impl StateObserver<'_> {
     pub async fn discover(&mut self, span: &Span) -> Result<State, OpenBaoError> {
         let guard = span
             .create_child("Checking OpenBao status", ScopeKind::Phase)
