@@ -566,6 +566,34 @@ impl<'a> Command<Context<'a>> for StartAgentContainer {
 
         guard.finish(Ok(()))
     }
+
+    async fn rollback(
+        &mut self,
+        span: &Span,
+        context: &mut Context<'a>,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let guard = span
+            .create_child(
+                &format!("Stopping agent container '{}'", self.container_name),
+                ScopeKind::Step,
+            )
+            .start_guard();
+
+        match context
+            .docker_client
+            .stop_container(ContainerRef::FullName(self.container_name.clone()))
+            .await
+        {
+            Ok(()) | Err(docker::DockerError::ResourceNotFound) => {}
+            Err(err) => {
+                guard.finish_with_outcome(log::Outcome::Failed);
+                return Err(Box::new(err));
+            }
+        }
+
+        guard.finish_with_outcome(log::Outcome::Ok);
+        Ok(())
+    }
 }
 
 struct StartSeedling {
@@ -694,6 +722,38 @@ impl<'a> Command<Context<'a>> for StartSeedling {
         .await?;
 
         guard.finish(Err(Box::new(StartSeedlingError::FailedToStart)))
+    }
+
+    async fn rollback(
+        &mut self,
+        span: &Span,
+        context: &mut Context<'a>,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        if self.already_running {
+            return Ok(());
+        }
+
+        let guard = span
+            .create_child(
+                &format!("Stopping seedling '{}'", self.seedling_name),
+                ScopeKind::Step,
+            )
+            .start_guard();
+
+        match context
+            .docker_client
+            .stop_container(self.container_ref())
+            .await
+        {
+            Ok(()) | Err(docker::DockerError::ResourceNotFound) => {}
+            Err(err) => {
+                guard.finish_with_outcome(log::Outcome::Failed);
+                return Err(Box::new(err));
+            }
+        }
+
+        guard.finish_with_outcome(log::Outcome::Ok);
+        Ok(())
     }
 }
 
@@ -1169,5 +1229,73 @@ mod tests {
         )
         .await
         .expect("should record the failure");
+    }
+
+    #[tokio::test]
+    async fn test_start_agent_container_rollback_should_stop_the_agent_container() {
+        let mut docker_client = docker::MockClient::new();
+        docker_client.expect_stop_container().returning(|_| Ok(()));
+        let seedbank_client = seedbank_client::MockClient::new();
+        let mut context = Context {
+            docker_client: &docker_client,
+            seedbank_client: &seedbank_client,
+        };
+
+        let mut command =
+            StartAgentContainer::new(agent_container_name(&name()).unwrap(), agent_ip());
+        let span = test_span();
+
+        let result = command.rollback(&span, &mut context).await;
+
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_start_seedling_rollback_should_stop_the_container_when_it_was_not_already_running()
+     {
+        let mut docker_client = docker::MockClient::new();
+        docker_client.expect_stop_container().returning(|_| Ok(()));
+        let seedbank_client = seedbank_client::MockClient::new();
+        let mut context = Context {
+            docker_client: &docker_client,
+            seedbank_client: &seedbank_client,
+        };
+
+        let mut command = StartSeedling::new(
+            name(),
+            health_check(),
+            container_name(&name()).unwrap(),
+            seedbank_types::Version(1),
+            false,
+        );
+        let span = test_span();
+
+        let result = command.rollback(&span, &mut context).await;
+
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_start_seedling_rollback_should_leave_an_already_running_container_alone() {
+        let mut docker_client = docker::MockClient::new();
+        docker_client.expect_stop_container().never();
+        let seedbank_client = seedbank_client::MockClient::new();
+        let mut context = Context {
+            docker_client: &docker_client,
+            seedbank_client: &seedbank_client,
+        };
+
+        let mut command = StartSeedling::new(
+            name(),
+            health_check(),
+            container_name(&name()).unwrap(),
+            seedbank_types::Version(1),
+            true,
+        );
+        let span = test_span();
+
+        let result = command.rollback(&span, &mut context).await;
+
+        assert!(result.is_ok());
     }
 }

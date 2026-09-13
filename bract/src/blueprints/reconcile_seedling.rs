@@ -24,8 +24,8 @@ use docker_types::{
     VersionedImageName,
 };
 use file_system::{
-    FileReader, FileSystemError, FileWriter, Folder, Inspect, Modes, Permissions, RelativePath,
-    path_to_string,
+    FileDeleter, FileReader, FileSystemError, FileWriter, Folder, FolderDeleter, Inspect, Modes,
+    Permissions, RelativePath, path_to_string,
 };
 use log::{Level, Reporter, ScopeKind, Span};
 use ram_disk::RamDisk;
@@ -80,7 +80,10 @@ struct Context<'a> {
     douglas_folders: &'a DouglasFolders,
     rolodex: &'a dyn Rolodex,
     folder: &'a dyn Folder,
+    file_reader: &'a dyn FileReader,
     file_writer: &'a dyn FileWriter,
+    file_deleter: &'a dyn FileDeleter,
+    folder_deleter: &'a dyn FolderDeleter,
     permissions: &'a dyn Permissions,
     registry: &'a docker_types::Registry,
     ram_disk: &'a dyn RamDisk,
@@ -128,6 +131,8 @@ pub(crate) struct Dependencies<'a> {
     pub folder: &'a dyn Folder,
     pub file_reader: &'a dyn FileReader,
     pub file_writer: &'a dyn FileWriter,
+    pub file_deleter: &'a dyn FileDeleter,
+    pub folder_deleter: &'a dyn FolderDeleter,
     pub permissions: &'a dyn Permissions,
     pub douglas_folders: &'a DouglasFolders,
     pub docker_client: &'a dyn docker::client::Client,
@@ -207,6 +212,9 @@ pub async fn execute(
             rolodex: deps.rolodex,
             douglas_folders: deps.douglas_folders,
             folder: deps.folder,
+            file_reader: deps.file_reader,
+            file_deleter: deps.file_deleter,
+            folder_deleter: deps.folder_deleter,
             permissions: deps.permissions,
             file_writer: deps.file_writer,
             registry: deps.registry,
@@ -812,6 +820,24 @@ impl<'a> Command<Context<'a>> for CreateSeedling {
         guard.finish_with_outcome(log::Outcome::Ok);
         Ok(())
     }
+
+    async fn rollback(
+        &mut self,
+        span: &Span,
+        context: &mut Context<'a>,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let guard = span
+            .create_child(
+                &format!("Rolling back seedling creation for '{}'", self.name),
+                ScopeKind::Step,
+            )
+            .start_guard();
+
+        context.seedbank_client.delete(&self.name).await?;
+
+        guard.finish_with_outcome(log::Outcome::Ok);
+        Ok(())
+    }
 }
 
 struct SetDesiredRunStatusToRunning {
@@ -870,6 +896,7 @@ struct UpdateSeedling {
     name: seedbank_types::Name,
     version: seedbank_types::Version,
     seedling_definition: seedbank_types::SeedlingDefinition,
+    previous: Option<(seedbank_types::Version, seedbank_types::SeedlingDefinition)>,
 }
 
 impl UpdateSeedling {
@@ -882,6 +909,7 @@ impl UpdateSeedling {
             name,
             version,
             seedling_definition,
+            previous: None,
         }
     }
 }
@@ -917,10 +945,36 @@ impl<'a> Command<Context<'a>> for UpdateSeedling {
             )
             .start_guard();
 
+        let previous = context.seedbank_client.load(&self.name).await?;
+        self.previous = Some((previous.version, previous.definition));
+
         context
             .seedbank_client
             .update(&self.name, &self.version, &self.seedling_definition)
             .await?;
+
+        guard.finish_with_outcome(log::Outcome::Ok);
+        Ok(())
+    }
+
+    async fn rollback(
+        &mut self,
+        span: &Span,
+        context: &mut Context<'a>,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let guard = span
+            .create_child(
+                &format!("Rolling back seedling update for '{}'", self.name),
+                ScopeKind::Step,
+            )
+            .start_guard();
+
+        if let Some((version, definition)) = &self.previous {
+            context
+                .seedbank_client
+                .update(&self.name, version, definition)
+                .await?;
+        }
 
         guard.finish_with_outcome(log::Outcome::Ok);
         Ok(())
@@ -1056,6 +1110,27 @@ impl<'a> Command<Context<'a>> for CreateMountFolder {
             .start_guard();
 
         context.folder.create_recursively(&self.path)?;
+
+        guard.finish_with_outcome(log::Outcome::Ok);
+        Ok(())
+    }
+
+    async fn rollback(
+        &mut self,
+        span: &Span,
+        context: &mut Context<'a>,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let guard = span
+            .create_child(
+                &format!(
+                    "Rolling back seedling mount '{}'",
+                    path_to_string(&self.path)
+                ),
+                ScopeKind::Step,
+            )
+            .start_guard();
+
+        context.folder_deleter.delete(&self.path)?;
 
         guard.finish_with_outcome(log::Outcome::Ok);
         Ok(())
@@ -1211,6 +1286,7 @@ struct WriteFile {
     parent_path: PathBuf,
     file_name: String,
     contents: Vec<u8>,
+    previous_contents: Option<Vec<u8>>,
 }
 
 impl WriteFile {
@@ -1219,7 +1295,14 @@ impl WriteFile {
             parent_path,
             file_name,
             contents,
+            previous_contents: None,
         }
+    }
+
+    fn file_path(&self) -> PathBuf {
+        let mut file_path = self.parent_path.clone();
+        file_path.push(&self.file_name);
+        file_path
     }
 }
 
@@ -1247,12 +1330,43 @@ impl<'a> Command<Context<'a>> for WriteFile {
             )
             .start_guard();
 
+        let file_path = self.file_path();
+        self.previous_contents = if context.file_reader.exists(&file_path) {
+            Some(context.file_reader.read_all_bytes(&file_path)?)
+        } else {
+            None
+        };
+
         context.folder.create_recursively(&self.parent_path)?;
-        let mut file_path = self.parent_path.clone();
-        file_path.push(self.file_name.clone());
         context
             .file_writer
             .write_all_bytes(&file_path, &self.contents)?;
+
+        guard.finish_with_outcome(log::Outcome::Ok);
+        Ok(())
+    }
+
+    async fn rollback(
+        &mut self,
+        span: &Span,
+        context: &mut Context<'a>,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let guard = span
+            .create_child(
+                &format!("Rolling back mount file '{}'", self.file_name),
+                ScopeKind::Step,
+            )
+            .start_guard();
+
+        let file_path = self.file_path();
+        match &self.previous_contents {
+            Some(previous_contents) => {
+                context
+                    .file_writer
+                    .write_all_bytes(&file_path, previous_contents)?;
+            }
+            None => context.file_deleter.delete(&file_path)?,
+        }
 
         guard.finish_with_outcome(log::Outcome::Ok);
         Ok(())
@@ -1312,11 +1426,17 @@ impl<'a> Command<Context<'a>> for SetMountMode {
 
 struct EnsureAgentMount {
     seedling_name: seedbank_types::Name,
+    created_mount_dir: bool,
+    mounted_ram_disk: bool,
 }
 
 impl EnsureAgentMount {
     pub fn new(seedling_name: seedbank_types::Name) -> Self {
-        Self { seedling_name }
+        Self {
+            seedling_name,
+            created_mount_dir: false,
+            mounted_ram_disk: false,
+        }
     }
 }
 
@@ -1353,9 +1473,12 @@ impl<'a> Command<Context<'a>> for EnsureAgentMount {
             return Err(Box::new(ReconcileSeedlingError::MissingAgentProvisioning));
         };
 
+        self.created_mount_dir = !context.folder.exists(&agent_provisioning.mount_dir);
         context
             .folder
             .create_recursively(&agent_provisioning.mount_dir)?;
+
+        self.mounted_ram_disk = !context.ram_disk.is_mounted(&agent_provisioning.mount_dir)?;
         let swap_protected = context
             .ram_disk
             .mount(&agent_provisioning.mount_dir, AGENT_MOUNT_RAM_DISK_SIZE_MB)?;
@@ -1395,6 +1518,39 @@ impl<'a> Command<Context<'a>> for EnsureAgentMount {
             &agent_provisioning.agent_config_path,
             &agent_provisioning.agent_config,
         )?;
+
+        guard.finish_with_outcome(log::Outcome::Ok);
+        Ok(())
+    }
+
+    async fn rollback(
+        &mut self,
+        span: &Span,
+        context: &mut Context<'a>,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let guard = span
+            .create_child(
+                &format!(
+                    "Rolling back OpenBao agent mount for '{}'",
+                    self.seedling_name
+                ),
+                ScopeKind::Step,
+            )
+            .start_guard();
+
+        let Some(agent_provisioning) = context.agent_provisioning else {
+            guard.finish_with_outcome(log::Outcome::Ok);
+            return Ok(());
+        };
+
+        if self.mounted_ram_disk {
+            context.ram_disk.unmount(&agent_provisioning.mount_dir)?;
+        }
+        if self.created_mount_dir {
+            context
+                .folder_deleter
+                .delete(&agent_provisioning.mount_dir)?;
+        }
 
         guard.finish_with_outcome(log::Outcome::Ok);
         Ok(())
@@ -1488,6 +1644,34 @@ impl<'a> Command<Context<'a>> for StopContainer {
             .docker_client
             .stop_container(ContainerRef::FullName(self.name.clone()))
             .await?;
+
+        guard.finish_with_outcome(log::Outcome::Ok);
+        Ok(())
+    }
+
+    async fn rollback(
+        &mut self,
+        span: &Span,
+        context: &mut Context<'a>,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let guard = span
+            .create_child(
+                &format!("Restarting container '{}' (v{})", self.name, self.version),
+                ScopeKind::Step,
+            )
+            .start_guard();
+
+        match context
+            .docker_client
+            .start_container(ContainerRef::FullName(self.name.clone()))
+            .await
+        {
+            Ok(()) | Err(DockerError::ResourceNotFound) => {}
+            Err(err) => {
+                guard.finish_with_outcome(log::Outcome::Failed);
+                return Err(Box::new(err));
+            }
+        }
 
         guard.finish_with_outcome(log::Outcome::Ok);
         Ok(())
@@ -1589,11 +1773,16 @@ fn build_new_container(
 struct BuildContainer {
     name: seedbank_types::Name,
     version: seedbank_types::Version,
+    created_network: bool,
 }
 
 impl BuildContainer {
     pub fn new(name: seedbank_types::Name, version: seedbank_types::Version) -> Self {
-        Self { name, version }
+        Self {
+            name,
+            version,
+            created_network: false,
+        }
     }
 }
 
@@ -1687,16 +1876,17 @@ impl<'a> Command<Context<'a>> for BuildContainer {
         let private_subnet = context
             .agent_provisioning
             .map(|agent_provisioning| agent_provisioning.private_subnet.clone());
-        if !context
+        let network_already_existed = context
             .docker_client
             .network_exists(&seedling_network)
-            .await?
-        {
+            .await?;
+        if !network_already_existed {
             context
                 .docker_client
                 .create_network(&seedling_network, private_subnet.as_ref())
                 .await?;
         }
+        self.created_network = !network_already_existed;
         context
             .docker_client
             .connect_network(
@@ -1723,11 +1913,52 @@ impl<'a> Command<Context<'a>> for BuildContainer {
         guard.finish_with_outcome(log::Outcome::Ok);
         Ok(())
     }
+
+    async fn rollback(
+        &mut self,
+        span: &Span,
+        context: &mut Context<'a>,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let guard = span
+            .create_child(
+                &format!(
+                    "Rolling back container build for '{}' (v{})",
+                    self.name, self.version
+                ),
+                ScopeKind::Step,
+            )
+            .start_guard();
+
+        let built_container_name = container_name(&self.name)?;
+        match context
+            .docker_client
+            .delete_container(ContainerRef::FullName(built_container_name))
+            .await
+        {
+            Ok(()) | Err(DockerError::ResourceNotFound) => {}
+            Err(err) => {
+                guard.finish_with_outcome(log::Outcome::Failed);
+                return Err(Box::new(err));
+            }
+        }
+
+        if self.created_network {
+            let seedling_network = seedling_network_name(&self.name)?;
+            context
+                .docker_client
+                .delete_network(&seedling_network)
+                .await?;
+        }
+
+        guard.finish_with_outcome(log::Outcome::Ok);
+        Ok(())
+    }
 }
 
 struct BuildAgentContainer {
     seedling_name: seedbank_types::Name,
     version: seedbank_types::Version,
+    created_network: bool,
 }
 
 impl BuildAgentContainer {
@@ -1735,6 +1966,7 @@ impl BuildAgentContainer {
         Self {
             seedling_name,
             version,
+            created_network: false,
         }
     }
 }
@@ -1830,16 +2062,17 @@ impl<'a> Command<Context<'a>> for BuildAgentContainer {
             .await?;
 
         let seedling_network = seedling_network_name(&self.seedling_name)?;
-        if !context
+        let network_already_existed = context
             .docker_client
             .network_exists(&seedling_network)
-            .await?
-        {
+            .await?;
+        if !network_already_existed {
             context
                 .docker_client
                 .create_network(&seedling_network, Some(&agent_provisioning.private_subnet))
                 .await?;
         }
+        self.created_network = !network_already_existed;
         context
             .docker_client
             .connect_network(
@@ -1860,6 +2093,46 @@ impl<'a> Command<Context<'a>> for BuildAgentContainer {
                 None,
             )
             .await?;
+
+        guard.finish_with_outcome(log::Outcome::Ok);
+        Ok(())
+    }
+
+    async fn rollback(
+        &mut self,
+        span: &Span,
+        context: &mut Context<'a>,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let guard = span
+            .create_child(
+                &format!(
+                    "Rolling back OpenBao agent container build for '{}' (v{})",
+                    self.seedling_name, self.version
+                ),
+                ScopeKind::Step,
+            )
+            .start_guard();
+
+        let built_container_name = agent_container_name(&self.seedling_name)?;
+        match context
+            .docker_client
+            .delete_container(ContainerRef::FullName(built_container_name))
+            .await
+        {
+            Ok(()) | Err(DockerError::ResourceNotFound) => {}
+            Err(err) => {
+                guard.finish_with_outcome(log::Outcome::Failed);
+                return Err(Box::new(err));
+            }
+        }
+
+        if self.created_network {
+            let seedling_network = seedling_network_name(&self.seedling_name)?;
+            context
+                .docker_client
+                .delete_network(&seedling_network)
+                .await?;
+        }
 
         guard.finish_with_outcome(log::Outcome::Ok);
         Ok(())
@@ -1909,11 +2182,47 @@ impl<'a> Command<Context<'a>> for StartContainer {
         guard.finish_with_outcome(log::Outcome::Ok);
         Ok(())
     }
+
+    async fn rollback(
+        &mut self,
+        span: &Span,
+        context: &mut Context<'a>,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let guard = span
+            .create_child(
+                &format!("Stopping container '{}' (v{})", self.name, self.version),
+                ScopeKind::Step,
+            )
+            .start_guard();
+
+        match context
+            .docker_client
+            .stop_container(ContainerRef::FullName(self.name.clone()))
+            .await
+        {
+            Ok(()) | Err(DockerError::ResourceNotFound) => {}
+            Err(err) => {
+                guard.finish_with_outcome(log::Outcome::Failed);
+                return Err(Box::new(err));
+            }
+        }
+
+        guard.finish_with_outcome(log::Outcome::Ok);
+        Ok(())
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::rolodex::MockRolodex;
+    use credentials::MockCredentials;
+    use docker::MockClient as MockDockerClient;
+    use file_system::{
+        MockFileDeleter, MockFileReader, MockFileWriter, MockFolder, MockFolderDeleter,
+        MockPermissions,
+    };
+    use ram_disk::MockRamDisk;
     use seedbank_types::{HealthCheck, HealthCheckCommand};
     use std::{
         collections::{HashMap, HashSet},
@@ -2481,5 +2790,431 @@ mod tests {
             labels::get_origin(&new_container.labels),
             Some(seedbank_types::Origin::User)
         );
+    }
+
+    fn root_span() -> Span {
+        struct NullReporter;
+        impl log::Reporter for NullReporter {
+            fn emit(&self, _event: log::Event) {}
+        }
+        Span::new(Arc::new(NullReporter), "test", ScopeKind::Group)
+    }
+
+    struct DefaultMocks {
+        credentials: MockCredentials,
+        docker_client: MockDockerClient,
+        seedbank_client: seedbank_client::MockClient,
+        rolodex: MockRolodex,
+        folder: MockFolder,
+        file_reader: MockFileReader,
+        file_writer: MockFileWriter,
+        file_deleter: MockFileDeleter,
+        folder_deleter: MockFolderDeleter,
+        permissions: MockPermissions,
+        ram_disk: MockRamDisk,
+    }
+
+    impl Default for DefaultMocks {
+        fn default() -> Self {
+            Self {
+                credentials: MockCredentials::new(),
+                docker_client: MockDockerClient::new(),
+                seedbank_client: seedbank_client::MockClient::new(),
+                rolodex: MockRolodex::new(),
+                folder: MockFolder::new(),
+                file_reader: MockFileReader::new(),
+                file_writer: MockFileWriter::new(),
+                file_deleter: MockFileDeleter::new(),
+                folder_deleter: MockFolderDeleter::new(),
+                permissions: MockPermissions::new(),
+                ram_disk: MockRamDisk::new(),
+            }
+        }
+    }
+
+    fn test_context<'a>(
+        mocks: &'a DefaultMocks,
+        name: &'a seedbank_types::Name,
+        version: &'a seedbank_types::Version,
+        seedling_definition: &'a seedbank_types::SeedlingDefinition,
+        douglas_folders: &'a DouglasFolders,
+        registry: &'a docker_types::Registry,
+    ) -> Context<'a> {
+        Context {
+            name,
+            version,
+            seedling_definition,
+            agent_provisioning: None,
+            credentials: &mocks.credentials,
+            docker_client: &mocks.docker_client,
+            seedbank_client: &mocks.seedbank_client,
+            douglas_folders,
+            rolodex: &mocks.rolodex,
+            folder: &mocks.folder,
+            file_reader: &mocks.file_reader,
+            file_writer: &mocks.file_writer,
+            file_deleter: &mocks.file_deleter,
+            folder_deleter: &mocks.folder_deleter,
+            permissions: &mocks.permissions,
+            registry,
+            ram_disk: &mocks.ram_disk,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_create_seedling_rollback_should_delete_the_created_seedling() {
+        let mut mocks = DefaultMocks::default();
+        mocks
+            .seedbank_client
+            .expect_delete()
+            .withf(|deleted_name| deleted_name == &name())
+            .returning(|_| Ok(()));
+
+        let seedling_name = name();
+        let definition = seedling_definition();
+        let douglas_folders = DouglasFolders::new();
+        let registry = registry();
+        let version = seedbank_types::Version(1);
+        let mut context = test_context(
+            &mocks,
+            &seedling_name,
+            &version,
+            &definition,
+            &douglas_folders,
+            &registry,
+        );
+
+        let mut command =
+            CreateSeedling::new(seedling_name.clone(), version.clone(), definition.clone());
+        let span = root_span();
+
+        let result = command.rollback(&span, &mut context).await;
+
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_update_seedling_run_should_capture_the_previous_definition_for_rollback() {
+        let previous_definition = seedling_definition();
+
+        let mut mocks = DefaultMocks::default();
+        mocks.seedbank_client.expect_load().returning({
+            let previous_definition = previous_definition.clone();
+            move |_| {
+                Ok(seedbank_types::Seedling {
+                    id: seedbank_types::Id { value: 0 },
+                    name: name(),
+                    version: seedbank_types::Version(1),
+                    definition: previous_definition.clone(),
+                })
+            }
+        });
+        mocks
+            .seedbank_client
+            .expect_update()
+            .returning(|_, _, _| Ok(()));
+
+        let seedling_name = name();
+        let new_definition = seedling_definition().with_origin(seedbank_types::Origin::User);
+        let douglas_folders = DouglasFolders::new();
+        let registry = registry();
+        let version = seedbank_types::Version(2);
+        let mut context = test_context(
+            &mocks,
+            &seedling_name,
+            &version,
+            &new_definition,
+            &douglas_folders,
+            &registry,
+        );
+
+        let mut command = UpdateSeedling::new(
+            seedling_name.clone(),
+            version.clone(),
+            new_definition.clone(),
+        );
+        let span = root_span();
+
+        let result = command.run(&span, &mut context).await;
+
+        assert!(result.is_ok());
+        assert_eq!(
+            command.previous,
+            Some((seedbank_types::Version(1), previous_definition))
+        );
+    }
+
+    #[tokio::test]
+    async fn test_update_seedling_rollback_should_restore_the_previous_version_and_definition() {
+        let previous_definition = seedling_definition();
+        let expected_previous_definition = previous_definition.clone();
+
+        let mut mocks = DefaultMocks::default();
+        mocks
+            .seedbank_client
+            .expect_update()
+            .withf(move |_, version, definition| {
+                *version == seedbank_types::Version(1)
+                    && definition == &expected_previous_definition
+            })
+            .returning(|_, _, _| Ok(()));
+
+        let seedling_name = name();
+        let new_definition = seedling_definition().with_origin(seedbank_types::Origin::User);
+        let douglas_folders = DouglasFolders::new();
+        let registry = registry();
+        let version = seedbank_types::Version(2);
+        let mut context = test_context(
+            &mocks,
+            &seedling_name,
+            &version,
+            &new_definition,
+            &douglas_folders,
+            &registry,
+        );
+
+        let mut command = UpdateSeedling::new(
+            seedling_name.clone(),
+            version.clone(),
+            new_definition.clone(),
+        );
+        command.previous = Some((seedbank_types::Version(1), previous_definition));
+        let span = root_span();
+
+        let result = command.rollback(&span, &mut context).await;
+
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_create_mount_folder_rollback_should_delete_the_folder() {
+        let path = PathBuf::from("/var/lib/douglas/mounts/traefik/config");
+
+        let mut mocks = DefaultMocks::default();
+        let expected_path = path.clone();
+        mocks
+            .folder_deleter
+            .expect_delete()
+            .withf(move |deleted_path| deleted_path == expected_path)
+            .returning(|_| Ok(()));
+
+        let seedling_name = name();
+        let definition = seedling_definition();
+        let douglas_folders = DouglasFolders::new();
+        let registry = registry();
+        let version = seedbank_types::Version(1);
+        let mut context = test_context(
+            &mocks,
+            &seedling_name,
+            &version,
+            &definition,
+            &douglas_folders,
+            &registry,
+        );
+
+        let mut command = CreateMountFolder::new(path);
+        let span = root_span();
+
+        let result = command.rollback(&span, &mut context).await;
+
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_write_file_rollback_should_delete_a_file_that_did_not_exist_before() {
+        let mut mocks = DefaultMocks::default();
+        mocks.file_deleter.expect_delete().returning(|_| Ok(()));
+
+        let seedling_name = name();
+        let definition = seedling_definition();
+        let douglas_folders = DouglasFolders::new();
+        let registry = registry();
+        let version = seedbank_types::Version(1);
+        let mut context = test_context(
+            &mocks,
+            &seedling_name,
+            &version,
+            &definition,
+            &douglas_folders,
+            &registry,
+        );
+
+        let mut command = WriteFile::new(
+            PathBuf::from("/var/lib/douglas/mounts/traefik/config"),
+            "config.yml".to_string(),
+            b"new contents".to_vec(),
+        );
+        let span = root_span();
+
+        let result = command.rollback(&span, &mut context).await;
+
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_write_file_rollback_should_restore_previous_contents_when_the_file_already_existed()
+     {
+        let mut mocks = DefaultMocks::default();
+        mocks
+            .file_writer
+            .expect_write_all_bytes()
+            .withf(|_, contents| contents == b"old contents")
+            .returning(|_, _| Ok(()));
+
+        let seedling_name = name();
+        let definition = seedling_definition();
+        let douglas_folders = DouglasFolders::new();
+        let registry = registry();
+        let version = seedbank_types::Version(1);
+        let mut context = test_context(
+            &mocks,
+            &seedling_name,
+            &version,
+            &definition,
+            &douglas_folders,
+            &registry,
+        );
+
+        let mut command = WriteFile::new(
+            PathBuf::from("/var/lib/douglas/mounts/traefik/config"),
+            "config.yml".to_string(),
+            b"new contents".to_vec(),
+        );
+        command.previous_contents = Some(b"old contents".to_vec());
+        let span = root_span();
+
+        let result = command.rollback(&span, &mut context).await;
+
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_build_container_rollback_should_delete_the_container_and_the_network_it_created()
+    {
+        let mut mocks = DefaultMocks::default();
+        mocks
+            .docker_client
+            .expect_delete_container()
+            .returning(|_| Ok(()));
+        mocks
+            .docker_client
+            .expect_delete_network()
+            .returning(|_| Ok(()));
+
+        let seedling_name = name();
+        let definition = seedling_definition();
+        let douglas_folders = DouglasFolders::new();
+        let registry = registry();
+        let version = seedbank_types::Version(1);
+        let mut context = test_context(
+            &mocks,
+            &seedling_name,
+            &version,
+            &definition,
+            &douglas_folders,
+            &registry,
+        );
+
+        let mut command = BuildContainer::new(seedling_name.clone(), version.clone());
+        command.created_network = true;
+        let span = root_span();
+
+        let result = command.rollback(&span, &mut context).await;
+
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_build_container_rollback_should_leave_a_pre_existing_network_alone() {
+        let mut mocks = DefaultMocks::default();
+        mocks
+            .docker_client
+            .expect_delete_container()
+            .returning(|_| Ok(()));
+        mocks.docker_client.expect_delete_network().never();
+
+        let seedling_name = name();
+        let definition = seedling_definition();
+        let douglas_folders = DouglasFolders::new();
+        let registry = registry();
+        let version = seedbank_types::Version(1);
+        let mut context = test_context(
+            &mocks,
+            &seedling_name,
+            &version,
+            &definition,
+            &douglas_folders,
+            &registry,
+        );
+
+        let mut command = BuildContainer::new(seedling_name.clone(), version.clone());
+        command.created_network = false;
+        let span = root_span();
+
+        let result = command.rollback(&span, &mut context).await;
+
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_start_container_rollback_should_stop_the_container() {
+        let mut mocks = DefaultMocks::default();
+        mocks
+            .docker_client
+            .expect_stop_container()
+            .returning(|_| Ok(()));
+
+        let seedling_name = name();
+        let definition = seedling_definition();
+        let douglas_folders = DouglasFolders::new();
+        let registry = registry();
+        let version = seedbank_types::Version(1);
+        let mut context = test_context(
+            &mocks,
+            &seedling_name,
+            &version,
+            &definition,
+            &douglas_folders,
+            &registry,
+        );
+
+        let mut command =
+            StartContainer::new(container_name(&seedling_name).unwrap(), version.clone());
+        let span = root_span();
+
+        let result = command.rollback(&span, &mut context).await;
+
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_stop_container_rollback_should_restart_the_container() {
+        let mut mocks = DefaultMocks::default();
+        mocks
+            .docker_client
+            .expect_start_container()
+            .returning(|_| Ok(()));
+
+        let seedling_name = name();
+        let definition = seedling_definition();
+        let douglas_folders = DouglasFolders::new();
+        let registry = registry();
+        let version = seedbank_types::Version(1);
+        let mut context = test_context(
+            &mocks,
+            &seedling_name,
+            &version,
+            &definition,
+            &douglas_folders,
+            &registry,
+        );
+
+        let mut command =
+            StopContainer::new(container_name(&seedling_name).unwrap(), version.clone());
+        let span = root_span();
+
+        let result = command.rollback(&span, &mut context).await;
+
+        assert!(result.is_ok());
     }
 }

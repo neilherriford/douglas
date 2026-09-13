@@ -234,6 +234,33 @@ impl<'a> Command<Context<'a>> for StopSeedling {
 
         guard.finish(Ok(()))
     }
+
+    async fn rollback(
+        &mut self,
+        span: &Span,
+        context: &mut Context<'a>,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let message = match &self.version {
+            Some(version) => format!("Restarting seedling '{}' (v{version})", self.seedling_name),
+            None => format!("Restarting seedling '{}'", self.seedling_name),
+        };
+        let guard = span.create_child(&message, ScopeKind::Step).start_guard();
+
+        match context
+            .docker_client
+            .start_container(ContainerRef::FullName(self.container_name.clone()))
+            .await
+        {
+            Ok(()) | Err(docker::DockerError::ResourceNotFound) => {}
+            Err(err) => {
+                guard.finish_with_outcome(log::Outcome::Failed);
+                return Err(Box::new(err));
+            }
+        }
+
+        guard.finish_with_outcome(log::Outcome::Ok);
+        Ok(())
+    }
 }
 
 struct SetDesiredRunStatusToStopped {
@@ -462,5 +489,33 @@ mod tests {
                 "Stopping seedling 'traefik' (v1)",
             ]
         );
+    }
+
+    fn test_span() -> Span {
+        let (sender, _receiver) = tokio::sync::mpsc::unbounded_channel();
+        let reporter: Arc<dyn Reporter> = Arc::new(log::ChannelReporter::new(sender));
+        Span::new(reporter, "test", ScopeKind::Task)
+    }
+
+    #[tokio::test]
+    async fn test_stop_seedling_rollback_should_restart_the_container() {
+        let mut docker_client = docker::MockClient::new();
+        docker_client.expect_start_container().returning(|_| Ok(()));
+        let seedbank_client = seedbank_client::MockClient::new();
+        let mut context = Context {
+            docker_client: &docker_client,
+            seedbank_client: &seedbank_client,
+        };
+
+        let mut command = StopSeedling::new(
+            name(),
+            container_name(&name()).unwrap(),
+            Some(seedbank_types::Version(1)),
+        );
+        let span = test_span();
+
+        let result = command.rollback(&span, &mut context).await;
+
+        assert!(result.is_ok());
     }
 }

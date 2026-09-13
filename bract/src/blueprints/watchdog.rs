@@ -12,7 +12,9 @@ use config::DouglasFolders;
 use credentials::Credentials;
 use docker::client::ContainerRef;
 use docker_types::{ContainerName, DockerNameError};
-use file_system::{FileReader, FileWriter, Folder, Inspect, Permissions};
+use file_system::{
+    FileDeleter, FileReader, FileWriter, Folder, FolderDeleter, Inspect, Permissions,
+};
 use log::{Reporter, ScopeKind, Span};
 use ram_disk::RamDisk;
 use seedbank_types::DesiredRunStatus;
@@ -39,6 +41,8 @@ struct Context<'a> {
     folder: &'a dyn Folder,
     file_reader: &'a dyn FileReader,
     file_writer: &'a dyn FileWriter,
+    file_deleter: &'a dyn FileDeleter,
+    folder_deleter: &'a dyn FolderDeleter,
     permissions: &'a dyn Permissions,
     douglas_folders: &'a DouglasFolders,
     resin_client_builder: &'a dyn resin_client::ClientBuilder,
@@ -63,6 +67,8 @@ pub(crate) struct Dependencies<'a> {
     pub folder: &'a dyn Folder,
     pub file_reader: &'a dyn FileReader,
     pub file_writer: &'a dyn FileWriter,
+    pub file_deleter: &'a dyn FileDeleter,
+    pub folder_deleter: &'a dyn FolderDeleter,
     pub permissions: &'a dyn Permissions,
     pub douglas_folders: &'a DouglasFolders,
     pub resin_client_builder: &'a dyn resin_client::ClientBuilder,
@@ -105,6 +111,8 @@ pub async fn execute(
             folder: deps.folder,
             file_reader: deps.file_reader,
             file_writer: deps.file_writer,
+            file_deleter: deps.file_deleter,
+            folder_deleter: deps.folder_deleter,
             permissions: deps.permissions,
             douglas_folders: deps.douglas_folders,
             resin_client_builder: deps.resin_client_builder,
@@ -329,6 +337,8 @@ impl<'a> Command<Context<'a>> for ReconcileSeedling {
                 folder: &*context.folder,
                 file_reader: &*context.file_reader,
                 file_writer: &*context.file_writer,
+                file_deleter: &*context.file_deleter,
+                folder_deleter: &*context.folder_deleter,
                 permissions: &*context.permissions,
                 douglas_folders: &*context.douglas_folders,
                 docker_client: context.docker_client,
