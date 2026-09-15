@@ -3,7 +3,7 @@ use blueprint::{
     listener::{LivenessCheck, check_liveness},
 };
 use command_fds::{CommandFdExt, FdMapping};
-use log::Span;
+use log::{Level, Outcome, ScopeGuard, Span};
 use os::Os;
 use os_pipe::{PipeReader, PipeWriter};
 use std::{
@@ -72,6 +72,19 @@ fn tag_event_with_service(event: &mut log::Event, service_name: &str) {
         }
         log::EventKind::PlanHint { .. } | log::EventKind::Progress { .. } => {}
     }
+}
+
+pub(crate) fn require<T, E: std::fmt::Display>(
+    guard: &ScopeGuard,
+    step: &str,
+    result: Result<T, E>,
+) -> Option<T> {
+    result
+        .inspect_err(|err| {
+            guard.span().message(Level::Warn, &format!("{step}: {err}"));
+            guard.finish_with_outcome(Outcome::Failed);
+        })
+        .ok()
 }
 
 pub(crate) async fn wait_until_running(liveness: &LivenessCheck, span: &Span) -> bool {

@@ -1,4 +1,5 @@
 use crate::bootstrap::core_seedlings;
+use crate::util::require;
 use async_trait::async_trait;
 use base64::{Engine, engine::general_purpose::STANDARD};
 use blueprint::{
@@ -1145,32 +1146,31 @@ pub async fn perform(reporter: Arc<dyn Reporter>, deps: Dependencies<'_>) -> boo
             bract_client: bract_client.as_ref(),
         };
 
-        match state_observer.discover(guard.span()).await {
-            Ok(state) => state,
-            Err(err) => {
-                guard.span().message(Level::Warn, &err.to_string());
-                return false;
-            }
-        }
+        let Some(state) = require(
+            &guard,
+            "Failed to discover current state",
+            state_observer.discover(guard.span()).await,
+        ) else {
+            return false;
+        };
+        state
     };
 
     let socket_path = get_socket_path(douglas_folders);
-    let mut openbao_client = match openbao_client_factory.build(&socket_path).await {
-        Ok(client) => client,
-        Err(err) => {
-            guard.span().message(Level::Warn, &err.to_string());
-            guard.finish_with_outcome(log::Outcome::Failed);
-            return false;
-        }
+    let Some(mut openbao_client) = require(
+        &guard,
+        "Failed to build OpenBao client",
+        openbao_client_factory.build(&socket_path).await,
+    ) else {
+        return false;
     };
 
-    let plan = match resolve_plan::<Context, OpenBaoError>(guard.span(), create_plan(&state)) {
-        Ok(plan) => plan,
-        Err(err) => {
-            guard.span().message(Level::Warn, &err.to_string());
-            guard.finish_with_outcome(log::Outcome::Failed);
-            return false;
-        }
+    let Some(plan) = require(
+        &guard,
+        "Failed to resolve plan",
+        resolve_plan::<Context, OpenBaoError>(guard.span(), create_plan(&state)),
+    ) else {
+        return false;
     };
 
     let mut context = Context {

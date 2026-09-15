@@ -1,10 +1,11 @@
+use crate::util::require;
 use async_trait::async_trait;
 use blueprint::{
     Command,
     bootstrap::{execute_plan, resolve_plan},
 };
 use file_system::RelativePathError;
-use log::{Level, Outcome, Reporter, ScopeKind, Span};
+use log::{Outcome, Reporter, ScopeKind, Span};
 use seedbank::{Name, NameParseError, SeedlingDefinition};
 use seedbank_types::Version;
 use std::sync::Arc;
@@ -88,21 +89,20 @@ pub async fn perform(
     )
     .start_guard();
 
-    let state = match StateObserver::discover(guard.span()) {
-        Ok(state) => state,
-        Err(err) => {
-            guard.span().message(Level::Warn, &err.to_string());
-            return false;
-        }
+    let Some(state) = require(
+        &guard,
+        "Failed to discover current state",
+        StateObserver::discover(guard.span()),
+    ) else {
+        return false;
     };
 
-    let plan = match resolve_plan::<Context, BootstrapError>(guard.span(), Ok(create_plan(state))) {
-        Ok(plan) => plan,
-        Err(err) => {
-            guard.span().message(Level::Warn, &err.to_string());
-            guard.finish_with_outcome(log::Outcome::Failed);
-            return false;
-        }
+    let Some(plan) = require(
+        &guard,
+        "Failed to resolve plan",
+        resolve_plan::<Context, BootstrapError>(guard.span(), Ok(create_plan(state))),
+    ) else {
+        return false;
     };
 
     let mut context = Context {
