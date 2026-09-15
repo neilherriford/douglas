@@ -13,8 +13,8 @@ let
       (builtins.attrNames (builtins.readDir userKeysDir));
 
   # Version information for your dev image
-  devImageVersion = "0.0.2n";
-  devImageDate = "2026-09-07";
+  devImageVersion = "0.0.2u";
+  devImageDate = "2026-09-15";
   devImageName = "Douglas Development Environment";
 
   # Define our development packages explicitly
@@ -69,6 +69,14 @@ in
   boot.loader.grub.enable = false;
   boot.loader.timeout = lib.mkForce 0;
   boot.isContainer = false;
+  # Mirror kernel/console output to the serial port (in addition to tty0)
+  # so a wedge can be captured to a host-side log even when the display
+  # isn't being watched at the time. panic=0 stops the kernel from
+  # auto-rebooting a few seconds after a panic, which would otherwise hide
+  # the panic message in a reboot loop before anyone can see it.
+  boot.kernelParams = [ "console=hvc0,115200n8" "console=tty0" "panic=0" "loglevel=7" ];
+  boot.consoleLogLevel = 7;
+  systemd.services."serial-getty@hvc0".enable = true;
 
   ############################## UTM SHARE #############################
   systemd.services.mount-utm-share = {
@@ -146,6 +154,29 @@ in
     };
   };
 
+  # Mirrors the journal (which already ingests the kernel ring buffer, so
+  # this catches watchdog/lockup/OOM messages too) to the host-backed
+  # share, one file per boot, written line-by-line as events happen rather
+  # than batched at shutdown. Debugging a VM that hard-locks or never comes
+  # back from a reboot otherwise has no persistence across that boot at
+  # all — this survives it, readable from the host at any time, including
+  # while the VM is still locked up.
+  systemd.services.persist-journal-to-share = {
+    description = "Mirror the journal to the UTM share for cross-reboot/cross-restart debugging";
+    after = [ "mount-utm-share.service" "setup-cache-symlinks.service" ];
+    wants = [ "mount-utm-share.service" "setup-cache-symlinks.service" ];
+    wantedBy = [ "multi-user.target" ];
+    serviceConfig = {
+      ExecStart = pkgs.writeShellScript "persist-journal-to-share" ''
+        ${pkgs.findutils}/bin/find /mnt/share/logs -maxdepth 1 -name 'journal-*.log' -mtime +3 -delete
+        log_file="/mnt/share/logs/journal-$(${pkgs.coreutils}/bin/date +%Y%m%d-%H%M%S).log"
+        exec ${pkgs.systemd}/bin/journalctl -f -o short-iso >> "$log_file"
+      '';
+      Restart = "always";
+      RestartSec = 1;
+    };
+  };
+
   ############################## ZEROCONF ##############################
   services.avahi = {
     enable = true;
@@ -156,6 +187,12 @@ in
       workstation = true; # advertise hostname for SSH/SMB/etc.
       addresses = true;   # advertise the IP address
     };
+  };
+  systemd.services.avahi-daemon = {
+    after = [ "network-pre.target" "dbus.service" ];
+    before = [ "network.target" "network-manager.service" ];
+    serviceConfig.Restart = "on-failure";
+    serviceConfig.RestartSec = 1;
   };
   networking.hostName = "douglas-dev";
 
