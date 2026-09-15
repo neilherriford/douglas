@@ -29,10 +29,13 @@ use file_system::{
 use log::{BufferedFileReporter, ChannelReporter, Reporter, ScopeKind, Span, TeeReporter};
 use os::{Os, Unix};
 use resin_client::LocalhostClientBuilder;
-use seedbank_types::{Name, Seedling};
+use seedbank_types::{DesiredRunStatus, Name, Seedling};
 use std::{cmp::Ordering, sync::Arc};
 use thiserror::Error;
-use tokio::sync::broadcast::{self, Sender};
+use tokio::{
+    io::AsyncWriteExt,
+    sync::broadcast::{self, Sender},
+};
 
 #[derive(Error, Debug)]
 pub enum Error {
@@ -140,12 +143,15 @@ pub trait Server: Send + Sync {
         &self,
         reporter: Arc<dyn Reporter>,
     ) -> Result<bract_types::OpenBaoReport, Error>;
+    async fn stop(&self, reporter: Arc<dyn Reporter>) -> Result<(), Error>;
 }
 
 pub struct Bract {
     listener_factory: SocketListenerFactory,
     trigger_listener_factory: SocketListenerFactory,
     shutdown_sender: Sender<()>,
+    watchdog_shutdown_sender: Sender<()>,
+    watchdog_task: tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
     reporter: Arc<dyn Reporter>,
     docker_client: Arc<dyn docker::client::Client>,
     seedbank_client: Arc<dyn seedbank_client::Client>,
@@ -248,6 +254,7 @@ impl Bract {
         let links = UnixLinks::new();
         let douglas_folders = DouglasFolders::new();
         let (shutdown_sender, _) = broadcast::channel::<()>(1);
+        let (watchdog_shutdown_sender, _) = broadcast::channel::<()>(1);
 
         blueprints::bootstrap::bootstrap(
             reporting_fd,
@@ -350,6 +357,8 @@ impl Bract {
                 .map_err(|err: docker_types::RegistryError| Error::BuildError(err.to_string()))?,
             ram_disk,
             heartbeat_writer,
+            watchdog_shutdown_sender,
+            watchdog_task: tokio::sync::Mutex::new(None),
         })
     }
 
@@ -392,6 +401,7 @@ impl Bract {
                 let server = Arc::clone(&self);
                 tokio::spawn(async move { Self::watchdog_loop(server).await })
             };
+            *self.watchdog_task.lock().await = Some(watchdog_task);
             let heartbeat_task = {
                 let server = Arc::clone(&self);
                 tokio::spawn(async move { Self::heartbeat_loop(server).await })
@@ -403,7 +413,6 @@ impl Bract {
 
             main_task.await.map_err(std::io::Error::other)??;
             trigger_task.await.map_err(std::io::Error::other)??;
-            watchdog_task.await.map_err(std::io::Error::other)?;
             heartbeat_task.await.map_err(std::io::Error::other)?;
             log_rotation_task.await.map_err(std::io::Error::other)?;
             Ok::<_, Error>(())
@@ -435,9 +444,13 @@ impl Bract {
     async fn watchdog_loop(server: Arc<Self>) {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut shutdown = server.watchdog_shutdown_sender.subscribe();
 
         loop {
-            interval.tick().await;
+            tokio::select! {
+                _ = interval.tick() => {},
+                _ = shutdown.recv() => break,
+            }
 
             let span = Span::new(
                 Arc::clone(&server.reporter),
@@ -545,6 +558,8 @@ impl Bract {
             }
         };
 
+        let is_stop_request = matches!(request, Request::Stop);
+
         let (event_sender, mut event_receiver) = tokio::sync::mpsc::unbounded_channel();
         let per_request_reporter: Arc<dyn Reporter> = Arc::new(TeeReporter::new(vec![
             Box::new(Arc::clone(&server.reporter)),
@@ -578,6 +593,11 @@ impl Bract {
         if let Err(err) = Self::write_message(&mut writer, &ServerMessage::Response(response)).await
         {
             Self::log_connection_error(&server, "Failed to write response message", &err);
+        }
+
+        if is_stop_request {
+            let _ = writer.flush().await;
+            let _ = server.shutdown_sender.send(());
         }
     }
 
@@ -1015,5 +1035,87 @@ impl Server for Bract {
         )
         .await
         .map_err(Error::from)
+    }
+
+    async fn stop(&self, reporter: Arc<dyn Reporter>) -> Result<(), Error> {
+        let guard = Span::new(Arc::clone(&reporter), "Stopping bract…", ScopeKind::Step);
+
+        let _ = self.watchdog_shutdown_sender.send(());
+        if let Some(handle) = self.watchdog_task.lock().await.take()
+            && let Err(err) = handle.await
+        {
+            guard.message(log::Level::Warn, &format!("watchdog task panicked: {err}"));
+        }
+
+        for core_seedling_name in [config::seedlings::TRAEFIK, config::seedlings::OPENBAO] {
+            let Ok(core_seedling) = core_seedling_name.parse::<seedbank_types::Name>() else {
+                guard.message(
+                    log::Level::Warn,
+                    &format!("failed to parse core seedling name '{core_seedling_name}'"),
+                );
+                continue;
+            };
+
+            if let Err(err) = self
+                .stop_seedling(Arc::clone(&reporter), &core_seedling)
+                .await
+            {
+                guard.message(
+                    log::Level::Warn,
+                    &format!("{core_seedling_name} failed to stop: {err}"),
+                );
+            }
+        }
+
+        for seedling_name in self.seedbank_client.list().await? {
+            let desired_run_status = match self
+                .seedbank_client
+                .get_desired_run_status(&seedling_name)
+                .await
+            {
+                Ok(desired_run_status) => desired_run_status,
+                Err(err) => {
+                    guard.message(
+                        log::Level::Warn,
+                        &format!("{seedling_name} failed to check desired run status: {err}"),
+                    );
+                    continue;
+                }
+            };
+
+            if desired_run_status == DesiredRunStatus::Stopped {
+                continue;
+            }
+
+            let status = match self
+                .seedling_status(Arc::clone(&reporter), &seedling_name)
+                .await
+            {
+                Ok(status) => status,
+                Err(err) => {
+                    guard.message(
+                        log::Level::Warn,
+                        &format!("{seedling_name} failed to check status: {err}"),
+                    );
+                    continue;
+                }
+            };
+
+            if !matches!(status, bract_types::SeedlingStatus::Running(_)) {
+                continue;
+            }
+
+            if let Err(err) = self
+                .stop_seedling(Arc::clone(&reporter), &seedling_name)
+                .await
+            {
+                guard.message(
+                    log::Level::Warn,
+                    &format!("{seedling_name} failed to stop: {err}"),
+                );
+            }
+        }
+
+        Ok(())
     }
 }

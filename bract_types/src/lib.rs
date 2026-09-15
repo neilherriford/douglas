@@ -120,6 +120,7 @@ pub enum Request {
     },
     ListSeedlings,
     OpenBaoStatus,
+    Stop,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
