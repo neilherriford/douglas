@@ -101,6 +101,35 @@ impl HeartbeatReader for LocalHeartbeatReader {
     }
 }
 
+#[cfg_attr(feature = "mock", automock)]
+pub trait HeartbeatReaderFactory: Send + Sync {
+    fn create(&self, service_name: &str) -> Box<dyn HeartbeatReader>;
+}
+
+pub struct LocalHeartbeatReaderFactory {
+    douglas_folders: DouglasFolders,
+    file_reader: Arc<dyn FileReader>,
+}
+
+impl LocalHeartbeatReaderFactory {
+    pub fn new(douglas_folders: DouglasFolders, file_reader: Arc<dyn FileReader>) -> Self {
+        Self {
+            douglas_folders,
+            file_reader,
+        }
+    }
+}
+
+impl HeartbeatReaderFactory for LocalHeartbeatReaderFactory {
+    fn create(&self, service_name: &str) -> Box<dyn HeartbeatReader> {
+        let heartbeat_file = self.douglas_folders.service_heartbeat_file(service_name);
+        Box::new(LocalHeartbeatReader::new(
+            &heartbeat_file,
+            Arc::clone(&self.file_reader),
+        ))
+    }
+}
+
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct SupervisionFailure {
     pub service_name: String,

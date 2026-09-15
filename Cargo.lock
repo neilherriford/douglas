@@ -415,6 +415,7 @@ dependencies = [
 name = "bract_types"
 version = "0.1.0"
 dependencies = [
+ "docker_types",
  "log 0.1.0",
  "seedbank_types",
  "serde",
