@@ -1,8 +1,7 @@
 use crate::blueprints::{
-    agent_container_name, container_name, openbao_socket_path, seedling_network_name,
-    traefik_dynamic_dir,
+    container_name, openbao_socket_path, seedling_network_name, traefik_dynamic_dir,
 };
-use bract_types::Deadwood;
+use bract_types::{Deadwood, agent_container_name};
 use config::DouglasFolders;
 use docker::client::ContainerRef;
 use docker_types::DockerNameError;

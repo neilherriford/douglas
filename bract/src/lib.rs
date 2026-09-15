@@ -792,7 +792,7 @@ impl Server for Bract {
             Err(Error::UnknownSeedling) => return guard.finish(Ok(SeedlingStatus::Unknown)),
             Err(err) => return guard.finish(Err(err)),
         };
-        let container_name: ContainerName = blueprints::container_name(&seedling.name)?;
+        let container_name: ContainerName = bract_types::container_name(&seedling.name)?;
 
         let mount_names = seedling
             .definition

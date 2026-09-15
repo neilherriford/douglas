@@ -1,9 +1,6 @@
 use crate::blueprints::provision_seedling_secrets::seedling_name_from_approle;
-use crate::blueprints::{
-    TRAEFIK_SEEDLING_NAME, openbao_socket_path, seedling_name_from_agent_prefixed,
-    seedling_name_from_doug_prefixed, traefik_dynamic_dir,
-};
-use bract_types::Deadwood;
+use crate::blueprints::{TRAEFIK_SEEDLING_NAME, openbao_socket_path, traefik_dynamic_dir};
+use bract_types::{Deadwood, seedling_name_from_agent_prefixed, seedling_name_from_doug_prefixed};
 use config::DouglasFolders;
 use file_system::{FileReader, FileSystemError, Folder};
 use identity::Identity;

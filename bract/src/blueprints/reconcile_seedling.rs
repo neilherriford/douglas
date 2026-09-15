@@ -1,8 +1,7 @@
 use crate::{
     blueprints::{
-        AGENT_MOUNT_RAM_DISK_SIZE_MB, EXPECTED_MOUNT_MODE, SYSTEM_NETWORK_NAME,
-        agent_container_name, build_client, container_name, provision_seedling_secrets,
-        seedling_network_name,
+        AGENT_MOUNT_RAM_DISK_SIZE_MB, EXPECTED_MOUNT_MODE, SYSTEM_NETWORK_NAME, build_client,
+        container_name, provision_seedling_secrets, seedling_network_name,
     },
     labels::{self},
     rolodex::{Rolodex, RolodexError},
@@ -13,6 +12,7 @@ use blueprint::{
     bootstrap::{execute_plan, resolve_plan},
     push_step,
 };
+use bract_types::agent_container_name;
 use config::DouglasFolders;
 use credentials::Credentials;
 use docker::{

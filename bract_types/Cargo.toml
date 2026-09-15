@@ -5,6 +5,7 @@ edition = "2024"
 publish = false
 
 [dependencies]
+docker_types = { workspace = true }
 log = { workspace = true }
 seedbank_types = { workspace = true }
 serde = { workspace = true }

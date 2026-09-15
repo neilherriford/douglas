@@ -1,3 +1,4 @@
+use bract_types::container_name;
 use config::DouglasFolders;
 use file_system::Modes;
 use std::path::PathBuf;
@@ -17,8 +18,6 @@ pub(crate) mod watchdog;
 pub(crate) mod write_traefik_routes;
 
 const EXPECTED_MOUNT_MODE: Modes = Modes::InheritedOwnerReadWriteExecuteGroupReadWriteExecute;
-const CONTAINER_NAME_PREFIX: &str = "doug.";
-const AGENT_CONTAINER_NAME_PREFIX: &str = "doug-agent.";
 pub(crate) const SYSTEM_NETWORK_NAME: &str = "douglas-system";
 #[cfg(target_os = "linux")]
 pub(crate) const AGENT_MOUNT_RAM_DISK_SIZE_MB: u32 = 1;
@@ -66,28 +65,6 @@ pub(crate) fn seedling_network_name(
     container_name(seedling_name)?.as_ref().parse()
 }
 
-pub(crate) fn container_name(
-    seedling_name: &seedbank_types::Name,
-) -> Result<docker_types::ContainerName, docker_types::DockerNameError> {
-    format!("{CONTAINER_NAME_PREFIX}{}", seedling_name.as_ref()).parse()
-}
-
-pub(crate) fn seedling_name_from_doug_prefixed(raw: &str) -> Option<seedbank_types::Name> {
-    raw.strip_prefix(CONTAINER_NAME_PREFIX)
-        .and_then(|name| name.parse().ok())
-}
-
-pub(crate) fn agent_container_name(
-    seedling_name: &seedbank_types::Name,
-) -> Result<docker_types::ContainerName, docker_types::DockerNameError> {
-    format!("{AGENT_CONTAINER_NAME_PREFIX}{}", seedling_name.as_ref()).parse()
-}
-
-pub(crate) fn seedling_name_from_agent_prefixed(raw: &str) -> Option<seedbank_types::Name> {
-    raw.strip_prefix(AGENT_CONTAINER_NAME_PREFIX)
-        .and_then(|name| name.parse().ok())
-}
-
 pub(crate) fn openbao_socket_path(douglas_folders: &DouglasFolders) -> PathBuf {
     let mut path =
         douglas_folders.seedling_mount(openbao::SEEDLING_NAME, openbao::SOCKET_MOUNT_NAME);
@@ -97,6 +74,10 @@ pub(crate) fn openbao_socket_path(douglas_folders: &DouglasFolders) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
+    use bract_types::{
+        agent_container_name, seedling_name_from_agent_prefixed, seedling_name_from_doug_prefixed,
+    };
+
     use super::*;
 
     #[test]

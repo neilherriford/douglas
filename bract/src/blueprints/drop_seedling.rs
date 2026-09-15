@@ -1,6 +1,5 @@
 use crate::blueprints::{
-    agent_container_name, build_client, container_name, provision_seedling_secrets,
-    seedling_network_name, traefik_dynamic_dir,
+    build_client, provision_seedling_secrets, seedling_network_name, traefik_dynamic_dir,
 };
 use crate::labels;
 use async_trait::async_trait;
@@ -9,6 +8,7 @@ use blueprint::{
     bootstrap::{execute_plan, resolve_plan},
     push_step,
 };
+use bract_types::{agent_container_name, container_name};
 use config::DouglasFolders;
 use docker::client::ContainerRef;
 use docker_types::DockerNameError;

@@ -165,6 +165,40 @@ pub enum ServerMessage {
     Response(Response),
 }
 
+const CONTAINER_NAME_PREFIX: &str = "doug.";
+pub fn seedling_name_from_doug_prefixed(raw: &str) -> Option<seedbank_types::Name> {
+    raw.strip_prefix(CONTAINER_NAME_PREFIX)
+        .and_then(|name| name.parse().ok())
+}
+
+const AGENT_CONTAINER_NAME_PREFIX: &str = "doug-agent.";
+pub fn agent_container_name(
+    seedling_name: &seedbank_types::Name,
+) -> Result<docker_types::ContainerName, docker_types::DockerNameError> {
+    format!("{AGENT_CONTAINER_NAME_PREFIX}{}", seedling_name.as_ref()).parse()
+}
+
+pub fn seedling_name_from_agent_prefixed(raw: &str) -> Option<seedbank_types::Name> {
+    raw.strip_prefix(AGENT_CONTAINER_NAME_PREFIX)
+        .and_then(|name| name.parse().ok())
+}
+
+pub fn container_name(
+    seedling_name: &seedbank_types::Name,
+) -> Result<docker_types::ContainerName, docker_types::DockerNameError> {
+    format!(
+        "{prefix}{name}",
+        prefix = CONTAINER_NAME_PREFIX,
+        name = seedling_name.as_ref()
+    )
+    .parse()
+}
+
+pub fn is_douglas_container(name: &docker_types::ContainerName) -> bool {
+    let name = name.to_string();
+    name.starts_with(CONTAINER_NAME_PREFIX) || name.starts_with(AGENT_CONTAINER_NAME_PREFIX)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

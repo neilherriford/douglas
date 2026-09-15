@@ -1,7 +1,7 @@
 use crate::{
     blueprints::{
-        EXPECTED_MOUNT_MODE, RequestedBy, agent_container_name, container_name,
-        core_seedling_forbidden_for, provision_seedling_secrets,
+        EXPECTED_MOUNT_MODE, RequestedBy, container_name, core_seedling_forbidden_for,
+        provision_seedling_secrets,
     },
     labels,
     rolodex::{Rolodex, RolodexError},
@@ -12,6 +12,7 @@ use blueprint::{
     bootstrap::{execute_plan, resolve_plan},
     push_step,
 };
+use bract_types::agent_container_name;
 use config::DouglasFolders;
 use docker::client::{ContainerRef, ImageRef};
 use docker_types::{ContainerName, DockerNameError, ExecInstanceOptions, ExecStartOptions};

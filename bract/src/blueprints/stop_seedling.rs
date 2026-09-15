@@ -1,6 +1,4 @@
-use crate::blueprints::{
-    RequestedBy, agent_container_name, container_name, core_seedling_forbidden_for,
-};
+use crate::blueprints::{RequestedBy, container_name, core_seedling_forbidden_for};
 use crate::labels;
 use async_trait::async_trait;
 use blueprint::{
@@ -8,6 +6,7 @@ use blueprint::{
     bootstrap::{execute_plan, resolve_plan},
     push_step,
 };
+use bract_types::agent_container_name;
 use docker::client::ContainerRef;
 use docker_types::DockerNameError;
 use log::{Reporter, ScopeKind, Span};
