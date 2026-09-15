@@ -910,6 +910,7 @@ dependencies = [
  "credentials",
  "crossterm",
  "daemonize",
+ "docker",
  "docker_types",
  "file_system",
  "hex",

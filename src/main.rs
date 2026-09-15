@@ -9,6 +9,7 @@ mod services;
 mod util;
 
 use crate::cli::{Cli, Commands, OutputStyle, SeedlingCommand, ServiceCommand};
+use crate::commands::stop::stop;
 use crate::commands::{kick::kick, prune::prune_deadwood, seedling, start::start, status::status};
 use crate::daemon::run_with_tokio;
 use crate::services::{
@@ -25,7 +26,7 @@ fn main() -> ExitCode {
 
     match cli.command {
         Commands::Start { plan_only } => run_with_tokio(start(plan_only, output_style_arg)),
-        Commands::Stop => todo!(),
+        Commands::Stop { plan_only } => run_with_tokio(stop(plan_only, output_style_arg)),
         Commands::Status => run_with_tokio(status(output_style)),
         Commands::Service {
             service: ServiceCommand::Bract { notify_fd },

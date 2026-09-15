@@ -75,7 +75,10 @@ pub(crate) enum Commands {
         plan_only: bool,
     },
     #[command(about = "Stop Douglas")]
-    Stop,
+    Stop {
+        #[arg(long, default_value_t = false, help = "Only display the start plan")]
+        plan_only: bool,
+    },
     #[command(about = "Report the status of seedlings and services")]
     Status,
     #[command(hide = true)]
@@ -190,7 +193,7 @@ impl std::fmt::Display for Commands {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Commands::Start { .. } => f.write_str("start"),
-            Commands::Stop => f.write_str("stop"),
+            Commands::Stop { .. } => f.write_str("stop"),
             Commands::Status => f.write_str("status"),
             Commands::Service {
                 service: ServiceCommand::Bract { .. },
