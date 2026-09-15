@@ -17,9 +17,10 @@ pub(crate) async fn start(plan_only: bool, output_style: Option<OutputStyle>) ->
     let douglas_folders = DouglasFolders::new();
 
     let reporter: Arc<dyn Reporter> = match output_style {
-        Some(_) => build_plain_reporter(&douglas_folders, "douglas-cli"),
+        Some(_) => build_plain_reporter(&douglas_folders, config::DOUGLAS_CLI_LOG_NAME),
         None => {
-            if let Ok(reporter) = build_cli_reporter(&douglas_folders, "douglas-cli") {
+            if let Ok(reporter) = build_cli_reporter(&douglas_folders, config::DOUGLAS_CLI_LOG_NAME)
+            {
                 reporter
             } else {
                 eprintln!("Failed to start TUI reporter");

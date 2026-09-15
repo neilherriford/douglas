@@ -12,6 +12,8 @@ pub mod seedlings {
     pub static OPENBAO: &str = "openbao";
 }
 
+pub static DOUGLAS_CLI_LOG_NAME: &str = "douglas-cli";
+
 #[derive(Debug, Clone)]
 pub struct DouglasFolders {
     pub logs: PathBuf,

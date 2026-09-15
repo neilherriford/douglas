@@ -1,9 +1,9 @@
-use crate::util::{spawn_service, wait_until_running};
+use crate::util::{require, spawn_service, wait_until_running};
 use async_trait::async_trait;
 use blueprint::{
     Command, GroupMembershipRequirement, HasCredentials, HasFolder, HasPermissions, RunningStatus,
     bootstrap::{execute_plan, resolve_plan},
-    commands::{AddUserToGroup, CreateGroup},
+    commands::{AddUserToGroup, CreateFolder, CreateGroup},
     listener::{LivenessCheck, check_liveness},
     service::{
         BootstrapReporting, ServiceDefinition, ServiceState, discover_service_state,
@@ -17,7 +17,7 @@ use file_system::{FileSystemError, Folder, Modes, Permissions};
 use log::{Level, Outcome, Reporter, ScopeKind, Span};
 use os::{EnvironmentVariableReader, Os};
 use os_pipe::{PipeReader, PipeWriter};
-use std::{collections::HashMap, env::VarError, sync::Arc};
+use std::{collections::HashMap, env::VarError, path::PathBuf, sync::Arc};
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -151,6 +151,7 @@ struct State {
     groups_missing: Vec<String>,
     group_members_missing: Vec<GroupMembershipRequirement>,
     services_needing_start: Vec<(DouglasService, ServiceState)>,
+    cli_log_dir_missing: Option<PathBuf>,
 }
 
 struct StateObserver<'a> {
@@ -183,6 +184,11 @@ impl StateObserver<'_> {
         };
 
         self.check_admin_group_membership(guard.span(), &mut result);
+
+        let cli_log_dir = douglas_folders.log_dir(config::DOUGLAS_CLI_LOG_NAME);
+        if !self.folder.exists(&cli_log_dir) {
+            result.cli_log_dir_missing = Some(cli_log_dir);
+        }
 
         let services = match known_services(douglas_folders) {
             Ok(services) => services,
@@ -272,6 +278,10 @@ fn create_plan<'a>(state: State) -> Result<Vec<Step<'a>>, BootstrapError> {
             &mut result,
             AddUserToGroup::new(&membership.user_name, &membership.group_name),
         );
+    }
+
+    if let Some(cli_log_dir) = state.cli_log_dir_missing {
+        push_step(&mut result, CreateFolder::new(cli_log_dir));
     }
 
     for (service, service_state) in &state.services_needing_start {
@@ -470,21 +480,20 @@ pub async fn perform(reporter: Arc<dyn Reporter>, plan_only: bool, deps: Depende
         folder: deps.folder.as_ref(),
         permissions: deps.permissions.as_ref(),
     };
-    let state = match state_observer.discover(guard.span(), &deps.douglas_folders) {
-        Ok(state) => state,
-        Err(err) => {
-            guard.span().message(Level::Warn, &err.to_string());
-            return false;
-        }
+    let Some(state) = require(
+        &guard,
+        "Failed to discover current state",
+        state_observer.discover(guard.span(), &deps.douglas_folders),
+    ) else {
+        return false;
     };
 
-    let plan = match resolve_plan(guard.span(), create_plan(state)) {
-        Ok(plan) => plan,
-        Err(err) => {
-            guard.span().message(Level::Warn, &err.to_string());
-            guard.finish_with_outcome(log::Outcome::Failed);
-            return false;
-        }
+    let Some(plan) = require(
+        &guard,
+        "Failed to resolve plan",
+        resolve_plan(guard.span(), create_plan(state)),
+    ) else {
+        return false;
     };
 
     if plan_only {
@@ -561,6 +570,8 @@ mod tests {
     use super::{
         BootstrapError, DouglasService, State, create_plan, liveness_check, require_liveness,
     };
+    use std::path::PathBuf;
+
     use blueprint::{
         listener::LivenessCheck,
         service::{BootstrapReporting, ServiceDefinition, ServiceState, ServiceUser},
@@ -712,6 +723,25 @@ mod tests {
         };
 
         assert!(steps.is_empty());
+    }
+
+    #[test]
+    fn test_create_plan_should_create_the_cli_log_dir_when_missing() {
+        let state = State {
+            is_root: true,
+            cli_log_dir_missing: Some(PathBuf::from("/var/log/douglas/douglas-cli")),
+            ..Default::default()
+        };
+
+        let Ok(steps) = create_plan(state) else {
+            panic!("should plan");
+        };
+        let descriptions = step_descriptions(&steps);
+
+        assert_eq!(
+            descriptions,
+            vec!["Create folder '/var/log/douglas/douglas-cli'".to_string()]
+        );
     }
 
     #[test]

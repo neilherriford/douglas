@@ -12,7 +12,7 @@ use log::Span;
 
 pub(crate) fn seedling_command_context(label: &str) -> (DouglasFolders, log::ScopeGuard) {
     let douglas_folders = DouglasFolders::new();
-    let reporter = build_plain_reporter(&douglas_folders, "douglas-cli");
+    let reporter = build_plain_reporter(&douglas_folders, config::DOUGLAS_CLI_LOG_NAME);
     let guard = Span::new(reporter, label, log::ScopeKind::Task).start_guard();
     (douglas_folders, guard)
 }
