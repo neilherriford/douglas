@@ -96,6 +96,14 @@ pub(crate) enum Commands {
         #[command(subcommand)]
         seedling: SeedlingCommand,
     },
+    #[command(about = "Verify a candidate douglas binary's signature")]
+    Verify {
+        #[arg(
+            long,
+            help = "Path to a candidate binary to verify; defaults to the currently running douglas binary"
+        )]
+        path: Option<PathBuf>,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -229,6 +237,7 @@ impl std::fmt::Display for Commands {
                 service: ServiceCommand::Woodward { .. },
             } => f.write_str("service woodward"),
             Commands::Kick { name } => write!(f, "kick {}", name.service_name()),
+            Commands::Verify { .. } => f.write_str("verify"),
         }
     }
 }

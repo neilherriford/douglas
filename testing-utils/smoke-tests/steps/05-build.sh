@@ -17,8 +17,8 @@ source ../lib.sh
 # expected, not a failure.
 ssh_out "sudo pkill -x douglas" >/dev/null 2>&1 || true
 
-assert_success "build douglas" ssh_out \
-    "cd /mnt/share/douglas && cargo build"
+assert_success "build and sign douglas" ssh_out \
+    "cd /mnt/share/douglas && cargo run -p xtask --quiet -- build"
 
 assert_success "deploy douglas binary to home directory" ssh_out \
     "cp /mnt/share/cache/target/debug/douglas ~/douglas"

@@ -7,10 +7,13 @@ mod commands;
 mod daemon;
 mod services;
 mod util;
+mod verify;
 
 use crate::cli::{Cli, Commands, OutputStyle, SeedlingCommand, ServiceCommand};
 use crate::commands::stop::stop;
-use crate::commands::{kick::kick, prune::prune_deadwood, seedling, start::start, status::status};
+use crate::commands::{
+    kick::kick, prune::prune_deadwood, seedling, start::start, status::status, verify::verify,
+};
 use crate::daemon::run_with_tokio;
 use crate::services::{
     resin_debug_mode, seedbank_debug_mode, start_bract, start_resin, start_seedbank,
@@ -98,5 +101,6 @@ fn main() -> ExitCode {
         Commands::Seedling {
             seedling: SeedlingCommand::Prune { yes },
         } => run_with_tokio(prune_deadwood(output_style, yes)),
+        Commands::Verify { path } => verify(path),
     }
 }
