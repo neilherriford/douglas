@@ -41,8 +41,8 @@ impl KickTarget {
 }
 
 #[derive(Parser, Debug)]
-#[command(name = "bract")]
 #[command(about = "Initialize and run the secure core of Douglas")]
+#[command(version = env!("CARGO_PKG_VERSION"))]
 pub(crate) struct Cli {
     #[command(subcommand)]
     pub(crate) command: Commands,
