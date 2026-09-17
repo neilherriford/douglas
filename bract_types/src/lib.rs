@@ -120,7 +120,9 @@ pub enum Request {
     },
     ListSeedlings,
     OpenBaoStatus,
-    Stop,
+    StopBract {
+        including_containers: bool,
+    },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -131,6 +133,7 @@ pub enum Response {
     Updated,
     Started,
     Stopped,
+    BractStopped { including_containers: bool },
     Dropped,
     Deadwood(Deadwood),
     Pruned,
@@ -149,11 +152,22 @@ impl std::fmt::Display for Response {
             Response::Updated => f.write_str("updated"),
             Response::Started => f.write_str("started"),
             Response::Stopped => f.write_str("stopped"),
+
             Response::Dropped => f.write_str("dropped"),
             Response::Deadwood(_) => f.write_str("deadwood"),
             Response::Pruned => f.write_str("pruned"),
             Response::Seedlings { names } => f.write_str(&format!("{} seedling(s)", names.len())),
             Response::OpenBaoStatus(_) => f.write_str("openbao status"),
+            Response::BractStopped {
+                including_containers,
+            } => {
+                if *including_containers {
+                    f.write_str("bract stopped (including containers)")
+                } else {
+                    f.write_str("bract stopped (excluding containers)")
+                }
+            }
+
             Response::Error { message } => f.write_str(&format!("error: '{message}'")),
         }
     }

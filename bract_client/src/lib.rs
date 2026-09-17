@@ -49,7 +49,7 @@ pub trait Client: Send + Sync {
     async fn prune_deadwood(&self, deadwood: &bract_types::Deadwood) -> Result<(), Error>;
     async fn list_seedlings(&self) -> Result<Vec<Name>, Error>;
     async fn openbao_status(&self) -> Result<bract_types::OpenBaoReport, Error>;
-    async fn stop(&self) -> Result<(), Error>;
+    async fn stop_bract(&self, including_containers: bool) -> Result<(), Error>;
 }
 
 pub struct UdsClient {
@@ -351,7 +351,7 @@ impl Client for UdsClient {
         })
     }
 
-    async fn stop(&self) -> Result<(), Error> {
+    async fn stop_bract(&self, including_containers: bool) -> Result<(), Error> {
         let guard = Span::new(
             Arc::clone(&self.reporter),
             "Stopping bract",
@@ -359,13 +359,21 @@ impl Client for UdsClient {
         )
         .start_guard();
 
-        let response = match self.request(guard.span(), Request::Stop).await {
+        let response = match self
+            .request(
+                guard.span(),
+                Request::StopBract {
+                    including_containers,
+                },
+            )
+            .await
+        {
             Ok(response) => response,
             Err(err) => return guard.finish(Err(err)),
         };
 
         guard.finish(match response {
-            bract_types::Response::Stopped => Ok(()),
+            bract_types::Response::BractStopped { .. } => Ok(()),
             bract_types::Response::Error { message } => Err(Error::ServerError(message)),
             unexpected => Err(Error::UnexpectedResponse(Box::new(unexpected))),
         })

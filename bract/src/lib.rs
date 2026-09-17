@@ -26,7 +26,9 @@ use file_system::{
     FolderDeleter, Inspect, Permissions, UnixDomainSocket, UnixFileDeleter, UnixFileReader,
     UnixFileWriter, UnixFolder, UnixFolderDeleter, UnixInspect, UnixLinks, UnixPermissions,
 };
-use log::{BufferedFileReporter, ChannelReporter, Reporter, ScopeKind, Span, TeeReporter};
+use log::{
+    BufferedFileReporter, ChannelReporter, Reporter, ScopeKind, Span, TeeReporter,
+};
 use os::{Os, Unix};
 use resin_client::LocalhostClientBuilder;
 use seedbank_types::{DesiredRunStatus, Name, Seedling};
@@ -143,7 +145,11 @@ pub trait Server: Send + Sync {
         &self,
         reporter: Arc<dyn Reporter>,
     ) -> Result<bract_types::OpenBaoReport, Error>;
-    async fn stop(&self, reporter: Arc<dyn Reporter>) -> Result<(), Error>;
+    async fn stop(
+        &self,
+        reporter: Arc<dyn Reporter>,
+        including_containers: bool,
+    ) -> Result<(), Error>;
 }
 
 pub struct Bract {
@@ -558,7 +564,7 @@ impl Bract {
             }
         };
 
-        let is_stop_request = matches!(request, Request::Stop);
+        let is_stop_request = matches!(request, Request::StopBract { .. });
 
         let (event_sender, mut event_receiver) = tokio::sync::mpsc::unbounded_channel();
         let per_request_reporter: Arc<dyn Reporter> = Arc::new(TeeReporter::new(vec![
@@ -784,6 +790,68 @@ impl Bract {
             Err(Error::UnknownSeedling)
         }
     }
+
+    async fn stop_user_seedlings(&self, span: &Span) {
+        let seedling_names = match self.seedbank_client.list().await {
+            Ok(seedling_names) => seedling_names,
+            Err(err) => {
+                span.message(
+                    log::Level::Warn,
+                    &format!("Failed to retrieve seedling names: {err}"),
+                );
+                return;
+            }
+        };
+
+        for seedling_name in seedling_names {
+            let desired_run_status = match self
+                .seedbank_client
+                .get_desired_run_status(&seedling_name)
+                .await
+            {
+                Ok(desired_run_status) => desired_run_status,
+                Err(err) => {
+                    span.message(
+                        log::Level::Warn,
+                        &format!("{seedling_name} failed to check desired run status: {err}"),
+                    );
+                    continue;
+                }
+            };
+
+            if desired_run_status == DesiredRunStatus::Stopped {
+                continue;
+            }
+
+            let status = match self
+                .seedling_status(Arc::clone(&span.reporter), &seedling_name)
+                .await
+            {
+                Ok(status) => status,
+                Err(err) => {
+                    span.message(
+                        log::Level::Warn,
+                        &format!("{seedling_name} failed to check status: {err}"),
+                    );
+                    continue;
+                }
+            };
+
+            if !matches!(status, bract_types::SeedlingStatus::Running(_)) {
+                continue;
+            }
+
+            if let Err(err) = self
+                .stop_seedling(Arc::clone(&span.reporter), &seedling_name)
+                .await
+            {
+                span.message(
+                    log::Level::Warn,
+                    &format!("{seedling_name} failed to stop: {err}"),
+                );
+            }
+        }
+    }
 }
 
 impl From<seedbank_client::Error> for Error {
@@ -795,6 +863,49 @@ impl From<seedbank_client::Error> for Error {
 impl From<docker_types::DockerNameError> for Error {
     fn from(value: docker_types::DockerNameError) -> Self {
         Error::NameError(value.to_string())
+    }
+}
+
+async fn stop_seedling_requested_by(
+    docker_client: &dyn docker::client::Client,
+    seedbank_client: &dyn seedbank_client::Client,
+    reporter: Arc<dyn Reporter>,
+    name: &Name,
+    requested_by: blueprints::RequestedBy,
+) -> Result<(), Error> {
+    blueprints::stop_seedling::execute(reporter, docker_client, seedbank_client, name, requested_by)
+        .await
+        .map_err(Error::from)
+}
+
+async fn stop_core_seedlings(
+    docker_client: &dyn docker::client::Client,
+    seedbank_client: &dyn seedbank_client::Client,
+    span: &Span,
+) {
+    for core_seedling_name in [config::seedlings::TRAEFIK, config::seedlings::OPENBAO] {
+        let Ok(core_seedling) = core_seedling_name.parse::<seedbank_types::Name>() else {
+            span.message(
+                log::Level::Warn,
+                &format!("failed to parse core seedling name '{core_seedling_name}'"),
+            );
+            continue;
+        };
+
+        if let Err(err) = stop_seedling_requested_by(
+            docker_client,
+            seedbank_client,
+            Arc::clone(&span.reporter),
+            &core_seedling,
+            blueprints::RequestedBy::Watchdog,
+        )
+        .await
+        {
+            span.message(
+                log::Level::Warn,
+                &format!("{core_seedling_name} failed to stop: {err}"),
+            );
+        }
     }
 }
 
@@ -862,15 +973,14 @@ impl Server for Bract {
     }
 
     async fn stop_seedling(&self, reporter: Arc<dyn Reporter>, name: &Name) -> Result<(), Error> {
-        blueprints::stop_seedling::execute(
-            reporter,
+        stop_seedling_requested_by(
             self.docker_client.as_ref(),
             self.seedbank_client.as_ref(),
+            reporter,
             name,
             blueprints::RequestedBy::Operator,
         )
         .await
-        .map_err(Error::from)
     }
 
     async fn drop_seedling(&self, reporter: Arc<dyn Reporter>, name: &Name) -> Result<(), Error> {
@@ -1037,85 +1147,139 @@ impl Server for Bract {
         .map_err(Error::from)
     }
 
-    async fn stop(&self, reporter: Arc<dyn Reporter>) -> Result<(), Error> {
-        let guard = Span::new(Arc::clone(&reporter), "Stopping bract…", ScopeKind::Step);
+    async fn stop(
+        &self,
+        reporter: Arc<dyn Reporter>,
+        including_containers: bool,
+    ) -> Result<(), Error> {
+        let span = Span::new(Arc::clone(&reporter), "Stopping bract…", ScopeKind::Step);
 
         let _ = self.watchdog_shutdown_sender.send(());
         if let Some(handle) = self.watchdog_task.lock().await.take()
             && let Err(err) = handle.await
         {
-            guard.message(log::Level::Warn, &format!("watchdog task panicked: {err}"));
+            span.message(log::Level::Warn, &format!("watchdog task panicked: {err}"));
         }
 
-        for core_seedling_name in [config::seedlings::TRAEFIK, config::seedlings::OPENBAO] {
-            let Ok(core_seedling) = core_seedling_name.parse::<seedbank_types::Name>() else {
-                guard.message(
-                    log::Level::Warn,
-                    &format!("failed to parse core seedling name '{core_seedling_name}'"),
-                );
-                continue;
-            };
-
-            if let Err(err) = self
-                .stop_seedling(Arc::clone(&reporter), &core_seedling)
-                .await
-            {
-                guard.message(
-                    log::Level::Warn,
-                    &format!("{core_seedling_name} failed to stop: {err}"),
-                );
-            }
+        if !including_containers {
+            return Ok(());
         }
 
-        for seedling_name in self.seedbank_client.list().await? {
-            let desired_run_status = match self
-                .seedbank_client
-                .get_desired_run_status(&seedling_name)
-                .await
-            {
-                Ok(desired_run_status) => desired_run_status,
-                Err(err) => {
-                    guard.message(
-                        log::Level::Warn,
-                        &format!("{seedling_name} failed to check desired run status: {err}"),
-                    );
-                    continue;
-                }
-            };
-
-            if desired_run_status == DesiredRunStatus::Stopped {
-                continue;
-            }
-
-            let status = match self
-                .seedling_status(Arc::clone(&reporter), &seedling_name)
-                .await
-            {
-                Ok(status) => status,
-                Err(err) => {
-                    guard.message(
-                        log::Level::Warn,
-                        &format!("{seedling_name} failed to check status: {err}"),
-                    );
-                    continue;
-                }
-            };
-
-            if !matches!(status, bract_types::SeedlingStatus::Running(_)) {
-                continue;
-            }
-
-            if let Err(err) = self
-                .stop_seedling(Arc::clone(&reporter), &seedling_name)
-                .await
-            {
-                guard.message(
-                    log::Level::Warn,
-                    &format!("{seedling_name} failed to stop: {err}"),
-                );
-            }
-        }
+        stop_core_seedlings(
+            self.docker_client.as_ref(),
+            self.seedbank_client.as_ref(),
+            &span,
+        )
+        .await;
+        self.stop_user_seedlings(&span).await;
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod stop_core_seedlings_tests {
+    use super::*;
+    use docker::client::ContainerRef;
+
+    fn core_seedling_name(raw: &str) -> Name {
+        raw.parse().expect("valid seedling name")
+    }
+
+    fn test_reporter() -> Arc<dyn Reporter> {
+        let (sender, _receiver) = tokio::sync::mpsc::unbounded_channel();
+        Arc::new(log::ChannelReporter::new(sender))
+    }
+
+    fn existing_stopped_core_seedling_docker_client(name: &Name) -> docker::MockClient {
+        let main = bract_types::container_name(name).expect("valid container name");
+
+        let mut docker_client = docker::MockClient::new();
+        docker_client
+            .expect_container_exists()
+            .returning(move |container_ref| {
+                let ContainerRef::FullName(container_name) = container_ref else {
+                    return Ok(false);
+                };
+                Ok(container_name == main)
+            });
+        docker_client
+            .expect_container_status()
+            .returning(|_| Ok(docker_types::Status::Exited));
+        docker_client.expect_container_labels().returning(|_| {
+            Ok(vec![crate::labels::create_origin_label(
+                seedbank_types::Origin::Core,
+            )])
+        });
+        docker_client
+    }
+
+    fn accepting_seedbank_client() -> seedbank_client::MockClient {
+        let mut seedbank_client = seedbank_client::MockClient::new();
+        seedbank_client
+            .expect_set_desired_run_status()
+            .returning(|_, _| Ok(()));
+        seedbank_client
+    }
+
+    #[tokio::test]
+    async fn test_stop_seedling_requested_by_should_allow_watchdog_to_stop_a_core_seedling() {
+        let name = core_seedling_name("traefik");
+        let docker_client = existing_stopped_core_seedling_docker_client(&name);
+        let seedbank_client = accepting_seedbank_client();
+
+        let result = stop_seedling_requested_by(
+            &docker_client,
+            &seedbank_client,
+            test_reporter(),
+            &name,
+            blueprints::RequestedBy::Watchdog,
+        )
+        .await;
+
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_stop_seedling_requested_by_should_forbid_operator_from_stopping_a_core_seedling()
+     {
+        let name = core_seedling_name("traefik");
+        let docker_client = existing_stopped_core_seedling_docker_client(&name);
+        let seedbank_client = accepting_seedbank_client();
+
+        let result = stop_seedling_requested_by(
+            &docker_client,
+            &seedbank_client,
+            test_reporter(),
+            &name,
+            blueprints::RequestedBy::Operator,
+        )
+        .await;
+
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_stop_core_seedlings_should_stop_both_traefik_and_openbao() {
+        let mut docker_client = docker::MockClient::new();
+        docker_client.expect_container_exists().returning(|_| Ok(true));
+        docker_client
+            .expect_container_status()
+            .returning(|_| Ok(docker_types::Status::Exited));
+        docker_client.expect_container_labels().returning(|_| {
+            Ok(vec![crate::labels::create_origin_label(
+                seedbank_types::Origin::Core,
+            )])
+        });
+
+        let mut seedbank_client = seedbank_client::MockClient::new();
+        seedbank_client
+            .expect_set_desired_run_status()
+            .times(2)
+            .returning(|_, _| Ok(()));
+
+        let span = Span::new(test_reporter(), "test", ScopeKind::Group);
+
+        stop_core_seedlings(&docker_client, &seedbank_client, &span).await;
     }
 }

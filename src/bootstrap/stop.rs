@@ -181,9 +181,15 @@ impl StopBract {
         &self,
         guard: &ScopeGuard,
         bract_client: &dyn bract_client::Client,
+        including_containers: bool,
         timeout: Duration,
     ) -> bool {
-        let outcome = match tokio::time::timeout(timeout, bract_client.stop()).await {
+        let outcome = match tokio::time::timeout(
+            timeout,
+            bract_client.stop_bract(including_containers),
+        )
+        .await
+        {
             Ok(Ok(())) => BractStopOutcome::Stopped,
             Ok(Err(err)) => BractStopOutcome::Failed(err),
             Err(_) => BractStopOutcome::TimedOut,
@@ -304,7 +310,7 @@ impl<'a> Command<Context<'a>> for StopBract {
             .start_guard();
 
         let needs_kill = self
-            .request_bract_stop(&guard, context.bract_client, BRACT_STOP_TIMEOUT)
+            .request_bract_stop(&guard, context.bract_client, true, BRACT_STOP_TIMEOUT)
             .await;
         if needs_kill {
             self.try_stop_douglas_containers(&guard, context.docker_client)
@@ -741,14 +747,16 @@ mod tests {
         #[tokio::test]
         async fn test_should_return_false_when_bract_acknowledges() {
             let mut bract_client = bract_client::MockClient::new();
-            bract_client.expect_stop().returning(|| Ok(()));
+            bract_client
+                .expect_stop_bract()
+                .returning(|_including_containers| Ok(()));
 
             let reporter = CapturingReporter::new();
-            let guard = test_guard(reporter);
+            let guard = test_guard(Arc::clone(&reporter) as Arc<dyn Reporter>);
             let stop_bract = StopBract::default();
 
             let needs_kill = stop_bract
-                .request_bract_stop(&guard, &bract_client, Duration::from_secs(5))
+                .request_bract_stop(&guard, &bract_client, true, Duration::from_secs(5))
                 .await;
 
             assert!(!needs_kill);
@@ -758,15 +766,15 @@ mod tests {
         async fn test_should_return_true_when_bract_reports_an_error() {
             let mut bract_client = bract_client::MockClient::new();
             bract_client
-                .expect_stop()
-                .returning(|| Err(bract_client::Error::MissingSocket));
+                .expect_stop_bract()
+                .returning(|_including_containers| Err(bract_client::Error::MissingSocket));
 
             let reporter = CapturingReporter::new();
             let guard = test_guard(Arc::clone(&reporter) as Arc<dyn Reporter>);
             let stop_bract = StopBract::default();
 
             let needs_kill = stop_bract
-                .request_bract_stop(&guard, &bract_client, Duration::from_secs(5))
+                .request_bract_stop(&guard, &bract_client, true, Duration::from_secs(5))
                 .await;
 
             assert!(needs_kill);
@@ -947,7 +955,9 @@ mod tests {
         async fn test_stop_bract_run_should_do_nothing_further_when_bract_acknowledges() {
             let os = MockOs::new();
             let mut bract_client = bract_client::MockClient::new();
-            bract_client.expect_stop().returning(|| Ok(()));
+            bract_client
+                .expect_stop_bract()
+                .returning(|_including_containers| Ok(()));
             let docker_client = docker::MockClient::new();
 
             let heartbeat_reader_factory = alive_heartbeat_reader_factory(4242);
@@ -974,8 +984,8 @@ mod tests {
 
             let mut bract_client = bract_client::MockClient::new();
             bract_client
-                .expect_stop()
-                .returning(|| Err(bract_client::Error::MissingSocket));
+                .expect_stop_bract()
+                .returning(|_including_containers| Err(bract_client::Error::MissingSocket));
 
             let mut docker_client = docker::MockClient::new();
             docker_client

@@ -64,8 +64,12 @@ pub async fn handle(
             Ok(report) => Response::OpenBaoStatus(report),
             Err(err) => error_response(err),
         },
-        Request::Stop => match server.stop(reporter).await {
-            Ok(()) => Response::Stopped,
+        Request::StopBract {
+            including_containers,
+        } => match server.stop(reporter, including_containers).await {
+            Ok(()) => Response::BractStopped {
+                including_containers,
+            },
             Err(err) => error_response(err),
         },
     }
