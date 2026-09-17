@@ -23,10 +23,16 @@ pub(crate) fn verify(path: Option<PathBuf>) -> ExitCode {
     };
 
     match verify_binary(&path) {
-        Ok(()) => {
+        Ok(version) => {
             guard.span().message(
                 log::Level::Info,
-                &format!("{} is signed correctly", path.display()),
+                &format!(
+                    "{} is signed correctly (v{}.{}.{})",
+                    path.display(),
+                    version.major,
+                    version.minor,
+                    version.patch
+                ),
             );
             ExitCode::from(0)
         }
