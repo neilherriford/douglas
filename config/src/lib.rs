@@ -7,9 +7,17 @@ pub mod services {
     pub static WOODWARD: &str = "woodward";
 }
 
+pub const DATA_FORMAT: u8 = 1;
+
 pub mod seedlings {
     pub static TRAEFIK: &str = "traefik";
     pub static OPENBAO: &str = "openbao";
+    pub const TRAEFIK_VERSION: u16 = 1;
+    pub const OPENBAO_VERSION: u16 = 1;
+
+    pub fn core_versions() -> [(&'static str, u16); 2] {
+        [(TRAEFIK, TRAEFIK_VERSION), (OPENBAO, OPENBAO_VERSION)]
+    }
 }
 
 pub static DOUGLAS_CLI_LOG_NAME: &str = "douglas-cli";

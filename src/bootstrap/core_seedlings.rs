@@ -195,7 +195,7 @@ pub mod definitions {
 
         pub fn create() -> Result<(Name, Version, SeedlingDefinition), BootstrapError> {
             let name = Name::from_str(config::seedlings::TRAEFIK)?;
-            let version = Version(1);
+            let version = Version(config::seedlings::TRAEFIK_VERSION);
             let mount_name: Name = "config".parse()?;
 
             let definition = SeedlingDefinition::new(
@@ -294,7 +294,7 @@ pub mod definitions {
             const CONFIG_FILE_NAME: &str = "config.json";
 
             let name = Name::from_str(NAME)?;
-            let version = Version(1);
+            let version = Version(config::seedlings::OPENBAO_VERSION);
             let socket_mount: Name = SOCKET_MOUNT_NAME.parse()?;
             let log_mount: Name = "log".parse()?;
             let config_mount: Name = "config".parse()?;
@@ -404,5 +404,28 @@ pub mod definitions {
 
             serde_json::to_vec_pretty(&config)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::definitions;
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn test_every_core_definition_should_be_listed_in_the_config_table_with_its_version() {
+        let Ok(all) = definitions::all() else {
+            panic!("core definitions should build");
+        };
+        let declared: BTreeMap<String, u16> = all
+            .iter()
+            .map(|(name, version, _)| (name.to_string(), version.0))
+            .collect();
+        let listed: BTreeMap<String, u16> = config::seedlings::core_versions()
+            .iter()
+            .map(|(name, version)| ((*name).to_string(), *version))
+            .collect();
+
+        assert_eq!(declared, listed);
     }
 }
