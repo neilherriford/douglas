@@ -4,7 +4,14 @@ set -uo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")"
 source ../lib.sh
 
-assert_success "douglas stop" ssh_out "sudo ~/douglas --output-style plain stop"
+if stop_output="$(ssh_out "sudo ~/douglas --output-style plain stop" 2>&1)"; then
+    pass "douglas stop"
+else
+    fail "douglas stop"
+    echo "$stop_output" | sed 's/^/    /'
+    FAILURES=$((FAILURES + 1))
+fi
+assert_contains "douglas stop reports the result on stdout" "$stop_output" "Douglas stopped."
 
 for service in woodward bract seedbank resin; do
     assert_failure "$service is no longer running" \

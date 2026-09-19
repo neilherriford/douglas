@@ -14,11 +14,22 @@ source ../lib.sh
 assert_success "verify accepts the freshly signed binary" ssh_out \
     "~/douglas verify --path ~/douglas"
 
+verify_output="$(ssh_out "~/douglas --output-style plain verify --path ~/douglas")"
+assert_contains "verify reports the signed version on stdout" "$verify_output" \
+    "is signed correctly (v"
+
+verify_json="$(ssh_out "~/douglas --output-style json verify --path ~/douglas")"
+assert_contains "verify --output-style json reports success" "$verify_json" '"success":true'
+
 assert_success "make a tampered copy" ssh_out \
     "cp ~/douglas ~/douglas-tampered && printf '\xff' | dd of=~/douglas-tampered bs=1 seek=1000 count=1 conv=notrunc"
 
 assert_failure "verify rejects a tampered binary" ssh_out \
     "~/douglas verify --path ~/douglas-tampered"
+
+tampered_output="$(ssh_out "~/douglas --output-style plain verify --path ~/douglas-tampered 2>&1")"
+assert_contains "verify explains why the tampered binary was rejected" "$tampered_output" \
+    "signature does not match"
 
 assert_success "make an unsigned copy by stripping the signature trailer" ssh_out \
     "head -c -72 ~/douglas > ~/douglas-unsigned"
