@@ -11,6 +11,7 @@ mod verify;
 
 use crate::cli::{Cli, Commands, Presentation, SeedlingCommand, ServiceCommand};
 use crate::commands::stop::stop;
+use crate::commands::upgrade::upgrade;
 use crate::commands::{
     kick::kick, prune::prune_deadwood, seedling, start::start, status::status, verify::verify,
 };
@@ -102,5 +103,8 @@ fn main() -> ExitCode {
             seedling: SeedlingCommand::Prune { yes },
         } => run_with_tokio(prune_deadwood(output_style, yes)),
         Commands::Verify { path } => verify(path, output_style),
+        Commands::Upgrade { plan_only, path } => {
+            run_with_tokio(upgrade(plan_only, presentation, path))
+        }
     }
 }

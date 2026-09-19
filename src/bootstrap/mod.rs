@@ -16,6 +16,7 @@ pub mod core_seedlings;
 pub mod openbao;
 pub mod stop;
 pub mod system;
+pub mod upgrade;
 
 pub(crate) struct ServiceControl<'a> {
     pub(crate) os: &'a dyn Os,

@@ -83,8 +83,8 @@ pub(crate) struct Cli {
         long,
         global = true,
         value_enum,
-        help = "Set the output mode. Defaults to plain text for most commands; `start` and `stop` \
-                default to an interactive TUI instead and only switch to plain/json \
+        help = "Set the output mode. Defaults to plain text for most commands; `start`, `stop` and \
+                `upgrade` default to an interactive TUI instead and only switch to plain/json \
                 output when this is explicitly set, since plain/json mode has no live terminal \
                 to render into."
     )]
@@ -136,6 +136,13 @@ pub(crate) enum Commands {
             help = "Path to a candidate binary to verify; defaults to the currently running douglas binary"
         )]
         path: Option<PathBuf>,
+    },
+    #[command(about = "Upgrade the douglas system")]
+    Upgrade {
+        #[arg(long, default_value_t = false, help = "Only display the upgrade plan")]
+        plan_only: bool,
+        #[arg(long, help = "Path to the new version")]
+        path: PathBuf,
     },
 }
 
@@ -271,6 +278,7 @@ impl std::fmt::Display for Commands {
             } => f.write_str("service woodward"),
             Commands::Kick { name } => write!(f, "kick {}", name.service_name()),
             Commands::Verify { .. } => f.write_str("verify"),
+            Commands::Upgrade { .. } => f.write_str("upgrade"),
         }
     }
 }

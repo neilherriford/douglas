@@ -1,5 +1,6 @@
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use file_system::{FileReader, FileSystemError};
+use os::Os;
 use std::{
     path::{Path, PathBuf},
     sync::Arc,
@@ -35,6 +36,8 @@ pub(crate) enum VerifyError {
     MissingTrailer(PathBuf),
     #[error("signature does not match: {0}")]
     Mismatch(ed25519_dalek::SignatureError),
+    #[error("Could not determine current internal version")]
+    UnknownInternalVersion,
 }
 
 #[derive(Error, Debug)]
@@ -45,17 +48,20 @@ enum TrailerError {
     Mismatch(ed25519_dalek::SignatureError),
 }
 
+#[cfg_attr(test, mockall::automock)]
 pub trait BinaryVerifier {
     fn get_external_version(&self, binary: &Path) -> Result<Version, VerifyError>;
+    fn get_internal_version(&self) -> Result<Version, VerifyError>;
 }
 
 pub struct DouglasBinaryVerifier {
+    os: Arc<dyn Os>,
     file_reader: Arc<dyn FileReader>,
 }
 
 impl DouglasBinaryVerifier {
-    pub fn new(file_reader: Arc<dyn FileReader>) -> Self {
-        Self { file_reader }
+    pub fn new(os: Arc<dyn Os>, file_reader: Arc<dyn FileReader>) -> Self {
+        Self { os, file_reader }
     }
 }
 
@@ -72,6 +78,14 @@ impl BinaryVerifier for DouglasBinaryVerifier {
             TrailerError::MissingTrailer => VerifyError::MissingTrailer(binary.to_path_buf()),
             TrailerError::Mismatch(err) => VerifyError::Mismatch(err),
         })
+    }
+
+    fn get_internal_version(&self) -> Result<Version, VerifyError> {
+        let path = self
+            .os
+            .current_executable()
+            .map_err(|_| VerifyError::UnknownInternalVersion)?;
+        self.get_external_version(&path)
     }
 }
 
@@ -121,6 +135,7 @@ mod tests {
     use super::*;
     use ed25519_dalek::{Signer, SigningKey};
     use file_system::MockFileReader;
+    use os::MockOs;
 
     fn test_keypair() -> (SigningKey, VerifyingKey) {
         let signing_key = SigningKey::from_bytes(&[7u8; 32]);
@@ -158,11 +173,42 @@ mod tests {
             .expect_read_all_bytes()
             .withf(|path| path == Path::new("/tmp/candidate-douglas"))
             .return_once(move |_| result);
-        DouglasBinaryVerifier::new(Arc::new(file_reader))
+        DouglasBinaryVerifier::new(Arc::new(MockOs::new()), Arc::new(file_reader))
     }
 
     fn candidate() -> PathBuf {
         PathBuf::from("/tmp/candidate-douglas")
+    }
+
+    #[test]
+    fn test_get_internal_version_should_fail_when_the_current_executable_is_unknown() {
+        let mut os = MockOs::new();
+        os.expect_current_executable()
+            .returning(|| Err(os::OsError::PidTooLarge));
+        let verifier = DouglasBinaryVerifier::new(Arc::new(os), Arc::new(MockFileReader::new()));
+
+        let result = verifier.get_internal_version();
+
+        assert!(matches!(result, Err(VerifyError::UnknownInternalVersion)));
+    }
+
+    #[test]
+    fn test_get_internal_version_should_verify_the_file_the_os_reports_as_the_current_executable() {
+        let mut os = MockOs::new();
+        os.expect_current_executable().returning(|| Ok(candidate()));
+        let mut file_reader = MockFileReader::new();
+        file_reader
+            .expect_read_all_bytes()
+            .withf(|path| path == Path::new("/tmp/candidate-douglas"))
+            .return_once(|_| Ok(b"tiny".to_vec()));
+        let verifier = DouglasBinaryVerifier::new(Arc::new(os), Arc::new(file_reader));
+
+        let result = verifier.get_internal_version();
+
+        assert!(matches!(
+            result,
+            Err(VerifyError::MissingTrailer(path)) if path == candidate()
+        ));
     }
 
     #[test]

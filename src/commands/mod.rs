@@ -4,6 +4,7 @@ pub(crate) mod seedling;
 pub(crate) mod start;
 pub(crate) mod status;
 pub(crate) mod stop;
+pub(crate) mod upgrade;
 pub(crate) mod verify;
 
 use crate::cli::{OutputStyle, Presentation};

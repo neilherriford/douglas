@@ -49,8 +49,9 @@ pub(crate) fn verify(path: Option<PathBuf>, output_style: OutputStyle) -> ExitCo
         },
     };
 
+    let os: Arc<dyn Os> = Arc::new(os);
     let file_reader: Arc<dyn FileReader> = Arc::new(UnixFileReader::new());
-    let verify_binary = DouglasBinaryVerifier::new(file_reader);
+    let verify_binary = DouglasBinaryVerifier::new(os, file_reader);
 
     match verify_binary.get_external_version(&path) {
         Ok(version) => {

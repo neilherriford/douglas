@@ -81,7 +81,7 @@ impl Drop for CliReporter {
     }
 }
 
-fn restore_term() -> io::Result<()> {
+pub(crate) fn restore_term() -> io::Result<()> {
     disable_raw_mode()?;
     execute!(io::stdout(), LeaveAlternateScreen)?;
     Ok(())
