@@ -143,6 +143,17 @@ pub enum FileSystemError {
     InvalidPath(PathBuf),
 }
 
+impl FileSystemError {
+    pub fn is_cross_device(&self) -> bool {
+        match self {
+            FileSystemError::IoError(error) | FileSystemError::IoErrorAtPath { error, .. } => {
+                error.kind() == std::io::ErrorKind::CrossesDevices
+            }
+            _ => false,
+        }
+    }
+}
+
 impl ClientErrorDisplay for FileSystemError {
     fn to_client_string(&self) -> String {
         "Could not create mount".to_string()
@@ -836,6 +847,31 @@ impl FileRenamer for UnixFileRenamer {
             path: from.to_path_buf(),
             error,
         })
+    }
+}
+
+#[cfg_attr(feature = "mock", mockall::automock)]
+pub trait FileCopier: Send + Sync {
+    fn copy(&self, from: &Path, to: &Path) -> Result<(), FileSystemError>;
+}
+
+#[derive(Default)]
+pub struct UnixFileCopier {}
+
+impl UnixFileCopier {
+    pub fn new() -> Self {
+        Self {}
+    }
+}
+
+impl FileCopier for UnixFileCopier {
+    fn copy(&self, from: &Path, to: &Path) -> Result<(), FileSystemError> {
+        std::fs::copy(from, to)
+            .map(|_| ())
+            .map_err(|error| FileSystemError::IoErrorAtPath {
+                path: from.to_path_buf(),
+                error,
+            })
     }
 }
 
@@ -1657,6 +1693,48 @@ impl MockFileRenamer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    mod is_cross_device {
+        use super::*;
+
+        fn io_error_of(kind: std::io::ErrorKind) -> std::io::Error {
+            std::io::Error::from(kind)
+        }
+
+        #[test]
+        fn test_should_be_true_for_a_cross_device_error_at_a_path() {
+            let error = FileSystemError::IoErrorAtPath {
+                path: PathBuf::from("/tmp/candidate"),
+                error: io_error_of(std::io::ErrorKind::CrossesDevices),
+            };
+
+            assert!(error.is_cross_device());
+        }
+
+        #[test]
+        fn test_should_be_true_for_a_bare_cross_device_io_error() {
+            let error = FileSystemError::IoError(io_error_of(std::io::ErrorKind::CrossesDevices));
+
+            assert!(error.is_cross_device());
+        }
+
+        #[test]
+        fn test_should_be_false_for_other_io_errors() {
+            let error = FileSystemError::IoErrorAtPath {
+                path: PathBuf::from("/tmp/candidate"),
+                error: io_error_of(std::io::ErrorKind::PermissionDenied),
+            };
+
+            assert!(!error.is_cross_device());
+        }
+
+        #[test]
+        fn test_should_be_false_for_errors_that_are_not_io_errors() {
+            let error = FileSystemError::NotFoundError(PathBuf::from("/tmp/candidate"));
+
+            assert!(!error.is_cross_device());
+        }
+    }
 
     mod relative_path {
         use super::*;
