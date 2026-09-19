@@ -2,6 +2,7 @@
 use mockall::predicate;
 use nix::sys::signal::{Signal, kill};
 use nix::unistd::Pid;
+use std::os::unix::process::CommandExt;
 #[cfg(feature = "mock")]
 use std::os::unix::process::ExitStatusExt;
 
@@ -36,6 +37,12 @@ pub enum OsError {
 #[cfg_attr(feature = "mock", mockall::automock)]
 pub trait Os: Send + Sync {
     fn current_executable(&self) -> Result<PathBuf, OsError>;
+    fn replace_process(
+        &self,
+        command: &str,
+        args: Vec<String>,
+        env: Vec<(String, String)>,
+    ) -> Result<(), OsError>;
     fn execute(
         &self,
         command: &str,
@@ -215,6 +222,15 @@ impl Os for Unix {
             Err(nix::errno::Errno::EPERM) => Err(OsError::InsufficientAccessToKillPid(pid)), // Process exists, but we lack permission
             Err(errno) => Err(OsError::ErrorNumber(errno as i32)),
         }
+    }
+
+    fn replace_process(
+        &self,
+        command: &str,
+        args: Vec<String>,
+        env: Vec<(String, String)>,
+    ) -> Result<(), OsError> {
+        Err(Command::new(command).args(&args).envs(env).exec().into())
     }
 }
 
