@@ -1,21 +1,20 @@
-use crate::bootstrap::{LivenessCheckError, liveness_check};
-use async_trait::async_trait;
+use crate::bootstrap::{
+    HasServiceControl, KillService, LivenessCheckError, OwnedServiceControl, ServiceControl,
+    StopBract, liveness_check,
+};
 use blueprint::{
     Command, RunningStatus,
     bootstrap::{execute_plan, resolve_plan},
     listener::{LivenessCheck, check_liveness},
     push_step,
 };
-use bract_types::is_douglas_container;
 use config::DouglasFolders;
 use credentials::Credentials;
-use docker::client::ClientBuilder;
 use file_system::{FileReader, FileSystemError};
 use log::{Level, Outcome, Reporter, ScopeGuard, ScopeKind, Span};
 use os::Os;
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
 use thiserror::Error;
-use heartbeat::{HeartbeatReaderFactory, LocalHeartbeatReaderFactory};
 
 #[derive(Error, Debug)]
 pub enum StopError {
@@ -30,10 +29,13 @@ pub enum StopError {
 type Step<'a> = Box<dyn Command<Context<'a>>>;
 
 struct Context<'a> {
-    os: &'a dyn Os,
-    heartbeat_reader_factory: &'a dyn HeartbeatReaderFactory,
-    bract_client: &'a dyn bract_client::Client,
-    docker_client: &'a dyn docker::client::Client,
+    service_control: ServiceControl<'a>,
+}
+
+impl HasServiceControl for Context<'_> {
+    fn service_control(&self) -> &ServiceControl<'_> {
+        &self.service_control
+    }
 }
 
 #[derive(Default)]
@@ -90,7 +92,7 @@ fn create_plan<'a>(state: &State) -> Result<Vec<Step<'a>>, StopError> {
     }
 
     if matches!(state.bract_running_status, RunningStatus::Running) {
-        push_step(&mut result, StopBract::default());
+        push_step(&mut result, StopBract::new(true));
     }
 
     if matches!(state.seedbank_running_status, RunningStatus::Running) {
@@ -102,235 +104,6 @@ fn create_plan<'a>(state: &State) -> Result<Vec<Step<'a>>, StopError> {
     }
 
     Ok(result)
-}
-
-fn kill_service(
-    span: &Span,
-    service_name: &str,
-    os: &dyn Os,
-    heartbeat_reader_factory: &dyn HeartbeatReaderFactory,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let guard = span
-        .create_child(&format!("Killing service {service_name}…"), ScopeKind::Step)
-        .start_guard();
-
-    let heartbeat_reader = heartbeat_reader_factory.create(service_name);
-
-    let pid = match heartbeat_reader.read() {
-        Ok(heartbeat) => heartbeat.pid,
-        Err(err) => return guard.finish(Err(Box::new(err))),
-    };
-
-    match os.kill(pid) {
-        Ok(()) => guard.finish(Ok(())),
-        Err(err) => guard.finish(Err(Box::new(err))),
-    }
-}
-
-struct KillService {
-    service_name: String,
-}
-
-impl KillService {
-    pub fn new(service_name: &str) -> Self {
-        Self {
-            service_name: service_name.to_string(),
-        }
-    }
-}
-
-impl std::fmt::Display for KillService {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Kill service {}", self.service_name)
-    }
-}
-
-#[async_trait]
-impl<'a> Command<Context<'a>> for KillService {
-    fn name(&self) -> String {
-        "Kill service".to_string()
-    }
-
-    async fn run(
-        &mut self,
-        span: &Span,
-        context: &mut Context<'a>,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        kill_service(
-            span,
-            &self.service_name,
-            context.os,
-            context.heartbeat_reader_factory,
-        )
-    }
-}
-
-const BRACT_STOP_TIMEOUT: Duration = Duration::from_secs(30);
-
-enum BractStopOutcome {
-    Stopped,
-    Failed(bract_client::Error),
-    TimedOut,
-}
-
-#[derive(Debug, Default)]
-struct StopBract {}
-
-impl StopBract {
-    async fn request_bract_stop(
-        &self,
-        guard: &ScopeGuard,
-        bract_client: &dyn bract_client::Client,
-        including_containers: bool,
-        timeout: Duration,
-    ) -> bool {
-        let outcome = match tokio::time::timeout(
-            timeout,
-            bract_client.stop_bract(including_containers),
-        )
-        .await
-        {
-            Ok(Ok(())) => BractStopOutcome::Stopped,
-            Ok(Err(err)) => BractStopOutcome::Failed(err),
-            Err(_) => BractStopOutcome::TimedOut,
-        };
-
-        Self::handle_stop_outcome(guard, outcome)
-    }
-
-    fn handle_stop_outcome(guard: &ScopeGuard, outcome: BractStopOutcome) -> bool {
-        match outcome {
-            BractStopOutcome::Stopped => false,
-            BractStopOutcome::Failed(err) => {
-                guard
-                    .span()
-                    .message(Level::Warn, &format!("Bract stop request failed: {err}"));
-                true
-            }
-            BractStopOutcome::TimedOut => {
-                guard
-                    .span()
-                    .message(Level::Warn, "Bract stop request timed out");
-                true
-            }
-        }
-    }
-
-    async fn try_stop_douglas_containers(
-        &self,
-        guard: &ScopeGuard,
-        docker_client: &dyn docker::client::Client,
-    ) {
-        let douglas_containers: Vec<docker_types::ContainerName> =
-            match docker_client.list_containers().await {
-                Ok(containers) => containers
-                    .iter()
-                    .filter(|name| is_douglas_container(name))
-                    .cloned()
-                    .collect(),
-                Err(err) => {
-                    guard.span().message(
-                        Level::Warn,
-                        &format!("Failed to list Docker containers during fall back stop: {err}"),
-                    );
-                    return;
-                }
-            };
-
-        for douglas_container in douglas_containers {
-            self.try_stop_container(guard, docker_client, &douglas_container)
-                .await;
-        }
-    }
-
-    async fn try_stop_container(
-        &self,
-        guard: &ScopeGuard,
-        docker_client: &dyn docker::client::Client,
-        douglas_container: &docker_types::ContainerName,
-    ) {
-        let needs_stop = match docker_client
-            .container_status(docker::client::ContainerRef::FullName(
-                douglas_container.clone(),
-            ))
-            .await
-        {
-            Ok(status) => matches!(status, docker_types::Status::Running),
-            Err(err) => {
-                guard.span().message(
-                    Level::Warn,
-                    &format!("Failed to get status for container {douglas_container}: {err}"),
-                );
-                return;
-            }
-        };
-
-        if !needs_stop {
-            return;
-        }
-
-        guard.span().message(
-            Level::Info,
-            &format!("Stopping container {douglas_container}…"),
-        );
-
-        if let Err(err) = docker_client
-            .stop_container(docker::client::ContainerRef::FullName(
-                douglas_container.clone(),
-            ))
-            .await
-        {
-            guard.span().message(
-                Level::Warn,
-                &format!("Failed to stop container {douglas_container}: {err}"),
-            );
-        }
-    }
-}
-
-impl std::fmt::Display for StopBract {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("Stopping Bract")
-    }
-}
-
-#[async_trait]
-impl<'a> Command<Context<'a>> for StopBract {
-    fn name(&self) -> String {
-        "Stopping bract".to_string()
-    }
-
-    async fn run(
-        &mut self,
-        span: &Span,
-        context: &mut Context<'a>,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let guard = span
-            .create_child("Stopping bract", ScopeKind::Step)
-            .start_guard();
-
-        let needs_kill = self
-            .request_bract_stop(&guard, context.bract_client, true, BRACT_STOP_TIMEOUT)
-            .await;
-        if needs_kill {
-            self.try_stop_douglas_containers(&guard, context.docker_client)
-                .await;
-
-            if let Err(err) = kill_service(
-                span,
-                config::services::BRACT,
-                context.os,
-                context.heartbeat_reader_factory,
-            ) {
-                guard
-                    .span()
-                    .message(Level::Warn, &format!("Failed to kill bract: {err}"));
-                return guard.finish(Err(err));
-            }
-        }
-
-        guard.finish(Ok(()))
-    }
 }
 
 pub(crate) struct Dependencies {
@@ -409,25 +182,15 @@ pub async fn perform(reporter: Arc<dyn Reporter>, plan_only: bool, deps: Depende
         }
     };
 
-    let bract_client =
-        bract_client::UdsClient::new(Arc::clone(&guard.reporter()), &deps.douglas_folders);
-
-    let heartbeat_reader_factory = LocalHeartbeatReaderFactory::new(
-        deps.douglas_folders.clone(),
+    let Some(service_control) = OwnedServiceControl::build(
+        &guard,
+        Arc::clone(&deps.os),
+        &deps.douglas_folders,
         Arc::clone(&deps.file_reader),
-    );
-
-    let builder = docker::client::UdsClientBuilder;
-    let docker_client = match builder.build(Arc::clone(&guard.reporter())).await {
-        Ok(docker_client) => docker_client,
-        Err(err) => {
-            guard.span().message(
-                Level::Warn,
-                &format!("Failed to create docker client: {err}"),
-            );
-            guard.finish_with_outcome(log::Outcome::Failed);
-            return false;
-        }
+    )
+    .await
+    else {
+        return false;
     };
 
     let plan = match resolve_plan(guard.span(), create_plan(&state)) {
@@ -445,10 +208,7 @@ pub async fn perform(reporter: Arc<dyn Reporter>, plan_only: bool, deps: Depende
     }
 
     let mut context = Context {
-        os: deps.os.as_ref(),
-        bract_client: &bract_client,
-        heartbeat_reader_factory: &heartbeat_reader_factory,
-        docker_client: &*docker_client,
+        service_control: service_control.borrow(),
     };
 
     let result = execute_plan(guard.span(), plan, &mut context, |_reason| ()).await;
@@ -629,6 +389,8 @@ mod tests {
     }
 
     mod kill_service_tests {
+        use crate::bootstrap::kill_service;
+
         use super::*;
 
         #[tokio::test]
@@ -692,6 +454,8 @@ mod tests {
     }
 
     mod handle_stop_outcome_tests {
+        use crate::bootstrap::BractStopOutcome;
+
         use super::*;
 
         #[test]
@@ -742,6 +506,8 @@ mod tests {
     }
 
     mod request_bract_stop_tests {
+        use std::time::Duration;
+
         use super::*;
 
         #[tokio::test]
@@ -756,7 +522,7 @@ mod tests {
             let stop_bract = StopBract::default();
 
             let needs_kill = stop_bract
-                .request_bract_stop(&guard, &bract_client, true, Duration::from_secs(5))
+                .request_bract_stop(&guard, &bract_client, Duration::from_secs(5))
                 .await;
 
             assert!(!needs_kill);
@@ -774,7 +540,7 @@ mod tests {
             let stop_bract = StopBract::default();
 
             let needs_kill = stop_bract
-                .request_bract_stop(&guard, &bract_client, true, Duration::from_secs(5))
+                .request_bract_stop(&guard, &bract_client, Duration::from_secs(5))
                 .await;
 
             assert!(needs_kill);
@@ -937,10 +703,12 @@ mod tests {
             let docker_client = docker::MockClient::new();
             let heartbeat_reader_factory = alive_heartbeat_reader_factory(4242);
             let mut context = Context {
-                os: &os,
-                heartbeat_reader_factory: &heartbeat_reader_factory,
-                bract_client: &bract_client,
-                docker_client: &docker_client,
+                service_control: ServiceControl {
+                    os: &os,
+                    heartbeat_reader_factory: &heartbeat_reader_factory,
+                    bract_client: &bract_client,
+                    docker_client: &docker_client,
+                },
             };
 
             let mut command = KillService::new(config::services::SEEDBANK);
@@ -962,10 +730,12 @@ mod tests {
 
             let heartbeat_reader_factory = alive_heartbeat_reader_factory(4242);
             let mut context = Context {
-                os: &os,
-                heartbeat_reader_factory: &heartbeat_reader_factory,
-                bract_client: &bract_client,
-                docker_client: &docker_client,
+                service_control: ServiceControl {
+                    os: &os,
+                    heartbeat_reader_factory: &heartbeat_reader_factory,
+                    bract_client: &bract_client,
+                    docker_client: &docker_client,
+                },
             };
 
             let mut command = StopBract::default();
@@ -998,13 +768,15 @@ mod tests {
 
             let heartbeat_reader_factory = alive_heartbeat_reader_factory(4242);
             let mut context = Context {
-                os: &os,
-                heartbeat_reader_factory: &heartbeat_reader_factory,
-                bract_client: &bract_client,
-                docker_client: &docker_client,
+                service_control: ServiceControl {
+                    os: &os,
+                    heartbeat_reader_factory: &heartbeat_reader_factory,
+                    bract_client: &bract_client,
+                    docker_client: &docker_client,
+                },
             };
 
-            let mut command = StopBract::default();
+            let mut command = StopBract::new(true);
             let reporter = CapturingReporter::new();
             let span = Span::new(
                 Arc::clone(&reporter) as Arc<dyn Reporter>,
@@ -1026,6 +798,51 @@ mod tests {
                     .messages()
                     .iter()
                     .any(|message| message.contains("Stopping container"))
+            );
+        }
+
+        #[tokio::test]
+        async fn test_stop_bract_run_should_leave_containers_alone_when_not_including_containers_even_on_fallback()
+         {
+            let mut os = MockOs::new();
+            os.expect_kill().returning(|_| Ok(()));
+
+            let mut bract_client = bract_client::MockClient::new();
+            bract_client
+                .expect_stop_bract()
+                .returning(|_including_containers| Err(bract_client::Error::MissingSocket));
+
+            let mut docker_client = docker::MockClient::new();
+            docker_client.expect_list_containers().times(0);
+            docker_client.expect_container_status().times(0);
+            docker_client.expect_stop_container().times(0);
+
+            let heartbeat_reader_factory = alive_heartbeat_reader_factory(4242);
+            let mut context = Context {
+                service_control: ServiceControl {
+                    os: &os,
+                    heartbeat_reader_factory: &heartbeat_reader_factory,
+                    bract_client: &bract_client,
+                    docker_client: &docker_client,
+                },
+            };
+
+            let mut command = StopBract::new(false);
+            let reporter = CapturingReporter::new();
+            let span = Span::new(
+                Arc::clone(&reporter) as Arc<dyn Reporter>,
+                "test",
+                ScopeKind::Group,
+            );
+
+            let result = command.run(&span, &mut context).await;
+
+            assert!(result.is_ok());
+            assert!(
+                reporter
+                    .messages()
+                    .iter()
+                    .any(|message| message.contains("Bract stop request failed"))
             );
         }
     }
