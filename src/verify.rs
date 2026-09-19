@@ -120,6 +120,7 @@ fn verify_trailer(verifying_key: &VerifyingKey, data: &[u8]) -> Result<Version, 
 mod tests {
     use super::*;
     use ed25519_dalek::{Signer, SigningKey};
+    use file_system::MockFileReader;
 
     fn test_keypair() -> (SigningKey, VerifyingKey) {
         let signing_key = SigningKey::from_bytes(&[7u8; 32]);
@@ -149,6 +150,69 @@ mod tests {
         };
 
         assert_eq!(version.to_string(), "1.20.3");
+    }
+
+    fn verifier_reading(result: Result<Vec<u8>, FileSystemError>) -> DouglasBinaryVerifier {
+        let mut file_reader = MockFileReader::new();
+        file_reader
+            .expect_read_all_bytes()
+            .withf(|path| path == Path::new("/tmp/candidate-douglas"))
+            .return_once(move |_| result);
+        DouglasBinaryVerifier::new(Arc::new(file_reader))
+    }
+
+    fn candidate() -> PathBuf {
+        PathBuf::from("/tmp/candidate-douglas")
+    }
+
+    #[test]
+    fn test_get_external_version_should_report_a_read_failure_with_the_path() {
+        let verifier = verifier_reading(Err(FileSystemError::NotFoundError(candidate())));
+
+        let result = verifier.get_external_version(&candidate());
+
+        assert!(matches!(
+            result,
+            Err(VerifyError::ReadFailed(path, FileSystemError::NotFoundError(_)))
+                if path == candidate()
+        ));
+    }
+
+    #[test]
+    fn test_get_external_version_should_reject_a_file_too_short_to_hold_a_trailer() {
+        let verifier = verifier_reading(Ok(b"tiny".to_vec()));
+
+        let result = verifier.get_external_version(&candidate());
+
+        assert!(matches!(
+            result,
+            Err(VerifyError::MissingTrailer(path)) if path == candidate()
+        ));
+    }
+
+    #[test]
+    fn test_get_external_version_should_reject_a_file_without_the_trailer_magic() {
+        let verifier = verifier_reading(Ok(vec![0u8; TRAILER_LEN + 100]));
+
+        let result = verifier.get_external_version(&candidate());
+
+        assert!(matches!(
+            result,
+            Err(VerifyError::MissingTrailer(path)) if path == candidate()
+        ));
+    }
+
+    #[test]
+    fn test_get_external_version_should_reject_a_signature_that_does_not_match_the_embedded_key() {
+        let mut data = b"pretend binary bytes".to_vec();
+        data.extend_from_slice(&[0, 0, 1]);
+        data.extend_from_slice(&[0u8; SIGNATURE_LEN]);
+        data.extend_from_slice(TRAILER_MAGIC);
+        let verifier = verifier_reading(Ok(data));
+
+        let result = verifier.get_external_version(&candidate());
+
+        assert!(matches!(result, Err(VerifyError::Mismatch(_))));
     }
 
     #[test]
