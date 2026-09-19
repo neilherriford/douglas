@@ -4,10 +4,10 @@ use crate::commands::CommandContext;
 use crate::util::{spawn_service, wait_until_running};
 use config::DouglasFolders;
 use file_system::{FileReader, UnixFileReader};
+use heartbeat::{HeartbeatReader, LocalHeartbeatReader};
 use os::{Os, Unix};
 use std::path::Path;
 use std::{process::ExitCode, sync::Arc};
-use heartbeat::{HeartbeatReader, LocalHeartbeatReader};
 
 pub(crate) async fn kick(kick_target: KickTarget) -> ExitCode {
     let context = CommandContext::plain();
@@ -181,9 +181,9 @@ fn read_pid_from_heartbeat_file(
 mod tests {
     use super::*;
     use file_system::MockFileReader;
+    use heartbeat::Heartbeat;
     use os::MockOs;
     use std::sync::Arc;
-    use heartbeat::Heartbeat;
 
     struct NullReporter;
 

@@ -7,10 +7,10 @@ use bract_types::is_douglas_container;
 use config::DouglasFolders;
 use docker::client::ClientBuilder;
 use file_system::FileReader;
+use heartbeat::{HeartbeatReaderFactory, LocalHeartbeatReaderFactory};
 use log::{Level, Outcome, ScopeGuard, ScopeKind, Span};
 use os::Os;
 use thiserror::Error;
-use heartbeat::{HeartbeatReaderFactory, LocalHeartbeatReaderFactory};
 
 pub mod core_seedlings;
 pub mod openbao;

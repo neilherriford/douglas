@@ -226,9 +226,9 @@ pub async fn perform(reporter: Arc<dyn Reporter>, plan_only: bool, deps: Depende
 mod tests {
     use super::*;
     use docker::client::ContainerRef;
+    use heartbeat::{Heartbeat, HeartbeatReaderError};
     use os::MockOs;
     use std::sync::Mutex;
-    use heartbeat::{Heartbeat, HeartbeatReaderError};
 
     struct CapturingReporter {
         messages: Mutex<Vec<String>>,
