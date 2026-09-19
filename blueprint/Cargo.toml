@@ -7,11 +7,16 @@ edition = "2024"
 async-trait = { workspace = true }
 credentials = { workspace = true }
 file_system = { workspace = true }
+heartbeat = { workspace = true }
 log = { workspace = true }
+os = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]
 credentials = { workspace = true, features = ["mock"] }
 file_system = { workspace = true, features = ["mock"] }
+heartbeat = { workspace = true, features = ["mock"] }
 mockall = { workspace = true }
+os = { workspace = true, features = ["mock"] }
+serde_json = { workspace = true }
 tokio = { workspace = true }

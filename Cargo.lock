@@ -358,8 +358,11 @@ dependencies = [
  "async-trait",
  "credentials",
  "file_system",
+ "heartbeat",
  "log 0.1.0",
  "mockall",
+ "os",
+ "serde_json",
  "thiserror 1.0.69",
  "tokio",
 ]

@@ -86,6 +86,43 @@ assert_contains() {
     fi
 }
 
+# assert_non_empty <description> <value>
+# Guards captured values (pids, timestamps) so a failed capture can't
+# silently satisfy a later comparison.
+assert_non_empty() {
+    local desc="$1" value="$2"
+    if [ -n "$value" ]; then
+        pass "$desc"
+    else
+        fail "$desc (captured value was empty)"
+        FAILURES=$((FAILURES + 1))
+    fi
+}
+
+# assert_equals <description> <expected> <actual>
+assert_equals() {
+    local desc="$1" expected="$2" actual="$3"
+    if [ -n "$expected" ] && [ "$expected" = "$actual" ]; then
+        pass "$desc"
+    else
+        fail "$desc (expected '$expected', got '$actual')"
+        FAILURES=$((FAILURES + 1))
+    fi
+}
+
+# assert_not_equals <description> <before> <after>
+# Both values must be non-empty, so "the thing vanished" doesn't read as
+# "the thing changed".
+assert_not_equals() {
+    local desc="$1" before="$2" after="$3"
+    if [ -n "$before" ] && [ -n "$after" ] && [ "$before" != "$after" ]; then
+        pass "$desc"
+    else
+        fail "$desc (before '$before', after '$after')"
+        FAILURES=$((FAILURES + 1))
+    fi
+}
+
 # assert_owner_group_mode <description> <remote path> <expected "user:group:mode">
 # Runs `stat` via sudo: these paths live under service-owned directories
 # (e.g. /var/lib/douglas/mounts/traefik/...) that the unprivileged `dev`

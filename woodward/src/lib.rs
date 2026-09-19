@@ -237,11 +237,7 @@ fn heartbeat_age(reader: &dyn HeartbeatReader) -> std::time::Duration {
     reader
         .read()
         .ok()
-        .and_then(|heartbeat| {
-            std::time::SystemTime::now()
-                .duration_since(heartbeat.written_at)
-                .ok()
-        })
+        .and_then(|heartbeat| heartbeat.age())
         .unwrap_or(std::time::Duration::MAX)
 }
 

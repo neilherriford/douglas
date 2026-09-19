@@ -1,14 +1,17 @@
 use crate::RunningStatus;
 use file_system::{
     BindableUnixDomainSocketFile, FileDeleter, FileSystemError, Listener, Modes, Permissions,
+    UnixFileReader,
 };
+use heartbeat::{HeartbeatReader, HeartbeatReaderError, LocalHeartbeatReader};
 use log::{Level, Outcome, ScopeKind, Span};
+use os::{Os, Unix};
 use std::io::ErrorKind;
 use std::net::TcpStream;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
 #[derive(Debug)]
 pub struct ListenerDefinition {
@@ -101,31 +104,77 @@ pub fn check_liveness(span: &Span, check: &LivenessCheck) -> RunningStatus {
 fn check_unix_socket(span: &Span, socket_path: &Path) -> RunningStatus {
     match UnixStream::connect(socket_path) {
         Ok(_) => RunningStatus::Running,
-        Err(err) => classify_io_error(span, &socket_path.to_string_lossy(), err),
+        Err(err) => classify_io_error(span, &socket_path.to_string_lossy(), &err),
     }
 }
 
 fn check_tcp_port(span: &Span, host: &str, port: u16) -> RunningStatus {
     match TcpStream::connect((host, port)) {
         Ok(_) => RunningStatus::Running,
-        Err(err) => classify_io_error(span, &format!("{host}:{port}"), err),
+        Err(err) => classify_io_error(span, &format!("{host}:{port}"), &err),
     }
 }
 
 fn check_heartbeat(span: &Span, path: &Path, max_age: Duration) -> RunningStatus {
-    let modified = match std::fs::metadata(path).and_then(|metadata| metadata.modified()) {
-        Ok(modified) => modified,
-        Err(err) => return classify_io_error(span, &path.to_string_lossy(), err),
+    let reader = LocalHeartbeatReader::new(path, Arc::new(UnixFileReader::new()));
+    check_heartbeat_with(
+        span,
+        &path.to_string_lossy(),
+        max_age,
+        &Unix::new(),
+        &reader,
+    )
+}
+
+fn check_heartbeat_with(
+    span: &Span,
+    target: &str,
+    max_age: Duration,
+    os: &dyn Os,
+    reader: &dyn HeartbeatReader,
+) -> RunningStatus {
+    let heartbeat = match reader.read() {
+        Ok(heartbeat) => heartbeat,
+        Err(HeartbeatReaderError::FileSystemError(err)) => {
+            return classify_file_error(span, target, &err);
+        }
+        Err(err) => return unknown_heartbeat(span, target, &err),
     };
 
-    match SystemTime::now().duration_since(modified) {
-        Ok(elapsed) if elapsed <= max_age => RunningStatus::Running,
-        Ok(_) => RunningStatus::NotRunning,
-        Err(_) => RunningStatus::Unknown,
+    match heartbeat.age() {
+        Some(age) if age <= max_age => check_heartbeat_pid(span, target, heartbeat.pid, os),
+        Some(_) => RunningStatus::NotRunning,
+        None => RunningStatus::Unknown,
     }
 }
 
-fn classify_io_error(span: &Span, target: &str, err: std::io::Error) -> RunningStatus {
+fn check_heartbeat_pid(span: &Span, target: &str, pid: u32, os: &dyn Os) -> RunningStatus {
+    match os.is_active_pid(pid) {
+        Ok(true) => RunningStatus::Running,
+        Ok(false) => RunningStatus::NotRunning,
+        Err(err) => unknown_heartbeat(span, target, &err),
+    }
+}
+
+fn classify_file_error(span: &Span, target: &str, err: &FileSystemError) -> RunningStatus {
+    match err {
+        FileSystemError::NotFoundError(_) => RunningStatus::NotRunning,
+        FileSystemError::IoError(error) | FileSystemError::IoErrorAtPath { error, .. } => {
+            classify_io_error(span, target, error)
+        }
+        _ => unknown_heartbeat(span, target, err),
+    }
+}
+
+fn unknown_heartbeat(span: &Span, target: &str, err: &dyn std::fmt::Display) -> RunningStatus {
+    span.message(
+        Level::Warn,
+        &format!("Could not determine status of '{target}': '{err}'"),
+    );
+    RunningStatus::Unknown
+}
+
+fn classify_io_error(span: &Span, target: &str, err: &std::io::Error) -> RunningStatus {
     let status = running_status_for_error_kind(err.kind());
     if status == RunningStatus::Unknown {
         span.message(
@@ -148,14 +197,17 @@ fn running_status_for_error_kind(kind: ErrorKind) -> RunningStatus {
 #[cfg(test)]
 mod tests {
     use super::{
-        ListenerDefinition, LivenessCheck, SocketListenerFactory, check_liveness,
-        running_status_for_error_kind,
+        ListenerDefinition, LivenessCheck, SocketListenerFactory, check_heartbeat_with,
+        check_liveness, running_status_for_error_kind,
     };
     use crate::RunningStatus;
     use file_system::{
-        MockBindableUnixDomainSocketFile, MockFileDeleter, MockListener, MockPermissions, Modes,
+        FileSystemError, MockBindableUnixDomainSocketFile, MockFileDeleter, MockListener,
+        MockPermissions, Modes,
     };
+    use heartbeat::{Heartbeat, HeartbeatReaderError, MockHeartbeatReader};
     use log::{Event, Reporter, ScopeKind, Span};
+    use os::MockOs;
     use std::io::ErrorKind;
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
@@ -214,59 +266,131 @@ mod tests {
         assert!(status == RunningStatus::NotRunning);
     }
 
+    const HEARTBEAT_PATH: &str = "/run/douglas/woodward-heartbeat/heartbeat";
+
+    fn recent() -> SystemTime {
+        SystemTime::now() - Duration::from_secs(1)
+    }
+
+    fn reader_returning(pid: u32, written_at: SystemTime) -> MockHeartbeatReader {
+        let mut reader = MockHeartbeatReader::new();
+        reader
+            .expect_read()
+            .returning(move || Ok(Heartbeat { pid, written_at }));
+        reader
+    }
+
+    fn reader_failing_with(error: fn() -> HeartbeatReaderError) -> MockHeartbeatReader {
+        let mut reader = MockHeartbeatReader::new();
+        reader.expect_read().returning(move || Err(error()));
+        reader
+    }
+
+    fn not_found() -> HeartbeatReaderError {
+        HeartbeatReaderError::FileSystemError(FileSystemError::NotFoundError(PathBuf::from(
+            HEARTBEAT_PATH,
+        )))
+    }
+
+    fn timed_out() -> HeartbeatReaderError {
+        HeartbeatReaderError::FileSystemError(FileSystemError::IoErrorAtPath {
+            path: PathBuf::from(HEARTBEAT_PATH),
+            error: std::io::Error::from(ErrorKind::TimedOut),
+        })
+    }
+
+    fn unparseable() -> HeartbeatReaderError {
+        HeartbeatReaderError::SupportFileSerializationError(
+            serde_json::from_str::<()>("not json").unwrap_err(),
+        )
+    }
+
+    fn check_heartbeat(os: &MockOs, reader: &MockHeartbeatReader) -> RunningStatus {
+        check_heartbeat_with(&span(), HEARTBEAT_PATH, Duration::from_secs(15), os, reader)
+    }
+
     #[test]
-    fn test_should_report_running_when_heartbeat_is_recent() {
-        let mut path = std::env::temp_dir();
-        path.push(format!("blueprint-heartbeat-test-{}-recent", std::process::id()));
-        std::fs::write(&path, "").expect("should write heartbeat file");
+    fn test_should_report_running_when_heartbeat_is_recent_and_its_pid_is_active() {
+        let mut os = MockOs::new();
+        os.given_pid_is_active(4242);
+        let reader = reader_returning(4242, recent());
 
-        let status = check_liveness(
-            &span(),
-            &LivenessCheck::Heartbeat {
-                path: path.clone(),
-                max_age: Duration::from_secs(15),
-            },
-        );
+        let status = check_heartbeat(&os, &reader);
 
-        let _ = std::fs::remove_file(&path);
         assert!(status == RunningStatus::Running);
     }
 
     #[test]
-    fn test_should_report_not_running_when_heartbeat_is_stale() {
-        let mut path = std::env::temp_dir();
-        path.push(format!("blueprint-heartbeat-test-{}-stale", std::process::id()));
-        std::fs::write(&path, "").expect("should write heartbeat file");
-        let file = std::fs::File::options()
-            .write(true)
-            .open(&path)
-            .expect("should open heartbeat file");
-        file.set_modified(SystemTime::now() - Duration::from_secs(60))
-            .expect("should backdate mtime");
+    fn test_should_report_not_running_when_heartbeat_is_recent_but_its_pid_is_gone() {
+        let mut os = MockOs::new();
+        os.given_pid_is_not_active(4242);
+        let reader = reader_returning(4242, recent());
 
-        let status = check_liveness(
-            &span(),
-            &LivenessCheck::Heartbeat {
-                path: path.clone(),
-                max_age: Duration::from_secs(15),
-            },
-        );
+        let status = check_heartbeat(&os, &reader);
 
-        let _ = std::fs::remove_file(&path);
         assert!(status == RunningStatus::NotRunning);
     }
 
     #[test]
-    fn test_should_report_not_running_when_heartbeat_file_is_missing() {
-        let status = check_liveness(
-            &span(),
-            &LivenessCheck::Heartbeat {
-                path: PathBuf::from("/run/douglas/definitely-missing-heartbeat"),
-                max_age: Duration::from_secs(15),
-            },
-        );
+    fn test_should_report_not_running_without_checking_the_pid_when_stale() {
+        let os = MockOs::new();
+        let reader = reader_returning(4242, SystemTime::now() - Duration::from_secs(60));
+
+        let status = check_heartbeat(&os, &reader);
 
         assert!(status == RunningStatus::NotRunning);
+    }
+
+    #[test]
+    fn test_should_report_unknown_when_written_at_is_in_the_future() {
+        let os = MockOs::new();
+        let reader = reader_returning(4242, SystemTime::now() + Duration::from_secs(600));
+
+        let status = check_heartbeat(&os, &reader);
+
+        assert!(status == RunningStatus::Unknown);
+    }
+
+    #[test]
+    fn test_should_report_unknown_when_the_pid_cannot_be_checked() {
+        let mut os = MockOs::new();
+        os.expect_is_active_pid()
+            .returning(|_| Err(os::OsError::PidTooLarge));
+        let reader = reader_returning(4242, recent());
+
+        let status = check_heartbeat(&os, &reader);
+
+        assert!(status == RunningStatus::Unknown);
+    }
+
+    #[test]
+    fn test_should_report_not_running_when_the_heartbeat_file_is_missing() {
+        let os = MockOs::new();
+        let reader = reader_failing_with(not_found);
+
+        let status = check_heartbeat(&os, &reader);
+
+        assert!(status == RunningStatus::NotRunning);
+    }
+
+    #[test]
+    fn test_should_report_unknown_when_the_heartbeat_cannot_be_read() {
+        let os = MockOs::new();
+        let reader = reader_failing_with(timed_out);
+
+        let status = check_heartbeat(&os, &reader);
+
+        assert!(status == RunningStatus::Unknown);
+    }
+
+    #[test]
+    fn test_should_report_unknown_when_the_heartbeat_cannot_be_parsed() {
+        let os = MockOs::new();
+        let reader = reader_failing_with(unparseable);
+
+        let status = check_heartbeat(&os, &reader);
+
+        assert!(status == RunningStatus::Unknown);
     }
 
     #[test]

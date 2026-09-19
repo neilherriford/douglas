@@ -5,7 +5,7 @@ use mockall::automock;
 use std::{
     path::{Path, PathBuf},
     sync::Arc,
-    time::SystemTime,
+    time::{Duration, SystemTime},
 };
 use thiserror::Error;
 
@@ -34,6 +34,10 @@ impl Heartbeat {
             pid: std::process::id(),
             written_at: SystemTime::now(),
         }
+    }
+
+    pub fn age(&self) -> Option<Duration> {
+        SystemTime::now().duration_since(self.written_at).ok()
     }
 }
 
@@ -68,6 +72,7 @@ pub enum HeartbeatReaderError {
     SupportFileSerializationError(#[from] serde_json::Error),
 }
 
+#[cfg_attr(feature = "mock", automock)]
 pub trait HeartbeatReader: Send + Sync {
     fn read(&self) -> Result<Heartbeat, HeartbeatReaderError>;
 }
@@ -174,6 +179,42 @@ mod tests {
     }
 
     #[test]
+    fn test_read_should_fail_with_a_serialization_error_when_the_contents_are_not_json() {
+        let mut file_reader = MockFileReader::new();
+        file_reader
+            .expect_read_all()
+            .returning(|_| Ok("not json".to_string()));
+
+        let reader = LocalHeartbeatReader::new(
+            Path::new("/run/douglas/bract/heartbeat"),
+            Arc::new(file_reader),
+        );
+
+        assert!(matches!(
+            reader.read(),
+            Err(HeartbeatReaderError::SupportFileSerializationError(_))
+        ));
+    }
+
+    #[test]
+    fn test_read_should_fail_with_a_serialization_error_when_the_timestamp_is_missing() {
+        let mut file_reader = MockFileReader::new();
+        file_reader
+            .expect_read_all()
+            .returning(|_| Ok(serde_json::json!({ "pid": 4242 }).to_string()));
+
+        let reader = LocalHeartbeatReader::new(
+            Path::new("/run/douglas/bract/heartbeat"),
+            Arc::new(file_reader),
+        );
+
+        assert!(matches!(
+            reader.read(),
+            Err(HeartbeatReaderError::SupportFileSerializationError(_))
+        ));
+    }
+
+    #[test]
     fn test_read_should_propagate_a_file_system_error() {
         let mut file_reader = MockFileReader::new();
         file_reader
@@ -207,5 +248,29 @@ mod tests {
             writer.write(),
             Err(HeartbeatWriterError::FileSystemError(_))
         ));
+    }
+
+    #[test]
+    fn test_age_should_be_small_for_a_recent_heartbeat() {
+        let heartbeat = Heartbeat {
+            pid: 1,
+            written_at: SystemTime::now() - Duration::from_secs(2),
+        };
+
+        let Some(age) = heartbeat.age() else {
+            panic!("should have an age");
+        };
+
+        assert!(age >= Duration::from_secs(2) && age < Duration::from_secs(10));
+    }
+
+    #[test]
+    fn test_age_should_be_absent_when_written_in_the_future() {
+        let heartbeat = Heartbeat {
+            pid: 1,
+            written_at: SystemTime::now() + Duration::from_secs(600),
+        };
+
+        assert!(heartbeat.age().is_none());
     }
 }
