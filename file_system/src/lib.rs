@@ -295,6 +295,35 @@ pub enum Modes {
     Other(u32),
 }
 
+impl Modes {
+    fn is_set(&self, mask: u32) -> bool {
+        let result: u32 = (*self).into();
+        result & mask != 0
+    }
+
+    fn create_new_by_setting(&self, mask: u32, value: bool) -> Modes {
+        let result: u32 = (*self).into();
+        let result = if value { result | mask } else { result & !mask };
+        Modes::Other(result)
+    }
+
+    pub fn is_executable_by_owner(&self) -> bool {
+        self.is_set(0x40)
+    }
+
+    pub fn is_executable_by_group(&self) -> bool {
+        self.is_set(0x08)
+    }
+
+    pub fn set_executable_by_owner(&self, value: bool) -> Modes {
+        self.create_new_by_setting(0x40, value)
+    }
+
+    pub fn set_executable_by_group(&self, value: bool) -> Modes {
+        self.create_new_by_setting(0x08, value)
+    }
+}
+
 impl From<Modes> for u32 {
     fn from(value: Modes) -> Self {
         match value {
