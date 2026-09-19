@@ -13,6 +13,7 @@ docker_types = { workspace = true }
 file_system = { workspace = true }
 bytes = "1"
 futures-util = "0.3"
+heartbeat = { workspace = true }
 hex =  { workspace = true }
 http-body = "1"
 log = { workspace = true, features = ["tui"] }
@@ -33,7 +34,6 @@ thiserror = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 uuid = { workspace = true }
-woodward = { workspace = true }
 
 [features]
 mock = ["file_system/mock", "seedling_registration_client/mock", "reconcile_trigger_client/mock"]

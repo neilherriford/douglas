@@ -19,6 +19,7 @@ use file_system::{
     UnixFileDeleter, UnixFileReader, UnixFileWriter, UnixFolder, UnixFolderDeleter, UnixInspect,
     UnixPermissions,
 };
+use heartbeat::{HeartbeatWriter, LocalHeartbeatWriter};
 use log::{BufferedFileReporter, Reporter, ScopeKind, Span, TuiReporter};
 use os::{Os, Unix};
 use std::{
@@ -29,7 +30,6 @@ use std::{
 };
 use thiserror::Error;
 use tokio::sync::broadcast::{self, Sender};
-use woodward::{HeartbeatWriter, LocalHeartbeatWriter};
 
 pub(crate) static SEEDS_ROOT_NAME: &str = "seeds";
 pub use config::services::SEEDBANK;
@@ -952,10 +952,10 @@ mod tests {
         Entry, MockBindableUnixDomainSocketFile, MockFileDeleter, MockFileReader, MockFileWriter,
         MockFolder, MockFolderDeleter, MockInspect, MockPermissions, Modes,
     };
+    use heartbeat::MockHeartbeatWriter;
     use log::Event;
     use seedbank_types::{HealthCheck, HealthCheckCommand};
     use std::num::NonZeroU8;
-    use woodward::MockHeartbeatWriter;
 
     struct NullReporter;
 

@@ -25,6 +25,7 @@ ed25519-dalek = "3.0.0"
 file_system = { workspace = true }
 hex = { workspace = true }
 humantime = { workspace = true }
+heartbeat = { workspace = true }
 identity = { workspace = true }
 log = { workspace = true }
 mockall = { workspace = true }
@@ -58,7 +59,7 @@ file_system = { workspace = true, features = ["mock"] }
 identity = { workspace = true, features = ["mock"] }
 openbao = { workspace = true, features = ["mock"] }
 os = { workspace = true, features = ["mock"] }
-woodward = { workspace = true, features = ["mock"] }
+heartbeat = { workspace = true, features = ["mock"] }
 
 [workspace]
 members = [
@@ -72,7 +73,7 @@ members = [
     "seedbank_client", "resin_client", "resin_types",
     "seedling_registration_types", "seedling_registration_client",
     "reconcile_trigger_types", "reconcile_trigger_client", "openbao_types"
-, "identity", "ram_disk", "woodward", "xtask"]
+, "identity", "ram_disk", "woodward", "heartbeat", "xtask"]
 
 [workspace.dependencies]
 # External
@@ -83,6 +84,7 @@ crossterm = "0.29.0"
 hex = "0.4.3"
 http-body-util = "0.1"
 humantime = "2.3.0"
+heartbeat = { path = "./heartbeat" }
 hyper = { version = "1.6.0", features = ["client"] }
 hyper-util = { version = "0.1.11", features = ["full"] }
 mime = "0.3.17"

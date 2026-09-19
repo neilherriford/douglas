@@ -7,7 +7,7 @@ use file_system::{FileReader, UnixFileReader};
 use os::{Os, Unix};
 use std::path::Path;
 use std::{process::ExitCode, sync::Arc};
-use woodward::{HeartbeatReader, LocalHeartbeatReader};
+use heartbeat::{HeartbeatReader, LocalHeartbeatReader};
 
 pub(crate) async fn kick(kick_target: KickTarget) -> ExitCode {
     let (douglas_folders, guard) =
@@ -182,7 +182,7 @@ mod tests {
     use file_system::MockFileReader;
     use os::MockOs;
     use std::sync::Arc;
-    use woodward::Heartbeat;
+    use heartbeat::Heartbeat;
 
     struct NullReporter;
 

@@ -48,6 +48,7 @@ use file_system::{
     UnixPermissions,
 };
 use futures_util::FutureExt;
+use heartbeat::{HeartbeatWriter, LocalHeartbeatWriter};
 use log::{BufferedFileReporter, Outcome, Reporter, ScopeKind, Span, TuiReporter};
 use os::{Os, Unix};
 use resin_types::{Name, NameParseError};
@@ -55,7 +56,6 @@ use serde_json::json;
 use std::path::Path;
 use std::{path::PathBuf, sync::Arc};
 use thiserror::Error;
-use woodward::{HeartbeatWriter, LocalHeartbeatWriter};
 
 #[derive(Debug, Error)]
 pub enum Error {

@@ -6,7 +6,7 @@ mod rolodex;
 pub use blueprints::bootstrap::service_definition;
 pub use blueprints::traefik_dynamic_dir;
 pub use bract_types::{Mount, Request, Response, SeedlingStatus, ServerMessage, Service};
-use woodward::{HeartbeatWriter, LocalHeartbeatWriter};
+use heartbeat::{HeartbeatWriter, LocalHeartbeatWriter};
 
 use crate::{
     labels::LabelError,

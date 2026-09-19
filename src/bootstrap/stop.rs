@@ -15,7 +15,7 @@ use log::{Level, Outcome, Reporter, ScopeGuard, ScopeKind, Span};
 use os::Os;
 use std::{sync::Arc, time::Duration};
 use thiserror::Error;
-use woodward::{HeartbeatReaderFactory, LocalHeartbeatReaderFactory};
+use heartbeat::{HeartbeatReaderFactory, LocalHeartbeatReaderFactory};
 
 #[derive(Error, Debug)]
 pub enum StopError {
@@ -468,7 +468,7 @@ mod tests {
     use docker::client::ContainerRef;
     use os::MockOs;
     use std::sync::Mutex;
-    use woodward::{Heartbeat, HeartbeatReaderError};
+    use heartbeat::{Heartbeat, HeartbeatReaderError};
 
     struct CapturingReporter {
         messages: Mutex<Vec<String>>,
@@ -515,7 +515,7 @@ mod tests {
     where
         F: Fn() -> Result<Heartbeat, HeartbeatReaderError> + Send + Sync;
 
-    impl<F> woodward::HeartbeatReader for FnHeartbeatReader<F>
+    impl<F> heartbeat::HeartbeatReader for FnHeartbeatReader<F>
     where
         F: Fn() -> Result<Heartbeat, HeartbeatReaderError> + Send + Sync,
     {
@@ -524,11 +524,11 @@ mod tests {
         }
     }
 
-    fn heartbeat_reader_factory<F>(read: F) -> woodward::MockHeartbeatReaderFactory
+    fn heartbeat_reader_factory<F>(read: F) -> heartbeat::MockHeartbeatReaderFactory
     where
         F: Fn() -> Result<Heartbeat, HeartbeatReaderError> + Send + Sync + Clone + 'static,
     {
-        let mut factory = woodward::MockHeartbeatReaderFactory::new();
+        let mut factory = heartbeat::MockHeartbeatReaderFactory::new();
         factory.expect_create().returning(move |_service_name| {
             let read = read.clone();
             Box::new(FnHeartbeatReader(read))
@@ -536,7 +536,7 @@ mod tests {
         factory
     }
 
-    fn alive_heartbeat_reader_factory(pid: u32) -> woodward::MockHeartbeatReaderFactory {
+    fn alive_heartbeat_reader_factory(pid: u32) -> heartbeat::MockHeartbeatReaderFactory {
         heartbeat_reader_factory(move || {
             Ok(Heartbeat {
                 pid,

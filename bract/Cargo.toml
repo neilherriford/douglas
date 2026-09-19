@@ -13,6 +13,7 @@ credentials = { workspace = true }
 docker = { workspace = true }
 docker_types = { workspace = true }
 file_system = { workspace = true }
+heartbeat = { workspace = true }
 identity = { workspace = true }
 log = { workspace = true }
 mockall = { workspace = true }
@@ -35,7 +36,6 @@ thiserror = { workspace = true }
 tokio = { workspace = true }
 uuid = { workspace = true }
 utils = { workspace = true }
-woodward = { workspace = true }
 
 [dev-dependencies]
 log = { workspace = true, features = ["mock"] }

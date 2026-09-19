@@ -377,6 +377,7 @@ dependencies = [
  "docker",
  "docker_types",
  "file_system",
+ "heartbeat",
  "identity",
  "log 0.1.0",
  "mockall",
@@ -399,7 +400,6 @@ dependencies = [
  "tokio",
  "utils",
  "uuid",
- "woodward",
 ]
 
 [[package]]
@@ -979,6 +979,7 @@ dependencies = [
  "docker_types",
  "ed25519-dalek 3.0.0",
  "file_system",
+ "heartbeat",
  "hex",
  "humantime",
  "identity",
@@ -1405,6 +1406,18 @@ dependencies = [
  "serde",
  "spin",
  "stable_deref_trait",
+]
+
+[[package]]
+name = "heartbeat"
+version = "0.1.0"
+dependencies = [
+ "config",
+ "file_system",
+ "mockall",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
 ]
 
 [[package]]
@@ -2634,6 +2647,7 @@ dependencies = [
  "docker_types",
  "file_system",
  "futures-util",
+ "heartbeat",
  "hex",
  "http-body",
  "log 0.1.0",
@@ -2656,7 +2670,6 @@ dependencies = [
  "tokio-util",
  "tower",
  "uuid",
- "woodward",
 ]
 
 [[package]]
@@ -2790,6 +2803,7 @@ dependencies = [
  "credentials",
  "docker_types",
  "file_system",
+ "heartbeat",
  "log 0.1.0",
  "mockall",
  "os",
@@ -2802,7 +2816,6 @@ dependencies = [
  "thiserror 1.0.69",
  "tokio",
  "toml",
- "woodward",
 ]
 
 [[package]]
@@ -4093,6 +4106,7 @@ dependencies = [
  "config",
  "credentials",
  "file_system",
+ "heartbeat",
  "log 0.1.0",
  "mockall",
  "os",
