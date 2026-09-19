@@ -1,9 +1,11 @@
 use crate::commands::seedling_command_context;
 use crate::util::require;
-use crate::verify::verify_binary;
+use crate::verify::{BinaryVerifier, DouglasBinaryVerifier};
+use file_system::{FileReader, UnixFileReader};
 use os::{Os, Unix};
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::sync::Arc;
 
 pub(crate) fn verify(path: Option<PathBuf>) -> ExitCode {
     let (_, guard) = seedling_command_context("Verifying binary");
@@ -22,7 +24,10 @@ pub(crate) fn verify(path: Option<PathBuf>) -> ExitCode {
         path
     };
 
-    match verify_binary(&path) {
+    let file_reader: Arc<dyn FileReader> = Arc::new(UnixFileReader::new());
+    let verify_binary = DouglasBinaryVerifier::new(file_reader);
+
+    match verify_binary.get_external_version(&path) {
         Ok(version) => {
             guard.span().message(
                 log::Level::Info,

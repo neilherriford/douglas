@@ -1,5 +1,9 @@
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
-use std::path::{Path, PathBuf};
+use file_system::{FileReader, FileSystemError};
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 use thiserror::Error;
 
 const PUBLIC_KEY_HEX: &str = include_str!("../keys/douglas_signing.pub");
@@ -20,7 +24,7 @@ pub(crate) enum VerifyError {
     #[error("embedded public key is invalid: {0}")]
     InvalidPublicKey(String),
     #[error("failed to read {0}: {1}")]
-    ReadFailed(PathBuf, std::io::Error),
+    ReadFailed(PathBuf, FileSystemError),
     #[error("{0} is not a signed douglas binary")]
     MissingTrailer(PathBuf),
     #[error("signature does not match: {0}")]
@@ -35,6 +39,36 @@ enum TrailerError {
     Mismatch(ed25519_dalek::SignatureError),
 }
 
+pub trait BinaryVerifier {
+    fn get_external_version(&self, binary: &Path) -> Result<Version, VerifyError>;
+}
+
+pub struct DouglasBinaryVerifier {
+    file_reader: Arc<dyn FileReader>,
+}
+
+impl DouglasBinaryVerifier {
+    pub fn new(file_reader: Arc<dyn FileReader>) -> Self {
+        Self { file_reader }
+    }
+}
+
+impl BinaryVerifier for DouglasBinaryVerifier {
+    fn get_external_version(&self, binary: &Path) -> Result<Version, VerifyError> {
+        let verifying_key = embedded_verifying_key()?;
+
+        let data = self
+            .file_reader
+            .read_all_bytes(binary)
+            .map_err(|err| VerifyError::ReadFailed(binary.to_path_buf(), err))?;
+
+        verify_trailer(&verifying_key, &data).map_err(|err| match err {
+            TrailerError::MissingTrailer => VerifyError::MissingTrailer(binary.to_path_buf()),
+            TrailerError::Mismatch(err) => VerifyError::Mismatch(err),
+        })
+    }
+}
+
 fn embedded_verifying_key() -> Result<VerifyingKey, VerifyError> {
     let bytes = hex::decode(PUBLIC_KEY_HEX.trim())
         .map_err(|err| VerifyError::InvalidPublicKey(err.to_string()))?;
@@ -42,18 +76,6 @@ fn embedded_verifying_key() -> Result<VerifyingKey, VerifyError> {
         .try_into()
         .map_err(|_| VerifyError::InvalidPublicKey("expected 32 bytes".to_string()))?;
     VerifyingKey::from_bytes(&bytes).map_err(|err| VerifyError::InvalidPublicKey(err.to_string()))
-}
-
-pub(crate) fn verify_binary(path: &Path) -> Result<Version, VerifyError> {
-    let verifying_key = embedded_verifying_key()?;
-
-    let data =
-        std::fs::read(path).map_err(|err| VerifyError::ReadFailed(path.to_path_buf(), err))?;
-
-    verify_trailer(&verifying_key, &data).map_err(|err| match err {
-        TrailerError::MissingTrailer => VerifyError::MissingTrailer(path.to_path_buf()),
-        TrailerError::Mismatch(err) => VerifyError::Mismatch(err),
-    })
 }
 
 fn verify_trailer(verifying_key: &VerifyingKey, data: &[u8]) -> Result<Version, TrailerError> {
