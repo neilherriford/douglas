@@ -9,7 +9,7 @@ mod services;
 mod util;
 mod verify;
 
-use crate::cli::{Cli, Commands, OutputStyle, SeedlingCommand, ServiceCommand};
+use crate::cli::{Cli, Commands, Presentation, SeedlingCommand, ServiceCommand};
 use crate::commands::stop::stop;
 use crate::commands::{
     kick::kick, prune::prune_deadwood, seedling, start::start, status::status, verify::verify,
@@ -24,12 +24,12 @@ use std::process::ExitCode;
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
-    let output_style_arg = cli.output_style;
-    let output_style = output_style_arg.unwrap_or(OutputStyle::Plain);
+    let presentation = Presentation::resolve(cli.output_style);
+    let output_style = presentation.output_style();
 
     match cli.command {
-        Commands::Start { plan_only } => run_with_tokio(start(plan_only, output_style_arg)),
-        Commands::Stop { plan_only } => run_with_tokio(stop(plan_only, output_style_arg)),
+        Commands::Start { plan_only } => run_with_tokio(start(plan_only, presentation)),
+        Commands::Stop { plan_only } => run_with_tokio(stop(plan_only, presentation)),
         Commands::Status => run_with_tokio(status(output_style)),
         Commands::Service {
             service: ServiceCommand::Bract { notify_fd },
@@ -101,6 +101,6 @@ fn main() -> ExitCode {
         Commands::Seedling {
             seedling: SeedlingCommand::Prune { yes },
         } => run_with_tokio(prune_deadwood(output_style, yes)),
-        Commands::Verify { path } => verify(path),
+        Commands::Verify { path } => verify(path, output_style),
     }
 }

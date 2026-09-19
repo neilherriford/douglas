@@ -7,6 +7,38 @@ pub(crate) enum OutputStyle {
     Json,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Presentation {
+    Interactive,
+    Plain,
+    Json,
+}
+
+impl Presentation {
+    pub(crate) fn resolve(output_style: Option<OutputStyle>) -> Self {
+        match output_style {
+            None => Presentation::Interactive,
+            Some(OutputStyle::Plain) => Presentation::Plain,
+            Some(OutputStyle::Json) => Presentation::Json,
+        }
+    }
+
+    pub(crate) fn output_style(self) -> OutputStyle {
+        match self {
+            Presentation::Interactive | Presentation::Plain => OutputStyle::Plain,
+            Presentation::Json => OutputStyle::Json,
+        }
+    }
+
+    pub(crate) fn console_style(self) -> Option<OutputStyle> {
+        match self {
+            Presentation::Interactive => None,
+            Presentation::Plain => Some(OutputStyle::Plain),
+            Presentation::Json => Some(OutputStyle::Json),
+        }
+    }
+}
+
 #[derive(ValueEnum, Clone, Debug)]
 pub(crate) enum Switch {
     Enabled,
@@ -51,9 +83,10 @@ pub(crate) struct Cli {
         long,
         global = true,
         value_enum,
-        help = "Set the output mode. Defaults to plain text for most commands; `start` defaults \
-                to an interactive TUI instead and only switches to plain/json output when this \
-                is explicitly set, since plain/json mode has no live terminal to render into."
+        help = "Set the output mode. Defaults to plain text for most commands; `start` and `stop` \
+                default to an interactive TUI instead and only switch to plain/json \
+                output when this is explicitly set, since plain/json mode has no live terminal \
+                to render into."
     )]
     pub(crate) output_style: Option<OutputStyle>,
     #[arg(
@@ -76,7 +109,7 @@ pub(crate) enum Commands {
     },
     #[command(about = "Stop Douglas")]
     Stop {
-        #[arg(long, default_value_t = false, help = "Only display the start plan")]
+        #[arg(long, default_value_t = false, help = "Only display the stop plan")]
         plan_only: bool,
     },
     #[command(about = "Report the status of seedlings and services")]
@@ -239,6 +272,53 @@ impl std::fmt::Display for Commands {
             Commands::Kick { name } => write!(f, "kick {}", name.service_name()),
             Commands::Verify { .. } => f.write_str("verify"),
         }
+    }
+}
+
+#[cfg(test)]
+mod presentation_tests {
+    use super::{OutputStyle, Presentation};
+
+    #[test]
+    fn test_resolve_should_treat_a_missing_style_as_interactive() {
+        assert_eq!(Presentation::resolve(None), Presentation::Interactive);
+    }
+
+    #[test]
+    fn test_resolve_should_map_explicit_styles() {
+        assert_eq!(
+            Presentation::resolve(Some(OutputStyle::Plain)),
+            Presentation::Plain
+        );
+        assert_eq!(
+            Presentation::resolve(Some(OutputStyle::Json)),
+            Presentation::Json
+        );
+    }
+
+    #[test]
+    fn test_output_style_should_fall_back_to_plain_when_interactive() {
+        assert!(matches!(
+            Presentation::Interactive.output_style(),
+            OutputStyle::Plain
+        ));
+        assert!(matches!(
+            Presentation::Json.output_style(),
+            OutputStyle::Json
+        ));
+    }
+
+    #[test]
+    fn test_console_style_should_be_absent_only_when_interactive() {
+        assert!(Presentation::Interactive.console_style().is_none());
+        assert!(matches!(
+            Presentation::Plain.console_style(),
+            Some(OutputStyle::Plain)
+        ));
+        assert!(matches!(
+            Presentation::Json.console_style(),
+            Some(OutputStyle::Json)
+        ));
     }
 }
 

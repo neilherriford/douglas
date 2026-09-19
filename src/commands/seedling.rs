@@ -1,7 +1,5 @@
 use crate::cli::OutputStyle;
-use crate::commands::{
-    parse_seedling_name, print_error, print_status_json, seedling_command_context,
-};
+use crate::commands::{CommandContext, parse_seedling_name, print_error, print_status_json};
 use ::config::DouglasFolders;
 use bract_client::Client;
 use crossterm::style::Stylize;
@@ -127,13 +125,15 @@ pub(crate) async fn create_seedling(
     file: Option<&Path>,
     output_style: OutputStyle,
 ) -> ExitCode {
-    let (douglas_folders, guard) = seedling_command_context("Creating seedling");
+    let context = CommandContext::plain();
+    let douglas_folders = &context.douglas_folders;
+    let guard = context.task("Creating seedling");
 
     let Some(seedling_name) = parse_seedling_name(&guard, output_style, name) else {
         return ExitCode::from(1);
     };
 
-    let client = bract_client::UdsClient::new(guard.reporter(), &douglas_folders);
+    let client = bract_client::UdsClient::new(guard.reporter(), douglas_folders);
 
     let file_reader = UnixFileReader::new();
 
@@ -192,13 +192,15 @@ pub(crate) async fn create_seedling(
 }
 
 pub(crate) async fn get_seedling_status(name: &str, output_style: OutputStyle) -> ExitCode {
-    let (douglas_folders, guard) = seedling_command_context("Fetching status");
+    let context = CommandContext::plain();
+    let douglas_folders = &context.douglas_folders;
+    let guard = context.task("Fetching status");
 
     let Some(seedling_name) = parse_seedling_name(&guard, output_style, name) else {
         return ExitCode::from(1);
     };
 
-    let result = fetch_status(&guard, &douglas_folders, output_style, seedling_name).await;
+    let result = fetch_status(&guard, douglas_folders, output_style, seedling_name).await;
 
     if result == ExitCode::SUCCESS {
         guard.finish_with_outcome(log::Outcome::Ok);
@@ -279,18 +281,20 @@ pub(crate) async fn run_seedling_action(
     output_style: OutputStyle,
     action: SeedlingAction,
 ) -> ExitCode {
-    let (douglas_folders, guard) = seedling_command_context(action.label());
+    let context = CommandContext::plain();
+    let douglas_folders = &context.douglas_folders;
+    let guard = context.task(action.label());
 
     let Some(seedling_name) = parse_seedling_name(&guard, output_style, name) else {
         return ExitCode::from(1);
     };
 
-    let client = bract_client::UdsClient::new(guard.reporter(), &douglas_folders);
+    let client = bract_client::UdsClient::new(guard.reporter(), douglas_folders);
 
     match action.invoke(&client, &seedling_name).await {
         Ok(()) => {
             let status_result =
-                fetch_status(&guard, &douglas_folders, output_style, seedling_name).await;
+                fetch_status(&guard, douglas_folders, output_style, seedling_name).await;
 
             if status_result != ExitCode::SUCCESS {
                 return status_result;

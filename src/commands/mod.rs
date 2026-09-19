@@ -6,17 +6,69 @@ pub(crate) mod status;
 pub(crate) mod stop;
 pub(crate) mod verify;
 
-use crate::cli::OutputStyle;
-use crate::daemon::build_plain_reporter;
+use crate::cli::{OutputStyle, Presentation};
+use crate::daemon::{build_cli_reporter, build_plain_reporter};
 use ::config::DouglasFolders;
 use crossterm::style::Stylize;
-use log::Span;
+use log::{Reporter, ScopeGuard, Span};
+use std::sync::Arc;
 
-pub(crate) fn seedling_command_context(label: &str) -> (DouglasFolders, log::ScopeGuard) {
-    let douglas_folders = DouglasFolders::new();
-    let reporter = build_plain_reporter(&douglas_folders, config::DOUGLAS_CLI_LOG_NAME);
-    let guard = Span::new(reporter, label, log::ScopeKind::Task).start_guard();
-    (douglas_folders, guard)
+pub(crate) struct CommandContext {
+    pub(crate) douglas_folders: DouglasFolders,
+    pub(crate) reporter: Arc<dyn Reporter>,
+}
+
+impl CommandContext {
+    pub(crate) fn plain() -> Self {
+        let douglas_folders = DouglasFolders::new();
+        let reporter = build_plain_reporter(&douglas_folders, config::DOUGLAS_CLI_LOG_NAME);
+        Self {
+            douglas_folders,
+            reporter,
+        }
+    }
+
+    pub(crate) fn for_presentation(presentation: Presentation) -> Option<Self> {
+        if presentation != Presentation::Interactive {
+            return Some(Self::plain());
+        }
+
+        let douglas_folders = DouglasFolders::new();
+        if let Ok(reporter) = build_cli_reporter(&douglas_folders, config::DOUGLAS_CLI_LOG_NAME) {
+            return Some(Self {
+                douglas_folders,
+                reporter,
+            });
+        }
+
+        eprintln!("Failed to start TUI reporter");
+        None
+    }
+
+    pub(crate) fn task(&self, label: &str) -> ScopeGuard {
+        Span::new(Arc::clone(&self.reporter), label, log::ScopeKind::Task).start_guard()
+    }
+}
+
+#[derive(serde::Serialize)]
+struct JsonSuccessResponse<'a> {
+    success: bool,
+    message: &'a str,
+}
+
+pub(crate) fn print_success(output_style: OutputStyle, message: &str) {
+    match output_style {
+        OutputStyle::Plain => println!("{message}"),
+        OutputStyle::Json => {
+            let response = JsonSuccessResponse {
+                success: true,
+                message,
+            };
+            if let Ok(json) = serde_json::to_string(&response) {
+                println!("{json}");
+            }
+        }
+    }
 }
 
 #[derive(serde::Serialize)]

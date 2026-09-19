@@ -19,6 +19,12 @@ pub(crate) struct Version {
     pub patch: u8,
 }
 
+impl std::fmt::Display for Version {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}.{}.{}", self.major, self.minor, self.patch)
+    }
+}
+
 #[derive(Error, Debug)]
 pub(crate) enum VerifyError {
     #[error("embedded public key is invalid: {0}")]
@@ -132,6 +138,17 @@ mod tests {
         data.extend_from_slice(&signature.to_bytes());
         data.extend_from_slice(TRAILER_MAGIC);
         data
+    }
+
+    #[test]
+    fn test_version_should_display_as_major_minor_patch() {
+        let version = Version {
+            major: 1,
+            minor: 20,
+            patch: 3,
+        };
+
+        assert_eq!(version.to_string(), "1.20.3");
     }
 
     #[test]

@@ -1,6 +1,6 @@
 use crate::bootstrap;
 use crate::cli::KickTarget;
-use crate::commands::seedling_command_context;
+use crate::commands::CommandContext;
 use crate::util::{spawn_service, wait_until_running};
 use config::DouglasFolders;
 use file_system::{FileReader, UnixFileReader};
@@ -10,8 +10,9 @@ use std::{process::ExitCode, sync::Arc};
 use heartbeat::{HeartbeatReader, LocalHeartbeatReader};
 
 pub(crate) async fn kick(kick_target: KickTarget) -> ExitCode {
-    let (douglas_folders, guard) =
-        seedling_command_context(&format!("Kicking target {kick_target}"));
+    let context = CommandContext::plain();
+    let douglas_folders = &context.douglas_folders;
+    let guard = context.task(&format!("Kicking target {kick_target}"));
 
     let heartbeat_file = douglas_folders.service_heartbeat_file(kick_target.service_name());
     let file_reader: Arc<dyn FileReader> = Arc::new(UnixFileReader::new());
@@ -45,7 +46,7 @@ pub(crate) async fn kick(kick_target: KickTarget) -> ExitCode {
         );
     }
 
-    if start_service(&guard, kick_target, &os, &douglas_folders).await {
+    if start_service(&guard, kick_target, &os, douglas_folders).await {
         ExitCode::from(0)
     } else {
         guard.finish_with_outcome(log::Outcome::Failed);

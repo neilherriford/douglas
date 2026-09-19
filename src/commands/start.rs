@@ -1,8 +1,6 @@
 use crate::bootstrap;
-use crate::cli::OutputStyle;
-use crate::commands::{names, print_error};
-use crate::daemon::{build_cli_reporter, build_plain_reporter};
-use ::config::DouglasFolders;
+use crate::cli::Presentation;
+use crate::commands::{CommandContext, names, print_error, print_success};
 use credentials::create_credentials;
 use file_system::{
     FileDeleter, FileReader, FileWriter, Folder, Inspect, Permissions, UnixFileDeleter,
@@ -13,21 +11,15 @@ use log::Reporter;
 use os::{EnvironmentVariableReader, Os, Unix, UnixEnvironmentVariableReader};
 use std::{process::ExitCode, sync::Arc};
 
-pub(crate) async fn start(plan_only: bool, output_style: Option<OutputStyle>) -> ExitCode {
-    let douglas_folders = DouglasFolders::new();
-
-    let reporter: Arc<dyn Reporter> = match output_style {
-        Some(_) => build_plain_reporter(&douglas_folders, config::DOUGLAS_CLI_LOG_NAME),
-        None => {
-            if let Ok(reporter) = build_cli_reporter(&douglas_folders, config::DOUGLAS_CLI_LOG_NAME)
-            {
-                reporter
-            } else {
-                eprintln!("Failed to start TUI reporter");
-                return ExitCode::from(1);
-            }
-        }
+pub(crate) async fn start(plan_only: bool, presentation: Presentation) -> ExitCode {
+    let Some(CommandContext {
+        douglas_folders,
+        reporter,
+    }) = CommandContext::for_presentation(presentation)
+    else {
+        return ExitCode::from(1);
     };
+    let output_style = presentation.console_style();
 
     let folder: Arc<dyn Folder> = Arc::new(UnixFolder::new());
     let os: Arc<dyn Os> = Arc::new(Unix::new());
@@ -123,21 +115,10 @@ pub(crate) async fn start(plan_only: bool, output_style: Option<OutputStyle>) ->
     log_deadwood_if_any(&reporter, bract_client.as_ref()).await;
 
     if let Some(style) = output_style {
-        print_start_result(style);
+        print_success(style, "Douglas started.");
     }
 
     ExitCode::from(0)
-}
-
-fn print_start_result(output_style: OutputStyle) {
-    match output_style {
-        OutputStyle::Plain => println!("Douglas started."),
-        OutputStyle::Json => {
-            if let Ok(json) = serde_json::to_string(&serde_json::json!({ "success": true })) {
-                println!("{json}");
-            }
-        }
-    }
 }
 
 async fn log_deadwood_if_any(

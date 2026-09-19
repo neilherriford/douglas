@@ -1,5 +1,5 @@
 use crate::cli::OutputStyle;
-use crate::commands::{print_error, seedling_command_context};
+use crate::commands::{CommandContext, print_error};
 use bract_client::Client;
 use crossterm::style::Stylize;
 use std::{io, process::ExitCode};
@@ -38,8 +38,9 @@ fn confirm_prune() -> bool {
 }
 
 pub(crate) async fn prune_deadwood(output_style: OutputStyle, skip_confirmation: bool) -> ExitCode {
-    let (douglas_folders, guard) = seedling_command_context("Finding deadwood");
-    let client = bract_client::UdsClient::new(guard.reporter(), &douglas_folders);
+    let context = CommandContext::plain();
+    let guard = context.task("Finding deadwood");
+    let client = bract_client::UdsClient::new(guard.reporter(), &context.douglas_folders);
 
     let deadwood = match client.find_deadwood().await {
         Ok(deadwood) => deadwood,

@@ -1,5 +1,5 @@
 use crate::cli::OutputStyle;
-use crate::daemon::build_plain_reporter;
+use crate::commands::CommandContext;
 use ::config::DouglasFolders;
 use bract_client::Client;
 use file_system::{Folder, UnixFileReader, UnixFolder};
@@ -138,8 +138,10 @@ fn list_traefik_routes(
 }
 
 pub(crate) async fn status(output_style: OutputStyle) -> ExitCode {
-    let douglas_folders = DouglasFolders::new();
-    let reporter = build_plain_reporter(&douglas_folders, config::DOUGLAS_CLI_LOG_NAME);
+    let CommandContext {
+        douglas_folders,
+        reporter,
+    } = CommandContext::plain();
     let guard = Span::new(Arc::clone(&reporter), "Status", log::ScopeKind::Task).start_guard();
 
     let bract_client = bract_client::UdsClient::new(Arc::clone(&reporter), &douglas_folders);

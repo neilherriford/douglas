@@ -1,28 +1,18 @@
 use crate::bootstrap;
-use crate::cli::OutputStyle;
-use crate::commands::print_error;
-use crate::daemon::{build_cli_reporter, build_plain_reporter};
-use ::config::DouglasFolders;
+use crate::cli::Presentation;
+use crate::commands::{CommandContext, print_error, print_success};
 use credentials::create_credentials;
 use file_system::{FileReader, UnixFileReader};
-use log::Reporter;
 use os::{Os, Unix};
 use std::{process::ExitCode, sync::Arc};
 
-pub(crate) async fn stop(plan_only: bool, output_style: Option<OutputStyle>) -> ExitCode {
-    let douglas_folders = DouglasFolders::new();
-
-    let reporter: Arc<dyn Reporter> = match output_style {
-        Some(_) => build_plain_reporter(&douglas_folders, config::DOUGLAS_CLI_LOG_NAME),
-        None => {
-            if let Ok(reporter) = build_cli_reporter(&douglas_folders, config::DOUGLAS_CLI_LOG_NAME)
-            {
-                reporter
-            } else {
-                eprintln!("Failed to start TUI reporter");
-                return ExitCode::from(1);
-            }
-        }
+pub(crate) async fn stop(plan_only: bool, presentation: Presentation) -> ExitCode {
+    let Some(CommandContext {
+        douglas_folders,
+        reporter,
+    }) = CommandContext::for_presentation(presentation)
+    else {
+        return ExitCode::from(1);
     };
 
     let os: Arc<dyn Os> = Arc::new(Unix::new());
@@ -42,7 +32,7 @@ pub(crate) async fn stop(plan_only: bool, output_style: Option<OutputStyle>) -> 
     .await;
 
     if !succeeded {
-        if let Some(style) = output_style {
+        if let Some(style) = presentation.console_style() {
             print_error(style, "System stop failed");
         }
         return ExitCode::from(1);
@@ -51,6 +41,10 @@ pub(crate) async fn stop(plan_only: bool, output_style: Option<OutputStyle>) -> 
     if plan_only {
         eprintln!("Stop plan only.");
         return ExitCode::from(0);
+    }
+
+    if let Some(style) = presentation.console_style() {
+        print_success(style, "Douglas stopped.");
     }
 
     ExitCode::from(0)
