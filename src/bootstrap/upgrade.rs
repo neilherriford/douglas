@@ -14,10 +14,11 @@ use clap::ValueEnum;
 use config::DouglasFolders;
 use credentials::Credentials;
 use file_system::{
-    FileReader, FileRenamer, FileSystemError, Inspect, Links, Permissions, UnixFileRenamer,
-    UnixInspect, UnixLinks, UnixPermissions, path_to_string,
+    FileCopier, FileDeleter, FileReader, FileRenamer, FileSystemError, Inspect, Links, Permissions,
+    UnixFileCopier, UnixFileDeleter, UnixFileRenamer, UnixInspect, UnixLinks, UnixPermissions,
+    path_to_string,
 };
-use log::{Level, Outcome, Reporter, ScopeKind, Span};
+use log::{Level, Outcome, Reporter, ScopeGuard, ScopeKind, Span};
 use os::Os;
 use std::{
     path::{Path, PathBuf},
@@ -41,10 +42,16 @@ pub enum UpgradeError {
 
 type Step<'a> = Box<dyn Command<Context<'a>>>;
 
+struct FileOperations<'a> {
+    renamer: &'a dyn FileRenamer,
+    copier: &'a dyn FileCopier,
+    deleter: &'a dyn FileDeleter,
+}
+
 struct Context<'a> {
     douglas_folders: DouglasFolders,
     service_control: ServiceControl<'a>,
-    file_renamer: &'a dyn FileRenamer,
+    files: FileOperations<'a>,
     links: &'a dyn Links,
     permissions: &'a dyn Permissions,
 }
@@ -240,6 +247,54 @@ impl OverwriteDouglasExecutable {
             path: path.to_path_buf(),
         }
     }
+
+    fn install_from_copy(
+        &self,
+        context: &Context<'_>,
+        staging: &Path,
+        target: &Path,
+    ) -> Result<(), FileSystemError> {
+        context.files.copier.copy(&self.path, staging)?;
+        let (user, group) = context
+            .permissions
+            .get_user_and_group_ownership(&self.path)?;
+        context
+            .permissions
+            .change_user_and_group_ownership(staging, &user, &group)?;
+        context.files.renamer.rename(staging, target)
+    }
+
+    fn copy_into_place(
+        &self,
+        guard: &ScopeGuard,
+        context: &Context<'_>,
+        target: &Path,
+    ) -> Result<(), FileSystemError> {
+        let staging = staging_path(target)?;
+
+        if let Err(err) = self.install_from_copy(context, &staging, target) {
+            let _ = context.files.deleter.delete(&staging);
+            return Err(err);
+        }
+
+        if let Err(err) = context.files.deleter.delete(&self.path) {
+            guard.span().message(
+                Level::Warn,
+                &format!(
+                    "Installed the new version but could not remove {}: {err}",
+                    path_to_string(&self.path)
+                ),
+            );
+        }
+        Ok(())
+    }
+}
+
+fn staging_path(target: &Path) -> Result<PathBuf, FileSystemError> {
+    let name = target
+        .file_name()
+        .ok_or_else(|| FileSystemError::InvalidPath(target.to_path_buf()))?;
+    Ok(target.with_file_name(format!("{}.upgrade", name.to_string_lossy())))
 }
 
 impl std::fmt::Display for OverwriteDouglasExecutable {
@@ -271,7 +326,10 @@ impl<'a> Command<Context<'a>> for OverwriteDouglasExecutable {
             .douglas_folders
             .binary_dir()
             .join(context.links.follow_symbolic(&link)?);
-        context.file_renamer.rename(&self.path, &target)?;
+        match context.files.renamer.rename(&self.path, &target) {
+            Err(err) if err.is_cross_device() => self.copy_into_place(&guard, context, &target)?,
+            result => result?,
+        }
 
         guard.finish_with_outcome(Outcome::Ok);
         Ok(())
@@ -392,6 +450,8 @@ pub async fn perform(
     };
 
     let file_renamer = UnixFileRenamer::new();
+    let file_copier = UnixFileCopier::new();
+    let file_deleter = UnixFileDeleter::new();
     let links = UnixLinks::new();
 
     let plan = match resolve_plan(guard.span(), create_plan(&state, path, presentation)) {
@@ -411,7 +471,11 @@ pub async fn perform(
     let mut context = Context {
         douglas_folders: deps.douglas_folders,
         service_control: service_control.borrow(),
-        file_renamer: &file_renamer,
+        files: FileOperations {
+            renamer: &file_renamer,
+            copier: &file_copier,
+            deleter: &file_deleter,
+        },
         links: &links,
         permissions: &permissions,
     };
@@ -432,8 +496,11 @@ mod tests {
     use super::*;
     use crate::verify::{MockBinaryVerifier, Version};
     use credentials::MockCredentials;
-    use file_system::{MockFileRenamer, MockInspect, MockLinks, MockPermissions};
+    use file_system::{
+        MockFileCopier, MockFileDeleter, MockFileRenamer, MockInspect, MockLinks, MockPermissions,
+    };
     use heartbeat::HeartbeatReaderFactory;
+    use mockall::Sequence;
     use os::MockOs;
     use std::sync::Mutex;
 
@@ -567,6 +634,24 @@ mod tests {
                     "Replace current process with new version".to_string(),
                 ]
             );
+        }
+    }
+
+    mod staging_path_tests {
+        use super::*;
+
+        #[test]
+        fn test_should_place_the_staging_file_next_to_the_target() {
+            let result = staging_path(Path::new("/home/dev/douglas"));
+
+            assert!(matches!(result, Ok(path) if path == Path::new("/home/dev/douglas.upgrade")));
+        }
+
+        #[test]
+        fn test_should_fail_when_the_target_has_no_file_name() {
+            let result = staging_path(Path::new("/"));
+
+            assert!(matches!(result, Err(FileSystemError::InvalidPath(_))));
         }
     }
 
@@ -842,7 +927,7 @@ mod tests {
 
         fn test_context<'a>(
             os: &'a dyn Os,
-            file_renamer: &'a dyn FileRenamer,
+            files: FileOperations<'a>,
             links: &'a dyn Links,
             permissions: &'a dyn Permissions,
             heartbeat_reader_factory: &'a dyn HeartbeatReaderFactory,
@@ -857,7 +942,7 @@ mod tests {
                     bract_client,
                     docker_client,
                 },
-                file_renamer,
+                files,
                 links,
                 permissions,
             }
@@ -879,9 +964,15 @@ mod tests {
             let heartbeat_reader_factory = heartbeat::MockHeartbeatReaderFactory::new();
             let docker_client = docker::MockClient::new();
             let bract_client = bract_client::MockClient::new();
+            let file_copier = MockFileCopier::new();
+            let file_deleter = MockFileDeleter::new();
             let mut context = test_context(
                 &os,
-                &file_renamer,
+                FileOperations {
+                    renamer: &file_renamer,
+                    copier: &file_copier,
+                    deleter: &file_deleter,
+                },
                 &links,
                 &permissions,
                 &heartbeat_reader_factory,
@@ -897,31 +988,66 @@ mod tests {
             assert!(result.is_ok());
         }
 
-        #[tokio::test]
-        async fn test_overwrite_run_should_rename_the_candidate_onto_the_links_real_target() {
-            let os = MockOs::new();
-            let mut file_renamer = MockFileRenamer::new();
-            file_renamer
-                .expect_rename()
-                .withf(|from, to| {
-                    from == Path::new("/tmp/candidate-douglas")
-                        && to == Path::new("/home/dev/douglas")
-                })
-                .times(1)
-                .returning(|_, _| Ok(()));
+        const CANDIDATE: &str = "/tmp/candidate-douglas";
+        const TARGET: &str = "/home/dev/douglas";
+        const STAGING: &str = "/home/dev/douglas.upgrade";
+
+        fn cross_device() -> FileSystemError {
+            FileSystemError::IoErrorAtPath {
+                path: PathBuf::from(CANDIDATE),
+                error: std::io::Error::from(std::io::ErrorKind::CrossesDevices),
+            }
+        }
+
+        fn permission_denied() -> FileSystemError {
+            FileSystemError::IoErrorAtPath {
+                path: PathBuf::from(CANDIDATE),
+                error: std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+            }
+        }
+
+        fn links_to_target() -> MockLinks {
             let mut links = MockLinks::new();
             let expected_link = DouglasFolders::default().binary_link();
             links
                 .expect_follow_symbolic()
                 .withf(move |path| path == expected_link)
-                .returning(|_| Ok(PathBuf::from("/home/dev/douglas")));
+                .returning(|_| Ok(PathBuf::from(TARGET)));
+            links
+        }
+
+        fn candidate_is_root_owned_by_douglas_admin() -> MockPermissions {
+            let mut permissions = MockPermissions::new();
+            permissions
+                .expect_get_user_and_group_ownership()
+                .withf(|path| path == Path::new(CANDIDATE))
+                .returning(|_| Ok(("root".to_string(), "douglas-admin".to_string())));
+            permissions
+        }
+
+        #[tokio::test]
+        async fn test_overwrite_run_should_rename_the_candidate_onto_the_links_real_target() {
+            let mut file_renamer = MockFileRenamer::new();
+            file_renamer
+                .expect_rename()
+                .withf(|from, to| from == Path::new(CANDIDATE) && to == Path::new(TARGET))
+                .times(1)
+                .returning(|_, _| Ok(()));
+            let file_copier = MockFileCopier::new();
+            let file_deleter = MockFileDeleter::new();
             let permissions = MockPermissions::new();
+            let os = MockOs::new();
+            let links = links_to_target();
             let heartbeat_reader_factory = heartbeat::MockHeartbeatReaderFactory::new();
             let docker_client = docker::MockClient::new();
             let bract_client = bract_client::MockClient::new();
             let mut context = test_context(
                 &os,
-                &file_renamer,
+                FileOperations {
+                    renamer: &file_renamer,
+                    copier: &file_copier,
+                    deleter: &file_deleter,
+                },
                 &links,
                 &permissions,
                 &heartbeat_reader_factory,
@@ -929,7 +1055,7 @@ mod tests {
                 &bract_client,
             );
 
-            let mut command = OverwriteDouglasExecutable::new(Path::new("/tmp/candidate-douglas"));
+            let mut command = OverwriteDouglasExecutable::new(Path::new(CANDIDATE));
             let span = Span::new(CapturingReporter::new(), "test", ScopeKind::Group);
 
             let result = command.run(&span, &mut context).await;
@@ -942,19 +1068,23 @@ mod tests {
             let os = MockOs::new();
             let mut file_renamer = MockFileRenamer::new();
             file_renamer.expect_rename().times(0);
+            let file_copier = MockFileCopier::new();
+            let file_deleter = MockFileDeleter::new();
             let mut links = MockLinks::new();
-            links.expect_follow_symbolic().returning(|path| {
-                Err(file_system::FileSystemError::NotFoundError(
-                    path.to_path_buf(),
-                ))
-            });
+            links
+                .expect_follow_symbolic()
+                .returning(|path| Err(FileSystemError::NotFoundError(path.to_path_buf())));
             let permissions = MockPermissions::new();
             let heartbeat_reader_factory = heartbeat::MockHeartbeatReaderFactory::new();
             let docker_client = docker::MockClient::new();
             let bract_client = bract_client::MockClient::new();
             let mut context = test_context(
                 &os,
-                &file_renamer,
+                FileOperations {
+                    renamer: &file_renamer,
+                    copier: &file_copier,
+                    deleter: &file_deleter,
+                },
                 &links,
                 &permissions,
                 &heartbeat_reader_factory,
@@ -962,12 +1092,339 @@ mod tests {
                 &bract_client,
             );
 
-            let mut command = OverwriteDouglasExecutable::new(Path::new("/tmp/candidate-douglas"));
+            let mut command = OverwriteDouglasExecutable::new(Path::new(CANDIDATE));
             let span = Span::new(CapturingReporter::new(), "test", ScopeKind::Group);
 
             let result = command.run(&span, &mut context).await;
 
             assert!(result.is_err());
+        }
+
+        #[tokio::test]
+        async fn test_overwrite_run_should_fail_without_copying_when_the_rename_fails_for_another_reason()
+         {
+            let mut file_renamer = MockFileRenamer::new();
+            file_renamer
+                .expect_rename()
+                .times(1)
+                .returning(|_, _| Err(permission_denied()));
+            let file_copier = MockFileCopier::new();
+            let file_deleter = MockFileDeleter::new();
+            let permissions = MockPermissions::new();
+            let os = MockOs::new();
+            let links = links_to_target();
+            let heartbeat_reader_factory = heartbeat::MockHeartbeatReaderFactory::new();
+            let docker_client = docker::MockClient::new();
+            let bract_client = bract_client::MockClient::new();
+            let mut context = test_context(
+                &os,
+                FileOperations {
+                    renamer: &file_renamer,
+                    copier: &file_copier,
+                    deleter: &file_deleter,
+                },
+                &links,
+                &permissions,
+                &heartbeat_reader_factory,
+                &docker_client,
+                &bract_client,
+            );
+
+            let mut command = OverwriteDouglasExecutable::new(Path::new(CANDIDATE));
+            let span = Span::new(CapturingReporter::new(), "test", ScopeKind::Group);
+
+            let result = command.run(&span, &mut context).await;
+
+            assert!(result.is_err());
+        }
+
+        #[tokio::test]
+        async fn test_overwrite_run_should_copy_chown_rename_and_remove_the_source_when_crossing_filesystems()
+         {
+            let mut sequence = Sequence::new();
+            let mut file_renamer = MockFileRenamer::new();
+            let mut file_copier = MockFileCopier::new();
+            let mut file_deleter = MockFileDeleter::new();
+            let mut permissions = MockPermissions::new();
+            file_renamer
+                .expect_rename()
+                .withf(|from, to| from == Path::new(CANDIDATE) && to == Path::new(TARGET))
+                .times(1)
+                .in_sequence(&mut sequence)
+                .returning(|_, _| Err(cross_device()));
+            file_copier
+                .expect_copy()
+                .withf(|from, to| from == Path::new(CANDIDATE) && to == Path::new(STAGING))
+                .times(1)
+                .in_sequence(&mut sequence)
+                .returning(|_, _| Ok(()));
+            permissions
+                .expect_get_user_and_group_ownership()
+                .withf(|path| path == Path::new(CANDIDATE))
+                .times(1)
+                .in_sequence(&mut sequence)
+                .returning(|_| Ok(("root".to_string(), "douglas-admin".to_string())));
+            permissions
+                .expect_change_user_and_group_ownership()
+                .withf(|path, user, group| {
+                    path == Path::new(STAGING) && user == "root" && group == "douglas-admin"
+                })
+                .times(1)
+                .in_sequence(&mut sequence)
+                .returning(|_, _, _| Ok(()));
+            file_renamer
+                .expect_rename()
+                .withf(|from, to| from == Path::new(STAGING) && to == Path::new(TARGET))
+                .times(1)
+                .in_sequence(&mut sequence)
+                .returning(|_, _| Ok(()));
+            file_deleter
+                .expect_delete()
+                .withf(|path| path == Path::new(CANDIDATE))
+                .times(1)
+                .in_sequence(&mut sequence)
+                .returning(|_| Ok(()));
+            let os = MockOs::new();
+            let links = links_to_target();
+            let heartbeat_reader_factory = heartbeat::MockHeartbeatReaderFactory::new();
+            let docker_client = docker::MockClient::new();
+            let bract_client = bract_client::MockClient::new();
+            let mut context = test_context(
+                &os,
+                FileOperations {
+                    renamer: &file_renamer,
+                    copier: &file_copier,
+                    deleter: &file_deleter,
+                },
+                &links,
+                &permissions,
+                &heartbeat_reader_factory,
+                &docker_client,
+                &bract_client,
+            );
+
+            let mut command = OverwriteDouglasExecutable::new(Path::new(CANDIDATE));
+            let span = Span::new(CapturingReporter::new(), "test", ScopeKind::Group);
+
+            let result = command.run(&span, &mut context).await;
+
+            assert!(result.is_ok());
+        }
+
+        #[tokio::test]
+        async fn test_overwrite_run_should_remove_the_staging_file_and_keep_the_candidate_when_the_copy_fails()
+         {
+            let mut file_renamer = MockFileRenamer::new();
+            let mut file_copier = MockFileCopier::new();
+            let mut file_deleter = MockFileDeleter::new();
+            let permissions = candidate_is_root_owned_by_douglas_admin();
+            file_renamer
+                .expect_rename()
+                .withf(|from, _| from == Path::new(CANDIDATE))
+                .times(1)
+                .returning(|_, _| Err(cross_device()));
+            file_copier
+                .expect_copy()
+                .times(1)
+                .returning(|_, _| Err(permission_denied()));
+            file_deleter
+                .expect_delete()
+                .withf(|path| path == Path::new(STAGING))
+                .times(1)
+                .returning(|_| Ok(()));
+            let os = MockOs::new();
+            let links = links_to_target();
+            let heartbeat_reader_factory = heartbeat::MockHeartbeatReaderFactory::new();
+            let docker_client = docker::MockClient::new();
+            let bract_client = bract_client::MockClient::new();
+            let mut context = test_context(
+                &os,
+                FileOperations {
+                    renamer: &file_renamer,
+                    copier: &file_copier,
+                    deleter: &file_deleter,
+                },
+                &links,
+                &permissions,
+                &heartbeat_reader_factory,
+                &docker_client,
+                &bract_client,
+            );
+
+            let mut command = OverwriteDouglasExecutable::new(Path::new(CANDIDATE));
+            let span = Span::new(CapturingReporter::new(), "test", ScopeKind::Group);
+
+            let result = command.run(&span, &mut context).await;
+
+            assert!(result.is_err());
+        }
+
+        #[tokio::test]
+        async fn test_overwrite_run_should_remove_the_staging_file_and_keep_the_candidate_when_ownership_cannot_be_set()
+         {
+            let mut file_renamer = MockFileRenamer::new();
+            let mut file_copier = MockFileCopier::new();
+            let mut file_deleter = MockFileDeleter::new();
+            let mut permissions = candidate_is_root_owned_by_douglas_admin();
+            file_renamer
+                .expect_rename()
+                .withf(|from, _| from == Path::new(CANDIDATE))
+                .times(1)
+                .returning(|_, _| Err(cross_device()));
+            file_copier.expect_copy().times(1).returning(|_, _| Ok(()));
+            permissions
+                .expect_change_user_and_group_ownership()
+                .times(1)
+                .returning(|_, _, _| Err(permission_denied()));
+            file_deleter
+                .expect_delete()
+                .withf(|path| path == Path::new(STAGING))
+                .times(1)
+                .returning(|_| Ok(()));
+            let os = MockOs::new();
+            let links = links_to_target();
+            let heartbeat_reader_factory = heartbeat::MockHeartbeatReaderFactory::new();
+            let docker_client = docker::MockClient::new();
+            let bract_client = bract_client::MockClient::new();
+            let mut context = test_context(
+                &os,
+                FileOperations {
+                    renamer: &file_renamer,
+                    copier: &file_copier,
+                    deleter: &file_deleter,
+                },
+                &links,
+                &permissions,
+                &heartbeat_reader_factory,
+                &docker_client,
+                &bract_client,
+            );
+
+            let mut command = OverwriteDouglasExecutable::new(Path::new(CANDIDATE));
+            let span = Span::new(CapturingReporter::new(), "test", ScopeKind::Group);
+
+            let result = command.run(&span, &mut context).await;
+
+            assert!(result.is_err());
+        }
+
+        #[tokio::test]
+        async fn test_overwrite_run_should_remove_the_staging_file_and_keep_the_candidate_when_the_final_rename_fails()
+         {
+            let mut file_renamer = MockFileRenamer::new();
+            let mut file_copier = MockFileCopier::new();
+            let mut file_deleter = MockFileDeleter::new();
+            let mut permissions = candidate_is_root_owned_by_douglas_admin();
+            file_renamer
+                .expect_rename()
+                .withf(|from, _| from == Path::new(CANDIDATE))
+                .times(1)
+                .returning(|_, _| Err(cross_device()));
+            file_copier.expect_copy().times(1).returning(|_, _| Ok(()));
+            permissions
+                .expect_change_user_and_group_ownership()
+                .times(1)
+                .returning(|_, _, _| Ok(()));
+            file_renamer
+                .expect_rename()
+                .withf(|from, to| from == Path::new(STAGING) && to == Path::new(TARGET))
+                .times(1)
+                .returning(|_, _| Err(permission_denied()));
+            file_deleter
+                .expect_delete()
+                .withf(|path| path == Path::new(STAGING))
+                .times(1)
+                .returning(|_| Ok(()));
+            let os = MockOs::new();
+            let links = links_to_target();
+            let heartbeat_reader_factory = heartbeat::MockHeartbeatReaderFactory::new();
+            let docker_client = docker::MockClient::new();
+            let bract_client = bract_client::MockClient::new();
+            let mut context = test_context(
+                &os,
+                FileOperations {
+                    renamer: &file_renamer,
+                    copier: &file_copier,
+                    deleter: &file_deleter,
+                },
+                &links,
+                &permissions,
+                &heartbeat_reader_factory,
+                &docker_client,
+                &bract_client,
+            );
+
+            let mut command = OverwriteDouglasExecutable::new(Path::new(CANDIDATE));
+            let span = Span::new(CapturingReporter::new(), "test", ScopeKind::Group);
+
+            let result = command.run(&span, &mut context).await;
+
+            assert!(result.is_err());
+        }
+
+        #[tokio::test]
+        async fn test_overwrite_run_should_still_succeed_and_warn_when_the_candidate_cannot_be_removed()
+         {
+            let mut file_renamer = MockFileRenamer::new();
+            let mut file_copier = MockFileCopier::new();
+            let mut file_deleter = MockFileDeleter::new();
+            let mut permissions = candidate_is_root_owned_by_douglas_admin();
+            file_renamer
+                .expect_rename()
+                .withf(|from, _| from == Path::new(CANDIDATE))
+                .times(1)
+                .returning(|_, _| Err(cross_device()));
+            file_copier.expect_copy().times(1).returning(|_, _| Ok(()));
+            permissions
+                .expect_change_user_and_group_ownership()
+                .times(1)
+                .returning(|_, _, _| Ok(()));
+            file_renamer
+                .expect_rename()
+                .withf(|from, to| from == Path::new(STAGING) && to == Path::new(TARGET))
+                .times(1)
+                .returning(|_, _| Ok(()));
+            file_deleter
+                .expect_delete()
+                .withf(|path| path == Path::new(CANDIDATE))
+                .times(1)
+                .returning(|_| Err(permission_denied()));
+            let os = MockOs::new();
+            let links = links_to_target();
+            let heartbeat_reader_factory = heartbeat::MockHeartbeatReaderFactory::new();
+            let docker_client = docker::MockClient::new();
+            let bract_client = bract_client::MockClient::new();
+            let mut context = test_context(
+                &os,
+                FileOperations {
+                    renamer: &file_renamer,
+                    copier: &file_copier,
+                    deleter: &file_deleter,
+                },
+                &links,
+                &permissions,
+                &heartbeat_reader_factory,
+                &docker_client,
+                &bract_client,
+            );
+
+            let mut command = OverwriteDouglasExecutable::new(Path::new(CANDIDATE));
+            let reporter = CapturingReporter::new();
+            let span = Span::new(
+                Arc::clone(&reporter) as Arc<dyn Reporter>,
+                "test",
+                ScopeKind::Group,
+            );
+
+            let result = command.run(&span, &mut context).await;
+
+            assert!(result.is_ok());
+            assert!(
+                reporter
+                    .messages()
+                    .iter()
+                    .any(|message| message.contains("could not remove"))
+            );
         }
 
         #[tokio::test]
@@ -992,9 +1449,15 @@ mod tests {
             let heartbeat_reader_factory = heartbeat::MockHeartbeatReaderFactory::new();
             let docker_client = docker::MockClient::new();
             let bract_client = bract_client::MockClient::new();
+            let file_copier = MockFileCopier::new();
+            let file_deleter = MockFileDeleter::new();
             let mut context = test_context(
                 &os,
-                &file_renamer,
+                FileOperations {
+                    renamer: &file_renamer,
+                    copier: &file_copier,
+                    deleter: &file_deleter,
+                },
                 &links,
                 &permissions,
                 &heartbeat_reader_factory,
@@ -1021,9 +1484,15 @@ mod tests {
             let heartbeat_reader_factory = heartbeat::MockHeartbeatReaderFactory::new();
             let docker_client = docker::MockClient::new();
             let bract_client = bract_client::MockClient::new();
+            let file_copier = MockFileCopier::new();
+            let file_deleter = MockFileDeleter::new();
             let mut context = test_context(
                 &os,
-                &file_renamer,
+                FileOperations {
+                    renamer: &file_renamer,
+                    copier: &file_copier,
+                    deleter: &file_deleter,
+                },
                 &links,
                 &permissions,
                 &heartbeat_reader_factory,

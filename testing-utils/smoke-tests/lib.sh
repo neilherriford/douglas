@@ -179,6 +179,26 @@ wait_until() {
     pass "$desc"
 }
 
+build_upgrade_candidate() {
+    local destination="$1"
+
+    CURRENT_VERSION="$(ssh_out "grep -m1 '^version' /mnt/share/douglas/Cargo.toml | sed -E 's/version = \"(.*)\"/\1/'")"
+    IFS='.' read -r major minor patch <<<"$CURRENT_VERSION"
+    NEW_VERSION="$major.$minor.$((patch + 1))"
+
+    assert_success "bump Cargo.toml to v$NEW_VERSION to build a higher-version candidate" ssh_out \
+        "cd /mnt/share/douglas && sed -i \"s/^version = \\\"$CURRENT_VERSION\\\"/version = \\\"$NEW_VERSION\\\"/\" Cargo.toml"
+
+    assert_success "build and sign the v$NEW_VERSION candidate" ssh_out \
+        "cd /mnt/share/douglas && cargo run -p xtask --quiet -- build"
+
+    assert_success "deploy the candidate binary to $destination" ssh_out \
+        "cp /mnt/share/cache/target/debug/douglas $destination"
+
+    assert_success "revert Cargo.toml back to v$CURRENT_VERSION" ssh_out \
+        "cd /mnt/share/douglas && sed -i \"s/^version = \\\"$NEW_VERSION\\\"/version = \\\"$CURRENT_VERSION\\\"/\" Cargo.toml"
+}
+
 run_prelude() {
     section "setup"
     for step in "$@"; do
