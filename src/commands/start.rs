@@ -1,6 +1,7 @@
 use crate::bootstrap::{
     self,
     compatibility::{self, CompatibilityError},
+    journal,
 };
 use crate::cli::{OutputStyle, Presentation};
 use crate::commands::{CommandContext, names, print_error, print_success};
@@ -36,6 +37,7 @@ pub(crate) async fn start(plan_only: bool, presentation: Presentation) -> ExitCo
 
     let folder: Arc<dyn Folder> = Arc::new(UnixFolder::new());
     let os: Arc<dyn Os> = Arc::new(Unix::new());
+    warn_about_interrupted_upgrade(&reporter, presentation, &douglas_folders, os.as_ref());
     let credentials = Arc::from(create_credentials(Arc::clone(&os)));
     let permissions: Arc<dyn Permissions> = Arc::new(UnixPermissions::new());
     let environment_variable_reader: Arc<dyn EnvironmentVariableReader> =
@@ -110,6 +112,32 @@ pub(crate) async fn start(plan_only: bool, presentation: Presentation) -> ExitCo
     }
 
     ExitCode::from(0)
+}
+
+fn warn_about_interrupted_upgrade(
+    reporter: &Arc<dyn Reporter>,
+    presentation: Presentation,
+    douglas_folders: &DouglasFolders,
+    os: &dyn Os,
+) {
+    let message = match journal::load(douglas_folders, &UnixFileReader::new()) {
+        Ok(Some(entry)) if journal::is_interrupted(os, &entry) => {
+            journal::describe_interrupted(&entry)
+        }
+        Ok(_) => return,
+        Err(err) => err.to_string(),
+    };
+
+    log::Span::new(
+        Arc::clone(reporter),
+        "Checking for an interrupted upgrade",
+        log::ScopeKind::Task,
+    )
+    .message(log::Level::Warn, &message);
+
+    if presentation == Presentation::Plain {
+        eprintln!("{message}");
+    }
 }
 
 fn report_compatibility_failure(

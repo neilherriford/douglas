@@ -1,5 +1,6 @@
 use ::config::DouglasFolders;
-use file_system::{FileDeleter, FileSystemError, FileWriter};
+use file_system::{FileDeleter, FileReader, FileSystemError, FileWriter};
+use os::Os;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use thiserror::Error;
@@ -16,6 +17,16 @@ pub(crate) struct UpgradeJournal {
 pub(crate) enum JournalError {
     #[error("The upgrade journal {} could not be serialized: {source}", .path.display())]
     Serialize {
+        path: PathBuf,
+        source: serde_json::Error,
+    },
+    #[error("The upgrade journal {} could not be read: {source}", .path.display())]
+    Unreadable {
+        path: PathBuf,
+        source: FileSystemError,
+    },
+    #[error("The upgrade journal {} is not valid: {source}", .path.display())]
+    Invalid {
         path: PathBuf,
         source: serde_json::Error,
     },
@@ -47,6 +58,37 @@ pub(crate) fn record(
         .map_err(|source| JournalError::WriteFailed { path, source })
 }
 
+pub(crate) fn load(
+    douglas_folders: &DouglasFolders,
+    file_reader: &dyn FileReader,
+) -> Result<Option<UpgradeJournal>, JournalError> {
+    let path = douglas_folders.upgrade_journal();
+
+    let raw = match file_reader.read_all(&path) {
+        Ok(raw) => raw,
+        Err(err) if err.is_not_found() => return Ok(None),
+        Err(source) => return Err(JournalError::Unreadable { path, source }),
+    };
+
+    serde_json::from_str(&raw)
+        .map(Some)
+        .map_err(|source| JournalError::Invalid { path, source })
+}
+
+pub(crate) fn is_interrupted(os: &dyn Os, journal: &UpgradeJournal) -> bool {
+    matches!(os.is_active_pid(journal.pid), Ok(false))
+}
+
+pub(crate) fn describe_interrupted(journal: &UpgradeJournal) -> String {
+    format!(
+        "An upgrade from {} to {} did not finish (the process running it is gone). The previous \
+         version is kept at {}.",
+        journal.from,
+        journal.to,
+        journal.previous_binary.display()
+    )
+}
+
 pub(crate) fn clear(
     douglas_folders: &DouglasFolders,
     file_deleter: &dyn FileDeleter,
@@ -62,7 +104,8 @@ pub(crate) fn clear(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use file_system::{MockFileDeleter, MockFileWriter};
+    use file_system::{MockFileDeleter, MockFileReader, MockFileWriter};
+    use os::MockOs;
 
     fn journal() -> UpgradeJournal {
         UpgradeJournal {
@@ -150,5 +193,101 @@ mod tests {
         let result = clear(&DouglasFolders::new(), &deleter);
 
         assert!(matches!(result, Err(JournalError::RemoveFailed { .. })));
+    }
+
+    fn journal_json() -> String {
+        let Ok(json) = serde_json::to_string(&journal()) else {
+            panic!("should serialize");
+        };
+        json
+    }
+
+    #[test]
+    fn test_load_should_read_the_journal_from_its_path() {
+        let expected_path = DouglasFolders::new().upgrade_journal();
+        let mut reader = MockFileReader::new();
+        reader
+            .expect_read_all()
+            .withf(move |path| path == expected_path)
+            .returning(|_| Ok(journal_json()));
+
+        let result = load(&DouglasFolders::new(), &reader);
+
+        assert!(matches!(result, Ok(Some(found)) if found == journal()));
+    }
+
+    #[test]
+    fn test_load_should_find_nothing_when_there_is_no_journal() {
+        let mut reader = MockFileReader::new();
+        reader
+            .expect_read_all()
+            .returning(|path| Err(FileSystemError::NotFoundError(path.to_path_buf())));
+
+        let result = load(&DouglasFolders::new(), &reader);
+
+        assert!(matches!(result, Ok(None)));
+    }
+
+    #[test]
+    fn test_load_should_report_a_journal_that_cannot_be_read() {
+        let mut reader = MockFileReader::new();
+        reader.expect_read_all().returning(|path| {
+            Err(FileSystemError::IoErrorAtPath {
+                path: path.to_path_buf(),
+                error: std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+            })
+        });
+
+        let result = load(&DouglasFolders::new(), &reader);
+
+        assert!(matches!(result, Err(JournalError::Unreadable { .. })));
+    }
+
+    #[test]
+    fn test_load_should_report_a_journal_that_is_not_valid() {
+        let mut reader = MockFileReader::new();
+        reader
+            .expect_read_all()
+            .returning(|_| Ok("not json".to_string()));
+
+        let result = load(&DouglasFolders::new(), &reader);
+
+        assert!(matches!(result, Err(JournalError::Invalid { .. })));
+    }
+
+    #[test]
+    fn test_is_interrupted_should_be_true_when_the_upgrading_process_is_gone() {
+        let mut os = MockOs::new();
+        os.expect_is_active_pid()
+            .withf(|pid| *pid == 4242)
+            .returning(|_| Ok(false));
+
+        assert!(is_interrupted(&os, &journal()));
+    }
+
+    #[test]
+    fn test_is_interrupted_should_be_false_while_the_upgrading_process_is_running() {
+        let mut os = MockOs::new();
+        os.expect_is_active_pid().returning(|_| Ok(true));
+
+        assert!(!is_interrupted(&os, &journal()));
+    }
+
+    #[test]
+    fn test_is_interrupted_should_be_false_when_the_process_cannot_be_checked() {
+        let mut os = MockOs::new();
+        os.expect_is_active_pid()
+            .returning(|_| Err(os::OsError::PidTooLarge));
+
+        assert!(!is_interrupted(&os, &journal()));
+    }
+
+    #[test]
+    fn test_describe_interrupted_should_name_both_versions_and_the_kept_binary() {
+        let message = describe_interrupted(&journal());
+
+        assert!(message.contains("0.0.1"));
+        assert!(message.contains("0.0.2"));
+        assert!(message.contains("/var/lib/douglas/bin/douglas-0.0.1"));
     }
 }
