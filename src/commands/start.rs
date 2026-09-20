@@ -1,6 +1,7 @@
 use crate::bootstrap;
-use crate::cli::Presentation;
+use crate::cli::{OutputStyle, Presentation};
 use crate::commands::{CommandContext, names, print_error, print_success};
+use ::config::DouglasFolders;
 use credentials::create_credentials;
 use file_system::{
     FileDeleter, FileReader, FileWriter, Folder, Inspect, Permissions, UnixFileDeleter,
@@ -71,9 +72,28 @@ pub(crate) async fn start(plan_only: bool, presentation: Presentation) -> ExitCo
         return ExitCode::from(1);
     }
 
+    if !bootstrap_openbao(&reporter, output_style, &douglas_folders, &bract_client).await {
+        return ExitCode::from(1);
+    }
+
+    log_deadwood_if_any(&reporter, bract_client.as_ref()).await;
+
+    if let Some(style) = output_style {
+        print_success(style, "Douglas started.");
+    }
+
+    ExitCode::from(0)
+}
+
+async fn bootstrap_openbao(
+    reporter: &Arc<dyn Reporter>,
+    output_style: Option<OutputStyle>,
+    douglas_folders: &DouglasFolders,
+    bract_client: &Arc<dyn bract_client::Client>,
+) -> bool {
     let inspect: Arc<dyn Inspect> = Arc::new(UnixInspect {});
     let openbao_client_factory: Arc<dyn openbao::ClientFactory> =
-        Arc::new(openbao::SocketClientFactory::new(Arc::clone(&reporter)));
+        Arc::new(openbao::SocketClientFactory::new(Arc::clone(reporter)));
     let openbao_file_reader: Arc<dyn FileReader> = Arc::new(UnixFileReader {});
     let openbao_file_writer: Arc<dyn FileWriter> = Arc::new(UnixFileWriter {});
     let openbao_file_deleter: Arc<dyn FileDeleter> = Arc::new(UnixFileDeleter {});
@@ -86,21 +106,21 @@ pub(crate) async fn start(plan_only: bool, presentation: Presentation) -> ExitCo
         if let Some(style) = output_style {
             print_error(style, &format!("Failed to initialize identity: {err}"));
         }
-        return ExitCode::from(1);
+        return false;
     }
 
     let succeeded = bootstrap::openbao::perform(
-        Arc::clone(&reporter),
+        Arc::clone(reporter),
         bootstrap::openbao::Dependencies {
             inspect,
             openbao_client_factory,
-            bract_client: Arc::clone(&bract_client),
+            bract_client: Arc::clone(bract_client),
             file_reader: openbao_file_reader,
             file_writer: openbao_file_writer,
             file_deleter: openbao_file_deleter,
             permissions: Arc::new(UnixPermissions::new()),
             identity: &mut identity,
-            douglas_folders: &douglas_folders,
+            douglas_folders,
         },
     )
     .await;
@@ -109,16 +129,10 @@ pub(crate) async fn start(plan_only: bool, presentation: Presentation) -> ExitCo
         if let Some(style) = output_style {
             print_error(style, "OpenBao bootstrap failed");
         }
-        return ExitCode::from(1);
+        return false;
     }
 
-    log_deadwood_if_any(&reporter, bract_client.as_ref()).await;
-
-    if let Some(style) = output_style {
-        print_success(style, "Douglas started.");
-    }
-
-    ExitCode::from(0)
+    true
 }
 
 async fn log_deadwood_if_any(
