@@ -117,6 +117,83 @@ pub fn start_conflicts(marker: &InstallMarker, running: &ReleaseMetadata) -> Vec
     conflicts
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Difference {
+    Format {
+        from: u8,
+        to: u8,
+    },
+    CoreVersion {
+        seedling: String,
+        from: u16,
+        to: u16,
+    },
+    CoreAdded {
+        seedling: String,
+        version: u16,
+    },
+    CoreRemoved {
+        seedling: String,
+        version: u16,
+    },
+}
+
+impl std::fmt::Display for Difference {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Difference::Format { from, to } => write!(f, "data format {from} -> {to}"),
+            Difference::CoreVersion { seedling, from, to } => {
+                write!(f, "core seedling '{seedling}' version {from} -> {to}")
+            }
+            Difference::CoreAdded { seedling, version } => {
+                write!(f, "core seedling '{seedling}' added at version {version}")
+            }
+            Difference::CoreRemoved { seedling, version } => {
+                write!(f, "core seedling '{seedling}' (version {version}) removed")
+            }
+        }
+    }
+}
+
+pub fn differences(from: &ReleaseMetadata, to: &ReleaseMetadata) -> Vec<Difference> {
+    let mut result = Vec::new();
+
+    if from.format != to.format {
+        result.push(Difference::Format {
+            from: from.format,
+            to: to.format,
+        });
+    }
+
+    for (seedling, from_version) in &from.core {
+        match to.core.get(seedling) {
+            None => result.push(Difference::CoreRemoved {
+                seedling: seedling.clone(),
+                version: *from_version,
+            }),
+            Some(to_version) if to_version != from_version => {
+                result.push(Difference::CoreVersion {
+                    seedling: seedling.clone(),
+                    from: *from_version,
+                    to: *to_version,
+                });
+            }
+            Some(_) => {}
+        }
+    }
+
+    for (seedling, version) in &to.core {
+        if !from.core.contains_key(seedling) {
+            result.push(Difference::CoreAdded {
+                seedling: seedling.clone(),
+                version: *version,
+            });
+        }
+    }
+
+    result
+}
+
 pub fn attach(payload: &mut Vec<u8>, metadata: &ReleaseMetadata) -> Result<(), ReleaseError> {
     let json =
         serde_json::to_vec(metadata).map_err(|err| ReleaseError::Malformed(err.to_string()))?;
@@ -405,5 +482,114 @@ mod tests {
         };
 
         assert_eq!(first, second);
+    }
+
+    #[test]
+    fn test_differences_should_be_empty_for_identical_metadata() {
+        assert!(differences(&metadata(1, 1, 1), &metadata(1, 1, 1)).is_empty());
+    }
+
+    #[test]
+    fn test_differences_should_report_a_format_change() {
+        assert_eq!(
+            differences(&metadata(1, 1, 1), &metadata(2, 1, 1)),
+            vec![Difference::Format { from: 1, to: 2 }]
+        );
+    }
+
+    #[test]
+    fn test_differences_should_report_a_core_version_change_in_either_direction() {
+        assert_eq!(
+            differences(&metadata(1, 1, 1), &metadata(1, 2, 1)),
+            vec![Difference::CoreVersion {
+                seedling: "openbao".to_string(),
+                from: 1,
+                to: 2
+            }]
+        );
+        assert_eq!(
+            differences(&metadata(1, 2, 1), &metadata(1, 1, 1)),
+            vec![Difference::CoreVersion {
+                seedling: "openbao".to_string(),
+                from: 2,
+                to: 1
+            }]
+        );
+    }
+
+    #[test]
+    fn test_differences_should_report_added_and_removed_seedlings() {
+        let fewer = ReleaseMetadata {
+            format: 1,
+            core: BTreeMap::from([("traefik".to_string(), 1)]),
+        };
+
+        assert_eq!(
+            differences(&metadata(1, 1, 1), &fewer),
+            vec![Difference::CoreRemoved {
+                seedling: "openbao".to_string(),
+                version: 1
+            }]
+        );
+        assert_eq!(
+            differences(&fewer, &metadata(1, 1, 1)),
+            vec![Difference::CoreAdded {
+                seedling: "openbao".to_string(),
+                version: 1
+            }]
+        );
+    }
+
+    #[test]
+    fn test_differences_should_report_every_change_in_a_stable_order() {
+        assert_eq!(
+            differences(&metadata(1, 1, 1), &metadata(2, 2, 3)),
+            vec![
+                Difference::Format { from: 1, to: 2 },
+                Difference::CoreVersion {
+                    seedling: "openbao".to_string(),
+                    from: 1,
+                    to: 2
+                },
+                Difference::CoreVersion {
+                    seedling: "traefik".to_string(),
+                    from: 1,
+                    to: 3
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn test_difference_messages_should_name_what_changed() {
+        assert_eq!(
+            Difference::Format { from: 1, to: 2 }.to_string(),
+            "data format 1 -> 2"
+        );
+        assert_eq!(
+            Difference::CoreVersion {
+                seedling: "openbao".to_string(),
+                from: 1,
+                to: 2
+            }
+            .to_string(),
+            "core seedling 'openbao' version 1 -> 2"
+        );
+        assert!(
+            Difference::CoreAdded {
+                seedling: "vault".to_string(),
+                version: 1
+            }
+            .to_string()
+            .contains("added")
+        );
+        assert!(
+            Difference::CoreRemoved {
+                seedling: "vault".to_string(),
+                version: 1
+            }
+            .to_string()
+            .contains("removed")
+        );
     }
 }
