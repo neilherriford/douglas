@@ -175,7 +175,7 @@ fn create_plan<'a>(
     presentation: Presentation,
     allow_one_way: bool,
 ) -> Result<Vec<Step<'a>>, UpgradeError> {
-    let (current, is_marked_as_executable, is_owned_by_douglas_admin) = match state {
+    let (current, restorable, is_marked_as_executable, is_owned_by_douglas_admin) = match state {
         State::NotRoot => return Err(UpgradeError::MustBeRoot),
         State::Missing => return Err(UpgradeError::Missing(path.to_path_buf())),
         State::NotNewer => return Err(UpgradeError::InvalidUpgrade),
@@ -190,6 +190,7 @@ fn create_plan<'a>(
             }
             (
                 *current,
+                one_way.is_empty(),
                 *is_marked_as_executable,
                 *is_owned_by_douglas_admin,
             )
@@ -218,7 +219,10 @@ fn create_plan<'a>(
     push_step(&mut result, StopBract::new(false));
     push_step(&mut result, KillService::new(config::services::RESIN));
     push_step(&mut result, KillService::new(config::services::SEEDBANK));
-    push_step(&mut result, OverwriteDouglasExecutable::new(path));
+    push_step(
+        &mut result,
+        OverwriteDouglasExecutable::new(path, current, restorable),
+    );
     push_step(&mut result, ReplaceProcess::new(presentation));
 
     Ok(result)
@@ -362,13 +366,51 @@ impl<'a> Command<Context<'a>> for RetainPreviousBinary {
 #[derive(Debug)]
 struct OverwriteDouglasExecutable {
     path: PathBuf,
+    previous: Version,
+    restorable: bool,
 }
 
 impl OverwriteDouglasExecutable {
-    pub fn new(path: &Path) -> Self {
+    pub fn new(path: &Path, previous: Version, restorable: bool) -> Self {
         Self {
             path: path.to_path_buf(),
+            previous,
+            restorable,
         }
+    }
+
+    fn install_target(context: &Context<'_>) -> Result<PathBuf, FileSystemError> {
+        let link = context.douglas_folders.binary_link();
+        Ok(context
+            .douglas_folders
+            .binary_dir()
+            .join(context.links.follow_symbolic(&link)?))
+    }
+
+    fn restore_previous(&self, context: &Context<'_>) -> Result<(), FileSystemError> {
+        let target = Self::install_target(context)?;
+        let retained =
+            retention::retained_path(&context.douglas_folders.binary_dir(), self.previous);
+        let staging = staging_path(&target)?;
+
+        let result = context
+            .files
+            .copier
+            .copy(&retained, &staging)
+            .and_then(|()| {
+                let (user, group) = context
+                    .permissions
+                    .get_user_and_group_ownership(&retained)?;
+                context
+                    .permissions
+                    .change_user_and_group_ownership(&staging, &user, &group)
+            })
+            .and_then(|()| context.files.renamer.rename(&staging, &target));
+
+        if result.is_err() {
+            let _ = context.files.deleter.delete(&staging);
+        }
+        result
     }
 
     fn install_from_copy(
@@ -444,15 +486,42 @@ impl<'a> Command<Context<'a>> for OverwriteDouglasExecutable {
             )
             .start_guard();
 
-        let link = context.douglas_folders.binary_link();
-        let target = context
-            .douglas_folders
-            .binary_dir()
-            .join(context.links.follow_symbolic(&link)?);
+        let target = Self::install_target(context)?;
         match context.files.renamer.rename(&self.path, &target) {
             Err(err) if err.is_cross_device() => self.copy_into_place(&guard, context, &target)?,
             result => result?,
         }
+
+        guard.finish_with_outcome(Outcome::Ok);
+        Ok(())
+    }
+
+    async fn rollback(
+        &mut self,
+        span: &Span,
+        context: &mut Context<'a>,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let guard = span
+            .create_child(
+                "Restoring the previous version of douglas…",
+                ScopeKind::Step,
+            )
+            .start_guard();
+
+        if !self.restorable {
+            guard.span().message(
+                Level::Warn,
+                &format!(
+                    "Leaving the new version installed: this upgrade cannot be rolled back, \
+                     so version {} is not restored",
+                    self.previous
+                ),
+            );
+            guard.finish_with_outcome(Outcome::Ok);
+            return Ok(());
+        }
+
+        self.restore_previous(context)?;
 
         guard.finish_with_outcome(Outcome::Ok);
         Ok(())
@@ -1865,7 +1934,8 @@ mod tests {
                 &bract_client,
             );
 
-            let mut command = OverwriteDouglasExecutable::new(Path::new(CANDIDATE));
+            let mut command =
+                OverwriteDouglasExecutable::new(Path::new(CANDIDATE), version(0, 0, 4), true);
             let span = Span::new(CapturingReporter::new(), "test", ScopeKind::Group);
 
             let result = command.run(&span, &mut context).await;
@@ -1904,7 +1974,8 @@ mod tests {
                 &bract_client,
             );
 
-            let mut command = OverwriteDouglasExecutable::new(Path::new(CANDIDATE));
+            let mut command =
+                OverwriteDouglasExecutable::new(Path::new(CANDIDATE), version(0, 0, 4), true);
             let span = Span::new(CapturingReporter::new(), "test", ScopeKind::Group);
 
             let result = command.run(&span, &mut context).await;
@@ -1944,7 +2015,8 @@ mod tests {
                 &bract_client,
             );
 
-            let mut command = OverwriteDouglasExecutable::new(Path::new(CANDIDATE));
+            let mut command =
+                OverwriteDouglasExecutable::new(Path::new(CANDIDATE), version(0, 0, 4), true);
             let span = Span::new(CapturingReporter::new(), "test", ScopeKind::Group);
 
             let result = command.run(&span, &mut context).await;
@@ -2019,7 +2091,8 @@ mod tests {
                 &bract_client,
             );
 
-            let mut command = OverwriteDouglasExecutable::new(Path::new(CANDIDATE));
+            let mut command =
+                OverwriteDouglasExecutable::new(Path::new(CANDIDATE), version(0, 0, 4), true);
             let span = Span::new(CapturingReporter::new(), "test", ScopeKind::Group);
 
             let result = command.run(&span, &mut context).await;
@@ -2069,7 +2142,8 @@ mod tests {
                 &bract_client,
             );
 
-            let mut command = OverwriteDouglasExecutable::new(Path::new(CANDIDATE));
+            let mut command =
+                OverwriteDouglasExecutable::new(Path::new(CANDIDATE), version(0, 0, 4), true);
             let span = Span::new(CapturingReporter::new(), "test", ScopeKind::Group);
 
             let result = command.run(&span, &mut context).await;
@@ -2120,7 +2194,8 @@ mod tests {
                 &bract_client,
             );
 
-            let mut command = OverwriteDouglasExecutable::new(Path::new(CANDIDATE));
+            let mut command =
+                OverwriteDouglasExecutable::new(Path::new(CANDIDATE), version(0, 0, 4), true);
             let span = Span::new(CapturingReporter::new(), "test", ScopeKind::Group);
 
             let result = command.run(&span, &mut context).await;
@@ -2176,7 +2251,8 @@ mod tests {
                 &bract_client,
             );
 
-            let mut command = OverwriteDouglasExecutable::new(Path::new(CANDIDATE));
+            let mut command =
+                OverwriteDouglasExecutable::new(Path::new(CANDIDATE), version(0, 0, 4), true);
             let span = Span::new(CapturingReporter::new(), "test", ScopeKind::Group);
 
             let result = command.run(&span, &mut context).await;
@@ -2232,7 +2308,8 @@ mod tests {
                 &bract_client,
             );
 
-            let mut command = OverwriteDouglasExecutable::new(Path::new(CANDIDATE));
+            let mut command =
+                OverwriteDouglasExecutable::new(Path::new(CANDIDATE), version(0, 0, 4), true);
             let reporter = CapturingReporter::new();
             let span = Span::new(
                 Arc::clone(&reporter) as Arc<dyn Reporter>,
@@ -2249,6 +2326,301 @@ mod tests {
                     .iter()
                     .any(|message| message.contains("could not remove"))
             );
+        }
+
+        #[tokio::test]
+        async fn test_overwrite_rollback_should_copy_the_retained_version_over_the_target_with_its_owner()
+         {
+            let mut file_copier = MockFileCopier::new();
+            file_copier
+                .expect_copy()
+                .withf(|from, to| from == retained() && to == Path::new(STAGING))
+                .times(1)
+                .returning(|_, _| Ok(()));
+            let mut file_renamer = MockFileRenamer::new();
+            file_renamer
+                .expect_rename()
+                .withf(|from, to| from == Path::new(STAGING) && to == Path::new(TARGET))
+                .times(1)
+                .returning(|_, _| Ok(()));
+            let mut permissions = MockPermissions::new();
+            permissions
+                .expect_get_user_and_group_ownership()
+                .withf(|path| path == retained())
+                .returning(|_| Ok(("root".to_string(), "douglas-admin".to_string())));
+            permissions
+                .expect_change_user_and_group_ownership()
+                .withf(|path, user, group| {
+                    path == Path::new(STAGING) && user == "root" && group == "douglas-admin"
+                })
+                .times(1)
+                .returning(|_, _, _| Ok(()));
+            let mut file_deleter = MockFileDeleter::new();
+            file_deleter.expect_delete().times(0);
+            let folder = MockFolder::new();
+            let links = links_to_target();
+            let os = MockOs::new();
+            let heartbeat_reader_factory = heartbeat::MockHeartbeatReaderFactory::new();
+            let docker_client = docker::MockClient::new();
+            let bract_client = bract_client::MockClient::new();
+            let mut context = test_context(
+                &os,
+                FileOperations {
+                    renamer: &file_renamer,
+                    copier: &file_copier,
+                    deleter: &file_deleter,
+                    folder: &folder,
+                },
+                &links,
+                &permissions,
+                &heartbeat_reader_factory,
+                &docker_client,
+                &bract_client,
+            );
+
+            let mut command =
+                OverwriteDouglasExecutable::new(Path::new(CANDIDATE), version(0, 0, 4), true);
+            let span = Span::new(CapturingReporter::new(), "test", ScopeKind::Group);
+
+            let result = command.rollback(&span, &mut context).await;
+
+            assert!(result.is_ok());
+        }
+
+        #[tokio::test]
+        async fn test_overwrite_rollback_should_leave_the_new_version_and_warn_when_the_upgrade_is_one_way()
+         {
+            let mut file_copier = MockFileCopier::new();
+            file_copier.expect_copy().times(0);
+            let mut file_renamer = MockFileRenamer::new();
+            file_renamer.expect_rename().times(0);
+            let permissions = MockPermissions::new();
+            let mut file_deleter = MockFileDeleter::new();
+            file_deleter.expect_delete().times(0);
+            let folder = MockFolder::new();
+            let links = MockLinks::new();
+            let os = MockOs::new();
+            let heartbeat_reader_factory = heartbeat::MockHeartbeatReaderFactory::new();
+            let docker_client = docker::MockClient::new();
+            let bract_client = bract_client::MockClient::new();
+            let mut context = test_context(
+                &os,
+                FileOperations {
+                    renamer: &file_renamer,
+                    copier: &file_copier,
+                    deleter: &file_deleter,
+                    folder: &folder,
+                },
+                &links,
+                &permissions,
+                &heartbeat_reader_factory,
+                &docker_client,
+                &bract_client,
+            );
+
+            let mut command =
+                OverwriteDouglasExecutable::new(Path::new(CANDIDATE), version(0, 0, 4), false);
+            let span = Span::new(CapturingReporter::new(), "test", ScopeKind::Group);
+
+            let result = command.rollback(&span, &mut context).await;
+
+            assert!(result.is_ok());
+        }
+
+        #[tokio::test]
+        async fn test_overwrite_rollback_should_fail_without_copying_when_the_binary_link_cannot_be_followed()
+         {
+            let mut file_copier = MockFileCopier::new();
+            file_copier.expect_copy().times(0);
+            let mut file_renamer = MockFileRenamer::new();
+            file_renamer.expect_rename().times(0);
+            let permissions = MockPermissions::new();
+            let mut file_deleter = MockFileDeleter::new();
+            file_deleter.expect_delete().times(0);
+            let folder = MockFolder::new();
+            let links = {
+                let mut links = MockLinks::new();
+                links
+                    .expect_follow_symbolic()
+                    .returning(|path| Err(FileSystemError::NotFoundError(path.to_path_buf())));
+                links
+            };
+            let os = MockOs::new();
+            let heartbeat_reader_factory = heartbeat::MockHeartbeatReaderFactory::new();
+            let docker_client = docker::MockClient::new();
+            let bract_client = bract_client::MockClient::new();
+            let mut context = test_context(
+                &os,
+                FileOperations {
+                    renamer: &file_renamer,
+                    copier: &file_copier,
+                    deleter: &file_deleter,
+                    folder: &folder,
+                },
+                &links,
+                &permissions,
+                &heartbeat_reader_factory,
+                &docker_client,
+                &bract_client,
+            );
+
+            let mut command =
+                OverwriteDouglasExecutable::new(Path::new(CANDIDATE), version(0, 0, 4), true);
+            let span = Span::new(CapturingReporter::new(), "test", ScopeKind::Group);
+
+            let result = command.rollback(&span, &mut context).await;
+
+            assert!(result.is_err());
+        }
+
+        #[tokio::test]
+        async fn test_overwrite_rollback_should_remove_the_staging_file_and_fail_when_the_copy_fails()
+         {
+            let mut file_copier = MockFileCopier::new();
+            file_copier
+                .expect_copy()
+                .returning(|_, _| Err(permission_denied()));
+            let mut file_renamer = MockFileRenamer::new();
+            file_renamer.expect_rename().times(0);
+            let permissions = MockPermissions::new();
+            let mut file_deleter = MockFileDeleter::new();
+            file_deleter
+                .expect_delete()
+                .withf(|path| path == Path::new(STAGING))
+                .times(1)
+                .returning(|_| Ok(()));
+            let folder = MockFolder::new();
+            let links = links_to_target();
+            let os = MockOs::new();
+            let heartbeat_reader_factory = heartbeat::MockHeartbeatReaderFactory::new();
+            let docker_client = docker::MockClient::new();
+            let bract_client = bract_client::MockClient::new();
+            let mut context = test_context(
+                &os,
+                FileOperations {
+                    renamer: &file_renamer,
+                    copier: &file_copier,
+                    deleter: &file_deleter,
+                    folder: &folder,
+                },
+                &links,
+                &permissions,
+                &heartbeat_reader_factory,
+                &docker_client,
+                &bract_client,
+            );
+
+            let mut command =
+                OverwriteDouglasExecutable::new(Path::new(CANDIDATE), version(0, 0, 4), true);
+            let span = Span::new(CapturingReporter::new(), "test", ScopeKind::Group);
+
+            let result = command.rollback(&span, &mut context).await;
+
+            assert!(result.is_err());
+        }
+
+        #[tokio::test]
+        async fn test_overwrite_rollback_should_remove_the_staging_file_and_fail_when_ownership_cannot_be_set()
+         {
+            let mut file_copier = MockFileCopier::new();
+            file_copier.expect_copy().returning(|_, _| Ok(()));
+            let mut file_renamer = MockFileRenamer::new();
+            file_renamer.expect_rename().times(0);
+            let mut permissions = MockPermissions::new();
+            permissions
+                .expect_get_user_and_group_ownership()
+                .withf(|path| path == retained())
+                .returning(|_| Ok(("root".to_string(), "douglas-admin".to_string())));
+            permissions
+                .expect_change_user_and_group_ownership()
+                .returning(|_, _, _| Err(permission_denied()));
+            let mut file_deleter = MockFileDeleter::new();
+            file_deleter
+                .expect_delete()
+                .withf(|path| path == Path::new(STAGING))
+                .times(1)
+                .returning(|_| Ok(()));
+            let folder = MockFolder::new();
+            let links = links_to_target();
+            let os = MockOs::new();
+            let heartbeat_reader_factory = heartbeat::MockHeartbeatReaderFactory::new();
+            let docker_client = docker::MockClient::new();
+            let bract_client = bract_client::MockClient::new();
+            let mut context = test_context(
+                &os,
+                FileOperations {
+                    renamer: &file_renamer,
+                    copier: &file_copier,
+                    deleter: &file_deleter,
+                    folder: &folder,
+                },
+                &links,
+                &permissions,
+                &heartbeat_reader_factory,
+                &docker_client,
+                &bract_client,
+            );
+
+            let mut command =
+                OverwriteDouglasExecutable::new(Path::new(CANDIDATE), version(0, 0, 4), true);
+            let span = Span::new(CapturingReporter::new(), "test", ScopeKind::Group);
+
+            let result = command.rollback(&span, &mut context).await;
+
+            assert!(result.is_err());
+        }
+
+        #[tokio::test]
+        async fn test_overwrite_rollback_should_remove_the_staging_file_and_fail_when_the_final_rename_fails()
+         {
+            let mut file_copier = MockFileCopier::new();
+            file_copier.expect_copy().returning(|_, _| Ok(()));
+            let mut file_renamer = MockFileRenamer::new();
+            file_renamer
+                .expect_rename()
+                .returning(|_, _| Err(permission_denied()));
+            let mut permissions = MockPermissions::new();
+            permissions
+                .expect_get_user_and_group_ownership()
+                .withf(|path| path == retained())
+                .returning(|_| Ok(("root".to_string(), "douglas-admin".to_string())));
+            permissions
+                .expect_change_user_and_group_ownership()
+                .returning(|_, _, _| Ok(()));
+            let mut file_deleter = MockFileDeleter::new();
+            file_deleter
+                .expect_delete()
+                .withf(|path| path == Path::new(STAGING))
+                .times(1)
+                .returning(|_| Ok(()));
+            let folder = MockFolder::new();
+            let links = links_to_target();
+            let os = MockOs::new();
+            let heartbeat_reader_factory = heartbeat::MockHeartbeatReaderFactory::new();
+            let docker_client = docker::MockClient::new();
+            let bract_client = bract_client::MockClient::new();
+            let mut context = test_context(
+                &os,
+                FileOperations {
+                    renamer: &file_renamer,
+                    copier: &file_copier,
+                    deleter: &file_deleter,
+                    folder: &folder,
+                },
+                &links,
+                &permissions,
+                &heartbeat_reader_factory,
+                &docker_client,
+                &bract_client,
+            );
+
+            let mut command =
+                OverwriteDouglasExecutable::new(Path::new(CANDIDATE), version(0, 0, 4), true);
+            let span = Span::new(CapturingReporter::new(), "test", ScopeKind::Group);
+
+            let result = command.rollback(&span, &mut context).await;
+
+            assert!(result.is_err());
         }
 
         #[tokio::test]
