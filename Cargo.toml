@@ -73,7 +73,7 @@ members = [
     "seedbank_client", "resin_client", "resin_types",
     "seedling_registration_types", "seedling_registration_client",
     "reconcile_trigger_types", "reconcile_trigger_client", "openbao_types"
-, "identity", "ram_disk", "woodward", "heartbeat", "xtask"]
+, "identity", "ram_disk", "woodward", "heartbeat", "release", "xtask"]
 
 [workspace.dependencies]
 # External
@@ -85,6 +85,7 @@ hex = "0.4.3"
 http-body-util = "0.1"
 humantime = "2.3.0"
 heartbeat = { path = "./heartbeat" }
+release = { path = "./release" }
 hyper = { version = "1.6.0", features = ["client"] }
 hyper-util = { version = "0.1.11", features = ["full"] }
 mime = "0.3.17"
