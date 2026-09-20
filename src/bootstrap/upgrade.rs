@@ -1,6 +1,7 @@
 use crate::{
     bootstrap::{
-        HasServiceControl, KillService, OwnedServiceControl, ServiceControl, StopBract, retention,
+        HasServiceControl, KillService, OwnedServiceControl, ServiceControl, StopBract, journal,
+        retention,
     },
     cli::Presentation,
     commands::print_error,
@@ -17,9 +18,9 @@ use clap::ValueEnum;
 use config::DouglasFolders;
 use credentials::Credentials;
 use file_system::{
-    FileCopier, FileDeleter, FileReader, FileRenamer, FileSystemError, Folder, Inspect, Links,
-    Permissions, UnixFileCopier, UnixFileDeleter, UnixFileRenamer, UnixFolder, UnixInspect,
-    UnixLinks, UnixPermissions, path_to_string,
+    FileCopier, FileDeleter, FileReader, FileRenamer, FileSystemError, FileWriter, Folder, Inspect,
+    Links, Permissions, UnixFileCopier, UnixFileDeleter, UnixFileRenamer, UnixFileWriter,
+    UnixFolder, UnixInspect, UnixLinks, UnixPermissions, path_to_string,
 };
 use log::{Level, Outcome, Reporter, ScopeGuard, ScopeKind, Span};
 use os::Os;
@@ -71,6 +72,7 @@ struct FileOperations<'a> {
     renamer: &'a dyn FileRenamer,
     copier: &'a dyn FileCopier,
     deleter: &'a dyn FileDeleter,
+    writer: &'a dyn FileWriter,
     folder: &'a dyn Folder,
 }
 
@@ -100,6 +102,7 @@ enum State {
     NotNewer,
     Upgradable {
         current: Version,
+        candidate: Version,
         one_way: Vec<Difference>,
         is_marked_as_executable: bool,
         is_owned_by_douglas_admin: bool,
@@ -170,6 +173,7 @@ impl StateObserver<'_> {
 
         guard.finish(Ok(State::Upgradable {
             current: internal.version,
+            candidate: external.version,
             one_way: differences(&internal.metadata, &external.metadata),
             is_marked_as_executable,
             is_owned_by_douglas_admin,
@@ -183,27 +187,30 @@ fn create_plan<'a>(
     presentation: Presentation,
     allow_one_way: bool,
 ) -> Result<Vec<Step<'a>>, UpgradeError> {
-    let (current, restorable, is_marked_as_executable, is_owned_by_douglas_admin) = match state {
-        State::NotRoot => return Err(UpgradeError::MustBeRoot),
-        State::Missing => return Err(UpgradeError::Missing(path.to_path_buf())),
-        State::NotNewer => return Err(UpgradeError::InvalidUpgrade),
-        State::Upgradable {
-            current,
-            one_way,
-            is_marked_as_executable,
-            is_owned_by_douglas_admin,
-        } => {
-            if !one_way.is_empty() && !allow_one_way {
-                return Err(UpgradeError::OneWay(one_way.clone()));
+    let (current, candidate, restorable, is_marked_as_executable, is_owned_by_douglas_admin) =
+        match state {
+            State::NotRoot => return Err(UpgradeError::MustBeRoot),
+            State::Missing => return Err(UpgradeError::Missing(path.to_path_buf())),
+            State::NotNewer => return Err(UpgradeError::InvalidUpgrade),
+            State::Upgradable {
+                current,
+                candidate,
+                one_way,
+                is_marked_as_executable,
+                is_owned_by_douglas_admin,
+            } => {
+                if !one_way.is_empty() && !allow_one_way {
+                    return Err(UpgradeError::OneWay(one_way.clone()));
+                }
+                (
+                    *current,
+                    *candidate,
+                    one_way.is_empty(),
+                    *is_marked_as_executable,
+                    *is_owned_by_douglas_admin,
+                )
             }
-            (
-                *current,
-                one_way.is_empty(),
-                *is_marked_as_executable,
-                *is_owned_by_douglas_admin,
-            )
-        }
-    };
+        };
 
     let mut result = Vec::new();
 
@@ -226,6 +233,7 @@ fn create_plan<'a>(
     if restorable {
         push_step(&mut result, RestartPreviousVersion::new(presentation));
     }
+    push_step(&mut result, RecordUpgrade::new(current, candidate));
     push_step(&mut result, KillService::new(config::services::WOODWARD));
     push_step(&mut result, StopBract::new(false));
     push_step(&mut result, KillService::new(config::services::RESIN));
@@ -236,6 +244,7 @@ fn create_plan<'a>(
     );
     push_step(&mut result, StartNewVersion::new(presentation));
     push_step(&mut result, ConfirmHealthy::new());
+    push_step(&mut result, ClearUpgradeRecord);
 
     Ok(result)
 }
@@ -787,6 +796,96 @@ impl<'a> Command<Context<'a>> for ConfirmHealthy {
 }
 
 #[derive(Debug)]
+struct RecordUpgrade {
+    from: Version,
+    to: Version,
+}
+
+impl RecordUpgrade {
+    pub fn new(from: Version, to: Version) -> Self {
+        Self { from, to }
+    }
+}
+
+impl std::fmt::Display for RecordUpgrade {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Record the upgrade in progress")
+    }
+}
+
+#[async_trait]
+impl<'a> Command<Context<'a>> for RecordUpgrade {
+    fn name(&self) -> String {
+        "Record the upgrade in progress".to_string()
+    }
+
+    async fn run(
+        &mut self,
+        span: &Span,
+        context: &mut Context<'a>,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let guard = span
+            .create_child("Recording the upgrade in progress…", ScopeKind::Step)
+            .start_guard();
+
+        let entry = journal::UpgradeJournal {
+            from: self.from.to_string(),
+            to: self.to.to_string(),
+            previous_binary: retention::retained_path(
+                &context.douglas_folders.binary_dir(),
+                self.from,
+            ),
+            pid: context.service_control.os.current_pid(),
+        };
+        if let Err(err) = journal::record(&context.douglas_folders, context.files.writer, &entry) {
+            return guard.finish(Err(err.into()));
+        }
+
+        guard.finish_with_outcome(Outcome::Ok);
+        Ok(())
+    }
+}
+
+#[derive(Debug)]
+struct ClearUpgradeRecord;
+
+impl ClearUpgradeRecord {
+    fn clear(guard: &ScopeGuard, context: &Context<'_>) {
+        if let Err(err) = journal::clear(&context.douglas_folders, context.files.deleter) {
+            guard.span().message(Level::Warn, &err.to_string());
+        }
+    }
+}
+
+impl std::fmt::Display for ClearUpgradeRecord {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Clear the upgrade record")
+    }
+}
+
+#[async_trait]
+impl<'a> Command<Context<'a>> for ClearUpgradeRecord {
+    fn name(&self) -> String {
+        "Clear the upgrade record".to_string()
+    }
+
+    async fn run(
+        &mut self,
+        span: &Span,
+        context: &mut Context<'a>,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let guard = span
+            .create_child("Clearing the upgrade record…", ScopeKind::Step)
+            .start_guard();
+
+        Self::clear(&guard, context);
+
+        guard.finish_with_outcome(Outcome::Ok);
+        Ok(())
+    }
+}
+
+#[derive(Debug)]
 struct RestartPreviousVersion {
     presentation: Presentation,
 }
@@ -829,6 +928,8 @@ impl<'a> Command<Context<'a>> for RestartPreviousVersion {
         if let Err(err) = start_installed_version(context, self.presentation) {
             return guard.finish(Err(err.into()));
         }
+
+        ClearUpgradeRecord::clear(&guard, context);
 
         guard.finish_with_outcome(Outcome::Ok);
         Ok(())
@@ -903,6 +1004,7 @@ pub async fn perform(
     let file_renamer = UnixFileRenamer::new();
     let file_copier = UnixFileCopier::new();
     let file_deleter = UnixFileDeleter::new();
+    let file_writer = UnixFileWriter::new();
     let folder = UnixFolder::new();
     let links = UnixLinks::new();
 
@@ -933,6 +1035,7 @@ pub async fn perform(
             renamer: &file_renamer,
             copier: &file_copier,
             deleter: &file_deleter,
+            writer: &file_writer,
             folder: &folder,
         },
         links: &links,
@@ -962,8 +1065,8 @@ mod tests {
     use crate::verify::{MockBinaryVerifier, Release, Version};
     use credentials::MockCredentials;
     use file_system::{
-        MockFileCopier, MockFileDeleter, MockFileRenamer, MockFolder, MockInspect, MockLinks,
-        MockPermissions,
+        MockFileCopier, MockFileDeleter, MockFileRenamer, MockFileWriter, MockFolder, MockInspect,
+        MockLinks, MockPermissions,
     };
     use heartbeat::HeartbeatReaderFactory;
     use mockall::Sequence;
@@ -1059,6 +1162,7 @@ mod tests {
         fn test_should_skip_mark_executable_and_set_ownership_when_already_correct() {
             let state = State::Upgradable {
                 current: version(0, 0, 1),
+                candidate: version(9, 9, 9),
                 one_way: Vec::new(),
                 is_marked_as_executable: true,
                 is_owned_by_douglas_admin: true,
@@ -1076,6 +1180,7 @@ mod tests {
                 vec![
                     "Keep the current version for rollback".to_string(),
                     "Bring the previous version back up if the upgrade fails".to_string(),
+                    "Record the upgrade in progress".to_string(),
                     "Kill service woodward".to_string(),
                     "Stopping Bract".to_string(),
                     "Kill service resin".to_string(),
@@ -1083,6 +1188,7 @@ mod tests {
                     "Overwrite current version with new version".to_string(),
                     "Start the new version".to_string(),
                     "Confirm the new version is healthy".to_string(),
+                    "Clear the upgrade record".to_string(),
                 ]
             );
         }
@@ -1091,6 +1197,7 @@ mod tests {
         fn test_should_mark_executable_and_set_ownership_first_when_needed() {
             let state = State::Upgradable {
                 current: version(0, 0, 1),
+                candidate: version(9, 9, 9),
                 one_way: Vec::new(),
                 is_marked_as_executable: false,
                 is_owned_by_douglas_admin: false,
@@ -1112,6 +1219,7 @@ mod tests {
                         .to_string(),
                     "Keep the current version for rollback".to_string(),
                     "Bring the previous version back up if the upgrade fails".to_string(),
+                    "Record the upgrade in progress".to_string(),
                     "Kill service woodward".to_string(),
                     "Stopping Bract".to_string(),
                     "Kill service resin".to_string(),
@@ -1119,12 +1227,14 @@ mod tests {
                     "Overwrite current version with new version".to_string(),
                     "Start the new version".to_string(),
                     "Confirm the new version is healthy".to_string(),
+                    "Clear the upgrade record".to_string(),
                 ]
             );
         }
         fn one_way_state() -> State {
             State::Upgradable {
                 current: version(0, 0, 1),
+                candidate: version(9, 9, 9),
                 one_way: vec![Difference::CoreVersion {
                     seedling: "openbao".to_string(),
                     from: 1,
@@ -1689,6 +1799,7 @@ mod tests {
             let bract_client = bract_client::MockClient::new();
             let file_copier = MockFileCopier::new();
             let file_deleter = MockFileDeleter::new();
+            let file_writer = MockFileWriter::new();
             let folder = MockFolder::new();
             let mut context = test_context(
                 &os,
@@ -1696,6 +1807,7 @@ mod tests {
                     renamer: &file_renamer,
                     copier: &file_copier,
                     deleter: &file_deleter,
+                    writer: &file_writer,
                     folder: &folder,
                 },
                 &links,
@@ -1821,12 +1933,14 @@ mod tests {
             let heartbeat_reader_factory = heartbeat::MockHeartbeatReaderFactory::new();
             let docker_client = docker::MockClient::new();
             let bract_client = bract_client::MockClient::new();
+            let file_writer = MockFileWriter::new();
             let mut context = test_context(
                 &os,
                 FileOperations {
                     renamer: &file_renamer,
                     copier: &file_copier,
                     deleter: &file_deleter,
+                    writer: &file_writer,
                     folder: &folder,
                 },
                 &links,
@@ -1879,12 +1993,14 @@ mod tests {
             let heartbeat_reader_factory = heartbeat::MockHeartbeatReaderFactory::new();
             let docker_client = docker::MockClient::new();
             let bract_client = bract_client::MockClient::new();
+            let file_writer = MockFileWriter::new();
             let mut context = test_context(
                 &os,
                 FileOperations {
                     renamer: &file_renamer,
                     copier: &file_copier,
                     deleter: &file_deleter,
+                    writer: &file_writer,
                     folder: &folder,
                 },
                 &links,
@@ -1924,12 +2040,14 @@ mod tests {
             let heartbeat_reader_factory = heartbeat::MockHeartbeatReaderFactory::new();
             let docker_client = docker::MockClient::new();
             let bract_client = bract_client::MockClient::new();
+            let file_writer = MockFileWriter::new();
             let mut context = test_context(
                 &os,
                 FileOperations {
                     renamer: &file_renamer,
                     copier: &file_copier,
                     deleter: &file_deleter,
+                    writer: &file_writer,
                     folder: &folder,
                 },
                 &links,
@@ -1985,12 +2103,14 @@ mod tests {
             let heartbeat_reader_factory = heartbeat::MockHeartbeatReaderFactory::new();
             let docker_client = docker::MockClient::new();
             let bract_client = bract_client::MockClient::new();
+            let file_writer = MockFileWriter::new();
             let mut context = test_context(
                 &os,
                 FileOperations {
                     renamer: &file_renamer,
                     copier: &file_copier,
                     deleter: &file_deleter,
+                    writer: &file_writer,
                     folder: &folder,
                 },
                 &links,
@@ -2029,6 +2149,7 @@ mod tests {
             file_copier.expect_copy().times(0);
             let mut file_deleter = MockFileDeleter::new();
             file_deleter.expect_delete().times(0);
+            let file_writer = MockFileWriter::new();
             let folder = MockFolder::new();
             let mut links = MockLinks::new();
             links
@@ -2044,6 +2165,7 @@ mod tests {
                     renamer: &file_renamer,
                     copier: &file_copier,
                     deleter: &file_deleter,
+                    writer: &file_writer,
                     folder: &folder,
                 },
                 &links,
@@ -2075,6 +2197,7 @@ mod tests {
                 .withf(|path| path == partial())
                 .times(1)
                 .returning(|_| Ok(()));
+            let file_writer = MockFileWriter::new();
             let folder = MockFolder::new();
             let permissions = MockPermissions::new();
             let os = MockOs::new();
@@ -2088,6 +2211,7 @@ mod tests {
                     renamer: &file_renamer,
                     copier: &file_copier,
                     deleter: &file_deleter,
+                    writer: &file_writer,
                     folder: &folder,
                 },
                 &links,
@@ -2122,6 +2246,7 @@ mod tests {
                 .withf(|path| path == partial())
                 .times(1)
                 .returning(|_| Ok(()));
+            let file_writer = MockFileWriter::new();
             let folder = MockFolder::new();
             let os = MockOs::new();
             let links = links_to_target();
@@ -2134,6 +2259,7 @@ mod tests {
                     renamer: &file_renamer,
                     copier: &file_copier,
                     deleter: &file_deleter,
+                    writer: &file_writer,
                     folder: &folder,
                 },
                 &links,
@@ -2170,6 +2296,7 @@ mod tests {
                 .withf(|path| path == partial())
                 .times(1)
                 .returning(|_| Ok(()));
+            let file_writer = MockFileWriter::new();
             let folder = MockFolder::new();
             let os = MockOs::new();
             let links = links_to_target();
@@ -2182,6 +2309,7 @@ mod tests {
                     renamer: &file_renamer,
                     copier: &file_copier,
                     deleter: &file_deleter,
+                    writer: &file_writer,
                     folder: &folder,
                 },
                 &links,
@@ -2209,6 +2337,7 @@ mod tests {
                 .returning(|_, _| Ok(()));
             let file_copier = MockFileCopier::new();
             let file_deleter = MockFileDeleter::new();
+            let file_writer = MockFileWriter::new();
             let folder = MockFolder::new();
             let permissions = MockPermissions::new();
             let os = MockOs::new();
@@ -2222,6 +2351,7 @@ mod tests {
                     renamer: &file_renamer,
                     copier: &file_copier,
                     deleter: &file_deleter,
+                    writer: &file_writer,
                     folder: &folder,
                 },
                 &links,
@@ -2247,6 +2377,7 @@ mod tests {
             file_renamer.expect_rename().times(0);
             let file_copier = MockFileCopier::new();
             let file_deleter = MockFileDeleter::new();
+            let file_writer = MockFileWriter::new();
             let folder = MockFolder::new();
             let mut links = MockLinks::new();
             links
@@ -2262,6 +2393,7 @@ mod tests {
                     renamer: &file_renamer,
                     copier: &file_copier,
                     deleter: &file_deleter,
+                    writer: &file_writer,
                     folder: &folder,
                 },
                 &links,
@@ -2290,6 +2422,7 @@ mod tests {
                 .returning(|_, _| Err(permission_denied()));
             let file_copier = MockFileCopier::new();
             let file_deleter = MockFileDeleter::new();
+            let file_writer = MockFileWriter::new();
             let folder = MockFolder::new();
             let permissions = MockPermissions::new();
             let os = MockOs::new();
@@ -2303,6 +2436,7 @@ mod tests {
                     renamer: &file_renamer,
                     copier: &file_copier,
                     deleter: &file_deleter,
+                    writer: &file_writer,
                     folder: &folder,
                 },
                 &links,
@@ -2327,6 +2461,7 @@ mod tests {
             let mut sequence = Sequence::new();
             let mut file_renamer = MockFileRenamer::new();
             let mut file_copier = MockFileCopier::new();
+            let file_writer = MockFileWriter::new();
             let folder = MockFolder::new();
             let mut file_deleter = MockFileDeleter::new();
             let mut permissions = MockPermissions::new();
@@ -2379,6 +2514,7 @@ mod tests {
                     renamer: &file_renamer,
                     copier: &file_copier,
                     deleter: &file_deleter,
+                    writer: &file_writer,
                     folder: &folder,
                 },
                 &links,
@@ -2402,6 +2538,7 @@ mod tests {
          {
             let mut file_renamer = MockFileRenamer::new();
             let mut file_copier = MockFileCopier::new();
+            let file_writer = MockFileWriter::new();
             let folder = MockFolder::new();
             let mut file_deleter = MockFileDeleter::new();
             let permissions = candidate_is_root_owned_by_douglas_admin();
@@ -2430,6 +2567,7 @@ mod tests {
                     renamer: &file_renamer,
                     copier: &file_copier,
                     deleter: &file_deleter,
+                    writer: &file_writer,
                     folder: &folder,
                 },
                 &links,
@@ -2453,6 +2591,7 @@ mod tests {
          {
             let mut file_renamer = MockFileRenamer::new();
             let mut file_copier = MockFileCopier::new();
+            let file_writer = MockFileWriter::new();
             let folder = MockFolder::new();
             let mut file_deleter = MockFileDeleter::new();
             let mut permissions = candidate_is_root_owned_by_douglas_admin();
@@ -2482,6 +2621,7 @@ mod tests {
                     renamer: &file_renamer,
                     copier: &file_copier,
                     deleter: &file_deleter,
+                    writer: &file_writer,
                     folder: &folder,
                 },
                 &links,
@@ -2505,6 +2645,7 @@ mod tests {
          {
             let mut file_renamer = MockFileRenamer::new();
             let mut file_copier = MockFileCopier::new();
+            let file_writer = MockFileWriter::new();
             let folder = MockFolder::new();
             let mut file_deleter = MockFileDeleter::new();
             let mut permissions = candidate_is_root_owned_by_douglas_admin();
@@ -2539,6 +2680,7 @@ mod tests {
                     renamer: &file_renamer,
                     copier: &file_copier,
                     deleter: &file_deleter,
+                    writer: &file_writer,
                     folder: &folder,
                 },
                 &links,
@@ -2562,6 +2704,7 @@ mod tests {
          {
             let mut file_renamer = MockFileRenamer::new();
             let mut file_copier = MockFileCopier::new();
+            let file_writer = MockFileWriter::new();
             let folder = MockFolder::new();
             let mut file_deleter = MockFileDeleter::new();
             let mut permissions = candidate_is_root_owned_by_douglas_admin();
@@ -2596,6 +2739,7 @@ mod tests {
                     renamer: &file_renamer,
                     copier: &file_copier,
                     deleter: &file_deleter,
+                    writer: &file_writer,
                     folder: &folder,
                 },
                 &links,
@@ -2654,6 +2798,7 @@ mod tests {
                 .returning(|_, _, _| Ok(()));
             let mut file_deleter = MockFileDeleter::new();
             file_deleter.expect_delete().times(0);
+            let file_writer = MockFileWriter::new();
             let folder = MockFolder::new();
             let links = links_to_target();
             let os = MockOs::new();
@@ -2666,6 +2811,7 @@ mod tests {
                     renamer: &file_renamer,
                     copier: &file_copier,
                     deleter: &file_deleter,
+                    writer: &file_writer,
                     folder: &folder,
                 },
                 &links,
@@ -2694,6 +2840,7 @@ mod tests {
             let permissions = MockPermissions::new();
             let mut file_deleter = MockFileDeleter::new();
             file_deleter.expect_delete().times(0);
+            let file_writer = MockFileWriter::new();
             let folder = MockFolder::new();
             let links = MockLinks::new();
             let os = MockOs::new();
@@ -2706,6 +2853,7 @@ mod tests {
                     renamer: &file_renamer,
                     copier: &file_copier,
                     deleter: &file_deleter,
+                    writer: &file_writer,
                     folder: &folder,
                 },
                 &links,
@@ -2734,6 +2882,7 @@ mod tests {
             let permissions = MockPermissions::new();
             let mut file_deleter = MockFileDeleter::new();
             file_deleter.expect_delete().times(0);
+            let file_writer = MockFileWriter::new();
             let folder = MockFolder::new();
             let links = {
                 let mut links = MockLinks::new();
@@ -2752,6 +2901,7 @@ mod tests {
                     renamer: &file_renamer,
                     copier: &file_copier,
                     deleter: &file_deleter,
+                    writer: &file_writer,
                     folder: &folder,
                 },
                 &links,
@@ -2786,6 +2936,7 @@ mod tests {
                 .withf(|path| path == Path::new(STAGING))
                 .times(1)
                 .returning(|_| Ok(()));
+            let file_writer = MockFileWriter::new();
             let folder = MockFolder::new();
             let links = links_to_target();
             let os = MockOs::new();
@@ -2798,6 +2949,7 @@ mod tests {
                     renamer: &file_renamer,
                     copier: &file_copier,
                     deleter: &file_deleter,
+                    writer: &file_writer,
                     folder: &folder,
                 },
                 &links,
@@ -2837,6 +2989,7 @@ mod tests {
                 .withf(|path| path == Path::new(STAGING))
                 .times(1)
                 .returning(|_| Ok(()));
+            let file_writer = MockFileWriter::new();
             let folder = MockFolder::new();
             let links = links_to_target();
             let os = MockOs::new();
@@ -2849,6 +3002,7 @@ mod tests {
                     renamer: &file_renamer,
                     copier: &file_copier,
                     deleter: &file_deleter,
+                    writer: &file_writer,
                     folder: &folder,
                 },
                 &links,
@@ -2890,6 +3044,7 @@ mod tests {
                 .withf(|path| path == Path::new(STAGING))
                 .times(1)
                 .returning(|_| Ok(()));
+            let file_writer = MockFileWriter::new();
             let folder = MockFolder::new();
             let links = links_to_target();
             let os = MockOs::new();
@@ -2902,6 +3057,7 @@ mod tests {
                     renamer: &file_renamer,
                     copier: &file_copier,
                     deleter: &file_deleter,
+                    writer: &file_writer,
                     folder: &folder,
                 },
                 &links,
@@ -2950,6 +3106,7 @@ mod tests {
             let docker_client = docker::MockClient::new();
             let file_copier = MockFileCopier::new();
             let file_deleter = MockFileDeleter::new();
+            let file_writer = MockFileWriter::new();
             let folder = MockFolder::new();
             let mut context = test_context(
                 &os,
@@ -2957,6 +3114,7 @@ mod tests {
                     renamer: &file_renamer,
                     copier: &file_copier,
                     deleter: &file_deleter,
+                    writer: &file_writer,
                     folder: &folder,
                 },
                 &links,
@@ -3046,6 +3204,7 @@ mod tests {
             let docker_client = docker::MockClient::new();
             let file_copier = MockFileCopier::new();
             let file_deleter = MockFileDeleter::new();
+            let file_writer = MockFileWriter::new();
             let folder = MockFolder::new();
             let mut context = test_context(
                 &os,
@@ -3053,6 +3212,7 @@ mod tests {
                     renamer: &file_renamer,
                     copier: &file_copier,
                     deleter: &file_deleter,
+                    writer: &file_writer,
                     folder: &folder,
                 },
                 &links,
@@ -3120,6 +3280,7 @@ mod tests {
             let docker_client = docker::MockClient::new();
             let file_copier = MockFileCopier::new();
             let file_deleter = MockFileDeleter::new();
+            let file_writer = MockFileWriter::new();
             let folder = MockFolder::new();
             let mut context = test_context(
                 &os,
@@ -3127,6 +3288,7 @@ mod tests {
                     renamer: &file_renamer,
                     copier: &file_copier,
                     deleter: &file_deleter,
+                    writer: &file_writer,
                     folder: &folder,
                 },
                 &links,
@@ -3169,6 +3331,7 @@ mod tests {
             let docker_client = docker::MockClient::new();
             let file_copier = MockFileCopier::new();
             let file_deleter = MockFileDeleter::new();
+            let file_writer = MockFileWriter::new();
             let folder = MockFolder::new();
             let mut context = test_context(
                 &os,
@@ -3176,6 +3339,7 @@ mod tests {
                     renamer: &file_renamer,
                     copier: &file_copier,
                     deleter: &file_deleter,
+                    writer: &file_writer,
                     folder: &folder,
                 },
                 &links,
@@ -3214,6 +3378,7 @@ mod tests {
             let docker_client = docker::MockClient::new();
             let file_copier = MockFileCopier::new();
             let file_deleter = MockFileDeleter::new();
+            let file_writer = MockFileWriter::new();
             let folder = MockFolder::new();
             let mut context = test_context(
                 &os,
@@ -3221,6 +3386,7 @@ mod tests {
                     renamer: &file_renamer,
                     copier: &file_copier,
                     deleter: &file_deleter,
+                    writer: &file_writer,
                     folder: &folder,
                 },
                 &links,
@@ -3269,6 +3435,7 @@ mod tests {
             let bract_client = bract_client::MockClient::new();
             let file_copier = MockFileCopier::new();
             let file_deleter = MockFileDeleter::new();
+            let file_writer = MockFileWriter::new();
             let folder = MockFolder::new();
             let mut context = test_context(
                 &os,
@@ -3276,6 +3443,7 @@ mod tests {
                     renamer: &file_renamer,
                     copier: &file_copier,
                     deleter: &file_deleter,
+                    writer: &file_writer,
                     folder: &folder,
                 },
                 &links,
@@ -3318,6 +3486,7 @@ mod tests {
             let bract_client = bract_client::MockClient::new();
             let file_copier = MockFileCopier::new();
             let file_deleter = MockFileDeleter::new();
+            let file_writer = MockFileWriter::new();
             let folder = MockFolder::new();
             let mut context = test_context(
                 &os,
@@ -3325,6 +3494,7 @@ mod tests {
                     renamer: &file_renamer,
                     copier: &file_copier,
                     deleter: &file_deleter,
+                    writer: &file_writer,
                     folder: &folder,
                 },
                 &links,
@@ -3377,6 +3547,7 @@ mod tests {
             let bract_client = bract_client::MockClient::new();
             let file_copier = MockFileCopier::new();
             let file_deleter = MockFileDeleter::new();
+            let file_writer = MockFileWriter::new();
             let folder = MockFolder::new();
             let mut context = test_context(
                 &os,
@@ -3384,6 +3555,7 @@ mod tests {
                     renamer: &file_renamer,
                     copier: &file_copier,
                     deleter: &file_deleter,
+                    writer: &file_writer,
                     folder: &folder,
                 },
                 &links,
@@ -3437,6 +3609,7 @@ mod tests {
             let bract_client = bract_client::MockClient::new();
             let file_copier = MockFileCopier::new();
             let file_deleter = MockFileDeleter::new();
+            let file_writer = MockFileWriter::new();
             let folder = MockFolder::new();
             let mut context = test_context(
                 &os,
@@ -3444,6 +3617,7 @@ mod tests {
                     renamer: &file_renamer,
                     copier: &file_copier,
                     deleter: &file_deleter,
+                    writer: &file_writer,
                     folder: &folder,
                 },
                 &links,
@@ -3488,6 +3662,7 @@ mod tests {
             let bract_client = bract_client::MockClient::new();
             let file_copier = MockFileCopier::new();
             let file_deleter = MockFileDeleter::new();
+            let file_writer = MockFileWriter::new();
             let folder = MockFolder::new();
             let mut context = test_context(
                 &os,
@@ -3495,6 +3670,7 @@ mod tests {
                     renamer: &file_renamer,
                     copier: &file_copier,
                     deleter: &file_deleter,
+                    writer: &file_writer,
                     folder: &folder,
                 },
                 &links,
@@ -3540,6 +3716,7 @@ mod tests {
             let bract_client = bract_client::MockClient::new();
             let file_copier = MockFileCopier::new();
             let file_deleter = MockFileDeleter::new();
+            let file_writer = MockFileWriter::new();
             let folder = MockFolder::new();
             let mut context = test_context(
                 &os,
@@ -3547,6 +3724,7 @@ mod tests {
                     renamer: &file_renamer,
                     copier: &file_copier,
                     deleter: &file_deleter,
+                    writer: &file_writer,
                     folder: &folder,
                 },
                 &links,
@@ -3616,6 +3794,7 @@ mod tests {
                 .returning(|_| Ok(()));
             let file_copier = MockFileCopier::new();
             let file_deleter = MockFileDeleter::new();
+            let file_writer = MockFileWriter::new();
             let folder = MockFolder::new();
             let mut context = test_context(
                 &os,
@@ -3623,6 +3802,7 @@ mod tests {
                     renamer: &file_renamer,
                     copier: &file_copier,
                     deleter: &file_deleter,
+                    writer: &file_writer,
                     folder: &folder,
                 },
                 &links,
@@ -3641,6 +3821,303 @@ mod tests {
         }
 
         #[tokio::test]
+        async fn test_record_upgrade_run_should_write_the_journal_with_both_versions_the_retained_binary_and_the_pid()
+         {
+            let mut os = MockOs::new();
+            os.expect_current_pid().returning(|| 4242);
+            let heartbeat_reader_factory = heartbeat::MockHeartbeatReaderFactory::new();
+            let bract_client = bract_client::MockClient::new();
+            let file_renamer = MockFileRenamer::new();
+            let links = MockLinks::new();
+            let permissions = MockPermissions::new();
+            let docker_client = docker::MockClient::new();
+            let file_copier = MockFileCopier::new();
+            let mut file_deleter = MockFileDeleter::new();
+            file_deleter.expect_delete().times(0);
+            let mut file_writer = MockFileWriter::new();
+            file_writer
+                .expect_write_all()
+                .withf(|path, contents| {
+                    let expected = journal::UpgradeJournal {
+                        from: "0.0.1".to_string(),
+                        to: "0.0.2".to_string(),
+                        previous_binary: DouglasFolders::default()
+                            .binary_dir()
+                            .join("douglas-0.0.1"),
+                        pid: 4242,
+                    };
+                    path == DouglasFolders::default().upgrade_journal()
+                        && serde_json::from_str::<journal::UpgradeJournal>(contents).ok()
+                            == Some(expected)
+                })
+                .times(1)
+                .returning(|_, _| Ok(()));
+            let folder = MockFolder::new();
+            let mut context = test_context(
+                &os,
+                FileOperations {
+                    renamer: &file_renamer,
+                    copier: &file_copier,
+                    deleter: &file_deleter,
+                    writer: &file_writer,
+                    folder: &folder,
+                },
+                &links,
+                &permissions,
+                &heartbeat_reader_factory,
+                &docker_client,
+                &bract_client,
+            );
+
+            let mut command = RecordUpgrade::new(version(0, 0, 1), version(0, 0, 2));
+
+            let span = Span::new(CapturingReporter::new(), "test", ScopeKind::Group);
+
+            let result = command.run(&span, &mut context).await;
+
+            assert!(result.is_ok());
+        }
+
+        #[tokio::test]
+        async fn test_record_upgrade_run_should_fail_when_the_journal_cannot_be_written() {
+            let mut os = MockOs::new();
+            os.expect_current_pid().returning(|| 4242);
+            let heartbeat_reader_factory = heartbeat::MockHeartbeatReaderFactory::new();
+            let bract_client = bract_client::MockClient::new();
+            let file_renamer = MockFileRenamer::new();
+            let links = MockLinks::new();
+            let permissions = MockPermissions::new();
+            let docker_client = docker::MockClient::new();
+            let file_copier = MockFileCopier::new();
+            let mut file_deleter = MockFileDeleter::new();
+            file_deleter.expect_delete().times(0);
+            let mut file_writer = MockFileWriter::new();
+            file_writer.expect_write_all().returning(|path, _| {
+                Err(FileSystemError::IoErrorAtPath {
+                    path: path.to_path_buf(),
+                    error: std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+                })
+            });
+            let folder = MockFolder::new();
+            let mut context = test_context(
+                &os,
+                FileOperations {
+                    renamer: &file_renamer,
+                    copier: &file_copier,
+                    deleter: &file_deleter,
+                    writer: &file_writer,
+                    folder: &folder,
+                },
+                &links,
+                &permissions,
+                &heartbeat_reader_factory,
+                &docker_client,
+                &bract_client,
+            );
+
+            let mut command = RecordUpgrade::new(version(0, 0, 1), version(0, 0, 2));
+
+            let span = Span::new(CapturingReporter::new(), "test", ScopeKind::Group);
+
+            let result = command.run(&span, &mut context).await;
+
+            assert!(result.is_err());
+        }
+
+        #[tokio::test]
+        async fn test_clear_upgrade_record_run_should_delete_the_journal() {
+            let os = MockOs::new();
+            let heartbeat_reader_factory = heartbeat::MockHeartbeatReaderFactory::new();
+            let bract_client = bract_client::MockClient::new();
+            let file_renamer = MockFileRenamer::new();
+            let links = MockLinks::new();
+            let permissions = MockPermissions::new();
+            let docker_client = docker::MockClient::new();
+            let file_copier = MockFileCopier::new();
+            let mut file_deleter = MockFileDeleter::new();
+            file_deleter
+                .expect_delete()
+                .withf(|path| path == DouglasFolders::default().upgrade_journal())
+                .times(1)
+                .returning(|_| Ok(()));
+            let mut file_writer = MockFileWriter::new();
+            file_writer.expect_write_all().times(0);
+            let folder = MockFolder::new();
+            let mut context = test_context(
+                &os,
+                FileOperations {
+                    renamer: &file_renamer,
+                    copier: &file_copier,
+                    deleter: &file_deleter,
+                    writer: &file_writer,
+                    folder: &folder,
+                },
+                &links,
+                &permissions,
+                &heartbeat_reader_factory,
+                &docker_client,
+                &bract_client,
+            );
+
+            let mut command = ClearUpgradeRecord;
+
+            let span = Span::new(CapturingReporter::new(), "test", ScopeKind::Group);
+
+            let result = command.run(&span, &mut context).await;
+
+            assert!(result.is_ok());
+        }
+
+        #[tokio::test]
+        async fn test_clear_upgrade_record_run_should_still_succeed_when_the_journal_cannot_be_removed()
+         {
+            let os = MockOs::new();
+            let heartbeat_reader_factory = heartbeat::MockHeartbeatReaderFactory::new();
+            let bract_client = bract_client::MockClient::new();
+            let file_renamer = MockFileRenamer::new();
+            let links = MockLinks::new();
+            let permissions = MockPermissions::new();
+            let docker_client = docker::MockClient::new();
+            let file_copier = MockFileCopier::new();
+            let mut file_deleter = MockFileDeleter::new();
+            file_deleter.expect_delete().returning(|path| {
+                Err(FileSystemError::IoErrorAtPath {
+                    path: path.to_path_buf(),
+                    error: std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+                })
+            });
+            let mut file_writer = MockFileWriter::new();
+            file_writer.expect_write_all().times(0);
+            let folder = MockFolder::new();
+            let mut context = test_context(
+                &os,
+                FileOperations {
+                    renamer: &file_renamer,
+                    copier: &file_copier,
+                    deleter: &file_deleter,
+                    writer: &file_writer,
+                    folder: &folder,
+                },
+                &links,
+                &permissions,
+                &heartbeat_reader_factory,
+                &docker_client,
+                &bract_client,
+            );
+
+            let mut command = ClearUpgradeRecord;
+
+            let span = Span::new(CapturingReporter::new(), "test", ScopeKind::Group);
+
+            let result = command.run(&span, &mut context).await;
+
+            assert!(result.is_ok());
+        }
+
+        #[tokio::test]
+        async fn test_restart_previous_version_rollback_should_still_succeed_when_the_journal_cannot_be_removed()
+         {
+            let mut os = MockOs::new();
+            os.expect_execute_with_output().returning(|_, _, _| {
+                Ok(std::process::Output {
+                    status: std::process::ExitStatus::from_raw(0),
+                    stdout: Vec::new(),
+                    stderr: Vec::new(),
+                })
+            });
+            let heartbeat_reader_factory = heartbeat::MockHeartbeatReaderFactory::new();
+            let bract_client = bract_client::MockClient::new();
+            let file_renamer = MockFileRenamer::new();
+            let links = MockLinks::new();
+            let permissions = MockPermissions::new();
+            let docker_client = docker::MockClient::new();
+            let file_copier = MockFileCopier::new();
+            let mut file_deleter = MockFileDeleter::new();
+            file_deleter.expect_delete().returning(|path| {
+                Err(FileSystemError::IoErrorAtPath {
+                    path: path.to_path_buf(),
+                    error: std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+                })
+            });
+            let mut file_writer = MockFileWriter::new();
+            file_writer.expect_write_all().times(0);
+            let folder = MockFolder::new();
+            let mut context = test_context(
+                &os,
+                FileOperations {
+                    renamer: &file_renamer,
+                    copier: &file_copier,
+                    deleter: &file_deleter,
+                    writer: &file_writer,
+                    folder: &folder,
+                },
+                &links,
+                &permissions,
+                &heartbeat_reader_factory,
+                &docker_client,
+                &bract_client,
+            );
+
+            let mut command = RestartPreviousVersion::new(Presentation::Plain);
+
+            let span = Span::new(CapturingReporter::new(), "test", ScopeKind::Group);
+
+            let result = command.rollback(&span, &mut context).await;
+
+            assert!(result.is_ok());
+        }
+
+        #[tokio::test]
+        async fn test_restart_previous_version_rollback_should_keep_the_journal_when_the_previous_version_will_not_start()
+         {
+            let mut os = MockOs::new();
+            os.expect_execute_with_output().returning(|_, _, _| {
+                Err(os::OsError::ProccessExitStatusError {
+                    name: "douglas".to_string(),
+                    code: Some(1),
+                    args: Vec::new(),
+                    stdout: String::new(),
+                    stderr: "no".to_string(),
+                })
+            });
+            let heartbeat_reader_factory = heartbeat::MockHeartbeatReaderFactory::new();
+            let bract_client = bract_client::MockClient::new();
+            let file_renamer = MockFileRenamer::new();
+            let links = MockLinks::new();
+            let permissions = MockPermissions::new();
+            let docker_client = docker::MockClient::new();
+            let file_copier = MockFileCopier::new();
+            let mut file_deleter = MockFileDeleter::new();
+            file_deleter.expect_delete().times(0);
+            let mut file_writer = MockFileWriter::new();
+            file_writer.expect_write_all().times(0);
+            let folder = MockFolder::new();
+            let mut context = test_context(
+                &os,
+                FileOperations {
+                    renamer: &file_renamer,
+                    copier: &file_copier,
+                    deleter: &file_deleter,
+                    writer: &file_writer,
+                    folder: &folder,
+                },
+                &links,
+                &permissions,
+                &heartbeat_reader_factory,
+                &docker_client,
+                &bract_client,
+            );
+
+            let mut command = RestartPreviousVersion::new(Presentation::Plain);
+
+            let span = Span::new(CapturingReporter::new(), "test", ScopeKind::Group);
+
+            let result = command.rollback(&span, &mut context).await;
+
+            assert!(result.is_err());
+        }
+
+        #[tokio::test]
         async fn test_restart_previous_version_run_should_do_nothing() {
             let mut os = MockOs::new();
             os.expect_execute_with_output().times(0);
@@ -3652,6 +4129,7 @@ mod tests {
             let docker_client = docker::MockClient::new();
             let file_copier = MockFileCopier::new();
             let file_deleter = MockFileDeleter::new();
+            let file_writer = MockFileWriter::new();
             let folder = MockFolder::new();
             let mut context = test_context(
                 &os,
@@ -3659,6 +4137,7 @@ mod tests {
                     renamer: &file_renamer,
                     copier: &file_copier,
                     deleter: &file_deleter,
+                    writer: &file_writer,
                     folder: &folder,
                 },
                 &links,
@@ -3705,7 +4184,13 @@ mod tests {
             let permissions = MockPermissions::new();
             let docker_client = docker::MockClient::new();
             let file_copier = MockFileCopier::new();
-            let file_deleter = MockFileDeleter::new();
+            let mut file_deleter = MockFileDeleter::new();
+            file_deleter
+                .expect_delete()
+                .withf(|path| path == DouglasFolders::default().upgrade_journal())
+                .times(1)
+                .returning(|_| Ok(()));
+            let file_writer = MockFileWriter::new();
             let folder = MockFolder::new();
             let mut context = test_context(
                 &os,
@@ -3713,6 +4198,7 @@ mod tests {
                     renamer: &file_renamer,
                     copier: &file_copier,
                     deleter: &file_deleter,
+                    writer: &file_writer,
                     folder: &folder,
                 },
                 &links,
@@ -3763,6 +4249,7 @@ mod tests {
             let docker_client = docker::MockClient::new();
             let file_copier = MockFileCopier::new();
             let file_deleter = MockFileDeleter::new();
+            let file_writer = MockFileWriter::new();
             let folder = MockFolder::new();
             let mut context = test_context(
                 &os,
@@ -3770,6 +4257,7 @@ mod tests {
                     renamer: &file_renamer,
                     copier: &file_copier,
                     deleter: &file_deleter,
+                    writer: &file_writer,
                     folder: &folder,
                 },
                 &links,

@@ -39,6 +39,7 @@ pub enum OsError {
 #[cfg_attr(feature = "mock", mockall::automock)]
 pub trait Os: Send + Sync {
     fn current_executable(&self) -> Result<PathBuf, OsError>;
+    fn current_pid(&self) -> u32;
     fn replace_process(
         &self,
         command: &str,
@@ -202,6 +203,10 @@ impl Os for Unix {
 
     fn current_executable(&self) -> Result<PathBuf, OsError> {
         Ok(std::env::current_exe()?)
+    }
+
+    fn current_pid(&self) -> u32 {
+        std::process::id()
     }
 
     fn spawn(

@@ -145,6 +145,12 @@ impl DouglasFolders {
         result.push("install-marker.json");
         result
     }
+
+    pub fn upgrade_journal(&self) -> PathBuf {
+        let mut result = self.seedlings_root.clone();
+        result.push("upgrade-journal.json");
+        result
+    }
 }
 
 impl Default for DouglasFolders {
@@ -338,6 +344,19 @@ mod tests {
         assert_eq!(
             marker.file_name().and_then(|name| name.to_str()),
             Some("install-marker.json")
+        );
+    }
+
+    #[test]
+    fn test_upgrade_journal_should_sit_directly_under_the_seedlings_root() {
+        let folders = DouglasFolders::new();
+
+        let journal = folders.upgrade_journal();
+
+        assert_eq!(journal.parent(), Some(folders.seedlings_root.as_path()));
+        assert_eq!(
+            journal.file_name().and_then(|name| name.to_str()),
+            Some("upgrade-journal.json")
         );
     }
 }

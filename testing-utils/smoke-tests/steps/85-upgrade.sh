@@ -72,6 +72,9 @@ assert_success "the retained version is executable" ssh_out "sudo test -x $retai
 assert_failure "no partial copy is left behind" ssh_out \
     "sudo ls /var/lib/douglas/bin/*.partial"
 
+assert_failure "no upgrade journal is left once the upgrade is settled" ssh_out \
+    "sudo test -e /var/lib/douglas/upgrade-journal.json"
+
 assert_success "installed binary verifies" ssh_out \
     "sudo /var/lib/douglas/bin/douglas verify --path /var/lib/douglas/bin/douglas"
 

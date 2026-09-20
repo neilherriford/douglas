@@ -35,6 +35,9 @@ assert_contains "the failure includes what the new version printed" "$upgrade_ou
 
 assert_equals "the previous binary was put back" "$version_before" "$(installed_trailer_version)"
 
+assert_failure "no upgrade journal is left once the upgrade is settled" ssh_out \
+    "sudo test -e /var/lib/douglas/upgrade-journal.json"
+
 assert_success "the restored binary verifies" ssh_out \
     "sudo /var/lib/douglas/bin/douglas verify --path /var/lib/douglas/bin/douglas"
 
