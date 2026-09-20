@@ -10,6 +10,7 @@ mod util;
 mod verify;
 
 use crate::cli::{Cli, Commands, Presentation, SeedlingCommand, ServiceCommand};
+use crate::commands::rollback::rollback;
 use crate::commands::stop::stop;
 use crate::commands::upgrade::upgrade;
 use crate::commands::{
@@ -108,5 +109,8 @@ fn main() -> ExitCode {
             allow_one_way,
             path,
         } => run_with_tokio(upgrade(plan_only, allow_one_way, presentation, path)),
+        Commands::Rollback { plan_only, to } => {
+            run_with_tokio(rollback(plan_only, to, presentation))
+        }
     }
 }

@@ -43,6 +43,13 @@ pub enum UpgradeError {
     InvalidExecutable,
     #[error("The target must be a higher version than the current version")]
     InvalidUpgrade,
+    #[error("The target must be a lower version than the current version")]
+    InvalidRollback,
+    #[error(
+        "Cannot roll back to that version: the data and core seedlings it expects differ from what is installed ({})",
+        describe_differences(.0)
+    )]
+    CannotRollBack(Vec<Difference>),
     #[error(
         "This upgrade cannot be rolled back from ({}); pass --allow-one-way to proceed anyway",
         describe_differences(.0)
@@ -64,6 +71,12 @@ fn describe_differences(found: &[Difference]) -> String {
         .map(std::string::ToString::to_string)
         .collect::<Vec<_>>()
         .join("; ")
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Direction {
+    Upgrade,
+    Rollback,
 }
 
 type Step<'a> = Box<dyn Command<Context<'a>>>;
@@ -99,7 +112,7 @@ impl blueprint::HasPermissions for Context<'_> {
 enum State {
     NotRoot,
     Missing,
-    NotNewer,
+    WrongVersionOrder,
     Upgradable {
         current: Version,
         candidate: Version,
@@ -117,7 +130,12 @@ struct StateObserver<'a> {
 }
 
 impl StateObserver<'_> {
-    pub fn discover(&mut self, span: &Span, path: &Path) -> Result<State, UpgradeError> {
+    pub fn discover(
+        &mut self,
+        span: &Span,
+        path: &Path,
+        direction: Direction,
+    ) -> Result<State, UpgradeError> {
         let guard = span
             .create_child(
                 "Upgrading douglas system, discovering current state",
@@ -154,8 +172,12 @@ impl StateObserver<'_> {
             }
         };
 
-        if external.version <= internal.version {
-            return guard.finish(Ok(State::NotNewer));
+        let in_order = match direction {
+            Direction::Upgrade => external.version > internal.version,
+            Direction::Rollback => external.version < internal.version,
+        };
+        if !in_order {
+            return guard.finish(Ok(State::WrongVersionOrder));
         }
 
         let is_marked_as_executable = self
@@ -186,12 +208,18 @@ fn create_plan<'a>(
     path: &Path,
     presentation: Presentation,
     allow_one_way: bool,
+    direction: Direction,
 ) -> Result<Vec<Step<'a>>, UpgradeError> {
     let (current, candidate, restorable, is_marked_as_executable, is_owned_by_douglas_admin) =
         match state {
             State::NotRoot => return Err(UpgradeError::MustBeRoot),
             State::Missing => return Err(UpgradeError::Missing(path.to_path_buf())),
-            State::NotNewer => return Err(UpgradeError::InvalidUpgrade),
+            State::WrongVersionOrder => {
+                return Err(match direction {
+                    Direction::Upgrade => UpgradeError::InvalidUpgrade,
+                    Direction::Rollback => UpgradeError::InvalidRollback,
+                });
+            }
             State::Upgradable {
                 current,
                 candidate,
@@ -199,8 +227,16 @@ fn create_plan<'a>(
                 is_marked_as_executable,
                 is_owned_by_douglas_admin,
             } => {
-                if !one_way.is_empty() && !allow_one_way {
-                    return Err(UpgradeError::OneWay(one_way.clone()));
+                if !one_way.is_empty() {
+                    match direction {
+                        Direction::Upgrade if !allow_one_way => {
+                            return Err(UpgradeError::OneWay(one_way.clone()));
+                        }
+                        Direction::Rollback => {
+                            return Err(UpgradeError::CannotRollBack(one_way.clone()));
+                        }
+                        Direction::Upgrade => {}
+                    }
                 }
                 (
                     *current,
@@ -947,16 +983,16 @@ pub async fn perform(
     reporter: Arc<dyn Reporter>,
     plan_only: bool,
     allow_one_way: bool,
+    direction: Direction,
     deps: Dependencies,
     path: &Path,
     presentation: Presentation,
 ) -> bool {
-    let guard = Span::new(
-        Arc::clone(&reporter),
-        "Upgrading douglas system",
-        log::ScopeKind::Group,
-    )
-    .start_guard();
+    let title = match direction {
+        Direction::Upgrade => "Upgrading douglas system",
+        Direction::Rollback => "Rolling back douglas system",
+    };
+    let guard = Span::new(Arc::clone(&reporter), title, log::ScopeKind::Group).start_guard();
 
     let permissions = UnixPermissions::new();
     let binary_verifier =
@@ -969,7 +1005,7 @@ pub async fn perform(
         permissions: &permissions,
     };
 
-    let state = match state_observer.discover(guard.span(), path) {
+    let state = match state_observer.discover(guard.span(), path, direction) {
         Ok(state) => state,
         Err(err) => {
             guard.span().message(Level::Warn, &err.to_string());
@@ -1010,7 +1046,7 @@ pub async fn perform(
 
     let plan = match resolve_plan(
         guard.span(),
-        create_plan(&state, path, presentation, allow_one_way),
+        create_plan(&state, path, presentation, allow_one_way, direction),
     ) {
         Ok(plan) => plan,
         Err(err) => {
@@ -1135,7 +1171,13 @@ mod tests {
         fn test_should_error_when_not_root() {
             let state = State::NotRoot;
 
-            let result = create_plan(&state, &candidate_path(), Presentation::Plain, false);
+            let result = create_plan(
+                &state,
+                &candidate_path(),
+                Presentation::Plain,
+                false,
+                Direction::Upgrade,
+            );
 
             assert!(matches!(result, Err(UpgradeError::MustBeRoot)));
         }
@@ -1144,16 +1186,28 @@ mod tests {
         fn test_should_error_when_binary_does_not_exist() {
             let state = State::Missing;
 
-            let result = create_plan(&state, &candidate_path(), Presentation::Plain, false);
+            let result = create_plan(
+                &state,
+                &candidate_path(),
+                Presentation::Plain,
+                false,
+                Direction::Upgrade,
+            );
 
             assert!(matches!(result, Err(UpgradeError::Missing(path)) if path == candidate_path()));
         }
 
         #[test]
         fn test_should_error_when_not_a_higher_version() {
-            let state = State::NotNewer;
+            let state = State::WrongVersionOrder;
 
-            let result = create_plan(&state, &candidate_path(), Presentation::Plain, false);
+            let result = create_plan(
+                &state,
+                &candidate_path(),
+                Presentation::Plain,
+                false,
+                Direction::Upgrade,
+            );
 
             assert!(matches!(result, Err(UpgradeError::InvalidUpgrade)));
         }
@@ -1168,8 +1222,13 @@ mod tests {
                 is_owned_by_douglas_admin: true,
             };
 
-            let Ok(steps) = create_plan(&state, &candidate_path(), Presentation::Plain, false)
-            else {
+            let Ok(steps) = create_plan(
+                &state,
+                &candidate_path(),
+                Presentation::Plain,
+                false,
+                Direction::Upgrade,
+            ) else {
                 panic!("should plan");
             };
             let descriptions: Vec<String> =
@@ -1203,8 +1262,13 @@ mod tests {
                 is_owned_by_douglas_admin: false,
             };
 
-            let Ok(steps) = create_plan(&state, &candidate_path(), Presentation::Plain, false)
-            else {
+            let Ok(steps) = create_plan(
+                &state,
+                &candidate_path(),
+                Presentation::Plain,
+                false,
+                Direction::Upgrade,
+            ) else {
                 panic!("should plan");
             };
             let descriptions: Vec<String> =
@@ -1252,6 +1316,7 @@ mod tests {
                 &candidate_path(),
                 Presentation::Plain,
                 false,
+                Direction::Upgrade,
             );
 
             let Err(err) = result else {
@@ -1264,12 +1329,78 @@ mod tests {
         }
 
         #[test]
+        fn test_should_refuse_a_rollback_to_a_version_that_is_not_lower() {
+            let result = create_plan(
+                &State::WrongVersionOrder,
+                &candidate_path(),
+                Presentation::Plain,
+                false,
+                Direction::Rollback,
+            );
+
+            assert!(matches!(result, Err(UpgradeError::InvalidRollback)));
+        }
+
+        #[test]
+        fn test_should_refuse_a_rollback_across_a_data_or_core_change_even_when_one_way_is_allowed()
+        {
+            let result = create_plan(
+                &one_way_state(),
+                &candidate_path(),
+                Presentation::Plain,
+                true,
+                Direction::Rollback,
+            );
+
+            let Err(err) = result else {
+                panic!("should refuse");
+            };
+            assert!(matches!(err, UpgradeError::CannotRollBack(_)));
+            assert!(
+                err.to_string()
+                    .contains("core seedling 'openbao' version 1 -> 2")
+            );
+        }
+
+        #[test]
+        fn test_should_plan_a_rollback_like_an_upgrade_when_nothing_differs() {
+            let state = State::Upgradable {
+                current: version(0, 0, 2),
+                candidate: version(0, 0, 1),
+                one_way: Vec::new(),
+                is_marked_as_executable: true,
+                is_owned_by_douglas_admin: true,
+            };
+
+            let Ok(steps) = create_plan(
+                &state,
+                &candidate_path(),
+                Presentation::Plain,
+                false,
+                Direction::Rollback,
+            ) else {
+                panic!("should plan");
+            };
+            let descriptions: Vec<String> =
+                steps.iter().map(std::string::ToString::to_string).collect();
+
+            assert!(descriptions.contains(&"Keep the current version for rollback".to_string()));
+            assert!(descriptions.contains(&"Start the new version".to_string()));
+            assert!(
+                descriptions.contains(
+                    &"Bring the previous version back up if the upgrade fails".to_string()
+                )
+            );
+        }
+
+        #[test]
         fn test_should_plan_a_one_way_upgrade_without_a_way_back_when_allowed() {
             let Ok(steps) = create_plan(
                 &one_way_state(),
                 &candidate_path(),
                 Presentation::Plain,
                 true,
+                Direction::Upgrade,
             ) else {
                 panic!("should plan");
             };
@@ -1380,7 +1511,11 @@ mod tests {
             let reporter = CapturingReporter::new();
             let guard = test_guard(reporter);
 
-            let Ok(state) = observer.discover(guard.span(), Path::new("/tmp/candidate")) else {
+            let Ok(state) = observer.discover(
+                guard.span(),
+                Path::new("/tmp/candidate"),
+                Direction::Upgrade,
+            ) else {
                 panic!("should discover");
             };
 
@@ -1405,7 +1540,11 @@ mod tests {
             let reporter = CapturingReporter::new();
             let guard = test_guard(reporter);
 
-            let Ok(state) = observer.discover(guard.span(), Path::new("/tmp/candidate")) else {
+            let Ok(state) = observer.discover(
+                guard.span(),
+                Path::new("/tmp/candidate"),
+                Direction::Upgrade,
+            ) else {
                 panic!("should discover");
             };
 
@@ -1433,7 +1572,11 @@ mod tests {
             let reporter = CapturingReporter::new();
             let guard = test_guard(Arc::clone(&reporter) as Arc<dyn Reporter>);
 
-            let result = observer.discover(guard.span(), Path::new("/tmp/candidate"));
+            let result = observer.discover(
+                guard.span(),
+                Path::new("/tmp/candidate"),
+                Direction::Upgrade,
+            );
 
             assert!(matches!(result, Err(UpgradeError::InvalidExecutable)));
             assert!(
@@ -1468,7 +1611,11 @@ mod tests {
             let reporter = CapturingReporter::new();
             let guard = test_guard(Arc::clone(&reporter) as Arc<dyn Reporter>);
 
-            let result = observer.discover(guard.span(), Path::new("/tmp/candidate"));
+            let result = observer.discover(
+                guard.span(),
+                Path::new("/tmp/candidate"),
+                Direction::Upgrade,
+            );
 
             assert!(matches!(result, Err(UpgradeError::InvalidExecutable)));
             assert!(
@@ -1503,11 +1650,179 @@ mod tests {
             let reporter = CapturingReporter::new();
             let guard = test_guard(reporter);
 
-            let Ok(state) = observer.discover(guard.span(), Path::new("/tmp/candidate")) else {
+            let Ok(state) = observer.discover(
+                guard.span(),
+                Path::new("/tmp/candidate"),
+                Direction::Upgrade,
+            ) else {
                 panic!("should discover");
             };
 
-            assert!(matches!(state, State::NotNewer));
+            assert!(matches!(state, State::WrongVersionOrder));
+        }
+
+        #[test]
+        fn test_should_accept_a_lower_candidate_when_rolling_back() {
+            let mut credentials = MockCredentials::new();
+            credentials.expect_is_root().returning(|| true);
+            let mut inspect = MockInspect::new();
+            inspect.expect_exists().returning(|_| true);
+            let mut binary_verifier = MockBinaryVerifier::new();
+            binary_verifier
+                .expect_get_external_release()
+                .returning(|_| Ok(release(1, 0, 0)));
+            binary_verifier
+                .expect_get_internal_release()
+                .returning(|| Ok(release(2, 0, 0)));
+            let mut permissions = MockPermissions::new();
+            permissions
+                .expect_get_mode()
+                .returning(|_| Ok(file_system::Modes::OwnerReadWriteExecute));
+            permissions
+                .expect_get_user_and_group_ownership()
+                .returning(|_| Ok(("dev".to_string(), "dev".to_string())));
+
+            let mut observer = StateObserver {
+                credentials: &credentials,
+                inspect: &inspect,
+                binary_verifier: &binary_verifier,
+                permissions: &permissions,
+            };
+            let reporter = CapturingReporter::new();
+            let guard = test_guard(reporter);
+
+            let Ok(state) = observer.discover(
+                guard.span(),
+                Path::new("/tmp/candidate"),
+                Direction::Rollback,
+            ) else {
+                panic!("should discover");
+            };
+
+            assert!(matches!(state, State::Upgradable { .. }));
+        }
+
+        #[test]
+        fn test_should_refuse_a_higher_candidate_when_rolling_back() {
+            let mut credentials = MockCredentials::new();
+            credentials.expect_is_root().returning(|| true);
+            let mut inspect = MockInspect::new();
+            inspect.expect_exists().returning(|_| true);
+            let mut binary_verifier = MockBinaryVerifier::new();
+            binary_verifier
+                .expect_get_external_release()
+                .returning(|_| Ok(release(3, 0, 0)));
+            binary_verifier
+                .expect_get_internal_release()
+                .returning(|| Ok(release(2, 0, 0)));
+            let mut permissions = MockPermissions::new();
+            permissions
+                .expect_get_mode()
+                .returning(|_| Ok(file_system::Modes::OwnerReadWriteExecute));
+            permissions
+                .expect_get_user_and_group_ownership()
+                .returning(|_| Ok(("dev".to_string(), "dev".to_string())));
+
+            let mut observer = StateObserver {
+                credentials: &credentials,
+                inspect: &inspect,
+                binary_verifier: &binary_verifier,
+                permissions: &permissions,
+            };
+            let reporter = CapturingReporter::new();
+            let guard = test_guard(reporter);
+
+            let Ok(state) = observer.discover(
+                guard.span(),
+                Path::new("/tmp/candidate"),
+                Direction::Rollback,
+            ) else {
+                panic!("should discover");
+            };
+
+            assert!(matches!(state, State::WrongVersionOrder));
+        }
+
+        #[test]
+        fn test_should_refuse_the_same_version_when_rolling_back() {
+            let mut credentials = MockCredentials::new();
+            credentials.expect_is_root().returning(|| true);
+            let mut inspect = MockInspect::new();
+            inspect.expect_exists().returning(|_| true);
+            let mut binary_verifier = MockBinaryVerifier::new();
+            binary_verifier
+                .expect_get_external_release()
+                .returning(|_| Ok(release(2, 0, 0)));
+            binary_verifier
+                .expect_get_internal_release()
+                .returning(|| Ok(release(2, 0, 0)));
+            let mut permissions = MockPermissions::new();
+            permissions
+                .expect_get_mode()
+                .returning(|_| Ok(file_system::Modes::OwnerReadWriteExecute));
+            permissions
+                .expect_get_user_and_group_ownership()
+                .returning(|_| Ok(("dev".to_string(), "dev".to_string())));
+
+            let mut observer = StateObserver {
+                credentials: &credentials,
+                inspect: &inspect,
+                binary_verifier: &binary_verifier,
+                permissions: &permissions,
+            };
+            let reporter = CapturingReporter::new();
+            let guard = test_guard(reporter);
+
+            let Ok(state) = observer.discover(
+                guard.span(),
+                Path::new("/tmp/candidate"),
+                Direction::Rollback,
+            ) else {
+                panic!("should discover");
+            };
+
+            assert!(matches!(state, State::WrongVersionOrder));
+        }
+
+        #[test]
+        fn test_should_refuse_a_lower_candidate_when_upgrading() {
+            let mut credentials = MockCredentials::new();
+            credentials.expect_is_root().returning(|| true);
+            let mut inspect = MockInspect::new();
+            inspect.expect_exists().returning(|_| true);
+            let mut binary_verifier = MockBinaryVerifier::new();
+            binary_verifier
+                .expect_get_external_release()
+                .returning(|_| Ok(release(1, 0, 0)));
+            binary_verifier
+                .expect_get_internal_release()
+                .returning(|| Ok(release(2, 0, 0)));
+            let mut permissions = MockPermissions::new();
+            permissions
+                .expect_get_mode()
+                .returning(|_| Ok(file_system::Modes::OwnerReadWriteExecute));
+            permissions
+                .expect_get_user_and_group_ownership()
+                .returning(|_| Ok(("dev".to_string(), "dev".to_string())));
+
+            let mut observer = StateObserver {
+                credentials: &credentials,
+                inspect: &inspect,
+                binary_verifier: &binary_verifier,
+                permissions: &permissions,
+            };
+            let reporter = CapturingReporter::new();
+            let guard = test_guard(reporter);
+
+            let Ok(state) = observer.discover(
+                guard.span(),
+                Path::new("/tmp/candidate"),
+                Direction::Upgrade,
+            ) else {
+                panic!("should discover");
+            };
+
+            assert!(matches!(state, State::WrongVersionOrder));
         }
 
         #[test]
@@ -1545,7 +1860,11 @@ mod tests {
             let reporter = CapturingReporter::new();
             let guard = test_guard(reporter);
 
-            let Ok(state) = observer.discover(guard.span(), Path::new("/tmp/candidate")) else {
+            let Ok(state) = observer.discover(
+                guard.span(),
+                Path::new("/tmp/candidate"),
+                Direction::Upgrade,
+            ) else {
                 panic!("should discover");
             };
 
@@ -1594,7 +1913,11 @@ mod tests {
             let reporter = CapturingReporter::new();
             let guard = test_guard(reporter);
 
-            let Ok(state) = observer.discover(guard.span(), Path::new("/tmp/candidate")) else {
+            let Ok(state) = observer.discover(
+                guard.span(),
+                Path::new("/tmp/candidate"),
+                Direction::Upgrade,
+            ) else {
                 panic!("should discover");
             };
 
@@ -1646,9 +1969,11 @@ mod tests {
             let reporter = CapturingReporter::new();
             let guard = test_guard(reporter);
 
-            let Ok(State::Upgradable { one_way, .. }) =
-                observer.discover(guard.span(), Path::new("/tmp/candidate"))
-            else {
+            let Ok(State::Upgradable { one_way, .. }) = observer.discover(
+                guard.span(),
+                Path::new("/tmp/candidate"),
+                Direction::Upgrade,
+            ) else {
                 panic!("should discover an upgradable state");
             };
 
@@ -1689,9 +2014,11 @@ mod tests {
             let reporter = CapturingReporter::new();
             let guard = test_guard(reporter);
 
-            let Ok(State::Upgradable { one_way, .. }) =
-                observer.discover(guard.span(), Path::new("/tmp/candidate"))
-            else {
+            let Ok(State::Upgradable { one_way, .. }) = observer.discover(
+                guard.span(),
+                Path::new("/tmp/candidate"),
+                Direction::Upgrade,
+            ) else {
                 panic!("should discover an upgradable state");
             };
 
@@ -1739,9 +2066,11 @@ mod tests {
             let reporter = CapturingReporter::new();
             let guard = test_guard(reporter);
 
-            let Ok(State::Upgradable { one_way, .. }) =
-                observer.discover(guard.span(), Path::new("/tmp/candidate"))
-            else {
+            let Ok(State::Upgradable { one_way, .. }) = observer.discover(
+                guard.span(),
+                Path::new("/tmp/candidate"),
+                Direction::Upgrade,
+            ) else {
                 panic!("should discover an upgradable state");
             };
 

@@ -1,4 +1,4 @@
-use crate::bootstrap;
+use crate::bootstrap::{self, upgrade::Direction};
 use crate::cli::Presentation;
 use crate::commands::{CommandContext, print_error};
 use credentials::create_credentials;
@@ -30,6 +30,7 @@ pub(crate) async fn upgrade(
         reporter,
         plan_only,
         allow_one_way,
+        Direction::Upgrade,
         bootstrap::upgrade::Dependencies {
             credentials,
             os,

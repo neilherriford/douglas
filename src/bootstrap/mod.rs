@@ -17,6 +17,7 @@ pub mod core_seedlings;
 pub mod journal;
 pub mod openbao;
 pub mod retention;
+pub mod rollback;
 pub mod stop;
 pub mod system;
 pub mod upgrade;

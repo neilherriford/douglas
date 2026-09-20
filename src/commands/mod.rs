@@ -1,5 +1,6 @@
 pub(crate) mod kick;
 pub(crate) mod prune;
+pub(crate) mod rollback;
 pub(crate) mod seedling;
 pub(crate) mod start;
 pub(crate) mod status;

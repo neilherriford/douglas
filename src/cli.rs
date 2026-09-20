@@ -150,6 +150,16 @@ pub(crate) enum Commands {
         #[arg(long, help = "Path to the new version")]
         path: PathBuf,
     },
+    #[command(about = "Roll back to a version kept from an earlier upgrade")]
+    Rollback {
+        #[arg(long, default_value_t = false, help = "Only display the rollback plan")]
+        plan_only: bool,
+        #[arg(
+            long,
+            help = "Version to roll back to; defaults to the newest kept version older than the running one"
+        )]
+        to: Option<String>,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -285,6 +295,7 @@ impl std::fmt::Display for Commands {
             Commands::Kick { name } => write!(f, "kick {}", name.service_name()),
             Commands::Verify { .. } => f.write_str("verify"),
             Commands::Upgrade { .. } => f.write_str("upgrade"),
+            Commands::Rollback { .. } => f.write_str("rollback"),
         }
     }
 }
