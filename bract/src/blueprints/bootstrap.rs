@@ -1121,6 +1121,8 @@ mod tests {
                 name: "visudo".to_string(),
                 code: Some(1),
                 args: Vec::new(),
+                stdout: String::new(),
+                stderr: String::new(),
             })
         });
 
@@ -1151,6 +1153,8 @@ mod tests {
                 name: "visudo".to_string(),
                 code: Some(1),
                 args: Vec::new(),
+                stdout: String::new(),
+                stderr: String::new(),
             })
         });
 

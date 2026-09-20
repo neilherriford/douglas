@@ -45,6 +45,10 @@ pub enum UpgradeError {
         describe_differences(.0)
     )]
     OneWay(Vec<Difference>),
+    #[error("The new version failed to start (exit code {code}): {detail}")]
+    StartFailed { code: String, detail: String },
+    #[error("Could not run the installed version: {0}")]
+    CannotRun(#[from] os::OsError),
     #[error("File system error: {0}")]
     FileSystemError(#[from] FileSystemError),
 }
@@ -215,6 +219,9 @@ fn create_plan<'a>(
     }
 
     push_step(&mut result, RetainPreviousBinary::new(current));
+    if restorable {
+        push_step(&mut result, RestartPreviousVersion::new(presentation));
+    }
     push_step(&mut result, KillService::new(config::services::WOODWARD));
     push_step(&mut result, StopBract::new(false));
     push_step(&mut result, KillService::new(config::services::RESIN));
@@ -223,7 +230,7 @@ fn create_plan<'a>(
         &mut result,
         OverwriteDouglasExecutable::new(path, current, restorable),
     );
-    push_step(&mut result, ReplaceProcess::new(presentation));
+    push_step(&mut result, StartNewVersion::new(presentation));
 
     Ok(result)
 }
@@ -528,22 +535,9 @@ impl<'a> Command<Context<'a>> for OverwriteDouglasExecutable {
     }
 }
 
-#[derive(Debug)]
-struct ReplaceProcess {
-    presentation: Presentation,
-}
-
-impl ReplaceProcess {
-    pub fn new(presentation: Presentation) -> Self {
-        Self { presentation }
-    }
-}
-
 fn start_args(presentation: Presentation) -> Vec<String> {
     let mut args = Vec::new();
-    if let Some(style) = presentation.console_style()
-        && let Some(value) = style.to_possible_value()
-    {
+    if let Some(value) = presentation.output_style().to_possible_value() {
         args.push("--output-style".to_string());
         args.push(value.get_name().to_string());
     }
@@ -551,16 +545,104 @@ fn start_args(presentation: Presentation) -> Vec<String> {
     args
 }
 
-impl std::fmt::Display for ReplaceProcess {
+const FAILURE_DETAIL_LINES: usize = 5;
+
+fn failure_detail(stdout: &str, stderr: &str) -> String {
+    let text = if stderr.trim().is_empty() {
+        stdout
+    } else {
+        stderr
+    };
+    let lines: Vec<&str> = text
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .collect();
+    let tail = &lines[lines.len().saturating_sub(FAILURE_DETAIL_LINES)..];
+    if tail.is_empty() {
+        "no output".to_string()
+    } else {
+        tail.join(" | ")
+    }
+}
+
+fn relay(presentation: Presentation, stdout: &str, stderr: &str) {
+    if presentation == Presentation::Interactive {
+        return;
+    }
+    print!("{stdout}");
+    eprint!("{stderr}");
+}
+
+fn start_installed_version(
+    context: &Context<'_>,
+    presentation: Presentation,
+) -> Result<(), UpgradeError> {
+    let result = context.service_control.os.execute_with_output(
+        &path_to_string(context.douglas_folders.binary_link()),
+        start_args(presentation),
+        vec![],
+    );
+
+    match result {
+        Ok(output) => {
+            relay(
+                presentation,
+                &String::from_utf8_lossy(&output.stdout),
+                &String::from_utf8_lossy(&output.stderr),
+            );
+            Ok(())
+        }
+        Err(os::OsError::ProccessExitStatusError {
+            code,
+            stdout,
+            stderr,
+            ..
+        }) => {
+            relay(presentation, &stdout, &stderr);
+            Err(UpgradeError::StartFailed {
+                code: code.map_or_else(|| "none".to_string(), |value| value.to_string()),
+                detail: failure_detail(&stdout, &stderr),
+            })
+        }
+        Err(err) => Err(err.into()),
+    }
+}
+
+#[derive(Debug)]
+struct StartNewVersion {
+    presentation: Presentation,
+}
+
+impl StartNewVersion {
+    pub fn new(presentation: Presentation) -> Self {
+        Self { presentation }
+    }
+
+    async fn stop_what_the_new_version_started<'a>(span: &Span, context: &mut Context<'a>) {
+        let mut steps: Vec<Step<'a>> = Vec::new();
+        push_step(&mut steps, KillService::new(config::services::WOODWARD));
+        push_step(&mut steps, StopBract::new(false));
+        push_step(&mut steps, KillService::new(config::services::RESIN));
+        push_step(&mut steps, KillService::new(config::services::SEEDBANK));
+
+        for step in &mut steps {
+            if let Err(err) = step.run(span, context).await {
+                span.message(Level::Info, &format!("[{step}] {err}"));
+            }
+        }
+    }
+}
+
+impl std::fmt::Display for StartNewVersion {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("Replace current process with new version")
+        f.write_str("Start the new version")
     }
 }
 
 #[async_trait]
-impl<'a> Command<Context<'a>> for ReplaceProcess {
+impl<'a> Command<Context<'a>> for StartNewVersion {
     fn name(&self) -> String {
-        "Replace current process with new version".to_string()
+        "Start the new version".to_string()
     }
 
     async fn run(
@@ -569,21 +651,62 @@ impl<'a> Command<Context<'a>> for ReplaceProcess {
         context: &mut Context<'a>,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let guard = span
-            .create_child(
-                "Replacing current process with new version…",
-                ScopeKind::Step,
-            )
+            .create_child("Starting the new version…", ScopeKind::Step)
             .start_guard();
 
-        if self.presentation == Presentation::Interactive {
-            let _ = crate::cli_reporter::restore_term();
+        if let Err(err) = start_installed_version(context, self.presentation) {
+            Self::stop_what_the_new_version_started(guard.span(), context).await;
+            return guard.finish(Err(err.into()));
         }
 
-        context.service_control.os.replace_process(
-            &path_to_string(context.douglas_folders.binary_link()),
-            start_args(self.presentation),
-            vec![],
-        )?;
+        guard.finish_with_outcome(Outcome::Ok);
+        Ok(())
+    }
+}
+
+#[derive(Debug)]
+struct RestartPreviousVersion {
+    presentation: Presentation,
+}
+
+impl RestartPreviousVersion {
+    pub fn new(presentation: Presentation) -> Self {
+        Self { presentation }
+    }
+}
+
+impl std::fmt::Display for RestartPreviousVersion {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Bring the previous version back up if the upgrade fails")
+    }
+}
+
+#[async_trait]
+impl<'a> Command<Context<'a>> for RestartPreviousVersion {
+    fn name(&self) -> String {
+        "Bring the previous version back up if the upgrade fails".to_string()
+    }
+
+    async fn run(
+        &mut self,
+        _span: &Span,
+        _context: &mut Context<'a>,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        Ok(())
+    }
+
+    async fn rollback(
+        &mut self,
+        span: &Span,
+        context: &mut Context<'a>,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let guard = span
+            .create_child("Starting the previous version again…", ScopeKind::Step)
+            .start_guard();
+
+        if let Err(err) = start_installed_version(context, self.presentation) {
+            return guard.finish(Err(err.into()));
+        }
 
         guard.finish_with_outcome(Outcome::Ok);
         Ok(())
@@ -694,14 +817,20 @@ pub async fn perform(
         permissions: &permissions,
     };
 
-    let result = execute_plan(guard.span(), plan, &mut context, |_reason| ()).await;
+    let result = execute_plan(guard.span(), plan, &mut context, |reason| reason).await;
 
-    if result.is_ok() {
-        guard.finish_with_outcome(Outcome::Ok);
-        true
-    } else {
-        guard.finish_with_outcome(Outcome::Failed);
-        false
+    match result {
+        Ok(()) => {
+            guard.finish_with_outcome(Outcome::Ok);
+            true
+        }
+        Err(reason) => {
+            guard.finish_with_outcome(Outcome::Failed);
+            if let Some(style) = presentation.console_style() {
+                print_error(style, &reason);
+            }
+            false
+        }
     }
 }
 
@@ -718,6 +847,7 @@ mod tests {
     use mockall::Sequence;
     use os::MockOs;
     use release::ReleaseMetadata;
+    use std::os::unix::process::ExitStatusExt;
     use std::sync::Mutex;
 
     struct CapturingReporter {
@@ -823,12 +953,13 @@ mod tests {
                 descriptions,
                 vec![
                     "Keep the current version for rollback".to_string(),
+                    "Bring the previous version back up if the upgrade fails".to_string(),
                     "Kill service woodward".to_string(),
                     "Stopping Bract".to_string(),
                     "Kill service resin".to_string(),
                     "Kill service seedbank".to_string(),
                     "Overwrite current version with new version".to_string(),
-                    "Replace current process with new version".to_string(),
+                    "Start the new version".to_string(),
                 ]
             );
         }
@@ -857,12 +988,13 @@ mod tests {
                      'douglas-admin'"
                         .to_string(),
                     "Keep the current version for rollback".to_string(),
+                    "Bring the previous version back up if the upgrade fails".to_string(),
                     "Kill service woodward".to_string(),
                     "Stopping Bract".to_string(),
                     "Kill service resin".to_string(),
                     "Kill service seedbank".to_string(),
                     "Overwrite current version with new version".to_string(),
-                    "Replace current process with new version".to_string(),
+                    "Start the new version".to_string(),
                 ]
             );
         }
@@ -898,15 +1030,24 @@ mod tests {
         }
 
         #[test]
-        fn test_should_plan_a_one_way_upgrade_when_allowed() {
-            let result = create_plan(
+        fn test_should_plan_a_one_way_upgrade_without_a_way_back_when_allowed() {
+            let Ok(steps) = create_plan(
                 &one_way_state(),
                 &candidate_path(),
                 Presentation::Plain,
                 true,
-            );
+            ) else {
+                panic!("should plan");
+            };
+            let descriptions: Vec<String> =
+                steps.iter().map(std::string::ToString::to_string).collect();
 
-            assert!(result.is_ok());
+            assert!(
+                !descriptions
+                    .iter()
+                    .any(|description| description.contains("previous version back up"))
+            );
+            assert!(descriptions.contains(&"Start the new version".to_string()));
         }
     }
 
@@ -932,8 +1073,11 @@ mod tests {
         use super::*;
 
         #[test]
-        fn test_should_start_without_a_style_when_interactive() {
-            assert_eq!(start_args(Presentation::Interactive), vec!["start"]);
+        fn test_should_start_plain_when_interactive_because_the_terminal_is_not_the_childs() {
+            assert_eq!(
+                start_args(Presentation::Interactive),
+                vec!["--output-style", "plain", "start"]
+            );
         }
 
         #[test]
@@ -950,6 +1094,35 @@ mod tests {
                 start_args(Presentation::Json),
                 vec!["--output-style", "json", "start"]
             );
+        }
+    }
+
+    mod failure_detail_tests {
+        use super::*;
+
+        #[test]
+        fn test_should_prefer_what_the_process_wrote_to_stderr() {
+            assert_eq!(failure_detail("fine", "broken"), "broken");
+        }
+
+        #[test]
+        fn test_should_fall_back_to_stdout_when_stderr_is_empty() {
+            assert_eq!(failure_detail("only stdout", "  \n"), "only stdout");
+        }
+
+        #[test]
+        fn test_should_keep_only_the_last_five_non_blank_lines() {
+            let stderr = "one\ntwo\n\nthree\nfour\nfive\nsix\nseven\n";
+
+            assert_eq!(
+                failure_detail("", stderr),
+                "three | four | five | six | seven"
+            );
+        }
+
+        #[test]
+        fn test_should_say_so_when_there_was_no_output() {
+            assert_eq!(failure_detail("", ""), "no output");
         }
     }
 
@@ -2624,11 +2797,10 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn test_replace_process_run_should_start_plain_from_the_binary_link() {
+        async fn test_start_new_version_run_should_start_plain_from_the_binary_link_and_succeed() {
             let mut os = MockOs::new();
-            let expected_path = DouglasFolders::default().binary_link();
-            let expected_path = path_to_string(&expected_path);
-            os.expect_replace_process()
+            let expected_path = path_to_string(DouglasFolders::default().binary_link());
+            os.expect_execute_with_output()
                 .withf(move |command, args, _env| {
                     command == expected_path
                         && *args
@@ -2638,13 +2810,20 @@ mod tests {
                                 "start".to_string(),
                             ]
                 })
-                .returning(|_, _, _| Ok(()));
+                .times(1)
+                .returning(|_, _, _| {
+                    Ok(std::process::Output {
+                        status: std::process::ExitStatus::from_raw(0),
+                        stdout: b"".to_vec(),
+                        stderr: b"".to_vec(),
+                    })
+                });
+            let heartbeat_reader_factory = heartbeat::MockHeartbeatReaderFactory::new();
+            let bract_client = bract_client::MockClient::new();
             let file_renamer = MockFileRenamer::new();
             let links = MockLinks::new();
             let permissions = MockPermissions::new();
-            let heartbeat_reader_factory = heartbeat::MockHeartbeatReaderFactory::new();
             let docker_client = docker::MockClient::new();
-            let bract_client = bract_client::MockClient::new();
             let file_copier = MockFileCopier::new();
             let file_deleter = MockFileDeleter::new();
             let folder = MockFolder::new();
@@ -2663,7 +2842,310 @@ mod tests {
                 &bract_client,
             );
 
-            let mut command = ReplaceProcess::new(Presentation::Plain);
+            let mut command = StartNewVersion::new(Presentation::Plain);
+            let span = Span::new(CapturingReporter::new(), "test", ScopeKind::Group);
+
+            let result = command.run(&span, &mut context).await;
+
+            assert!(result.is_ok());
+        }
+
+        fn heartbeat_reader_with_pid(pid: u32) -> Box<dyn heartbeat::HeartbeatReader> {
+            let mut reader = heartbeat::MockHeartbeatReader::new();
+            reader.expect_read().returning(move || {
+                Ok(heartbeat::Heartbeat {
+                    pid,
+                    written_at: std::time::SystemTime::now(),
+                })
+            });
+            Box::new(reader)
+        }
+
+        #[tokio::test]
+        async fn test_start_new_version_run_should_stop_what_it_started_and_report_why_when_start_fails()
+         {
+            let mut os = MockOs::new();
+            let expected_path = path_to_string(DouglasFolders::default().binary_link());
+            os.expect_execute_with_output()
+                .withf(move |command, args, _env| {
+                    command == expected_path
+                        && *args
+                            == vec![
+                                "--output-style".to_string(),
+                                "plain".to_string(),
+                                "start".to_string(),
+                            ]
+                })
+                .times(1)
+                .returning(|_, _, _| {
+                    Err(os::OsError::ProccessExitStatusError {
+                        name: "douglas".to_string(),
+                        code: Some(1),
+                        args: Vec::new(),
+                        stdout: String::new(),
+                        stderr: "port 443 already in use".to_string(),
+                    })
+                });
+            os.expect_kill()
+                .withf(|pid| *pid == 11)
+                .times(1)
+                .returning(|_| Ok(()));
+            os.expect_kill()
+                .withf(|pid| *pid == 33)
+                .times(1)
+                .returning(|_| Ok(()));
+            os.expect_kill()
+                .withf(|pid| *pid == 44)
+                .times(1)
+                .returning(|_| Ok(()));
+            let mut heartbeat_reader_factory = heartbeat::MockHeartbeatReaderFactory::new();
+            for (service, pid) in [
+                (config::services::WOODWARD, 11),
+                (config::services::RESIN, 33),
+                (config::services::SEEDBANK, 44),
+            ] {
+                heartbeat_reader_factory
+                    .expect_create()
+                    .withf(move |name| name == service)
+                    .times(1)
+                    .returning(move |_| heartbeat_reader_with_pid(pid));
+            }
+            let mut bract_client = bract_client::MockClient::new();
+            bract_client
+                .expect_stop_bract()
+                .withf(|including_containers| !*including_containers)
+                .times(1)
+                .returning(|_| Ok(()));
+            let file_renamer = MockFileRenamer::new();
+            let links = MockLinks::new();
+            let permissions = MockPermissions::new();
+            let docker_client = docker::MockClient::new();
+            let file_copier = MockFileCopier::new();
+            let file_deleter = MockFileDeleter::new();
+            let folder = MockFolder::new();
+            let mut context = test_context(
+                &os,
+                FileOperations {
+                    renamer: &file_renamer,
+                    copier: &file_copier,
+                    deleter: &file_deleter,
+                    folder: &folder,
+                },
+                &links,
+                &permissions,
+                &heartbeat_reader_factory,
+                &docker_client,
+                &bract_client,
+            );
+
+            let mut command = StartNewVersion::new(Presentation::Plain);
+            let span = Span::new(CapturingReporter::new(), "test", ScopeKind::Group);
+
+            let result = command.run(&span, &mut context).await;
+
+            let Err(err) = result else {
+                panic!("should fail");
+            };
+            let message = err.to_string();
+            assert!(message.contains("exit code 1"));
+            assert!(message.contains("port 443 already in use"));
+        }
+
+        #[tokio::test]
+        async fn test_start_new_version_run_should_still_fail_when_stopping_what_it_started_also_fails()
+         {
+            let mut os = MockOs::new();
+            let expected_path = path_to_string(DouglasFolders::default().binary_link());
+            os.expect_execute_with_output()
+                .withf(move |command, args, _env| {
+                    command == expected_path
+                        && *args
+                            == vec![
+                                "--output-style".to_string(),
+                                "plain".to_string(),
+                                "start".to_string(),
+                            ]
+                })
+                .times(1)
+                .returning(|_, _, _| {
+                    Err(os::OsError::ProccessExitStatusError {
+                        name: "douglas".to_string(),
+                        code: Some(1),
+                        args: Vec::new(),
+                        stdout: String::new(),
+                        stderr: "boom".to_string(),
+                    })
+                });
+            let mut heartbeat_reader_factory = heartbeat::MockHeartbeatReaderFactory::new();
+            heartbeat_reader_factory.expect_create().returning(|_| {
+                let mut reader = heartbeat::MockHeartbeatReader::new();
+                reader.expect_read().returning(|| {
+                    Err(heartbeat::HeartbeatReaderError::FileSystemError(
+                        FileSystemError::NotFoundError(PathBuf::from("/heartbeat")),
+                    ))
+                });
+                Box::new(reader)
+            });
+            let mut bract_client = bract_client::MockClient::new();
+            bract_client
+                .expect_stop_bract()
+                .returning(|_| Err(bract_client::Error::ConnectionRefused));
+            let file_renamer = MockFileRenamer::new();
+            let links = MockLinks::new();
+            let permissions = MockPermissions::new();
+            let docker_client = docker::MockClient::new();
+            let file_copier = MockFileCopier::new();
+            let file_deleter = MockFileDeleter::new();
+            let folder = MockFolder::new();
+            let mut context = test_context(
+                &os,
+                FileOperations {
+                    renamer: &file_renamer,
+                    copier: &file_copier,
+                    deleter: &file_deleter,
+                    folder: &folder,
+                },
+                &links,
+                &permissions,
+                &heartbeat_reader_factory,
+                &docker_client,
+                &bract_client,
+            );
+
+            let mut command = StartNewVersion::new(Presentation::Plain);
+            let span = Span::new(CapturingReporter::new(), "test", ScopeKind::Group);
+
+            let result = command.run(&span, &mut context).await;
+
+            assert!(result.is_err());
+        }
+
+        #[tokio::test]
+        async fn test_start_new_version_run_should_fail_when_the_binary_cannot_be_run() {
+            let mut os = MockOs::new();
+            os.expect_execute_with_output()
+                .returning(|_, _, _| Err(os::OsError::PidTooLarge));
+            let mut heartbeat_reader_factory = heartbeat::MockHeartbeatReaderFactory::new();
+            heartbeat_reader_factory.expect_create().returning(|_| {
+                let mut reader = heartbeat::MockHeartbeatReader::new();
+                reader.expect_read().returning(|| {
+                    Err(heartbeat::HeartbeatReaderError::FileSystemError(
+                        FileSystemError::NotFoundError(PathBuf::from("/heartbeat")),
+                    ))
+                });
+                Box::new(reader)
+            });
+            let mut bract_client = bract_client::MockClient::new();
+            bract_client
+                .expect_stop_bract()
+                .returning(|_| Err(bract_client::Error::ConnectionRefused));
+            let file_renamer = MockFileRenamer::new();
+            let links = MockLinks::new();
+            let permissions = MockPermissions::new();
+            let docker_client = docker::MockClient::new();
+            let file_copier = MockFileCopier::new();
+            let file_deleter = MockFileDeleter::new();
+            let folder = MockFolder::new();
+            let mut context = test_context(
+                &os,
+                FileOperations {
+                    renamer: &file_renamer,
+                    copier: &file_copier,
+                    deleter: &file_deleter,
+                    folder: &folder,
+                },
+                &links,
+                &permissions,
+                &heartbeat_reader_factory,
+                &docker_client,
+                &bract_client,
+            );
+
+            let mut command = StartNewVersion::new(Presentation::Plain);
+            let span = Span::new(CapturingReporter::new(), "test", ScopeKind::Group);
+
+            let result = command.run(&span, &mut context).await;
+
+            assert!(result.is_err());
+        }
+
+        #[tokio::test]
+        async fn test_restart_previous_version_rollback_should_say_none_when_the_process_was_killed_by_a_signal()
+         {
+            let mut os = MockOs::new();
+            os.expect_execute_with_output().returning(|_, _, _| {
+                Err(os::OsError::ProccessExitStatusError {
+                    name: "douglas".to_string(),
+                    code: None,
+                    args: Vec::new(),
+                    stdout: String::new(),
+                    stderr: String::new(),
+                })
+            });
+            let heartbeat_reader_factory = heartbeat::MockHeartbeatReaderFactory::new();
+            let bract_client = bract_client::MockClient::new();
+            let file_renamer = MockFileRenamer::new();
+            let links = MockLinks::new();
+            let permissions = MockPermissions::new();
+            let docker_client = docker::MockClient::new();
+            let file_copier = MockFileCopier::new();
+            let file_deleter = MockFileDeleter::new();
+            let folder = MockFolder::new();
+            let mut context = test_context(
+                &os,
+                FileOperations {
+                    renamer: &file_renamer,
+                    copier: &file_copier,
+                    deleter: &file_deleter,
+                    folder: &folder,
+                },
+                &links,
+                &permissions,
+                &heartbeat_reader_factory,
+                &docker_client,
+                &bract_client,
+            );
+
+            let mut command = RestartPreviousVersion::new(Presentation::Plain);
+            let span = Span::new(CapturingReporter::new(), "test", ScopeKind::Group);
+
+            let result = command.rollback(&span, &mut context).await;
+
+            let Err(err) = result else {
+                panic!("should fail");
+            };
+            assert!(err.to_string().contains("exit code none"));
+        }
+
+        #[tokio::test]
+        async fn test_restart_previous_version_run_should_do_nothing() {
+            let mut os = MockOs::new();
+            os.expect_execute_with_output().times(0);
+            let heartbeat_reader_factory = heartbeat::MockHeartbeatReaderFactory::new();
+            let bract_client = bract_client::MockClient::new();
+            let file_renamer = MockFileRenamer::new();
+            let links = MockLinks::new();
+            let permissions = MockPermissions::new();
+            let docker_client = docker::MockClient::new();
+            let file_copier = MockFileCopier::new();
+            let file_deleter = MockFileDeleter::new();
+            let folder = MockFolder::new();
+            let mut context = test_context(
+                &os,
+                FileOperations {
+                    renamer: &file_renamer,
+                    copier: &file_copier,
+                    deleter: &file_deleter,
+                    folder: &folder,
+                },
+                &links,
+                &permissions,
+                &heartbeat_reader_factory,
+                &docker_client,
+                &bract_client,
+            );
+
+            let mut command = RestartPreviousVersion::new(Presentation::Plain);
             let span = Span::new(CapturingReporter::new(), "test", ScopeKind::Group);
 
             let result = command.run(&span, &mut context).await;
@@ -2672,16 +3154,33 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn test_replace_process_run_should_fail_when_the_os_call_fails() {
+        async fn test_restart_previous_version_rollback_should_start_the_installed_version() {
             let mut os = MockOs::new();
-            os.expect_replace_process()
-                .returning(|_, _, _| Err(os::OsError::PidTooLarge));
+            let expected_path = path_to_string(DouglasFolders::default().binary_link());
+            os.expect_execute_with_output()
+                .withf(move |command, args, _env| {
+                    command == expected_path
+                        && *args
+                            == vec![
+                                "--output-style".to_string(),
+                                "plain".to_string(),
+                                "start".to_string(),
+                            ]
+                })
+                .times(1)
+                .returning(|_, _, _| {
+                    Ok(std::process::Output {
+                        status: std::process::ExitStatus::from_raw(0),
+                        stdout: b"".to_vec(),
+                        stderr: b"".to_vec(),
+                    })
+                });
+            let heartbeat_reader_factory = heartbeat::MockHeartbeatReaderFactory::new();
+            let bract_client = bract_client::MockClient::new();
             let file_renamer = MockFileRenamer::new();
             let links = MockLinks::new();
             let permissions = MockPermissions::new();
-            let heartbeat_reader_factory = heartbeat::MockHeartbeatReaderFactory::new();
             let docker_client = docker::MockClient::new();
-            let bract_client = bract_client::MockClient::new();
             let file_copier = MockFileCopier::new();
             let file_deleter = MockFileDeleter::new();
             let folder = MockFolder::new();
@@ -2700,12 +3199,72 @@ mod tests {
                 &bract_client,
             );
 
-            let mut command = ReplaceProcess::new(Presentation::Plain);
+            let mut command = RestartPreviousVersion::new(Presentation::Plain);
             let span = Span::new(CapturingReporter::new(), "test", ScopeKind::Group);
 
-            let result = command.run(&span, &mut context).await;
+            let result = command.rollback(&span, &mut context).await;
 
-            assert!(result.is_err());
+            assert!(result.is_ok());
+        }
+
+        #[tokio::test]
+        async fn test_restart_previous_version_rollback_should_fail_when_the_previous_version_will_not_start()
+         {
+            let mut os = MockOs::new();
+            let expected_path = path_to_string(DouglasFolders::default().binary_link());
+            os.expect_execute_with_output()
+                .withf(move |command, args, _env| {
+                    command == expected_path
+                        && *args
+                            == vec![
+                                "--output-style".to_string(),
+                                "plain".to_string(),
+                                "start".to_string(),
+                            ]
+                })
+                .times(1)
+                .returning(|_, _, _| {
+                    Err(os::OsError::ProccessExitStatusError {
+                        name: "douglas".to_string(),
+                        code: Some(1),
+                        args: Vec::new(),
+                        stdout: String::new(),
+                        stderr: "cannot open the rolodex".to_string(),
+                    })
+                });
+            let heartbeat_reader_factory = heartbeat::MockHeartbeatReaderFactory::new();
+            let bract_client = bract_client::MockClient::new();
+            let file_renamer = MockFileRenamer::new();
+            let links = MockLinks::new();
+            let permissions = MockPermissions::new();
+            let docker_client = docker::MockClient::new();
+            let file_copier = MockFileCopier::new();
+            let file_deleter = MockFileDeleter::new();
+            let folder = MockFolder::new();
+            let mut context = test_context(
+                &os,
+                FileOperations {
+                    renamer: &file_renamer,
+                    copier: &file_copier,
+                    deleter: &file_deleter,
+                    folder: &folder,
+                },
+                &links,
+                &permissions,
+                &heartbeat_reader_factory,
+                &docker_client,
+                &bract_client,
+            );
+
+            let mut command = RestartPreviousVersion::new(Presentation::Plain);
+            let span = Span::new(CapturingReporter::new(), "test", ScopeKind::Group);
+
+            let result = command.rollback(&span, &mut context).await;
+
+            let Err(err) = result else {
+                panic!("should fail");
+            };
+            assert!(err.to_string().contains("cannot open the rolodex"));
         }
     }
 }

@@ -29,6 +29,8 @@ pub enum OsError {
         name: String,
         code: Option<i32>,
         args: Vec<String>,
+        stdout: String,
+        stderr: String,
     },
     #[error("Encountered error #{0}")]
     ErrorNumber(i32),
@@ -177,6 +179,8 @@ impl Os for Unix {
                 name: command.to_string(),
                 code: output.status.code(),
                 args,
+                stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+                stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
             })
         }
     }

@@ -99,6 +99,8 @@ mod tests {
                     name: "mount".to_string(),
                     code: Some(1),
                     args: Vec::new(),
+                    stdout: String::new(),
+                    stderr: String::new(),
                 })
             });
         os.expect_execute_with_output()

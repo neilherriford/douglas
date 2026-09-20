@@ -199,6 +199,31 @@ build_upgrade_candidate() {
         "cd /mnt/share/douglas && sed -i \"s/^version = \\\"$NEW_VERSION\\\"/version = \\\"$CURRENT_VERSION\\\"/\" Cargo.toml"
 }
 
+# build_failing_upgrade_candidate <destination>
+# A signed, higher-version "douglas" that only prints a message and exits
+# non-zero, so an upgrade to it fails at the point the new version is
+# started. Like build_upgrade_candidate, the version bump is reverted
+# unconditionally.
+build_failing_upgrade_candidate() {
+    local destination="$1"
+
+    CURRENT_VERSION="$(ssh_out "grep -m1 '^version' /mnt/share/douglas/Cargo.toml | sed -E 's/version = \"(.*)\"/\1/'")"
+    IFS='.' read -r major minor patch <<<"$CURRENT_VERSION"
+    NEW_VERSION="$major.$minor.$((patch + 1))"
+
+    assert_success "bump Cargo.toml to v$NEW_VERSION to sign a higher-version stub" ssh_out \
+        "cd /mnt/share/douglas && sed -i \"s/^version = \\\"$CURRENT_VERSION\\\"/version = \\\"$NEW_VERSION\\\"/\" Cargo.toml"
+
+    assert_success "write a stub that fails to start" ssh_out \
+        "printf '#!/bin/sh\necho stub refusing to start >&2\nexit 1\n' > $destination && chmod +x $destination"
+
+    assert_success "sign the stub as v$NEW_VERSION" ssh_out \
+        "cd /mnt/share/douglas && cargo run -p xtask --quiet -- sign $destination"
+
+    assert_success "revert Cargo.toml back to v$CURRENT_VERSION" ssh_out \
+        "cd /mnt/share/douglas && sed -i \"s/^version = \\\"$NEW_VERSION\\\"/version = \\\"$CURRENT_VERSION\\\"/\" Cargo.toml"
+}
+
 run_prelude() {
     section "setup"
     for step in "$@"; do
