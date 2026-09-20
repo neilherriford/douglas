@@ -39,8 +39,8 @@ pub enum UpgradeError {
     MustBeRoot,
     #[error("No executable at given path")]
     Missing(PathBuf),
-    #[error("Not a valid douglas executable")]
-    InvalidExecutable,
+    #[error("Not a valid douglas executable: {0}")]
+    InvalidExecutable(String),
     #[error("The target must be a higher version than the current version")]
     InvalidUpgrade,
     #[error("The target must be a lower version than the current version")]
@@ -157,7 +157,7 @@ impl StateObserver<'_> {
                 guard
                     .span()
                     .message(Level::Warn, &format!("Invalid douglas executable: {err}"));
-                return guard.finish(Err(UpgradeError::InvalidExecutable));
+                return guard.finish(Err(UpgradeError::InvalidExecutable(err.to_string())));
             }
         };
 
@@ -168,7 +168,9 @@ impl StateObserver<'_> {
                     Level::Warn,
                     &format!("Could not determine internal version: {err}"),
                 );
-                return guard.finish(Err(UpgradeError::InvalidExecutable));
+                return guard.finish(Err(UpgradeError::InvalidExecutable(format!(
+                    "the running version could not be determined ({err})"
+                ))));
             }
         };
 
@@ -1009,6 +1011,10 @@ pub async fn perform(
         Ok(state) => state,
         Err(err) => {
             guard.span().message(Level::Warn, &err.to_string());
+            guard.finish_with_outcome(log::Outcome::Failed);
+            if let Some(style) = presentation.console_style() {
+                print_error(style, &err.to_string());
+            }
             return false;
         }
     };
@@ -1578,7 +1584,14 @@ mod tests {
                 Direction::Upgrade,
             );
 
-            assert!(matches!(result, Err(UpgradeError::InvalidExecutable)));
+            let Err(err) = result else {
+                panic!("should fail");
+            };
+            assert!(matches!(err, UpgradeError::InvalidExecutable(_)));
+            assert!(
+                err.to_string()
+                    .contains(&crate::verify::VerifyError::UnknownInternalVersion.to_string())
+            );
             assert!(
                 reporter
                     .messages()
@@ -1617,7 +1630,14 @@ mod tests {
                 Direction::Upgrade,
             );
 
-            assert!(matches!(result, Err(UpgradeError::InvalidExecutable)));
+            let Err(err) = result else {
+                panic!("should fail");
+            };
+            assert!(matches!(err, UpgradeError::InvalidExecutable(_)));
+            assert!(
+                err.to_string()
+                    .contains("the running version could not be determined")
+            );
             assert!(
                 reporter
                     .messages()
