@@ -141,6 +141,12 @@ pub(crate) enum Commands {
     Upgrade {
         #[arg(long, default_value_t = false, help = "Only display the upgrade plan")]
         plan_only: bool,
+        #[arg(
+            long,
+            default_value_t = false,
+            help = "Proceed even when the new version cannot be rolled back from"
+        )]
+        allow_one_way: bool,
         #[arg(long, help = "Path to the new version")]
         path: PathBuf,
     },

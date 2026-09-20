@@ -10,6 +10,7 @@ use std::sync::Arc;
 
 pub(crate) async fn upgrade(
     plan_only: bool,
+    allow_one_way: bool,
     presentation: Presentation,
     path: PathBuf,
 ) -> ExitCode {
@@ -28,6 +29,7 @@ pub(crate) async fn upgrade(
     let succeeded = bootstrap::upgrade::perform(
         reporter,
         plan_only,
+        allow_one_way,
         bootstrap::upgrade::Dependencies {
             credentials,
             os,

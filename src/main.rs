@@ -103,8 +103,10 @@ fn main() -> ExitCode {
             seedling: SeedlingCommand::Prune { yes },
         } => run_with_tokio(prune_deadwood(output_style, yes)),
         Commands::Verify { path } => verify(path, output_style),
-        Commands::Upgrade { plan_only, path } => {
-            run_with_tokio(upgrade(plan_only, presentation, path))
-        }
+        Commands::Upgrade {
+            plan_only,
+            allow_one_way,
+            path,
+        } => run_with_tokio(upgrade(plan_only, allow_one_way, presentation, path)),
     }
 }

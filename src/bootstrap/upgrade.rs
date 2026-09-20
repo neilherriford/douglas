@@ -3,6 +3,7 @@ use crate::{
         HasServiceControl, KillService, OwnedServiceControl, ServiceControl, StopBract, retention,
     },
     cli::Presentation,
+    commands::print_error,
     verify::{BinaryVerifier, DouglasBinaryVerifier, Version},
 };
 use async_trait::async_trait;
@@ -22,6 +23,7 @@ use file_system::{
 };
 use log::{Level, Outcome, Reporter, ScopeGuard, ScopeKind, Span};
 use os::Os;
+use release::{Difference, differences};
 use std::{
     path::{Path, PathBuf},
     sync::Arc,
@@ -38,8 +40,21 @@ pub enum UpgradeError {
     InvalidExecutable,
     #[error("The target must be a higher version than the current version")]
     InvalidUpgrade,
+    #[error(
+        "This upgrade cannot be rolled back from ({}); pass --allow-one-way to proceed anyway",
+        describe_differences(.0)
+    )]
+    OneWay(Vec<Difference>),
     #[error("File system error: {0}")]
     FileSystemError(#[from] FileSystemError),
+}
+
+fn describe_differences(found: &[Difference]) -> String {
+    found
+        .iter()
+        .map(std::string::ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("; ")
 }
 
 type Step<'a> = Box<dyn Command<Context<'a>>>;
@@ -77,6 +92,7 @@ enum State {
     NotNewer,
     Upgradable {
         current: Version,
+        one_way: Vec<Difference>,
         is_marked_as_executable: bool,
         is_owned_by_douglas_admin: bool,
     },
@@ -146,6 +162,7 @@ impl StateObserver<'_> {
 
         guard.finish(Ok(State::Upgradable {
             current: internal.version,
+            one_way: differences(&internal.metadata, &external.metadata),
             is_marked_as_executable,
             is_owned_by_douglas_admin,
         }))
@@ -156,16 +173,27 @@ fn create_plan<'a>(
     state: &State,
     path: &Path,
     presentation: Presentation,
+    allow_one_way: bool,
 ) -> Result<Vec<Step<'a>>, UpgradeError> {
-    let (current, is_marked_as_executable, is_owned_by_douglas_admin) = match *state {
+    let (current, is_marked_as_executable, is_owned_by_douglas_admin) = match state {
         State::NotRoot => return Err(UpgradeError::MustBeRoot),
         State::Missing => return Err(UpgradeError::Missing(path.to_path_buf())),
         State::NotNewer => return Err(UpgradeError::InvalidUpgrade),
         State::Upgradable {
             current,
+            one_way,
             is_marked_as_executable,
             is_owned_by_douglas_admin,
-        } => (current, is_marked_as_executable, is_owned_by_douglas_admin),
+        } => {
+            if !one_way.is_empty() && !allow_one_way {
+                return Err(UpgradeError::OneWay(one_way.clone()));
+            }
+            (
+                *current,
+                *is_marked_as_executable,
+                *is_owned_by_douglas_admin,
+            )
+        }
     };
 
     let mut result = Vec::new();
@@ -503,6 +531,7 @@ pub(crate) struct Dependencies {
 pub async fn perform(
     reporter: Arc<dyn Reporter>,
     plan_only: bool,
+    allow_one_way: bool,
     deps: Dependencies,
     path: &Path,
     presentation: Presentation,
@@ -533,6 +562,19 @@ pub async fn perform(
         }
     };
 
+    if allow_one_way
+        && let State::Upgradable { one_way, .. } = &state
+        && !one_way.is_empty()
+    {
+        guard.span().message(
+            Level::Warn,
+            &format!(
+                "This upgrade cannot be rolled back from ({})",
+                describe_differences(one_way)
+            ),
+        );
+    }
+
     let Some(service_control) = OwnedServiceControl::build(
         &guard,
         Arc::clone(&deps.os),
@@ -550,11 +592,17 @@ pub async fn perform(
     let folder = UnixFolder::new();
     let links = UnixLinks::new();
 
-    let plan = match resolve_plan(guard.span(), create_plan(&state, path, presentation)) {
+    let plan = match resolve_plan(
+        guard.span(),
+        create_plan(&state, path, presentation, allow_one_way),
+    ) {
         Ok(plan) => plan,
         Err(err) => {
             guard.span().message(Level::Warn, &err.to_string());
             guard.finish_with_outcome(log::Outcome::Failed);
+            if let Some(style) = presentation.console_style() {
+                print_error(style, &err.to_string());
+            }
             return false;
         }
     };
@@ -663,7 +711,7 @@ mod tests {
         fn test_should_error_when_not_root() {
             let state = State::NotRoot;
 
-            let result = create_plan(&state, &candidate_path(), Presentation::Plain);
+            let result = create_plan(&state, &candidate_path(), Presentation::Plain, false);
 
             assert!(matches!(result, Err(UpgradeError::MustBeRoot)));
         }
@@ -672,7 +720,7 @@ mod tests {
         fn test_should_error_when_binary_does_not_exist() {
             let state = State::Missing;
 
-            let result = create_plan(&state, &candidate_path(), Presentation::Plain);
+            let result = create_plan(&state, &candidate_path(), Presentation::Plain, false);
 
             assert!(matches!(result, Err(UpgradeError::Missing(path)) if path == candidate_path()));
         }
@@ -681,7 +729,7 @@ mod tests {
         fn test_should_error_when_not_a_higher_version() {
             let state = State::NotNewer;
 
-            let result = create_plan(&state, &candidate_path(), Presentation::Plain);
+            let result = create_plan(&state, &candidate_path(), Presentation::Plain, false);
 
             assert!(matches!(result, Err(UpgradeError::InvalidUpgrade)));
         }
@@ -690,11 +738,13 @@ mod tests {
         fn test_should_skip_mark_executable_and_set_ownership_when_already_correct() {
             let state = State::Upgradable {
                 current: version(0, 0, 1),
+                one_way: Vec::new(),
                 is_marked_as_executable: true,
                 is_owned_by_douglas_admin: true,
             };
 
-            let Ok(steps) = create_plan(&state, &candidate_path(), Presentation::Plain) else {
+            let Ok(steps) = create_plan(&state, &candidate_path(), Presentation::Plain, false)
+            else {
                 panic!("should plan");
             };
             let descriptions: Vec<String> =
@@ -718,11 +768,13 @@ mod tests {
         fn test_should_mark_executable_and_set_ownership_first_when_needed() {
             let state = State::Upgradable {
                 current: version(0, 0, 1),
+                one_way: Vec::new(),
                 is_marked_as_executable: false,
                 is_owned_by_douglas_admin: false,
             };
 
-            let Ok(steps) = create_plan(&state, &candidate_path(), Presentation::Plain) else {
+            let Ok(steps) = create_plan(&state, &candidate_path(), Presentation::Plain, false)
+            else {
                 panic!("should plan");
             };
             let descriptions: Vec<String> =
@@ -744,6 +796,48 @@ mod tests {
                     "Replace current process with new version".to_string(),
                 ]
             );
+        }
+        fn one_way_state() -> State {
+            State::Upgradable {
+                current: version(0, 0, 1),
+                one_way: vec![Difference::CoreVersion {
+                    seedling: "openbao".to_string(),
+                    from: 1,
+                    to: 2,
+                }],
+                is_marked_as_executable: true,
+                is_owned_by_douglas_admin: true,
+            }
+        }
+
+        #[test]
+        fn test_should_refuse_a_one_way_upgrade_and_say_what_changed() {
+            let result = create_plan(
+                &one_way_state(),
+                &candidate_path(),
+                Presentation::Plain,
+                false,
+            );
+
+            let Err(err) = result else {
+                panic!("should refuse");
+            };
+            assert!(matches!(err, UpgradeError::OneWay(_)));
+            let message = err.to_string();
+            assert!(message.contains("core seedling 'openbao' version 1 -> 2"));
+            assert!(message.contains("--allow-one-way"));
+        }
+
+        #[test]
+        fn test_should_plan_a_one_way_upgrade_when_allowed() {
+            let result = create_plan(
+                &one_way_state(),
+                &candidate_path(),
+                Presentation::Plain,
+                true,
+            );
+
+            assert!(result.is_ok());
         }
     }
 
@@ -989,6 +1083,7 @@ mod tests {
                     },
                     is_marked_as_executable: true,
                     is_owned_by_douglas_admin: true,
+                    ..
                 }
             ));
         }
@@ -1037,8 +1132,150 @@ mod tests {
                     },
                     is_marked_as_executable: false,
                     is_owned_by_douglas_admin: false,
+                    ..
                 }
             ));
+        }
+        #[test]
+        fn test_should_report_no_one_way_differences_when_the_metadata_matches() {
+            let mut credentials = MockCredentials::new();
+            credentials.expect_is_root().returning(|| true);
+            let mut inspect = MockInspect::new();
+            inspect.expect_exists().returning(|_| true);
+            let mut binary_verifier = MockBinaryVerifier::new();
+            binary_verifier
+                .expect_get_external_release()
+                .returning(|_| {
+                    let candidate = release(2, 0, 0);
+
+                    Ok(candidate)
+                });
+            binary_verifier
+                .expect_get_internal_release()
+                .returning(|| Ok(release(1, 0, 0)));
+            let mut permissions = MockPermissions::new();
+            permissions
+                .expect_get_mode()
+                .returning(|_| Ok(file_system::Modes::OwnerReadWriteExecute));
+            permissions
+                .expect_get_user_and_group_ownership()
+                .returning(|_| Ok(("dev".to_string(), "dev".to_string())));
+
+            let mut observer = StateObserver {
+                credentials: &credentials,
+                inspect: &inspect,
+                binary_verifier: &binary_verifier,
+                permissions: &permissions,
+            };
+            let reporter = CapturingReporter::new();
+            let guard = test_guard(reporter);
+
+            let Ok(State::Upgradable { one_way, .. }) =
+                observer.discover(guard.span(), Path::new("/tmp/candidate"))
+            else {
+                panic!("should discover an upgradable state");
+            };
+
+            assert!(one_way.is_empty());
+        }
+
+        #[test]
+        fn test_should_report_a_one_way_difference_when_a_core_seedling_version_changes() {
+            let mut credentials = MockCredentials::new();
+            credentials.expect_is_root().returning(|| true);
+            let mut inspect = MockInspect::new();
+            inspect.expect_exists().returning(|_| true);
+            let mut binary_verifier = MockBinaryVerifier::new();
+            binary_verifier
+                .expect_get_external_release()
+                .returning(|_| {
+                    let mut candidate = release(2, 0, 0);
+                    candidate.metadata.core.insert("openbao".to_string(), 99);
+                    Ok(candidate)
+                });
+            binary_verifier
+                .expect_get_internal_release()
+                .returning(|| Ok(release(1, 0, 0)));
+            let mut permissions = MockPermissions::new();
+            permissions
+                .expect_get_mode()
+                .returning(|_| Ok(file_system::Modes::OwnerReadWriteExecute));
+            permissions
+                .expect_get_user_and_group_ownership()
+                .returning(|_| Ok(("dev".to_string(), "dev".to_string())));
+
+            let mut observer = StateObserver {
+                credentials: &credentials,
+                inspect: &inspect,
+                binary_verifier: &binary_verifier,
+                permissions: &permissions,
+            };
+            let reporter = CapturingReporter::new();
+            let guard = test_guard(reporter);
+
+            let Ok(State::Upgradable { one_way, .. }) =
+                observer.discover(guard.span(), Path::new("/tmp/candidate"))
+            else {
+                panic!("should discover an upgradable state");
+            };
+
+            assert_eq!(
+                one_way,
+                vec![Difference::CoreVersion {
+                    seedling: "openbao".to_string(),
+                    from: config::seedlings::OPENBAO_VERSION,
+                    to: 99,
+                }]
+            );
+        }
+
+        #[test]
+        fn test_should_report_a_one_way_difference_when_the_data_format_changes() {
+            let mut credentials = MockCredentials::new();
+            credentials.expect_is_root().returning(|| true);
+            let mut inspect = MockInspect::new();
+            inspect.expect_exists().returning(|_| true);
+            let mut binary_verifier = MockBinaryVerifier::new();
+            binary_verifier
+                .expect_get_external_release()
+                .returning(|_| {
+                    let mut candidate = release(2, 0, 0);
+                    candidate.metadata.format = 99;
+                    Ok(candidate)
+                });
+            binary_verifier
+                .expect_get_internal_release()
+                .returning(|| Ok(release(1, 0, 0)));
+            let mut permissions = MockPermissions::new();
+            permissions
+                .expect_get_mode()
+                .returning(|_| Ok(file_system::Modes::OwnerReadWriteExecute));
+            permissions
+                .expect_get_user_and_group_ownership()
+                .returning(|_| Ok(("dev".to_string(), "dev".to_string())));
+
+            let mut observer = StateObserver {
+                credentials: &credentials,
+                inspect: &inspect,
+                binary_verifier: &binary_verifier,
+                permissions: &permissions,
+            };
+            let reporter = CapturingReporter::new();
+            let guard = test_guard(reporter);
+
+            let Ok(State::Upgradable { one_way, .. }) =
+                observer.discover(guard.span(), Path::new("/tmp/candidate"))
+            else {
+                panic!("should discover an upgradable state");
+            };
+
+            assert_eq!(
+                one_way,
+                vec![Difference::Format {
+                    from: config::DATA_FORMAT,
+                    to: 99,
+                }]
+            );
         }
     }
 
