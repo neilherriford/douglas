@@ -15,6 +15,7 @@ use thiserror::Error;
 pub mod compatibility;
 pub mod core_seedlings;
 pub mod openbao;
+pub mod retention;
 pub mod stop;
 pub mod system;
 pub mod upgrade;

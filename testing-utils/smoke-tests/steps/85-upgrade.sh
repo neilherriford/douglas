@@ -60,6 +60,18 @@ marker_after="$(ssh_out "sudo cat /var/lib/douglas/install-marker.json")"
 assert_contains "the install marker records the upgraded version" "$marker_after" \
     "\"version\":\"$NEW_VERSION\""
 
+retained="/var/lib/douglas/bin/douglas-$CURRENT_VERSION"
+retained_version="$(ssh_out "sudo tail -c 75 $retained | head -c 3 | od -An -tu1 | xargs")"
+assert_equals "the previous version was kept for rollback" "$major $minor $patch" "$retained_version"
+
+assert_success "the retained version verifies" ssh_out \
+    "sudo /var/lib/douglas/bin/douglas verify --path $retained"
+
+assert_success "the retained version is executable" ssh_out "sudo test -x $retained"
+
+assert_failure "no partial copy is left behind" ssh_out \
+    "sudo ls /var/lib/douglas/bin/*.partial"
+
 assert_success "installed binary verifies" ssh_out \
     "sudo /var/lib/douglas/bin/douglas verify --path /var/lib/douglas/bin/douglas"
 

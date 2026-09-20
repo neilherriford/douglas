@@ -1,7 +1,9 @@
 use crate::{
-    bootstrap::{HasServiceControl, KillService, OwnedServiceControl, ServiceControl, StopBract},
+    bootstrap::{
+        HasServiceControl, KillService, OwnedServiceControl, ServiceControl, StopBract, retention,
+    },
     cli::Presentation,
-    verify::{BinaryVerifier, DouglasBinaryVerifier},
+    verify::{BinaryVerifier, DouglasBinaryVerifier, Version},
 };
 use async_trait::async_trait;
 use blueprint::{
@@ -14,9 +16,9 @@ use clap::ValueEnum;
 use config::DouglasFolders;
 use credentials::Credentials;
 use file_system::{
-    FileCopier, FileDeleter, FileReader, FileRenamer, FileSystemError, Inspect, Links, Permissions,
-    UnixFileCopier, UnixFileDeleter, UnixFileRenamer, UnixInspect, UnixLinks, UnixPermissions,
-    path_to_string,
+    FileCopier, FileDeleter, FileReader, FileRenamer, FileSystemError, Folder, Inspect, Links,
+    Permissions, UnixFileCopier, UnixFileDeleter, UnixFileRenamer, UnixFolder, UnixInspect,
+    UnixLinks, UnixPermissions, path_to_string,
 };
 use log::{Level, Outcome, Reporter, ScopeGuard, ScopeKind, Span};
 use os::Os;
@@ -46,6 +48,7 @@ struct FileOperations<'a> {
     renamer: &'a dyn FileRenamer,
     copier: &'a dyn FileCopier,
     deleter: &'a dyn FileDeleter,
+    folder: &'a dyn Folder,
 }
 
 struct Context<'a> {
@@ -73,6 +76,7 @@ enum State {
     Missing,
     NotNewer,
     Upgradable {
+        current: Version,
         is_marked_as_executable: bool,
         is_owned_by_douglas_admin: bool,
     },
@@ -141,6 +145,7 @@ impl StateObserver<'_> {
             });
 
         guard.finish(Ok(State::Upgradable {
+            current: internal.version,
             is_marked_as_executable,
             is_owned_by_douglas_admin,
         }))
@@ -152,14 +157,15 @@ fn create_plan<'a>(
     path: &Path,
     presentation: Presentation,
 ) -> Result<Vec<Step<'a>>, UpgradeError> {
-    let (is_marked_as_executable, is_owned_by_douglas_admin) = match *state {
+    let (current, is_marked_as_executable, is_owned_by_douglas_admin) = match *state {
         State::NotRoot => return Err(UpgradeError::MustBeRoot),
         State::Missing => return Err(UpgradeError::Missing(path.to_path_buf())),
         State::NotNewer => return Err(UpgradeError::InvalidUpgrade),
         State::Upgradable {
+            current,
             is_marked_as_executable,
             is_owned_by_douglas_admin,
-        } => (is_marked_as_executable, is_owned_by_douglas_admin),
+        } => (current, is_marked_as_executable, is_owned_by_douglas_admin),
     };
 
     let mut result = Vec::new();
@@ -179,6 +185,7 @@ fn create_plan<'a>(
         );
     }
 
+    push_step(&mut result, RetainPreviousBinary::new(current));
     push_step(&mut result, KillService::new(config::services::WOODWARD));
     push_step(&mut result, StopBract::new(false));
     push_step(&mut result, KillService::new(config::services::RESIN));
@@ -230,6 +237,94 @@ impl<'a> Command<Context<'a>> for MarkExecutable {
         new_mode = new_mode.set_executable_by_owner(true);
 
         context.permissions.change_mode(&self.path, &new_mode)?;
+
+        guard.finish_with_outcome(Outcome::Ok);
+        Ok(())
+    }
+}
+
+#[derive(Debug)]
+struct RetainPreviousBinary {
+    current: Version,
+}
+
+impl RetainPreviousBinary {
+    pub fn new(current: Version) -> Self {
+        Self { current }
+    }
+
+    fn copy_aside(
+        context: &Context<'_>,
+        target: &Path,
+        partial: &Path,
+        retained: &Path,
+    ) -> Result<(), FileSystemError> {
+        context.files.copier.copy(target, partial)?;
+        let (user, group) = context.permissions.get_user_and_group_ownership(target)?;
+        context
+            .permissions
+            .change_user_and_group_ownership(partial, &user, &group)?;
+        context.files.renamer.rename(partial, retained)
+    }
+
+    fn prune(guard: &ScopeGuard, context: &Context<'_>, binary_dir: &Path) {
+        let entries = match context.files.folder.entries(binary_dir) {
+            Ok(entries) => entries,
+            Err(err) => {
+                guard.span().message(
+                    Level::Warn,
+                    &format!("Could not list retained versions to prune them: {err}"),
+                );
+                return;
+            }
+        };
+        let names: Vec<String> = entries.into_iter().map(|entry| entry.name).collect();
+
+        for name in retention::expired(&names, retention::RETAINED_COUNT) {
+            if let Err(err) = context.files.deleter.delete(&binary_dir.join(&name)) {
+                guard.span().message(
+                    Level::Warn,
+                    &format!("Could not remove the old retained version {name}: {err}"),
+                );
+            }
+        }
+    }
+}
+
+impl std::fmt::Display for RetainPreviousBinary {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Keep the current version for rollback")
+    }
+}
+
+#[async_trait]
+impl<'a> Command<Context<'a>> for RetainPreviousBinary {
+    fn name(&self) -> String {
+        "Keep the current version for rollback".to_string()
+    }
+
+    async fn run(
+        &mut self,
+        span: &Span,
+        context: &mut Context<'a>,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let guard = span
+            .create_child("Keeping the current version for rollback…", ScopeKind::Step)
+            .start_guard();
+
+        let binary_dir = context.douglas_folders.binary_dir();
+        let link = context.douglas_folders.binary_link();
+        let target = binary_dir.join(context.links.follow_symbolic(&link)?);
+        let retained = retention::retained_path(&binary_dir, self.current);
+        let partial = retention::partial_path(&retained)
+            .ok_or_else(|| FileSystemError::InvalidPath(retained.clone()))?;
+
+        if let Err(err) = Self::copy_aside(context, &target, &partial, &retained) {
+            let _ = context.files.deleter.delete(&partial);
+            return Err(err.into());
+        }
+
+        Self::prune(&guard, context, &binary_dir);
 
         guard.finish_with_outcome(Outcome::Ok);
         Ok(())
@@ -452,6 +547,7 @@ pub async fn perform(
     let file_renamer = UnixFileRenamer::new();
     let file_copier = UnixFileCopier::new();
     let file_deleter = UnixFileDeleter::new();
+    let folder = UnixFolder::new();
     let links = UnixLinks::new();
 
     let plan = match resolve_plan(guard.span(), create_plan(&state, path, presentation)) {
@@ -475,6 +571,7 @@ pub async fn perform(
             renamer: &file_renamer,
             copier: &file_copier,
             deleter: &file_deleter,
+            folder: &folder,
         },
         links: &links,
         permissions: &permissions,
@@ -497,7 +594,8 @@ mod tests {
     use crate::verify::{MockBinaryVerifier, Release, Version};
     use credentials::MockCredentials;
     use file_system::{
-        MockFileCopier, MockFileDeleter, MockFileRenamer, MockInspect, MockLinks, MockPermissions,
+        MockFileCopier, MockFileDeleter, MockFileRenamer, MockFolder, MockInspect, MockLinks,
+        MockPermissions,
     };
     use heartbeat::HeartbeatReaderFactory;
     use mockall::Sequence;
@@ -591,6 +689,7 @@ mod tests {
         #[test]
         fn test_should_skip_mark_executable_and_set_ownership_when_already_correct() {
             let state = State::Upgradable {
+                current: version(0, 0, 1),
                 is_marked_as_executable: true,
                 is_owned_by_douglas_admin: true,
             };
@@ -604,6 +703,7 @@ mod tests {
             assert_eq!(
                 descriptions,
                 vec![
+                    "Keep the current version for rollback".to_string(),
                     "Kill service woodward".to_string(),
                     "Stopping Bract".to_string(),
                     "Kill service resin".to_string(),
@@ -617,6 +717,7 @@ mod tests {
         #[test]
         fn test_should_mark_executable_and_set_ownership_first_when_needed() {
             let state = State::Upgradable {
+                current: version(0, 0, 1),
                 is_marked_as_executable: false,
                 is_owned_by_douglas_admin: false,
             };
@@ -634,6 +735,7 @@ mod tests {
                     "Set ownership on '/tmp/candidate-douglas' to user 'root' group \
                      'douglas-admin'"
                         .to_string(),
+                    "Keep the current version for rollback".to_string(),
                     "Kill service woodward".to_string(),
                     "Stopping Bract".to_string(),
                     "Kill service resin".to_string(),
@@ -880,6 +982,11 @@ mod tests {
             assert!(matches!(
                 state,
                 State::Upgradable {
+                    current: Version {
+                        major: 1,
+                        minor: 0,
+                        patch: 0,
+                    },
                     is_marked_as_executable: true,
                     is_owned_by_douglas_admin: true,
                 }
@@ -923,6 +1030,11 @@ mod tests {
             assert!(matches!(
                 state,
                 State::Upgradable {
+                    current: Version {
+                        major: 1,
+                        minor: 0,
+                        patch: 0,
+                    },
                     is_marked_as_executable: false,
                     is_owned_by_douglas_admin: false,
                 }
@@ -974,12 +1086,14 @@ mod tests {
             let bract_client = bract_client::MockClient::new();
             let file_copier = MockFileCopier::new();
             let file_deleter = MockFileDeleter::new();
+            let folder = MockFolder::new();
             let mut context = test_context(
                 &os,
                 FileOperations {
                     renamer: &file_renamer,
                     copier: &file_copier,
                     deleter: &file_deleter,
+                    folder: &folder,
                 },
                 &links,
                 &permissions,
@@ -1033,16 +1147,332 @@ mod tests {
             permissions
         }
 
+        fn binary_dir() -> PathBuf {
+            DouglasFolders::default().binary_dir()
+        }
+
+        fn retained() -> PathBuf {
+            binary_dir().join("douglas-0.0.4")
+        }
+
+        fn partial() -> PathBuf {
+            binary_dir().join("douglas-0.0.4.partial")
+        }
+
+        fn target_is_owned_by_dev() -> MockPermissions {
+            let mut permissions = MockPermissions::new();
+            permissions
+                .expect_get_user_and_group_ownership()
+                .withf(|path| path == Path::new(TARGET))
+                .returning(|_| Ok(("dev".to_string(), "dev-group".to_string())));
+            permissions
+        }
+
+        fn entry(name: &str) -> file_system::Entry {
+            file_system::Entry {
+                name: name.to_string(),
+                path: binary_dir().join(name),
+                kind: file_system::EntryKind::File,
+                is_link: false,
+                size: 1,
+            }
+        }
+
+        fn folder_listing(names: &[&str]) -> MockFolder {
+            let entries: Vec<file_system::Entry> = names.iter().map(|name| entry(name)).collect();
+            let mut folder = MockFolder::new();
+            folder
+                .expect_entries()
+                .withf(|path| path == binary_dir())
+                .returning(move |_| Ok(entries.clone()));
+            folder
+        }
+
         #[tokio::test]
-        async fn test_overwrite_run_should_rename_the_candidate_onto_the_links_real_target() {
+        async fn test_retain_run_should_copy_the_target_aside_hand_it_the_same_owner_and_rename_it_into_place()
+         {
+            let mut file_copier = MockFileCopier::new();
+            file_copier
+                .expect_copy()
+                .withf(|from, to| from == Path::new(TARGET) && to == partial())
+                .times(1)
+                .returning(|_, _| Ok(()));
             let mut file_renamer = MockFileRenamer::new();
             file_renamer
                 .expect_rename()
-                .withf(|from, to| from == Path::new(CANDIDATE) && to == Path::new(TARGET))
+                .withf(|from, to| from == partial() && to == retained())
                 .times(1)
                 .returning(|_, _| Ok(()));
-            let file_copier = MockFileCopier::new();
+            let mut permissions = target_is_owned_by_dev();
+            permissions
+                .expect_change_user_and_group_ownership()
+                .withf(|path, user, group| {
+                    path == partial() && user == "dev" && group == "dev-group"
+                })
+                .times(1)
+                .returning(|_, _, _| Ok(()));
             let file_deleter = MockFileDeleter::new();
+            let folder = folder_listing(&["douglas", "douglas-0.0.4"]);
+            let os = MockOs::new();
+            let links = links_to_target();
+            let heartbeat_reader_factory = heartbeat::MockHeartbeatReaderFactory::new();
+            let docker_client = docker::MockClient::new();
+            let bract_client = bract_client::MockClient::new();
+            let mut context = test_context(
+                &os,
+                FileOperations {
+                    renamer: &file_renamer,
+                    copier: &file_copier,
+                    deleter: &file_deleter,
+                    folder: &folder,
+                },
+                &links,
+                &permissions,
+                &heartbeat_reader_factory,
+                &docker_client,
+                &bract_client,
+            );
+
+            let mut command = RetainPreviousBinary::new(version(0, 0, 4));
+            let span = Span::new(CapturingReporter::new(), "test", ScopeKind::Group);
+
+            let result = command.run(&span, &mut context).await;
+
+            assert!(result.is_ok());
+        }
+
+        #[tokio::test]
+        async fn test_retain_run_should_delete_only_the_versions_beyond_the_newest_three() {
+            let mut file_copier = MockFileCopier::new();
+            file_copier.expect_copy().returning(|_, _| Ok(()));
+            let mut file_renamer = MockFileRenamer::new();
+            file_renamer.expect_rename().returning(|_, _| Ok(()));
+            let mut permissions = target_is_owned_by_dev();
+            permissions
+                .expect_change_user_and_group_ownership()
+                .returning(|_, _, _| Ok(()));
+            let mut file_deleter = MockFileDeleter::new();
+            file_deleter
+                .expect_delete()
+                .withf(|path| path == binary_dir().join("douglas-0.0.1"))
+                .times(1)
+                .returning(|_| Ok(()));
+            file_deleter
+                .expect_delete()
+                .withf(|path| path == binary_dir().join("douglas-0.0.2"))
+                .times(1)
+                .returning(|_| Ok(()));
+            let folder = folder_listing(&[
+                "douglas",
+                "douglas-0.0.1",
+                "douglas-0.0.2",
+                "douglas-0.0.3",
+                "douglas-0.0.4",
+                "douglas-0.0.5",
+                "install-marker.json",
+            ]);
+            let os = MockOs::new();
+            let links = links_to_target();
+            let heartbeat_reader_factory = heartbeat::MockHeartbeatReaderFactory::new();
+            let docker_client = docker::MockClient::new();
+            let bract_client = bract_client::MockClient::new();
+            let mut context = test_context(
+                &os,
+                FileOperations {
+                    renamer: &file_renamer,
+                    copier: &file_copier,
+                    deleter: &file_deleter,
+                    folder: &folder,
+                },
+                &links,
+                &permissions,
+                &heartbeat_reader_factory,
+                &docker_client,
+                &bract_client,
+            );
+
+            let mut command = RetainPreviousBinary::new(version(0, 0, 4));
+            let span = Span::new(CapturingReporter::new(), "test", ScopeKind::Group);
+
+            let result = command.run(&span, &mut context).await;
+
+            assert!(result.is_ok());
+        }
+
+        #[tokio::test]
+        async fn test_retain_run_should_still_succeed_and_warn_when_the_retained_versions_cannot_be_listed()
+         {
+            let mut file_copier = MockFileCopier::new();
+            file_copier.expect_copy().returning(|_, _| Ok(()));
+            let mut file_renamer = MockFileRenamer::new();
+            file_renamer.expect_rename().returning(|_, _| Ok(()));
+            let mut permissions = target_is_owned_by_dev();
+            permissions
+                .expect_change_user_and_group_ownership()
+                .returning(|_, _, _| Ok(()));
+            let mut file_deleter = MockFileDeleter::new();
+            file_deleter.expect_delete().times(0);
+            let mut folder = MockFolder::new();
+            folder
+                .expect_entries()
+                .returning(|path| Err(FileSystemError::NotFoundError(path.to_path_buf())));
+            let os = MockOs::new();
+            let links = links_to_target();
+            let heartbeat_reader_factory = heartbeat::MockHeartbeatReaderFactory::new();
+            let docker_client = docker::MockClient::new();
+            let bract_client = bract_client::MockClient::new();
+            let mut context = test_context(
+                &os,
+                FileOperations {
+                    renamer: &file_renamer,
+                    copier: &file_copier,
+                    deleter: &file_deleter,
+                    folder: &folder,
+                },
+                &links,
+                &permissions,
+                &heartbeat_reader_factory,
+                &docker_client,
+                &bract_client,
+            );
+
+            let mut command = RetainPreviousBinary::new(version(0, 0, 4));
+            let reporter = CapturingReporter::new();
+            let span = Span::new(
+                Arc::clone(&reporter) as Arc<dyn Reporter>,
+                "test",
+                ScopeKind::Group,
+            );
+
+            let result = command.run(&span, &mut context).await;
+
+            assert!(result.is_ok());
+            assert!(
+                reporter
+                    .messages()
+                    .iter()
+                    .any(|message| message.contains("Could not list retained versions"))
+            );
+        }
+
+        #[tokio::test]
+        async fn test_retain_run_should_still_succeed_and_warn_when_an_old_version_cannot_be_removed()
+         {
+            let mut file_copier = MockFileCopier::new();
+            file_copier.expect_copy().returning(|_, _| Ok(()));
+            let mut file_renamer = MockFileRenamer::new();
+            file_renamer.expect_rename().returning(|_, _| Ok(()));
+            let mut permissions = target_is_owned_by_dev();
+            permissions
+                .expect_change_user_and_group_ownership()
+                .returning(|_, _, _| Ok(()));
+            let mut file_deleter = MockFileDeleter::new();
+            file_deleter
+                .expect_delete()
+                .times(1)
+                .returning(|path| Err(FileSystemError::NotFoundError(path.to_path_buf())));
+            let folder = folder_listing(&[
+                "douglas-0.0.1",
+                "douglas-0.0.2",
+                "douglas-0.0.3",
+                "douglas-0.0.4",
+            ]);
+            let os = MockOs::new();
+            let links = links_to_target();
+            let heartbeat_reader_factory = heartbeat::MockHeartbeatReaderFactory::new();
+            let docker_client = docker::MockClient::new();
+            let bract_client = bract_client::MockClient::new();
+            let mut context = test_context(
+                &os,
+                FileOperations {
+                    renamer: &file_renamer,
+                    copier: &file_copier,
+                    deleter: &file_deleter,
+                    folder: &folder,
+                },
+                &links,
+                &permissions,
+                &heartbeat_reader_factory,
+                &docker_client,
+                &bract_client,
+            );
+
+            let mut command = RetainPreviousBinary::new(version(0, 0, 4));
+            let reporter = CapturingReporter::new();
+            let span = Span::new(
+                Arc::clone(&reporter) as Arc<dyn Reporter>,
+                "test",
+                ScopeKind::Group,
+            );
+
+            let result = command.run(&span, &mut context).await;
+
+            assert!(result.is_ok());
+            assert!(
+                reporter
+                    .messages()
+                    .iter()
+                    .any(|message| message.contains("douglas-0.0.1"))
+            );
+        }
+
+        #[tokio::test]
+        async fn test_retain_run_should_fail_without_copying_when_the_binary_link_cannot_be_followed()
+         {
+            let os = MockOs::new();
+            let mut file_renamer = MockFileRenamer::new();
+            file_renamer.expect_rename().times(0);
+            let mut file_copier = MockFileCopier::new();
+            file_copier.expect_copy().times(0);
+            let mut file_deleter = MockFileDeleter::new();
+            file_deleter.expect_delete().times(0);
+            let folder = MockFolder::new();
+            let mut links = MockLinks::new();
+            links
+                .expect_follow_symbolic()
+                .returning(|path| Err(FileSystemError::NotFoundError(path.to_path_buf())));
+            let permissions = MockPermissions::new();
+            let heartbeat_reader_factory = heartbeat::MockHeartbeatReaderFactory::new();
+            let docker_client = docker::MockClient::new();
+            let bract_client = bract_client::MockClient::new();
+            let mut context = test_context(
+                &os,
+                FileOperations {
+                    renamer: &file_renamer,
+                    copier: &file_copier,
+                    deleter: &file_deleter,
+                    folder: &folder,
+                },
+                &links,
+                &permissions,
+                &heartbeat_reader_factory,
+                &docker_client,
+                &bract_client,
+            );
+
+            let mut command = RetainPreviousBinary::new(version(0, 0, 4));
+            let span = Span::new(CapturingReporter::new(), "test", ScopeKind::Group);
+
+            let result = command.run(&span, &mut context).await;
+
+            assert!(result.is_err());
+        }
+
+        #[tokio::test]
+        async fn test_retain_run_should_remove_the_partial_file_and_fail_when_the_copy_fails() {
+            let mut file_copier = MockFileCopier::new();
+            file_copier
+                .expect_copy()
+                .returning(|_, _| Err(permission_denied()));
+            let mut file_renamer = MockFileRenamer::new();
+            file_renamer.expect_rename().times(0);
+            let mut file_deleter = MockFileDeleter::new();
+            file_deleter
+                .expect_delete()
+                .withf(|path| path == partial())
+                .times(1)
+                .returning(|_| Ok(()));
+            let folder = MockFolder::new();
             let permissions = MockPermissions::new();
             let os = MockOs::new();
             let links = links_to_target();
@@ -1055,6 +1485,141 @@ mod tests {
                     renamer: &file_renamer,
                     copier: &file_copier,
                     deleter: &file_deleter,
+                    folder: &folder,
+                },
+                &links,
+                &permissions,
+                &heartbeat_reader_factory,
+                &docker_client,
+                &bract_client,
+            );
+
+            let mut command = RetainPreviousBinary::new(version(0, 0, 4));
+            let span = Span::new(CapturingReporter::new(), "test", ScopeKind::Group);
+
+            let result = command.run(&span, &mut context).await;
+
+            assert!(result.is_err());
+        }
+
+        #[tokio::test]
+        async fn test_retain_run_should_remove_the_partial_file_and_fail_when_ownership_cannot_be_set()
+         {
+            let mut file_copier = MockFileCopier::new();
+            file_copier.expect_copy().returning(|_, _| Ok(()));
+            let mut file_renamer = MockFileRenamer::new();
+            file_renamer.expect_rename().times(0);
+            let mut permissions = target_is_owned_by_dev();
+            permissions
+                .expect_change_user_and_group_ownership()
+                .returning(|_, _, _| Err(permission_denied()));
+            let mut file_deleter = MockFileDeleter::new();
+            file_deleter
+                .expect_delete()
+                .withf(|path| path == partial())
+                .times(1)
+                .returning(|_| Ok(()));
+            let folder = MockFolder::new();
+            let os = MockOs::new();
+            let links = links_to_target();
+            let heartbeat_reader_factory = heartbeat::MockHeartbeatReaderFactory::new();
+            let docker_client = docker::MockClient::new();
+            let bract_client = bract_client::MockClient::new();
+            let mut context = test_context(
+                &os,
+                FileOperations {
+                    renamer: &file_renamer,
+                    copier: &file_copier,
+                    deleter: &file_deleter,
+                    folder: &folder,
+                },
+                &links,
+                &permissions,
+                &heartbeat_reader_factory,
+                &docker_client,
+                &bract_client,
+            );
+
+            let mut command = RetainPreviousBinary::new(version(0, 0, 4));
+            let span = Span::new(CapturingReporter::new(), "test", ScopeKind::Group);
+
+            let result = command.run(&span, &mut context).await;
+
+            assert!(result.is_err());
+        }
+
+        #[tokio::test]
+        async fn test_retain_run_should_remove_the_partial_file_and_fail_when_the_final_rename_fails()
+         {
+            let mut file_copier = MockFileCopier::new();
+            file_copier.expect_copy().returning(|_, _| Ok(()));
+            let mut file_renamer = MockFileRenamer::new();
+            file_renamer
+                .expect_rename()
+                .returning(|_, _| Err(permission_denied()));
+            let mut permissions = target_is_owned_by_dev();
+            permissions
+                .expect_change_user_and_group_ownership()
+                .returning(|_, _, _| Ok(()));
+            let mut file_deleter = MockFileDeleter::new();
+            file_deleter
+                .expect_delete()
+                .withf(|path| path == partial())
+                .times(1)
+                .returning(|_| Ok(()));
+            let folder = MockFolder::new();
+            let os = MockOs::new();
+            let links = links_to_target();
+            let heartbeat_reader_factory = heartbeat::MockHeartbeatReaderFactory::new();
+            let docker_client = docker::MockClient::new();
+            let bract_client = bract_client::MockClient::new();
+            let mut context = test_context(
+                &os,
+                FileOperations {
+                    renamer: &file_renamer,
+                    copier: &file_copier,
+                    deleter: &file_deleter,
+                    folder: &folder,
+                },
+                &links,
+                &permissions,
+                &heartbeat_reader_factory,
+                &docker_client,
+                &bract_client,
+            );
+
+            let mut command = RetainPreviousBinary::new(version(0, 0, 4));
+            let span = Span::new(CapturingReporter::new(), "test", ScopeKind::Group);
+
+            let result = command.run(&span, &mut context).await;
+
+            assert!(result.is_err());
+        }
+
+        #[tokio::test]
+        async fn test_overwrite_run_should_rename_the_candidate_onto_the_links_real_target() {
+            let mut file_renamer = MockFileRenamer::new();
+            file_renamer
+                .expect_rename()
+                .withf(|from, to| from == Path::new(CANDIDATE) && to == Path::new(TARGET))
+                .times(1)
+                .returning(|_, _| Ok(()));
+            let file_copier = MockFileCopier::new();
+            let file_deleter = MockFileDeleter::new();
+            let folder = MockFolder::new();
+            let permissions = MockPermissions::new();
+            let os = MockOs::new();
+            let links = links_to_target();
+            let heartbeat_reader_factory = heartbeat::MockHeartbeatReaderFactory::new();
+            let docker_client = docker::MockClient::new();
+            let bract_client = bract_client::MockClient::new();
+            let mut context = test_context(
+                &os,
+                FileOperations {
+                    renamer: &file_renamer,
+                    copier: &file_copier,
+                    deleter: &file_deleter,
+                    folder: &folder,
                 },
                 &links,
                 &permissions,
@@ -1078,6 +1643,7 @@ mod tests {
             file_renamer.expect_rename().times(0);
             let file_copier = MockFileCopier::new();
             let file_deleter = MockFileDeleter::new();
+            let folder = MockFolder::new();
             let mut links = MockLinks::new();
             links
                 .expect_follow_symbolic()
@@ -1092,6 +1658,7 @@ mod tests {
                     renamer: &file_renamer,
                     copier: &file_copier,
                     deleter: &file_deleter,
+                    folder: &folder,
                 },
                 &links,
                 &permissions,
@@ -1118,6 +1685,7 @@ mod tests {
                 .returning(|_, _| Err(permission_denied()));
             let file_copier = MockFileCopier::new();
             let file_deleter = MockFileDeleter::new();
+            let folder = MockFolder::new();
             let permissions = MockPermissions::new();
             let os = MockOs::new();
             let links = links_to_target();
@@ -1130,6 +1698,7 @@ mod tests {
                     renamer: &file_renamer,
                     copier: &file_copier,
                     deleter: &file_deleter,
+                    folder: &folder,
                 },
                 &links,
                 &permissions,
@@ -1152,6 +1721,7 @@ mod tests {
             let mut sequence = Sequence::new();
             let mut file_renamer = MockFileRenamer::new();
             let mut file_copier = MockFileCopier::new();
+            let folder = MockFolder::new();
             let mut file_deleter = MockFileDeleter::new();
             let mut permissions = MockPermissions::new();
             file_renamer
@@ -1203,6 +1773,7 @@ mod tests {
                     renamer: &file_renamer,
                     copier: &file_copier,
                     deleter: &file_deleter,
+                    folder: &folder,
                 },
                 &links,
                 &permissions,
@@ -1224,6 +1795,7 @@ mod tests {
          {
             let mut file_renamer = MockFileRenamer::new();
             let mut file_copier = MockFileCopier::new();
+            let folder = MockFolder::new();
             let mut file_deleter = MockFileDeleter::new();
             let permissions = candidate_is_root_owned_by_douglas_admin();
             file_renamer
@@ -1251,6 +1823,7 @@ mod tests {
                     renamer: &file_renamer,
                     copier: &file_copier,
                     deleter: &file_deleter,
+                    folder: &folder,
                 },
                 &links,
                 &permissions,
@@ -1272,6 +1845,7 @@ mod tests {
          {
             let mut file_renamer = MockFileRenamer::new();
             let mut file_copier = MockFileCopier::new();
+            let folder = MockFolder::new();
             let mut file_deleter = MockFileDeleter::new();
             let mut permissions = candidate_is_root_owned_by_douglas_admin();
             file_renamer
@@ -1300,6 +1874,7 @@ mod tests {
                     renamer: &file_renamer,
                     copier: &file_copier,
                     deleter: &file_deleter,
+                    folder: &folder,
                 },
                 &links,
                 &permissions,
@@ -1321,6 +1896,7 @@ mod tests {
          {
             let mut file_renamer = MockFileRenamer::new();
             let mut file_copier = MockFileCopier::new();
+            let folder = MockFolder::new();
             let mut file_deleter = MockFileDeleter::new();
             let mut permissions = candidate_is_root_owned_by_douglas_admin();
             file_renamer
@@ -1354,6 +1930,7 @@ mod tests {
                     renamer: &file_renamer,
                     copier: &file_copier,
                     deleter: &file_deleter,
+                    folder: &folder,
                 },
                 &links,
                 &permissions,
@@ -1375,6 +1952,7 @@ mod tests {
          {
             let mut file_renamer = MockFileRenamer::new();
             let mut file_copier = MockFileCopier::new();
+            let folder = MockFolder::new();
             let mut file_deleter = MockFileDeleter::new();
             let mut permissions = candidate_is_root_owned_by_douglas_admin();
             file_renamer
@@ -1408,6 +1986,7 @@ mod tests {
                     renamer: &file_renamer,
                     copier: &file_copier,
                     deleter: &file_deleter,
+                    folder: &folder,
                 },
                 &links,
                 &permissions,
@@ -1459,12 +2038,14 @@ mod tests {
             let bract_client = bract_client::MockClient::new();
             let file_copier = MockFileCopier::new();
             let file_deleter = MockFileDeleter::new();
+            let folder = MockFolder::new();
             let mut context = test_context(
                 &os,
                 FileOperations {
                     renamer: &file_renamer,
                     copier: &file_copier,
                     deleter: &file_deleter,
+                    folder: &folder,
                 },
                 &links,
                 &permissions,
@@ -1494,12 +2075,14 @@ mod tests {
             let bract_client = bract_client::MockClient::new();
             let file_copier = MockFileCopier::new();
             let file_deleter = MockFileDeleter::new();
+            let folder = MockFolder::new();
             let mut context = test_context(
                 &os,
                 FileOperations {
                     renamer: &file_renamer,
                     copier: &file_copier,
                     deleter: &file_deleter,
+                    folder: &folder,
                 },
                 &links,
                 &permissions,
