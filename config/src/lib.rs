@@ -139,6 +139,12 @@ impl DouglasFolders {
         result.push("douglas");
         result
     }
+
+    pub fn install_marker(&self) -> PathBuf {
+        let mut result = self.seedlings_root.clone();
+        result.push("install-marker.json");
+        result
+    }
 }
 
 impl Default for DouglasFolders {
@@ -319,6 +325,19 @@ mod tests {
         assert_ne!(
             folders.seedling_mount("bract", "socket"),
             folders.seedling_mount("resin", "socket")
+        );
+    }
+
+    #[test]
+    fn test_install_marker_should_sit_directly_under_the_seedlings_root() {
+        let folders = DouglasFolders::new();
+
+        let marker = folders.install_marker();
+
+        assert_eq!(marker.parent(), Some(folders.seedlings_root.as_path()));
+        assert_eq!(
+            marker.file_name().and_then(|name| name.to_str()),
+            Some("install-marker.json")
         );
     }
 }
