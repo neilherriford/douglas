@@ -1,5 +1,6 @@
 use crate::verify::Version;
 use std::path::{Path, PathBuf};
+use thiserror::Error;
 
 pub(crate) const RETAINED_COUNT: usize = 3;
 
@@ -18,9 +19,8 @@ pub(crate) fn partial_path(retained: &Path) -> Option<PathBuf> {
     Some(retained.with_file_name(format!("{}.partial", name.to_string_lossy())))
 }
 
-pub(crate) fn parse_retained(name: &str) -> Option<Version> {
-    let rest = name.strip_prefix(PREFIX)?;
-    let mut parts = rest.split('.');
+pub(crate) fn parse_version(text: &str) -> Option<Version> {
+    let mut parts = text.split('.');
     let major = parts.next()?.parse().ok()?;
     let minor = parts.next()?.parse().ok()?;
     let patch = parts.next()?.parse().ok()?;
@@ -32,7 +32,49 @@ pub(crate) fn parse_retained(name: &str) -> Option<Version> {
         minor,
         patch,
     };
-    (retained_name(version) == name).then_some(version)
+    (version.to_string() == text).then_some(version)
+}
+
+pub(crate) fn parse_retained(name: &str) -> Option<Version> {
+    parse_version(name.strip_prefix(PREFIX)?)
+}
+
+#[derive(Error, Debug, PartialEq, Eq)]
+pub(crate) enum RollbackTargetError {
+    #[error("No earlier version is kept to roll back to")]
+    NothingToRollBackTo,
+    #[error("Version {0} is not kept; the versions kept are: {1}")]
+    NotKept(Version, String),
+    #[error("Version {0} is not older than the running version {1}")]
+    NotOlder(Version, Version),
+}
+
+pub(crate) fn rollback_target(
+    names: &[String],
+    current: Version,
+    requested: Option<Version>,
+) -> Result<Version, RollbackTargetError> {
+    let mut kept: Vec<Version> = names
+        .iter()
+        .filter_map(|name| parse_retained(name))
+        .collect();
+    kept.sort();
+
+    match requested {
+        Some(version) if version >= current => Err(RollbackTargetError::NotOlder(version, current)),
+        Some(version) if kept.contains(&version) => Ok(version),
+        Some(version) => Err(RollbackTargetError::NotKept(
+            version,
+            kept.iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(", "),
+        )),
+        None => kept
+            .into_iter()
+            .rfind(|version| *version < current)
+            .ok_or(RollbackTargetError::NothingToRollBackTo),
+    }
 }
 
 pub(crate) fn expired(names: &[String], keep: usize) -> Vec<String> {
@@ -163,5 +205,72 @@ mod tests {
         let listing = names(&["douglas-0.0.1", "douglas-0.0.2"]);
 
         assert_eq!(expired(&listing, 0).len(), 2);
+    }
+
+    #[test]
+    fn test_parse_version_should_read_a_dotted_version_and_reject_the_rest() {
+        assert_eq!(parse_version("0.2.11"), Some(version(0, 2, 11)));
+        assert_eq!(parse_version("0.2"), None);
+        assert_eq!(parse_version("0.2.x"), None);
+        assert_eq!(parse_version("00.2.1"), None);
+        assert_eq!(parse_version(""), None);
+    }
+
+    #[test]
+    fn test_rollback_target_should_default_to_the_newest_kept_version_older_than_the_running_one() {
+        let listing = names(&["douglas", "douglas-0.0.1", "douglas-0.0.3", "douglas-0.0.5"]);
+
+        assert_eq!(
+            rollback_target(&listing, version(0, 0, 4), None),
+            Ok(version(0, 0, 3))
+        );
+    }
+
+    #[test]
+    fn test_rollback_target_should_have_nothing_when_no_kept_version_is_older() {
+        let listing = names(&["douglas-0.0.4", "douglas-0.0.5"]);
+
+        assert_eq!(
+            rollback_target(&listing, version(0, 0, 4), None),
+            Err(RollbackTargetError::NothingToRollBackTo)
+        );
+    }
+
+    #[test]
+    fn test_rollback_target_should_accept_a_requested_kept_version() {
+        let listing = names(&["douglas-0.0.1", "douglas-0.0.3"]);
+
+        assert_eq!(
+            rollback_target(&listing, version(0, 0, 4), Some(version(0, 0, 1))),
+            Ok(version(0, 0, 1))
+        );
+    }
+
+    #[test]
+    fn test_rollback_target_should_refuse_a_requested_version_that_is_not_kept_and_list_what_is() {
+        let listing = names(&["douglas-0.0.1", "douglas-0.0.3"]);
+
+        let result = rollback_target(&listing, version(0, 0, 4), Some(version(0, 0, 2)));
+
+        assert_eq!(
+            result,
+            Err(RollbackTargetError::NotKept(
+                version(0, 0, 2),
+                "0.0.1, 0.0.3".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn test_rollback_target_should_refuse_a_requested_version_that_is_not_older() {
+        let listing = names(&["douglas-0.0.4"]);
+
+        assert_eq!(
+            rollback_target(&listing, version(0, 0, 4), Some(version(0, 0, 4))),
+            Err(RollbackTargetError::NotOlder(
+                version(0, 0, 4),
+                version(0, 0, 4)
+            ))
+        );
     }
 }
