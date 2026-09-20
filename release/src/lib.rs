@@ -28,6 +28,95 @@ impl ReleaseMetadata {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InstallMarker {
+    pub version: String,
+    pub metadata: ReleaseMetadata,
+}
+
+impl InstallMarker {
+    pub fn to_json(&self) -> Result<String, ReleaseError> {
+        serde_json::to_string(self).map_err(|err| ReleaseError::Malformed(err.to_string()))
+    }
+
+    pub fn from_json(raw: &str) -> Result<Self, ReleaseError> {
+        serde_json::from_str(raw).map_err(|err| ReleaseError::Malformed(err.to_string()))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Conflict {
+    FormatNewer {
+        installed: u8,
+        running: u8,
+    },
+    CoreNewer {
+        seedling: String,
+        installed: u16,
+        running: u16,
+    },
+    CoreUnknown {
+        seedling: String,
+        installed: u16,
+    },
+}
+
+impl std::fmt::Display for Conflict {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Conflict::FormatNewer { installed, running } => write!(
+                f,
+                "the installed data format is {installed} but this binary only understands format {running}"
+            ),
+            Conflict::CoreNewer {
+                seedling,
+                installed,
+                running,
+            } => write!(
+                f,
+                "core seedling '{seedling}' is at version {installed} but this binary declares version {running}"
+            ),
+            Conflict::CoreUnknown {
+                seedling,
+                installed,
+            } => write!(
+                f,
+                "core seedling '{seedling}' (version {installed}) is installed but this binary does not know it"
+            ),
+        }
+    }
+}
+
+pub fn start_conflicts(marker: &InstallMarker, running: &ReleaseMetadata) -> Vec<Conflict> {
+    let mut conflicts = Vec::new();
+
+    if marker.metadata.format > running.format {
+        conflicts.push(Conflict::FormatNewer {
+            installed: marker.metadata.format,
+            running: running.format,
+        });
+    }
+
+    for (seedling, installed) in &marker.metadata.core {
+        match running.core.get(seedling) {
+            None => conflicts.push(Conflict::CoreUnknown {
+                seedling: seedling.clone(),
+                installed: *installed,
+            }),
+            Some(running_version) if installed > running_version => {
+                conflicts.push(Conflict::CoreNewer {
+                    seedling: seedling.clone(),
+                    installed: *installed,
+                    running: *running_version,
+                });
+            }
+            Some(_) => {}
+        }
+    }
+
+    conflicts
+}
+
 pub fn attach(payload: &mut Vec<u8>, metadata: &ReleaseMetadata) -> Result<(), ReleaseError> {
     let json =
         serde_json::to_vec(metadata).map_err(|err| ReleaseError::Malformed(err.to_string()))?;
@@ -160,6 +249,147 @@ mod tests {
             Err(ReleaseError::Malformed(_))
         ));
         assert_eq!(payload, b"a plain payload");
+    }
+
+    fn metadata(format: u8, openbao: u16, traefik: u16) -> ReleaseMetadata {
+        ReleaseMetadata {
+            format,
+            core: BTreeMap::from([
+                ("openbao".to_string(), openbao),
+                ("traefik".to_string(), traefik),
+            ]),
+        }
+    }
+
+    fn marker(metadata: ReleaseMetadata) -> InstallMarker {
+        InstallMarker {
+            version: "0.2.1".to_string(),
+            metadata,
+        }
+    }
+
+    #[test]
+    fn test_marker_should_round_trip_through_json() {
+        let original = marker(metadata(2, 1, 3));
+
+        let Ok(json) = original.to_json() else {
+            panic!("should serialize");
+        };
+        let Ok(recovered) = InstallMarker::from_json(&json) else {
+            panic!("should parse");
+        };
+
+        assert_eq!(recovered, original);
+    }
+
+    #[test]
+    fn test_marker_should_reject_contents_that_are_not_a_marker() {
+        assert!(matches!(
+            InstallMarker::from_json("not json"),
+            Err(ReleaseError::Malformed(_))
+        ));
+        assert!(matches!(
+            InstallMarker::from_json("{\"version\":\"0.2.1\"}"),
+            Err(ReleaseError::Malformed(_))
+        ));
+    }
+
+    #[test]
+    fn test_start_conflicts_should_be_empty_when_the_marker_matches_the_running_binary() {
+        let conflicts = start_conflicts(&marker(metadata(1, 1, 1)), &metadata(1, 1, 1));
+
+        assert!(conflicts.is_empty());
+    }
+
+    #[test]
+    fn test_start_conflicts_should_allow_a_binary_newer_than_the_installed_data() {
+        let conflicts = start_conflicts(&marker(metadata(1, 1, 1)), &metadata(2, 2, 3));
+
+        assert!(conflicts.is_empty());
+    }
+
+    #[test]
+    fn test_start_conflicts_should_refuse_a_binary_with_an_older_data_format() {
+        let conflicts = start_conflicts(&marker(metadata(3, 1, 1)), &metadata(2, 1, 1));
+
+        assert_eq!(
+            conflicts,
+            vec![Conflict::FormatNewer {
+                installed: 3,
+                running: 2
+            }]
+        );
+    }
+
+    #[test]
+    fn test_start_conflicts_should_refuse_a_binary_with_an_older_core_seedling_version() {
+        let conflicts = start_conflicts(&marker(metadata(1, 2, 1)), &metadata(1, 1, 1));
+
+        assert_eq!(
+            conflicts,
+            vec![Conflict::CoreNewer {
+                seedling: "openbao".to_string(),
+                installed: 2,
+                running: 1
+            }]
+        );
+    }
+
+    #[test]
+    fn test_start_conflicts_should_refuse_a_binary_that_does_not_know_an_installed_seedling() {
+        let running = ReleaseMetadata {
+            format: 1,
+            core: BTreeMap::from([("traefik".to_string(), 1)]),
+        };
+
+        let conflicts = start_conflicts(&marker(metadata(1, 1, 1)), &running);
+
+        assert_eq!(
+            conflicts,
+            vec![Conflict::CoreUnknown {
+                seedling: "openbao".to_string(),
+                installed: 1
+            }]
+        );
+    }
+
+    #[test]
+    fn test_start_conflicts_should_report_every_conflict_in_a_stable_order() {
+        let conflicts = start_conflicts(&marker(metadata(3, 2, 2)), &metadata(2, 1, 1));
+
+        assert_eq!(
+            conflicts,
+            vec![
+                Conflict::FormatNewer {
+                    installed: 3,
+                    running: 2
+                },
+                Conflict::CoreNewer {
+                    seedling: "openbao".to_string(),
+                    installed: 2,
+                    running: 1
+                },
+                Conflict::CoreNewer {
+                    seedling: "traefik".to_string(),
+                    installed: 2,
+                    running: 1
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn test_conflict_messages_should_name_the_seedling_and_both_versions() {
+        let message = Conflict::CoreNewer {
+            seedling: "openbao".to_string(),
+            installed: 2,
+            running: 1,
+        }
+        .to_string();
+
+        assert!(message.contains("openbao"));
+        assert!(message.contains('2'));
+        assert!(message.contains('1'));
     }
 
     #[test]
