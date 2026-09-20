@@ -25,8 +25,10 @@ use log::{Level, Outcome, Reporter, ScopeGuard, ScopeKind, Span};
 use os::Os;
 use release::{Difference, differences};
 use std::{
+    collections::HashMap,
     path::{Path, PathBuf},
     sync::Arc,
+    time::Duration,
 };
 use thiserror::Error;
 
@@ -49,6 +51,8 @@ pub enum UpgradeError {
     StartFailed { code: String, detail: String },
     #[error("Could not run the installed version: {0}")]
     CannotRun(#[from] os::OsError),
+    #[error("{service} is not healthy after the upgrade: {reason}")]
+    Unhealthy { service: String, reason: String },
     #[error("File system error: {0}")]
     FileSystemError(#[from] FileSystemError),
 }
@@ -231,6 +235,7 @@ fn create_plan<'a>(
         OverwriteDouglasExecutable::new(path, current, restorable),
     );
     push_step(&mut result, StartNewVersion::new(presentation));
+    push_step(&mut result, ConfirmHealthy::new());
 
     Ok(result)
 }
@@ -662,6 +667,123 @@ impl<'a> Command<Context<'a>> for StartNewVersion {
         guard.finish_with_outcome(Outcome::Ok);
         Ok(())
     }
+
+    async fn rollback(
+        &mut self,
+        span: &Span,
+        context: &mut Context<'a>,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let guard = span
+            .create_child("Stopping the new version…", ScopeKind::Step)
+            .start_guard();
+
+        Self::stop_what_the_new_version_started(guard.span(), context).await;
+
+        guard.finish_with_outcome(Outcome::Ok);
+        Ok(())
+    }
+}
+
+const HEALTH_SOAK: Duration = Duration::from_secs(10);
+const HEALTH_INTERVAL: Duration = Duration::from_secs(1);
+const HEALTH_SERVICES: [&str; 4] = [
+    config::services::WOODWARD,
+    config::services::BRACT,
+    config::services::RESIN,
+    config::services::SEEDBANK,
+];
+
+#[derive(Debug)]
+struct ConfirmHealthy {
+    soak: Duration,
+    interval: Duration,
+}
+
+impl ConfirmHealthy {
+    pub fn new() -> Self {
+        Self::with_soak(HEALTH_SOAK, HEALTH_INTERVAL)
+    }
+
+    fn with_soak(soak: Duration, interval: Duration) -> Self {
+        Self { soak, interval }
+    }
+
+    fn polls(&self) -> u128 {
+        self.soak.as_millis() / self.interval.as_millis().max(1)
+    }
+
+    fn check_once(
+        context: &Context<'_>,
+        seen: &mut HashMap<&'static str, u32>,
+    ) -> Result<(), UpgradeError> {
+        let control = &context.service_control;
+
+        for service in HEALTH_SERVICES {
+            let unhealthy = |reason: String| UpgradeError::Unhealthy {
+                service: service.to_string(),
+                reason,
+            };
+
+            let pid = control
+                .heartbeat_reader_factory
+                .create(service)
+                .read()
+                .map_err(|err| unhealthy(format!("its heartbeat could not be read: {err}")))?
+                .pid;
+
+            let alive = control
+                .os
+                .is_active_pid(pid)
+                .map_err(|err| unhealthy(format!("its process could not be checked: {err}")))?;
+            if !alive {
+                return Err(unhealthy(format!("process {pid} is not running")));
+            }
+
+            match seen.insert(service, pid) {
+                Some(earlier) if earlier != pid => {
+                    return Err(unhealthy(format!("restarted (process {earlier} -> {pid})")));
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+}
+
+impl std::fmt::Display for ConfirmHealthy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Confirm the new version is healthy")
+    }
+}
+
+#[async_trait]
+impl<'a> Command<Context<'a>> for ConfirmHealthy {
+    fn name(&self) -> String {
+        "Confirm the new version is healthy".to_string()
+    }
+
+    async fn run(
+        &mut self,
+        span: &Span,
+        context: &mut Context<'a>,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let guard = span
+            .create_child("Confirming the new version is healthy…", ScopeKind::Step)
+            .start_guard();
+
+        let mut seen = HashMap::new();
+        for poll in 0..=self.polls() {
+            if poll > 0 {
+                context.service_control.os.sleep(self.interval);
+            }
+            if let Err(err) = Self::check_once(context, &mut seen) {
+                return guard.finish(Err(err.into()));
+            }
+        }
+
+        guard.finish_with_outcome(Outcome::Ok);
+        Ok(())
+    }
 }
 
 #[derive(Debug)]
@@ -960,6 +1082,7 @@ mod tests {
                     "Kill service seedbank".to_string(),
                     "Overwrite current version with new version".to_string(),
                     "Start the new version".to_string(),
+                    "Confirm the new version is healthy".to_string(),
                 ]
             );
         }
@@ -995,6 +1118,7 @@ mod tests {
                     "Kill service seedbank".to_string(),
                     "Overwrite current version with new version".to_string(),
                     "Start the new version".to_string(),
+                    "Confirm the new version is healthy".to_string(),
                 ]
             );
         }
@@ -3115,6 +3239,405 @@ mod tests {
                 panic!("should fail");
             };
             assert!(err.to_string().contains("exit code none"));
+        }
+
+        #[tokio::test]
+        async fn test_confirm_healthy_run_should_pass_when_every_service_stays_up_through_the_soak()
+        {
+            let mut os = MockOs::new();
+            os.expect_is_active_pid().returning(|_| Ok(true));
+            os.expect_sleep()
+                .withf(|duration| *duration == Duration::from_secs(1))
+                .times(3)
+                .returning(|_| ());
+            let mut heartbeat_reader_factory = heartbeat::MockHeartbeatReaderFactory::new();
+            for (service, pid) in [
+                (config::services::WOODWARD, 11),
+                (config::services::BRACT, 22),
+                (config::services::RESIN, 33),
+                (config::services::SEEDBANK, 44),
+            ] {
+                heartbeat_reader_factory
+                    .expect_create()
+                    .withf(move |name| name == service)
+                    .returning(move |_| heartbeat_reader_with_pid(pid));
+            }
+            let file_renamer = MockFileRenamer::new();
+            let links = MockLinks::new();
+            let permissions = MockPermissions::new();
+            let docker_client = docker::MockClient::new();
+            let bract_client = bract_client::MockClient::new();
+            let file_copier = MockFileCopier::new();
+            let file_deleter = MockFileDeleter::new();
+            let folder = MockFolder::new();
+            let mut context = test_context(
+                &os,
+                FileOperations {
+                    renamer: &file_renamer,
+                    copier: &file_copier,
+                    deleter: &file_deleter,
+                    folder: &folder,
+                },
+                &links,
+                &permissions,
+                &heartbeat_reader_factory,
+                &docker_client,
+                &bract_client,
+            );
+
+            let mut command =
+                ConfirmHealthy::with_soak(Duration::from_secs(3), Duration::from_secs(1));
+            let span = Span::new(CapturingReporter::new(), "test", ScopeKind::Group);
+
+            let result = command.run(&span, &mut context).await;
+
+            assert!(result.is_ok());
+        }
+
+        #[tokio::test]
+        async fn test_confirm_healthy_run_should_fail_naming_the_service_whose_process_is_gone() {
+            let mut os = MockOs::new();
+            os.expect_is_active_pid().returning(|pid| Ok(pid != 33));
+            os.expect_sleep().times(0);
+            let mut heartbeat_reader_factory = heartbeat::MockHeartbeatReaderFactory::new();
+            for (service, pid) in [
+                (config::services::WOODWARD, 11),
+                (config::services::BRACT, 22),
+                (config::services::RESIN, 33),
+                (config::services::SEEDBANK, 44),
+            ] {
+                heartbeat_reader_factory
+                    .expect_create()
+                    .withf(move |name| name == service)
+                    .returning(move |_| heartbeat_reader_with_pid(pid));
+            }
+            let file_renamer = MockFileRenamer::new();
+            let links = MockLinks::new();
+            let permissions = MockPermissions::new();
+            let docker_client = docker::MockClient::new();
+            let bract_client = bract_client::MockClient::new();
+            let file_copier = MockFileCopier::new();
+            let file_deleter = MockFileDeleter::new();
+            let folder = MockFolder::new();
+            let mut context = test_context(
+                &os,
+                FileOperations {
+                    renamer: &file_renamer,
+                    copier: &file_copier,
+                    deleter: &file_deleter,
+                    folder: &folder,
+                },
+                &links,
+                &permissions,
+                &heartbeat_reader_factory,
+                &docker_client,
+                &bract_client,
+            );
+
+            let mut command =
+                ConfirmHealthy::with_soak(Duration::from_secs(3), Duration::from_secs(1));
+            let span = Span::new(CapturingReporter::new(), "test", ScopeKind::Group);
+
+            let result = command.run(&span, &mut context).await;
+
+            let Err(err) = result else {
+                panic!("should fail");
+            };
+            let message = err.to_string();
+            assert!(message.contains(config::services::RESIN));
+            assert!(message.contains("33"));
+        }
+
+        #[tokio::test]
+        async fn test_confirm_healthy_run_should_fail_when_a_service_dies_partway_through_the_soak()
+        {
+            let mut os = MockOs::new();
+            let checks = std::sync::atomic::AtomicU32::new(0);
+            os.expect_is_active_pid().returning(move |pid| {
+                let seen = checks.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(!(pid == 44 && seen >= 8))
+            });
+            os.expect_sleep().returning(|_| ());
+            let mut heartbeat_reader_factory = heartbeat::MockHeartbeatReaderFactory::new();
+            for (service, pid) in [
+                (config::services::WOODWARD, 11),
+                (config::services::BRACT, 22),
+                (config::services::RESIN, 33),
+                (config::services::SEEDBANK, 44),
+            ] {
+                heartbeat_reader_factory
+                    .expect_create()
+                    .withf(move |name| name == service)
+                    .returning(move |_| heartbeat_reader_with_pid(pid));
+            }
+            let file_renamer = MockFileRenamer::new();
+            let links = MockLinks::new();
+            let permissions = MockPermissions::new();
+            let docker_client = docker::MockClient::new();
+            let bract_client = bract_client::MockClient::new();
+            let file_copier = MockFileCopier::new();
+            let file_deleter = MockFileDeleter::new();
+            let folder = MockFolder::new();
+            let mut context = test_context(
+                &os,
+                FileOperations {
+                    renamer: &file_renamer,
+                    copier: &file_copier,
+                    deleter: &file_deleter,
+                    folder: &folder,
+                },
+                &links,
+                &permissions,
+                &heartbeat_reader_factory,
+                &docker_client,
+                &bract_client,
+            );
+
+            let mut command =
+                ConfirmHealthy::with_soak(Duration::from_secs(3), Duration::from_secs(1));
+            let span = Span::new(CapturingReporter::new(), "test", ScopeKind::Group);
+
+            let result = command.run(&span, &mut context).await;
+
+            let Err(err) = result else {
+                panic!("should fail");
+            };
+            assert!(err.to_string().contains(config::services::SEEDBANK));
+        }
+
+        #[tokio::test]
+        async fn test_confirm_healthy_run_should_fail_when_a_service_restarts_under_a_new_pid() {
+            let mut os = MockOs::new();
+            os.expect_is_active_pid().returning(|_| Ok(true));
+            os.expect_sleep().returning(|_| ());
+            let reads = Arc::new(std::sync::atomic::AtomicU32::new(0));
+            let mut heartbeat_reader_factory = heartbeat::MockHeartbeatReaderFactory::new();
+            heartbeat_reader_factory
+                .expect_create()
+                .returning(move |service| {
+                    if service == config::services::WOODWARD {
+                        let reads = Arc::clone(&reads);
+                        let mut reader = heartbeat::MockHeartbeatReader::new();
+                        reader.expect_read().returning(move || {
+                            let count = reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                            Ok(heartbeat::Heartbeat {
+                                pid: 100 + count,
+                                written_at: std::time::SystemTime::now(),
+                            })
+                        });
+                        Box::new(reader)
+                    } else {
+                        heartbeat_reader_with_pid(7)
+                    }
+                });
+            let file_renamer = MockFileRenamer::new();
+            let links = MockLinks::new();
+            let permissions = MockPermissions::new();
+            let docker_client = docker::MockClient::new();
+            let bract_client = bract_client::MockClient::new();
+            let file_copier = MockFileCopier::new();
+            let file_deleter = MockFileDeleter::new();
+            let folder = MockFolder::new();
+            let mut context = test_context(
+                &os,
+                FileOperations {
+                    renamer: &file_renamer,
+                    copier: &file_copier,
+                    deleter: &file_deleter,
+                    folder: &folder,
+                },
+                &links,
+                &permissions,
+                &heartbeat_reader_factory,
+                &docker_client,
+                &bract_client,
+            );
+
+            let mut command =
+                ConfirmHealthy::with_soak(Duration::from_secs(3), Duration::from_secs(1));
+            let span = Span::new(CapturingReporter::new(), "test", ScopeKind::Group);
+
+            let result = command.run(&span, &mut context).await;
+
+            let Err(err) = result else {
+                panic!("should fail");
+            };
+            let message = err.to_string();
+            assert!(message.contains(config::services::WOODWARD));
+            assert!(message.contains("restarted"));
+        }
+
+        #[tokio::test]
+        async fn test_confirm_healthy_run_should_fail_when_a_heartbeat_cannot_be_read() {
+            let mut os = MockOs::new();
+            os.expect_is_active_pid().returning(|_| Ok(true));
+            let mut heartbeat_reader_factory = heartbeat::MockHeartbeatReaderFactory::new();
+            heartbeat_reader_factory.expect_create().returning(|_| {
+                let mut reader = heartbeat::MockHeartbeatReader::new();
+                reader.expect_read().returning(|| {
+                    Err(heartbeat::HeartbeatReaderError::FileSystemError(
+                        FileSystemError::NotFoundError(PathBuf::from("/heartbeat")),
+                    ))
+                });
+                Box::new(reader)
+            });
+            let file_renamer = MockFileRenamer::new();
+            let links = MockLinks::new();
+            let permissions = MockPermissions::new();
+            let docker_client = docker::MockClient::new();
+            let bract_client = bract_client::MockClient::new();
+            let file_copier = MockFileCopier::new();
+            let file_deleter = MockFileDeleter::new();
+            let folder = MockFolder::new();
+            let mut context = test_context(
+                &os,
+                FileOperations {
+                    renamer: &file_renamer,
+                    copier: &file_copier,
+                    deleter: &file_deleter,
+                    folder: &folder,
+                },
+                &links,
+                &permissions,
+                &heartbeat_reader_factory,
+                &docker_client,
+                &bract_client,
+            );
+
+            let mut command =
+                ConfirmHealthy::with_soak(Duration::from_secs(3), Duration::from_secs(1));
+            let span = Span::new(CapturingReporter::new(), "test", ScopeKind::Group);
+
+            let result = command.run(&span, &mut context).await;
+
+            let Err(err) = result else {
+                panic!("should fail");
+            };
+            assert!(err.to_string().contains("heartbeat could not be read"));
+        }
+
+        #[tokio::test]
+        async fn test_confirm_healthy_run_should_fail_when_the_process_check_itself_fails() {
+            let mut os = MockOs::new();
+            os.expect_is_active_pid()
+                .returning(|_| Err(os::OsError::PidTooLarge));
+            let mut heartbeat_reader_factory = heartbeat::MockHeartbeatReaderFactory::new();
+            for (service, pid) in [
+                (config::services::WOODWARD, 11),
+                (config::services::BRACT, 22),
+                (config::services::RESIN, 33),
+                (config::services::SEEDBANK, 44),
+            ] {
+                heartbeat_reader_factory
+                    .expect_create()
+                    .withf(move |name| name == service)
+                    .returning(move |_| heartbeat_reader_with_pid(pid));
+            }
+            let file_renamer = MockFileRenamer::new();
+            let links = MockLinks::new();
+            let permissions = MockPermissions::new();
+            let docker_client = docker::MockClient::new();
+            let bract_client = bract_client::MockClient::new();
+            let file_copier = MockFileCopier::new();
+            let file_deleter = MockFileDeleter::new();
+            let folder = MockFolder::new();
+            let mut context = test_context(
+                &os,
+                FileOperations {
+                    renamer: &file_renamer,
+                    copier: &file_copier,
+                    deleter: &file_deleter,
+                    folder: &folder,
+                },
+                &links,
+                &permissions,
+                &heartbeat_reader_factory,
+                &docker_client,
+                &bract_client,
+            );
+
+            let mut command =
+                ConfirmHealthy::with_soak(Duration::from_secs(3), Duration::from_secs(1));
+            let span = Span::new(CapturingReporter::new(), "test", ScopeKind::Group);
+
+            let result = command.run(&span, &mut context).await;
+
+            let Err(err) = result else {
+                panic!("should fail");
+            };
+            assert!(err.to_string().contains("could not be checked"));
+        }
+
+        #[test]
+        fn test_confirm_healthy_polls_should_divide_the_soak_by_the_interval() {
+            let command =
+                ConfirmHealthy::with_soak(Duration::from_secs(10), Duration::from_secs(2));
+
+            assert_eq!(command.polls(), 5);
+        }
+
+        #[test]
+        fn test_confirm_healthy_polls_should_not_divide_by_a_zero_interval() {
+            let command = ConfirmHealthy::with_soak(Duration::from_secs(1), Duration::ZERO);
+
+            assert_eq!(command.polls(), 1000);
+        }
+
+        #[tokio::test]
+        async fn test_start_new_version_rollback_should_stop_what_the_new_version_started() {
+            let mut os = MockOs::new();
+            for pid in [11, 33, 44] {
+                os.expect_kill()
+                    .withf(move |given| *given == pid)
+                    .times(1)
+                    .returning(|_| Ok(()));
+            }
+            let mut heartbeat_reader_factory = heartbeat::MockHeartbeatReaderFactory::new();
+            for (service, pid) in [
+                (config::services::WOODWARD, 11),
+                (config::services::RESIN, 33),
+                (config::services::SEEDBANK, 44),
+            ] {
+                heartbeat_reader_factory
+                    .expect_create()
+                    .withf(move |name| name == service)
+                    .times(1)
+                    .returning(move |_| heartbeat_reader_with_pid(pid));
+            }
+            let file_renamer = MockFileRenamer::new();
+            let links = MockLinks::new();
+            let permissions = MockPermissions::new();
+            let docker_client = docker::MockClient::new();
+            let mut bract_client = bract_client::MockClient::new();
+            bract_client
+                .expect_stop_bract()
+                .withf(|including_containers| !*including_containers)
+                .times(1)
+                .returning(|_| Ok(()));
+            let file_copier = MockFileCopier::new();
+            let file_deleter = MockFileDeleter::new();
+            let folder = MockFolder::new();
+            let mut context = test_context(
+                &os,
+                FileOperations {
+                    renamer: &file_renamer,
+                    copier: &file_copier,
+                    deleter: &file_deleter,
+                    folder: &folder,
+                },
+                &links,
+                &permissions,
+                &heartbeat_reader_factory,
+                &docker_client,
+                &bract_client,
+            );
+
+            let mut command = StartNewVersion::new(Presentation::Plain);
+            let span = Span::new(CapturingReporter::new(), "test", ScopeKind::Group);
+
+            let result = command.rollback(&span, &mut context).await;
+
+            assert!(result.is_ok());
         }
 
         #[tokio::test]
