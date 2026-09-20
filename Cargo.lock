@@ -994,6 +994,7 @@ dependencies = [
  "os",
  "os_pipe",
  "ratatui",
+ "release",
  "resin",
  "resin_client",
  "resin_types",

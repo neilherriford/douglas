@@ -1,6 +1,7 @@
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use file_system::{FileReader, FileSystemError};
 use os::Os;
+use release::{ReleaseError, ReleaseMetadata};
 use std::{
     path::{Path, PathBuf},
     sync::Arc,
@@ -26,6 +27,12 @@ impl std::fmt::Display for Version {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Release {
+    pub version: Version,
+    pub metadata: ReleaseMetadata,
+}
+
 #[derive(Error, Debug)]
 pub(crate) enum VerifyError {
     #[error("embedded public key is invalid: {0}")]
@@ -36,6 +43,8 @@ pub(crate) enum VerifyError {
     MissingTrailer(PathBuf),
     #[error("signature does not match: {0}")]
     Mismatch(ed25519_dalek::SignatureError),
+    #[error("release metadata is invalid: {0}")]
+    InvalidMetadata(ReleaseError),
     #[error("Could not determine current internal version")]
     UnknownInternalVersion,
 }
@@ -46,12 +55,14 @@ enum TrailerError {
     MissingTrailer,
     #[error("signature does not match: {0}")]
     Mismatch(ed25519_dalek::SignatureError),
+    #[error("release metadata is invalid: {0}")]
+    Metadata(ReleaseError),
 }
 
 #[cfg_attr(test, mockall::automock)]
 pub trait BinaryVerifier {
-    fn get_external_version(&self, binary: &Path) -> Result<Version, VerifyError>;
-    fn get_internal_version(&self) -> Result<Version, VerifyError>;
+    fn get_external_release(&self, binary: &Path) -> Result<Release, VerifyError>;
+    fn get_internal_release(&self) -> Result<Release, VerifyError>;
 }
 
 pub struct DouglasBinaryVerifier {
@@ -66,7 +77,7 @@ impl DouglasBinaryVerifier {
 }
 
 impl BinaryVerifier for DouglasBinaryVerifier {
-    fn get_external_version(&self, binary: &Path) -> Result<Version, VerifyError> {
+    fn get_external_release(&self, binary: &Path) -> Result<Release, VerifyError> {
         let verifying_key = embedded_verifying_key()?;
 
         let data = self
@@ -77,15 +88,16 @@ impl BinaryVerifier for DouglasBinaryVerifier {
         verify_trailer(&verifying_key, &data).map_err(|err| match err {
             TrailerError::MissingTrailer => VerifyError::MissingTrailer(binary.to_path_buf()),
             TrailerError::Mismatch(err) => VerifyError::Mismatch(err),
+            TrailerError::Metadata(err) => VerifyError::InvalidMetadata(err),
         })
     }
 
-    fn get_internal_version(&self) -> Result<Version, VerifyError> {
+    fn get_internal_release(&self) -> Result<Release, VerifyError> {
         let path = self
             .os
             .current_executable()
             .map_err(|_| VerifyError::UnknownInternalVersion)?;
-        self.get_external_version(&path)
+        self.get_external_release(&path)
     }
 }
 
@@ -98,7 +110,7 @@ fn embedded_verifying_key() -> Result<VerifyingKey, VerifyError> {
     VerifyingKey::from_bytes(&bytes).map_err(|err| VerifyError::InvalidPublicKey(err.to_string()))
 }
 
-fn verify_trailer(verifying_key: &VerifyingKey, data: &[u8]) -> Result<Version, TrailerError> {
+fn verify_trailer(verifying_key: &VerifyingKey, data: &[u8]) -> Result<Release, TrailerError> {
     if data.len() < TRAILER_LEN {
         return Err(TrailerError::MissingTrailer);
     }
@@ -123,10 +135,15 @@ fn verify_trailer(verifying_key: &VerifyingKey, data: &[u8]) -> Result<Version, 
         .verify(&signed_message, &signature)
         .map_err(TrailerError::Mismatch)?;
 
-    Ok(Version {
-        major: version_bytes[0],
-        minor: version_bytes[1],
-        patch: version_bytes[2],
+    let (_, metadata) = release::detach(payload).map_err(TrailerError::Metadata)?;
+
+    Ok(Release {
+        version: Version {
+            major: version_bytes[0],
+            minor: version_bytes[1],
+            patch: version_bytes[2],
+        },
+        metadata,
     })
 }
 
@@ -187,7 +204,7 @@ mod tests {
             .returning(|| Err(os::OsError::PidTooLarge));
         let verifier = DouglasBinaryVerifier::new(Arc::new(os), Arc::new(MockFileReader::new()));
 
-        let result = verifier.get_internal_version();
+        let result = verifier.get_internal_release();
 
         assert!(matches!(result, Err(VerifyError::UnknownInternalVersion)));
     }
@@ -203,7 +220,7 @@ mod tests {
             .return_once(|_| Ok(b"tiny".to_vec()));
         let verifier = DouglasBinaryVerifier::new(Arc::new(os), Arc::new(file_reader));
 
-        let result = verifier.get_internal_version();
+        let result = verifier.get_internal_release();
 
         assert!(matches!(
             result,
@@ -215,7 +232,7 @@ mod tests {
     fn test_get_external_version_should_report_a_read_failure_with_the_path() {
         let verifier = verifier_reading(Err(FileSystemError::NotFoundError(candidate())));
 
-        let result = verifier.get_external_version(&candidate());
+        let result = verifier.get_external_release(&candidate());
 
         assert!(matches!(
             result,
@@ -228,7 +245,7 @@ mod tests {
     fn test_get_external_version_should_reject_a_file_too_short_to_hold_a_trailer() {
         let verifier = verifier_reading(Ok(b"tiny".to_vec()));
 
-        let result = verifier.get_external_version(&candidate());
+        let result = verifier.get_external_release(&candidate());
 
         assert!(matches!(
             result,
@@ -240,7 +257,7 @@ mod tests {
     fn test_get_external_version_should_reject_a_file_without_the_trailer_magic() {
         let verifier = verifier_reading(Ok(vec![0u8; TRAILER_LEN + 100]));
 
-        let result = verifier.get_external_version(&candidate());
+        let result = verifier.get_external_release(&candidate());
 
         assert!(matches!(
             result,
@@ -256,7 +273,7 @@ mod tests {
         data.extend_from_slice(TRAILER_MAGIC);
         let verifier = verifier_reading(Ok(data));
 
-        let result = verifier.get_external_version(&candidate());
+        let result = verifier.get_external_release(&candidate());
 
         assert!(matches!(result, Err(VerifyError::Mismatch(_))));
     }
@@ -264,20 +281,81 @@ mod tests {
     #[test]
     fn test_verify_trailer_should_accept_a_correctly_signed_payload_and_version() {
         let (signing_key, verifying_key) = test_keypair();
-        let data = signed_data(&signing_key, b"pretend binary bytes", [1, 2, 3]);
+        let data = signed_data_with_metadata(&signing_key, &sample_metadata());
 
-        let Ok(version) = verify_trailer(&verifying_key, &data) else {
+        let Ok(release) = verify_trailer(&verifying_key, &data) else {
             panic!("should verify");
         };
 
         assert_eq!(
-            version,
+            release.version,
             Version {
                 major: 1,
                 minor: 2,
                 patch: 3
             }
         );
+    }
+
+    fn sample_metadata() -> ReleaseMetadata {
+        ReleaseMetadata {
+            format: 2,
+            core: std::collections::BTreeMap::from([("openbao".to_string(), 1)]),
+        }
+    }
+
+    fn signed_data_with_metadata(signing_key: &SigningKey, metadata: &ReleaseMetadata) -> Vec<u8> {
+        let mut payload = b"pretend binary bytes".to_vec();
+        let Ok(()) = release::attach(&mut payload, metadata) else {
+            panic!("should attach");
+        };
+        signed_data(signing_key, &payload, [1, 2, 3])
+    }
+
+    #[test]
+    fn test_verify_trailer_should_return_the_metadata_embedded_in_the_payload() {
+        let (signing_key, verifying_key) = test_keypair();
+        let data = signed_data_with_metadata(&signing_key, &sample_metadata());
+
+        let Ok(release) = verify_trailer(&verifying_key, &data) else {
+            panic!("should verify");
+        };
+
+        assert_eq!(release.metadata, sample_metadata());
+    }
+
+    #[test]
+    fn test_verify_trailer_should_reject_a_signed_payload_with_no_metadata_block() {
+        let (signing_key, verifying_key) = test_keypair();
+        let data = signed_data(&signing_key, b"pretend binary bytes", [1, 2, 3]);
+
+        let result = verify_trailer(&verifying_key, &data);
+
+        assert!(matches!(result, Err(TrailerError::Metadata(_))));
+    }
+
+    #[test]
+    fn test_verify_trailer_should_reject_tampered_metadata() {
+        let (signing_key, verifying_key) = test_keypair();
+        let mut data = signed_data_with_metadata(&signing_key, &sample_metadata());
+        let metadata_start = b"pretend binary bytes".len();
+        data[metadata_start] ^= 0xFF;
+
+        let result = verify_trailer(&verifying_key, &data);
+
+        assert!(matches!(result, Err(TrailerError::Mismatch(_))));
+    }
+
+    #[test]
+    fn test_verify_trailer_should_reject_a_signed_but_malformed_metadata_block() {
+        let (signing_key, verifying_key) = test_keypair();
+        let mut payload = b"pretend binary bytes".to_vec();
+        payload.extend_from_slice(&1000u32.to_le_bytes());
+        let data = signed_data(&signing_key, &payload, [1, 2, 3]);
+
+        let result = verify_trailer(&verifying_key, &data);
+
+        assert!(matches!(result, Err(TrailerError::Metadata(_))));
     }
 
     #[test]

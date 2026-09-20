@@ -102,8 +102,8 @@ impl StateObserver<'_> {
             return guard.finish(Ok(State::Missing));
         }
 
-        let external_version = match self.binary_verifier.get_external_version(path) {
-            Ok(version) => version,
+        let external = match self.binary_verifier.get_external_release(path) {
+            Ok(release) => release,
             Err(err) => {
                 guard
                     .span()
@@ -112,8 +112,8 @@ impl StateObserver<'_> {
             }
         };
 
-        let internal_version = match self.binary_verifier.get_internal_version() {
-            Ok(version) => version,
+        let internal = match self.binary_verifier.get_internal_release() {
+            Ok(release) => release,
             Err(err) => {
                 guard.span().message(
                     Level::Warn,
@@ -123,7 +123,7 @@ impl StateObserver<'_> {
             }
         };
 
-        if external_version <= internal_version {
+        if external.version <= internal.version {
             return guard.finish(Ok(State::NotNewer));
         }
 
@@ -494,7 +494,7 @@ pub async fn perform(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::verify::{MockBinaryVerifier, Version};
+    use crate::verify::{MockBinaryVerifier, Release, Version};
     use credentials::MockCredentials;
     use file_system::{
         MockFileCopier, MockFileDeleter, MockFileRenamer, MockInspect, MockLinks, MockPermissions,
@@ -502,6 +502,7 @@ mod tests {
     use heartbeat::HeartbeatReaderFactory;
     use mockall::Sequence;
     use os::MockOs;
+    use release::ReleaseMetadata;
     use std::sync::Mutex;
 
     struct CapturingReporter {
@@ -543,6 +544,13 @@ mod tests {
             major,
             minor,
             patch,
+        }
+    }
+
+    fn release(major: u8, minor: u8, patch: u8) -> Release {
+        Release {
+            version: version(major, minor, patch),
+            metadata: ReleaseMetadata::current(),
         }
     }
 
@@ -740,7 +748,7 @@ mod tests {
             inspect.expect_exists().returning(|_| true);
             let mut binary_verifier = MockBinaryVerifier::new();
             binary_verifier
-                .expect_get_external_version()
+                .expect_get_external_release()
                 .returning(|_| Err(crate::verify::VerifyError::UnknownInternalVersion));
             let permissions = MockPermissions::new();
 
@@ -772,10 +780,10 @@ mod tests {
             inspect.expect_exists().returning(|_| true);
             let mut binary_verifier = MockBinaryVerifier::new();
             binary_verifier
-                .expect_get_external_version()
-                .returning(|_| Ok(version(1, 0, 0)));
+                .expect_get_external_release()
+                .returning(|_| Ok(release(1, 0, 0)));
             binary_verifier
-                .expect_get_internal_version()
+                .expect_get_internal_release()
                 .returning(|| Err(crate::verify::VerifyError::UnknownInternalVersion));
             let permissions = MockPermissions::new();
 
@@ -807,11 +815,11 @@ mod tests {
             inspect.expect_exists().returning(|_| true);
             let mut binary_verifier = MockBinaryVerifier::new();
             binary_verifier
-                .expect_get_external_version()
-                .returning(|_| Ok(version(1, 0, 0)));
+                .expect_get_external_release()
+                .returning(|_| Ok(release(1, 0, 0)));
             binary_verifier
-                .expect_get_internal_version()
-                .returning(|| Ok(version(1, 0, 0)));
+                .expect_get_internal_release()
+                .returning(|| Ok(release(1, 0, 0)));
             let permissions = MockPermissions::new();
 
             let mut observer = StateObserver {
@@ -838,11 +846,11 @@ mod tests {
             inspect.expect_exists().returning(|_| true);
             let mut binary_verifier = MockBinaryVerifier::new();
             binary_verifier
-                .expect_get_external_version()
-                .returning(|_| Ok(version(2, 0, 0)));
+                .expect_get_external_release()
+                .returning(|_| Ok(release(2, 0, 0)));
             binary_verifier
-                .expect_get_internal_version()
-                .returning(|| Ok(version(1, 0, 0)));
+                .expect_get_internal_release()
+                .returning(|| Ok(release(1, 0, 0)));
             let mut permissions = MockPermissions::new();
             permissions
                 .expect_get_mode()
@@ -886,11 +894,11 @@ mod tests {
             inspect.expect_exists().returning(|_| true);
             let mut binary_verifier = MockBinaryVerifier::new();
             binary_verifier
-                .expect_get_external_version()
-                .returning(|_| Ok(version(2, 0, 0)));
+                .expect_get_external_release()
+                .returning(|_| Ok(release(2, 0, 0)));
             binary_verifier
-                .expect_get_internal_version()
-                .returning(|| Ok(version(1, 0, 0)));
+                .expect_get_internal_release()
+                .returning(|| Ok(release(1, 0, 0)));
             let mut permissions = MockPermissions::new();
             permissions
                 .expect_get_mode()
