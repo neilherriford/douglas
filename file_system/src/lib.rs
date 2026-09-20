@@ -144,6 +144,16 @@ pub enum FileSystemError {
 }
 
 impl FileSystemError {
+    pub fn is_not_found(&self) -> bool {
+        match self {
+            FileSystemError::NotFoundError(_) => true,
+            FileSystemError::IoError(error) | FileSystemError::IoErrorAtPath { error, .. } => {
+                error.kind() == std::io::ErrorKind::NotFound
+            }
+            _ => false,
+        }
+    }
+
     pub fn is_cross_device(&self) -> bool {
         match self {
             FileSystemError::IoError(error) | FileSystemError::IoErrorAtPath { error, .. } => {
@@ -1693,6 +1703,52 @@ impl MockFileRenamer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    mod is_not_found {
+        use super::*;
+
+        #[test]
+        fn test_should_be_true_for_a_not_found_error() {
+            let error = FileSystemError::NotFoundError(PathBuf::from("/tmp/missing"));
+
+            assert!(error.is_not_found());
+        }
+
+        #[test]
+        fn test_should_be_true_for_an_io_not_found_error_at_a_path() {
+            let error = FileSystemError::IoErrorAtPath {
+                path: PathBuf::from("/tmp/missing"),
+                error: std::io::Error::from(std::io::ErrorKind::NotFound),
+            };
+
+            assert!(error.is_not_found());
+        }
+
+        #[test]
+        fn test_should_be_true_for_a_bare_io_not_found_error() {
+            let error =
+                FileSystemError::IoError(std::io::Error::from(std::io::ErrorKind::NotFound));
+
+            assert!(error.is_not_found());
+        }
+
+        #[test]
+        fn test_should_be_false_for_other_io_errors() {
+            let error = FileSystemError::IoErrorAtPath {
+                path: PathBuf::from("/tmp/locked"),
+                error: std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+            };
+
+            assert!(!error.is_not_found());
+        }
+
+        #[test]
+        fn test_should_be_false_for_errors_that_are_not_io_errors() {
+            let error = FileSystemError::ExpectedFileError;
+
+            assert!(!error.is_not_found());
+        }
+    }
 
     mod is_cross_device {
         use super::*;
