@@ -12,6 +12,7 @@ use log::{Level, Outcome, ScopeGuard, ScopeKind, Span};
 use os::Os;
 use thiserror::Error;
 
+pub mod compatibility;
 pub mod core_seedlings;
 pub mod openbao;
 pub mod stop;

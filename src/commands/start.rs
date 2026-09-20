@@ -1,4 +1,7 @@
-use crate::bootstrap;
+use crate::bootstrap::{
+    self,
+    compatibility::{self, CompatibilityError},
+};
 use crate::cli::{OutputStyle, Presentation};
 use crate::commands::{CommandContext, names, print_error, print_success};
 use ::config::DouglasFolders;
@@ -10,6 +13,7 @@ use file_system::{
 use identity::{Identity, LocalIdentity};
 use log::Reporter;
 use os::{EnvironmentVariableReader, Os, Unix, UnixEnvironmentVariableReader};
+use release::ReleaseMetadata;
 use std::{process::ExitCode, sync::Arc};
 
 pub(crate) async fn start(plan_only: bool, presentation: Presentation) -> ExitCode {
@@ -21,6 +25,14 @@ pub(crate) async fn start(plan_only: bool, presentation: Presentation) -> ExitCo
         return ExitCode::from(1);
     };
     let output_style = presentation.console_style();
+
+    let running = ReleaseMetadata::current();
+    if let Err(err) =
+        compatibility::ensure_compatible(&douglas_folders, &UnixFileReader::new(), &running)
+    {
+        report_compatibility_failure(&reporter, presentation, "Checking installed data", &err);
+        return ExitCode::from(1);
+    }
 
     let folder: Arc<dyn Folder> = Arc::new(UnixFolder::new());
     let os: Arc<dyn Os> = Arc::new(Unix::new());
@@ -78,11 +90,41 @@ pub(crate) async fn start(plan_only: bool, presentation: Presentation) -> ExitCo
 
     log_deadwood_if_any(&reporter, bract_client.as_ref()).await;
 
+    if let Err(err) = compatibility::record_install(
+        &douglas_folders,
+        &UnixFileWriter::new(),
+        env!("CARGO_PKG_VERSION"),
+        &running,
+    ) {
+        report_compatibility_failure(
+            &reporter,
+            presentation,
+            "Recording the installed release",
+            &err,
+        );
+        return ExitCode::from(1);
+    }
+
     if let Some(style) = output_style {
         print_success(style, "Douglas started.");
     }
 
     ExitCode::from(0)
+}
+
+fn report_compatibility_failure(
+    reporter: &Arc<dyn Reporter>,
+    presentation: Presentation,
+    label: &str,
+    err: &CompatibilityError,
+) {
+    let guard = log::Span::new(Arc::clone(reporter), label, log::ScopeKind::Task).start_guard();
+    guard.span().message(log::Level::Warn, &err.to_string());
+    guard.finish_with_outcome(log::Outcome::Failed);
+
+    if let Some(style) = presentation.console_style() {
+        print_error(style, &err.to_string());
+    }
 }
 
 async fn bootstrap_openbao(

@@ -56,6 +56,10 @@ assert_contains "the new binary's start ran with the requested output style" \
 installed_version="$(ssh_out "sudo tail -c 75 /var/lib/douglas/bin/douglas | head -c 3 | od -An -tu1 | xargs")"
 assert_equals "installed binary carries the new version" "$major $minor $((patch + 1))" "$installed_version"
 
+marker_after="$(ssh_out "sudo cat /var/lib/douglas/install-marker.json")"
+assert_contains "the install marker records the upgraded version" "$marker_after" \
+    "\"version\":\"$NEW_VERSION\""
+
 assert_success "installed binary verifies" ssh_out \
     "sudo /var/lib/douglas/bin/douglas verify --path /var/lib/douglas/bin/douglas"
 
