@@ -1,6 +1,7 @@
 use clap::{Parser, Subcommand};
 use ed25519_dalek::{Signer, SigningKey};
 use rand::rngs::OsRng;
+use release::ReleaseMetadata;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 use std::{env, fs};
@@ -131,23 +132,28 @@ fn parse_version(raw: &str) -> Result<(u8, u8, u8), String> {
     Ok((next()?, next()?, next()?))
 }
 
-fn strip_existing_trailer(data: &mut Vec<u8>) {
+fn strip_existing_trailer(data: &mut Vec<u8>) -> bool {
     if data.len() < TRAILER_LEN {
-        return;
+        return false;
     }
     let magic_start = data.len() - TRAILER_MAGIC.len();
     if data[magic_start..] == TRAILER_MAGIC[..] {
         data.truncate(data.len() - TRAILER_LEN);
+        return true;
     }
+    false
 }
 
-fn sign(path: &Path) -> Result<(), String> {
-    let signing_key = load_signing_key()?;
-    let (major, minor, patch) = read_douglas_version()?;
-
-    let mut data =
-        fs::read(path).map_err(|err| format!("failed to read {}: {err}", path.display()))?;
-    strip_existing_trailer(&mut data);
+fn signed_bytes(
+    signing_key: &SigningKey,
+    mut data: Vec<u8>,
+    (major, minor, patch): (u8, u8, u8),
+    metadata: &ReleaseMetadata,
+) -> Result<Vec<u8>, String> {
+    if strip_existing_trailer(&mut data) {
+        release::strip(&mut data).map_err(|err| err.to_string())?;
+    }
+    release::attach(&mut data, metadata).map_err(|err| err.to_string())?;
 
     data.push(major);
     data.push(minor);
@@ -156,8 +162,22 @@ fn sign(path: &Path) -> Result<(), String> {
     let signature = signing_key.sign(&data);
     data.extend_from_slice(&signature.to_bytes());
     data.extend_from_slice(TRAILER_MAGIC);
+    Ok(data)
+}
 
-    fs::write(path, data).map_err(|err| format!("failed to write {}: {err}", path.display()))?;
+fn sign(path: &Path) -> Result<(), String> {
+    let signing_key = load_signing_key()?;
+    let (major, minor, patch) = read_douglas_version()?;
+
+    let data = fs::read(path).map_err(|err| format!("failed to read {}: {err}", path.display()))?;
+    let signed = signed_bytes(
+        &signing_key,
+        data,
+        (major, minor, patch),
+        &ReleaseMetadata::current(),
+    )?;
+
+    fs::write(path, signed).map_err(|err| format!("failed to write {}: {err}", path.display()))?;
 
     println!(
         "Signed {} in place (v{major}.{minor}.{patch})",
@@ -194,6 +214,7 @@ fn build(release: bool) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ed25519_dalek::Verifier;
 
     #[test]
     fn test_parse_version_should_split_major_minor_patch() {
@@ -266,25 +287,100 @@ mod tests {
         assert_eq!(data, original);
     }
 
+    fn test_key() -> SigningKey {
+        SigningKey::from_bytes(&[7u8; 32])
+    }
+
+    fn metadata(format: u8) -> ReleaseMetadata {
+        ReleaseMetadata {
+            format,
+            core: std::collections::BTreeMap::from([("openbao".to_string(), 1)]),
+        }
+    }
+
+    fn signed_once() -> Vec<u8> {
+        signed_bytes(
+            &test_key(),
+            b"pretend binary bytes".to_vec(),
+            (1, 2, 3),
+            &metadata(1),
+        )
+        .expect("should sign")
+    }
+
     #[test]
-    fn test_sign_should_be_idempotent_when_called_twice() {
-        let signing_key = SigningKey::from_bytes(&[7u8; 32]);
-        let mut data = b"pretend binary bytes".to_vec();
+    fn test_signed_bytes_should_be_idempotent_when_signed_twice() {
+        let once = signed_once();
 
-        strip_existing_trailer(&mut data);
+        let twice = signed_bytes(&test_key(), once.clone(), (1, 2, 3), &metadata(1))
+            .expect("should sign again");
+
+        assert_eq!(twice, once);
+    }
+
+    #[test]
+    fn test_signed_bytes_should_embed_the_metadata_before_the_version_inside_the_payload() {
+        let signed = signed_once();
+
+        let payload = &signed[..signed.len() - TRAILER_LEN];
+        let (binary, embedded) = release::detach(payload).expect("should detach");
+
+        assert_eq!(binary, b"pretend binary bytes");
+        assert_eq!(embedded, metadata(1));
+    }
+
+    #[test]
+    fn test_signed_bytes_should_replace_earlier_metadata_instead_of_stacking_it() {
+        let first = signed_once();
+
+        let second =
+            signed_bytes(&test_key(), first, (1, 2, 4), &metadata(2)).expect("should sign again");
+
+        let payload = &second[..second.len() - TRAILER_LEN];
+        let (binary, embedded) = release::detach(payload).expect("should detach");
+        assert_eq!(binary, b"pretend binary bytes");
+        assert_eq!(embedded, metadata(2));
+    }
+
+    #[test]
+    fn test_signed_bytes_should_sign_the_metadata_and_the_version_together() {
+        let signed = signed_once();
+        let verifying_key = test_key().verifying_key();
+        let (message, trailer) =
+            signed.split_at(signed.len() - SIGNATURE_LEN - TRAILER_MAGIC.len());
+        let signature_bytes: [u8; SIGNATURE_LEN] = trailer[..SIGNATURE_LEN]
+            .try_into()
+            .expect("signature length");
+        let signature = ed25519_dalek::Signature::from_bytes(&signature_bytes);
+
+        assert!(verifying_key.verify(message, &signature).is_ok());
+
+        let payload_len = message.len() - VERSION_LEN;
+        let (binary, _) = release::detach(&message[..payload_len]).expect("should detach");
+        let mut tampered = message.to_vec();
+        tampered[binary.len()] ^= 0xFF;
+        assert!(verifying_key.verify(&tampered, &signature).is_err());
+    }
+
+    #[test]
+    fn test_signed_bytes_should_reject_a_signed_file_whose_existing_block_is_malformed() {
+        let mut data = b"binary".to_vec();
+        data.extend_from_slice(&1000u32.to_le_bytes());
         data.extend_from_slice(&[1, 2, 3]);
-        let first_signature = signing_key.sign(&data);
-        data.extend_from_slice(&first_signature.to_bytes());
+        data.extend_from_slice(&[0u8; SIGNATURE_LEN]);
         data.extend_from_slice(TRAILER_MAGIC);
 
-        let signed_once_len = data.len();
+        let result = signed_bytes(&test_key(), data, (1, 2, 3), &metadata(1));
 
-        strip_existing_trailer(&mut data);
-        data.extend_from_slice(&[1, 2, 3]);
-        let second_signature = signing_key.sign(&data);
-        data.extend_from_slice(&second_signature.to_bytes());
-        data.extend_from_slice(TRAILER_MAGIC);
+        assert!(result.is_err());
+    }
 
-        assert_eq!(data.len(), signed_once_len);
+    #[test]
+    fn test_strip_existing_trailer_should_report_whether_it_removed_a_trailer() {
+        let mut signed = signed_once();
+        let mut unsigned = b"just a plain, unsigned binary".to_vec();
+
+        assert!(strip_existing_trailer(&mut signed));
+        assert!(!strip_existing_trailer(&mut unsigned));
     }
 }
