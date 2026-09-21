@@ -146,12 +146,16 @@ impl HasPermissions for Context<'_> {
 }
 
 #[derive(Default)]
-struct State {
-    is_root: bool,
+struct Work {
     groups_missing: Vec<String>,
     group_members_missing: Vec<GroupMembershipRequirement>,
     services_needing_start: Vec<(DouglasService, ServiceState)>,
     cli_log_dir_missing: Option<PathBuf>,
+}
+
+enum State {
+    NotRoot,
+    Root(Work),
 }
 
 struct StateObserver<'a> {
@@ -175,13 +179,10 @@ impl StateObserver<'_> {
             .start_guard();
 
         if !self.credentials.is_root() {
-            return guard.finish(Ok(State::default()));
+            return guard.finish(Ok(State::NotRoot));
         }
 
-        let mut result = State {
-            is_root: true,
-            ..Default::default()
-        };
+        let mut result = Work::default();
 
         self.check_admin_group_membership(guard.span(), &mut result);
 
@@ -211,10 +212,10 @@ impl StateObserver<'_> {
             }
         }
 
-        guard.finish(Ok(result))
+        guard.finish(Ok(State::Root(result)))
     }
 
-    fn check_admin_group_membership(&mut self, span: &Span, result: &mut State) {
+    fn check_admin_group_membership(&mut self, span: &Span, result: &mut Work) {
         let (non_sudoer, valid_non_sudoer) = self.get_non_sudoer(span);
         if self.credentials.group_exists(DOUGLAS_ADMIN_GROUP) {
             if valid_non_sudoer
@@ -263,9 +264,9 @@ impl StateObserver<'_> {
 }
 
 fn create_plan<'a>(state: State) -> Result<Vec<Step<'a>>, BootstrapError> {
-    if !state.is_root {
+    let State::Root(state) = state else {
         return Err(BootstrapError::MustBeRoot);
-    }
+    };
 
     let mut result = Vec::new();
 
@@ -568,7 +569,7 @@ fn ensure_supervised_heartbeat_dirs_accessible(
 #[cfg(test)]
 mod tests {
     use super::{
-        BootstrapError, DouglasService, State, create_plan, liveness_check, require_liveness,
+        BootstrapError, DouglasService, State, Work, create_plan, liveness_check, require_liveness,
     };
     use std::path::PathBuf;
 
@@ -701,10 +702,7 @@ mod tests {
 
     #[test]
     fn test_create_plan_should_error_when_not_root() {
-        let state = State {
-            is_root: false,
-            ..Default::default()
-        };
+        let state = State::NotRoot;
 
         let result = create_plan(state);
 
@@ -713,10 +711,7 @@ mod tests {
 
     #[test]
     fn test_create_plan_should_produce_no_steps_when_nothing_is_needed() {
-        let state = State {
-            is_root: true,
-            ..Default::default()
-        };
+        let state = State::Root(Work::default());
 
         let Ok(steps) = create_plan(state) else {
             panic!("should plan");
@@ -727,11 +722,10 @@ mod tests {
 
     #[test]
     fn test_create_plan_should_create_the_cli_log_dir_when_missing() {
-        let state = State {
-            is_root: true,
+        let state = State::Root(Work {
             cli_log_dir_missing: Some(PathBuf::from("/var/log/douglas/douglas-cli")),
             ..Default::default()
-        };
+        });
 
         let Ok(steps) = create_plan(state) else {
             panic!("should plan");
@@ -746,14 +740,13 @@ mod tests {
 
     #[test]
     fn test_create_plan_should_batch_pipes_starts_and_waits_across_services() {
-        let state = State {
-            is_root: true,
+        let state = State::Root(Work {
             services_needing_start: vec![
                 (service("bract", tcp_liveness(1)), ServiceState::default()),
                 (service("resin", tcp_liveness(2)), ServiceState::default()),
             ],
             ..Default::default()
-        };
+        });
 
         let Ok(steps) = create_plan(state) else {
             panic!("should plan");
