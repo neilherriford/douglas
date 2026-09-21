@@ -110,15 +110,108 @@ pub fn service_definition(douglas_folders: &DouglasFolders) -> ServiceDefinition
         ],
         &[well_known::DOUGLAS_RESIN_SEEDBANK_GROUP],
         BootstrapReporting::Pipe,
-        Some(LivenessCheck::UnixSocket(douglas_folders.socket_file(SEEDBANK))),
+        Some(LivenessCheck::UnixSocket(
+            douglas_folders.socket_file(SEEDBANK),
+        )),
     )
 }
 
 #[cfg(test)]
 mod tests {
-    use super::service_definition;
+    use super::{State, StateObserver, create_plan, service_definition};
+    use crate::Error;
+    use blueprint::service::ServiceState;
     use config::DouglasFolders;
-    use credentials::well_known::DOUGLAS_RESIN_SEEDBANK_GROUP;
+    use credentials::{MockCredentials, well_known::DOUGLAS_RESIN_SEEDBANK_GROUP};
+    use file_system::{MockFolder, MockPermissions};
+    use log::{ScopeKind, Span};
+    use std::path::Path;
+    use std::sync::Arc;
+
+    struct NullReporter;
+
+    impl log::Reporter for NullReporter {
+        fn emit(&self, _event: log::Event) {}
+    }
+
+    fn span() -> Span {
+        Span::new(Arc::new(NullReporter), "test", ScopeKind::Group)
+    }
+
+    #[test]
+    fn test_create_plan_should_refuse_to_run_as_root() {
+        let definition = service_definition(&DouglasFolders::new());
+
+        let result = create_plan(&definition, State::Root);
+
+        assert!(matches!(result, Err(Error::CannotBeRoot)));
+    }
+
+    #[test]
+    fn test_create_plan_should_refuse_when_the_root_path_is_missing() {
+        let definition = service_definition(&DouglasFolders::new());
+
+        let result = create_plan(&definition, State::MissingRootPath);
+
+        assert!(matches!(result, Err(Error::MissingRootPath)));
+    }
+
+    #[test]
+    fn test_create_plan_should_plan_the_service_bootstrap_when_ready() {
+        let definition = service_definition(&DouglasFolders::new());
+
+        let result = create_plan(&definition, State::Ready(ServiceState::default()));
+
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_discover_should_report_root_without_looking_at_the_root_path() {
+        let mut credentials = MockCredentials::new();
+        credentials.expect_is_root().returning(|| true);
+        let mut folder = MockFolder::new();
+        folder.expect_exists().times(0);
+        let permissions = MockPermissions::new();
+        let definition = service_definition(&DouglasFolders::new());
+        let mut observer = StateObserver::new(&credentials, &folder);
+
+        let result = observer
+            .discover(
+                &span(),
+                &definition,
+                Path::new("/var/lib/douglas/seedbank"),
+                &credentials,
+                &folder,
+                &permissions,
+            )
+            .await;
+
+        assert!(matches!(result, Ok(State::Root)));
+    }
+
+    #[tokio::test]
+    async fn test_discover_should_report_a_missing_root_path_when_not_root() {
+        let mut credentials = MockCredentials::new();
+        credentials.expect_is_root().returning(|| false);
+        let mut folder = MockFolder::new();
+        folder.expect_exists().returning(|_| false);
+        let permissions = MockPermissions::new();
+        let definition = service_definition(&DouglasFolders::new());
+        let mut observer = StateObserver::new(&credentials, &folder);
+
+        let result = observer
+            .discover(
+                &span(),
+                &definition,
+                Path::new("/var/lib/douglas/seedbank"),
+                &credentials,
+                &folder,
+                &permissions,
+            )
+            .await;
+
+        assert!(matches!(result, Ok(State::MissingRootPath)));
+    }
 
     #[test]
     fn test_service_definition_should_declare_both_the_main_and_registration_sockets() {
@@ -199,22 +292,17 @@ mod tests {
 }
 
 fn create_plan<'a>(definition: &ServiceDefinition, state: State) -> Result<Vec<Step<'a>>, Error> {
-    if state.is_root {
-        return Err(Error::CannotBeRoot);
+    match state {
+        State::Root => Err(Error::CannotBeRoot),
+        State::MissingRootPath => Err(Error::MissingRootPath),
+        State::Ready(service) => Ok(plan_service_bootstrap(definition, &service)),
     }
-
-    if !state.root_path_exists {
-        return Err(Error::MissingRootPath);
-    }
-
-    Ok(plan_service_bootstrap(definition, &state.service))
 }
 
-#[derive(Default)]
-struct State {
-    is_root: bool,
-    root_path_exists: bool,
-    service: ServiceState,
+enum State {
+    Root,
+    MissingRootPath,
+    Ready(ServiceState),
 }
 
 struct StateObserver<'a> {
@@ -246,20 +334,16 @@ impl<'a> StateObserver<'a> {
             )
             .start_guard();
 
-        let root_path_exists = self.folder.exists(root_path);
-
-        let mut result = State {
-            is_root: self.credentials.is_root(),
-            root_path_exists,
-            ..Default::default()
-        };
-
-        if result.is_root || !result.root_path_exists {
-            return guard.finish(Ok(result));
+        if self.credentials.is_root() {
+            return guard.finish(Ok(State::Root));
         }
 
-        result.service = discover_service_state(definition, credentials, folder, permissions)?;
+        if !self.folder.exists(root_path) {
+            return guard.finish(Ok(State::MissingRootPath));
+        }
 
-        guard.finish(Ok(result))
+        let service = discover_service_state(definition, credentials, folder, permissions)?;
+
+        guard.finish(Ok(State::Ready(service)))
     }
 }
