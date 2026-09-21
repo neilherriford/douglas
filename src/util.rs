@@ -107,6 +107,15 @@ pub(crate) fn require<T, E: std::fmt::Display>(
         .ok()
 }
 
+pub(crate) fn conclude(guard: &ScopeGuard, succeeded: bool) -> bool {
+    guard.finish_with_outcome(if succeeded {
+        Outcome::Ok
+    } else {
+        Outcome::Failed
+    });
+    succeeded
+}
+
 pub(crate) async fn wait_until_running(liveness: &LivenessCheck, span: &Span) -> bool {
     let deadline = Instant::now() + Duration::from_mins(5);
     loop {
@@ -122,6 +131,56 @@ pub(crate) async fn wait_until_running(liveness: &LivenessCheck, span: &Span) ->
 
 #[cfg(test)]
 mod tests {
+    struct CapturingReporter {
+        outcomes: std::sync::Mutex<Vec<Outcome>>,
+    }
+
+    impl log::Reporter for CapturingReporter {
+        fn emit(&self, event: log::Event) {
+            if let log::EventKind::ScopeEnded { outcome, .. } = event.kind {
+                let Ok(mut outcomes) = self.outcomes.lock() else {
+                    panic!("outcomes mutex poisoned");
+                };
+                outcomes.push(outcome);
+            }
+        }
+    }
+
+    fn conclude_with(succeeded: bool) -> (bool, Vec<Outcome>) {
+        let reporter = std::sync::Arc::new(CapturingReporter {
+            outcomes: std::sync::Mutex::new(Vec::new()),
+        });
+        let guard = Span::new(
+            std::sync::Arc::clone(&reporter) as std::sync::Arc<dyn log::Reporter>,
+            "test",
+            log::ScopeKind::Group,
+        )
+        .start_guard();
+
+        let result = conclude(&guard, succeeded);
+
+        let Ok(outcomes) = reporter.outcomes.lock() else {
+            panic!("outcomes mutex poisoned");
+        };
+        (result, outcomes.clone())
+    }
+
+    #[test]
+    fn test_conclude_should_finish_ok_and_report_success() {
+        let (result, outcomes) = conclude_with(true);
+
+        assert!(result);
+        assert!(matches!(outcomes.as_slice(), [Outcome::Ok]));
+    }
+
+    #[test]
+    fn test_conclude_should_finish_failed_and_report_failure() {
+        let (result, outcomes) = conclude_with(false);
+
+        assert!(!result);
+        assert!(matches!(outcomes.as_slice(), [Outcome::Failed]));
+    }
+
     #[test]
     fn test_join_display_should_join_items_with_the_separator() {
         assert_eq!(join_display(&[1, 2, 3], "; "), "1; 2; 3");

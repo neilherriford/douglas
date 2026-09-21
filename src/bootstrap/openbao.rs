@@ -1,5 +1,5 @@
 use crate::bootstrap::core_seedlings;
-use crate::util::require;
+use crate::util::{conclude, require};
 use async_trait::async_trait;
 use base64::{Engine, engine::general_purpose::STANDARD};
 use blueprint::{
@@ -1197,13 +1197,9 @@ pub async fn perform(reporter: Arc<dyn Reporter>, deps: Dependencies<'_>) -> boo
         douglas_secret_id: None,
     };
 
-    if let Ok(()) = execute_plan(guard.span(), plan, &mut context, |_reason| ()).await {
-        guard.finish_with_outcome(Outcome::Ok);
-        true
-    } else {
-        guard.finish_with_outcome(Outcome::Failed);
-        false
-    }
+    let result = execute_plan(guard.span(), plan, &mut context, |_reason| ()).await;
+
+    conclude(&guard, result.is_ok())
 }
 
 #[cfg(test)]

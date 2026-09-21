@@ -1,5 +1,5 @@
 use crate::bootstrap::{CORE_SERVICES, LivenessCheckError, require_liveness};
-use crate::util::{require, spawn_service, wait_until_running};
+use crate::util::{conclude, require, spawn_service, wait_until_running};
 use async_trait::async_trait;
 use blueprint::{
     Command, GroupMembershipRequirement, HasCredentials, HasFolder, HasPermissions, RunningStatus,
@@ -446,8 +446,7 @@ pub async fn perform(reporter: Arc<dyn Reporter>, plan_only: bool, deps: Depende
     };
 
     if plan_only {
-        guard.finish_with_outcome(log::Outcome::Ok);
-        return true;
+        return conclude(&guard, true);
     }
 
     let mut context = Context {
@@ -471,13 +470,7 @@ pub async fn perform(reporter: Arc<dyn Reporter>, plan_only: bool, deps: Depende
         return false;
     }
 
-    if result.is_ok() {
-        guard.finish_with_outcome(Outcome::Ok);
-        true
-    } else {
-        guard.finish_with_outcome(Outcome::Failed);
-        false
-    }
+    conclude(&guard, result.is_ok())
 }
 
 fn ensure_supervised_heartbeat_dirs_accessible(

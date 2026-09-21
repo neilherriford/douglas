@@ -1,4 +1,4 @@
-use crate::util::require;
+use crate::util::{conclude, require};
 use async_trait::async_trait;
 use blueprint::{
     Command,
@@ -109,13 +109,9 @@ pub async fn perform(
         bract_client: bract_client.as_ref(),
     };
 
-    if let Ok(()) = execute_plan(guard.span(), plan, &mut context, |_reason| ()).await {
-        guard.finish_with_outcome(Outcome::Ok);
-        true
-    } else {
-        guard.finish_with_outcome(Outcome::Failed);
-        false
-    }
+    let result = execute_plan(guard.span(), plan, &mut context, |_reason| ()).await;
+
+    conclude(&guard, result.is_ok())
 }
 
 struct ReconcileSeedling {

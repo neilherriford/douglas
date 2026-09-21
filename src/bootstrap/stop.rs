@@ -2,6 +2,7 @@ use crate::bootstrap::{
     HasServiceControl, KillService, LivenessCheckError, OwnedServiceControl, ServiceControl,
     StopBract, liveness_check,
 };
+use crate::util::{conclude, require};
 use blueprint::{
     Command, RunningStatus,
     bootstrap::{execute_plan, resolve_plan},
@@ -186,18 +187,16 @@ pub async fn perform(reporter: Arc<dyn Reporter>, plan_only: bool, deps: Depende
         return false;
     };
 
-    let plan = match resolve_plan(guard.span(), create_plan(&state)) {
-        Ok(plan) => plan,
-        Err(err) => {
-            guard.span().message(Level::Warn, &err.to_string());
-            guard.finish_with_outcome(log::Outcome::Failed);
-            return false;
-        }
+    let Some(plan) = require(
+        &guard,
+        "Failed to resolve plan",
+        resolve_plan(guard.span(), create_plan(&state)),
+    ) else {
+        return false;
     };
 
     if plan_only {
-        guard.finish_with_outcome(log::Outcome::Ok);
-        return true;
+        return conclude(&guard, true);
     }
 
     let mut context = Context {
@@ -206,13 +205,7 @@ pub async fn perform(reporter: Arc<dyn Reporter>, plan_only: bool, deps: Depende
 
     let result = execute_plan(guard.span(), plan, &mut context, |_reason| ()).await;
 
-    if result.is_ok() {
-        guard.finish_with_outcome(Outcome::Ok);
-        true
-    } else {
-        guard.finish_with_outcome(Outcome::Failed);
-        false
-    }
+    conclude(&guard, result.is_ok())
 }
 
 #[cfg(test)]

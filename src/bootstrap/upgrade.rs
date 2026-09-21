@@ -5,7 +5,7 @@ use crate::{
     },
     cli::Presentation,
     commands::{print_failure, report_failure},
-    util::join_display,
+    util::{conclude, join_display},
     verify::{BinaryVerifier, DouglasBinaryVerifier, Version},
 };
 use async_trait::async_trait;
@@ -970,8 +970,7 @@ pub async fn perform(
         Ok(state) => state,
         Err(err) => {
             report_failure(guard.span(), presentation.console_style(), &err.to_string());
-            guard.finish_with_outcome(log::Outcome::Failed);
-            return false;
+            return conclude(&guard, false);
         }
     };
 
@@ -1013,14 +1012,12 @@ pub async fn perform(
         Ok(plan) => plan,
         Err(err) => {
             report_failure(guard.span(), presentation.console_style(), &err.to_string());
-            guard.finish_with_outcome(log::Outcome::Failed);
-            return false;
+            return conclude(&guard, false);
         }
     };
 
     if plan_only {
-        guard.finish_with_outcome(log::Outcome::Ok);
-        return true;
+        return conclude(&guard, true);
     }
 
     let mut context = Context {
@@ -1039,17 +1036,11 @@ pub async fn perform(
 
     let result = execute_plan(guard.span(), plan, &mut context, |reason| reason).await;
 
-    match result {
-        Ok(()) => {
-            guard.finish_with_outcome(Outcome::Ok);
-            true
-        }
-        Err(reason) => {
-            guard.finish_with_outcome(Outcome::Failed);
-            print_failure(presentation.console_style(), &reason);
-            false
-        }
+    if let Err(reason) = &result {
+        print_failure(presentation.console_style(), reason);
     }
+
+    conclude(&guard, result.is_ok())
 }
 
 #[cfg(test)]
