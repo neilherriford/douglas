@@ -18,6 +18,7 @@ pub mod journal;
 pub mod openbao;
 pub mod retention;
 pub mod rollback;
+pub mod staged_copy;
 pub mod stop;
 pub mod system;
 pub mod upgrade;

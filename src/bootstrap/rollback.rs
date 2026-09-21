@@ -1,4 +1,5 @@
 use crate::bootstrap::retention::{self, RollbackTargetError};
+use crate::bootstrap::staged_copy::copy_keeping_owner;
 use crate::verify::Version;
 use ::config::DouglasFolders;
 use file_system::{FileCopier, FileDeleter, FileSystemError, Folder, Permissions};
@@ -56,18 +57,9 @@ pub(crate) fn stage(
     let kept = retention::retained_path(&douglas_folders.binary_dir(), version);
     let staging = staging_path(douglas_folders);
 
-    let result = copier.copy(&kept, &staging).and_then(|()| {
-        let (user, group) = permissions.get_user_and_group_ownership(&kept)?;
-        permissions.change_user_and_group_ownership(&staging, &user, &group)
-    });
-
-    match result {
-        Ok(()) => Ok(staging),
-        Err(err) => {
-            unstage(deleter, &staging);
-            Err(RollbackError::Staging(err))
-        }
-    }
+    copy_keeping_owner(copier, permissions, deleter, &kept, &staging)
+        .map(|()| staging)
+        .map_err(RollbackError::Staging)
 }
 
 pub(crate) fn unstage(deleter: &dyn FileDeleter, staging: &std::path::Path) {

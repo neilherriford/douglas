@@ -1,7 +1,7 @@
 use crate::{
     bootstrap::{
         HasServiceControl, KillService, OwnedServiceControl, ServiceControl, StopBract, journal,
-        retention,
+        retention, staged_copy::Installer,
     },
     cli::Presentation,
     commands::print_error,
@@ -96,6 +96,17 @@ struct Context<'a> {
     files: FileOperations<'a>,
     links: &'a dyn Links,
     permissions: &'a dyn Permissions,
+}
+
+impl Context<'_> {
+    fn installer(&self) -> Installer<'_> {
+        Installer {
+            copier: self.files.copier,
+            permissions: self.permissions,
+            renamer: self.files.renamer,
+            deleter: self.files.deleter,
+        }
+    }
 }
 
 impl HasServiceControl for Context<'_> {
@@ -351,12 +362,7 @@ impl RetainPreviousBinary {
         partial: &Path,
         retained: &Path,
     ) -> Result<(), FileSystemError> {
-        context.files.copier.copy(target, partial)?;
-        let (user, group) = context.permissions.get_user_and_group_ownership(target)?;
-        context
-            .permissions
-            .change_user_and_group_ownership(partial, &user, &group)?;
-        context.files.renamer.rename(partial, retained)
+        context.installer().install_copy(target, partial, retained)
     }
 
     fn prune(guard: &ScopeGuard, context: &Context<'_>, binary_dir: &Path) {
@@ -411,10 +417,7 @@ impl<'a> Command<Context<'a>> for RetainPreviousBinary {
         let partial = retention::partial_path(&retained)
             .ok_or_else(|| FileSystemError::InvalidPath(retained.clone()))?;
 
-        if let Err(err) = Self::copy_aside(context, &target, &partial, &retained) {
-            let _ = context.files.deleter.delete(&partial);
-            return Err(err.into());
-        }
+        Self::copy_aside(context, &target, &partial, &retained)?;
 
         Self::prune(&guard, context, &binary_dir);
 
@@ -453,40 +456,9 @@ impl OverwriteDouglasExecutable {
             retention::retained_path(&context.douglas_folders.binary_dir(), self.previous);
         let staging = staging_path(&target)?;
 
-        let result = context
-            .files
-            .copier
-            .copy(&retained, &staging)
-            .and_then(|()| {
-                let (user, group) = context
-                    .permissions
-                    .get_user_and_group_ownership(&retained)?;
-                context
-                    .permissions
-                    .change_user_and_group_ownership(&staging, &user, &group)
-            })
-            .and_then(|()| context.files.renamer.rename(&staging, &target));
-
-        if result.is_err() {
-            let _ = context.files.deleter.delete(&staging);
-        }
-        result
-    }
-
-    fn install_from_copy(
-        &self,
-        context: &Context<'_>,
-        staging: &Path,
-        target: &Path,
-    ) -> Result<(), FileSystemError> {
-        context.files.copier.copy(&self.path, staging)?;
-        let (user, group) = context
-            .permissions
-            .get_user_and_group_ownership(&self.path)?;
         context
-            .permissions
-            .change_user_and_group_ownership(staging, &user, &group)?;
-        context.files.renamer.rename(staging, target)
+            .installer()
+            .install_copy(&retained, &staging, &target)
     }
 
     fn copy_into_place(
@@ -497,10 +469,9 @@ impl OverwriteDouglasExecutable {
     ) -> Result<(), FileSystemError> {
         let staging = staging_path(target)?;
 
-        if let Err(err) = self.install_from_copy(context, &staging, target) {
-            let _ = context.files.deleter.delete(&staging);
-            return Err(err);
-        }
+        context
+            .installer()
+            .install_copy(&self.path, &staging, target)?;
 
         if let Err(err) = context.files.deleter.delete(&self.path) {
             guard.span().message(
