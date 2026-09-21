@@ -6,26 +6,14 @@
 # containers the newer one changed. Runs after 86-rollback.sh, so the install
 # is the version from 05-build.sh, and plants a kept version one step older
 # than it whose OpenBao core version differs.
-#
-# Like the version bump in build_upgrade_candidate, the edits to the shared
-# checkout only last long enough to build and sign, and are reverted
-# unconditionally.
 set -uo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")"
 source ../lib.sh
 
 BIN_DIR="/var/lib/douglas/bin"
-CONFIG="/mnt/share/douglas/config/src/lib.rs"
-CARGO_TOML="/mnt/share/douglas/Cargo.toml"
 
-installed_version="$(ssh_out "grep -m1 '^version' $CARGO_TOML | sed -E 's/version = \"(.*)\"/\1/'")"
+installed_version="$(ssh_out "grep -m1 '^version' /mnt/share/douglas/Cargo.toml | sed -E 's/version = \"(.*)\"/\1/'")"
 IFS='.' read -r major minor patch <<<"$installed_version"
-
-revert_checkout() {
-    ssh_out "sed -i 's/OPENBAO_VERSION: u16 = 2;/OPENBAO_VERSION: u16 = 1;/' $CONFIG" >/dev/null 2>&1
-    ssh_out "sed -i 's/^version = \"0.0.0\"/version = \"$installed_version\"/' $CARGO_TOML" >/dev/null 2>&1
-}
-trap revert_checkout EXIT
 
 installed_trailer_version() {
     ssh_out "sudo tail -c 75 $BIN_DIR/douglas | head -c 3 | od -An -tu1 | xargs"
@@ -33,18 +21,12 @@ installed_trailer_version() {
 
 assert_equals "the installed version is the one from the build" "$major $minor $patch" "$(installed_trailer_version)"
 
-assert_success "bump the OpenBao core version" ssh_out \
-    "sed -i 's/OPENBAO_VERSION: u16 = 1;/OPENBAO_VERSION: u16 = 2;/' $CONFIG"
-assert_success "lower the version to 0.0.0" ssh_out \
-    "sed -i 's/^version = \"$installed_version\"/version = \"0.0.0\"/' $CARGO_TOML"
-assert_success "build and sign the older one-way version" ssh_out \
-    "cd /mnt/share/douglas && cargo run -p xtask --quiet -- build"
+assert_success "copy the built binary as the older one-way version" ssh_out \
+    "cp $BUILT_BINARY ~/douglas-0.0.0"
+assert_success "sign it as 0.0.0 with a different OpenBao core version" ssh_out \
+    "$XTASK_SIGN ~/douglas-0.0.0 --version 0.0.0 --core openbao=2"
 assert_success "keep it beside the installed binary" ssh_out \
-    "sudo cp /mnt/share/cache/target/debug/douglas $BIN_DIR/douglas-0.0.0"
-
-revert_checkout
-assert_success "the OpenBao core version was reverted" ssh_out "grep -q 'OPENBAO_VERSION: u16 = 1;' $CONFIG"
-assert_success "the version was reverted" ssh_out "grep -q '^version = \"$installed_version\"' $CARGO_TOML"
+    "sudo mv ~/douglas-0.0.0 $BIN_DIR/douglas-0.0.0"
 
 woodward_pid_before="$(ssh_out "pgrep -f '[s]ervice woodward'")"
 assert_non_empty "woodward pid baseline was captured" "$woodward_pid_before"

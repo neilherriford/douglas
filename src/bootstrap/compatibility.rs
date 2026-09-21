@@ -1,4 +1,5 @@
 use crate::util::{join_display, read_if_present};
+use crate::verify::{BinaryVerifier, VerifyError};
 use ::config::DouglasFolders;
 use file_system::{FileReader, FileSystemError, FileWriter};
 use release::{Conflict, InstallMarker, ReleaseError, ReleaseMetadata};
@@ -53,6 +54,17 @@ pub(crate) fn ensure_compatible(
         Ok(())
     } else {
         Err(CompatibilityError::Incompatible(conflicts))
+    }
+}
+
+pub(crate) fn running_version(
+    verifier: &dyn BinaryVerifier,
+    unsigned_fallback: &str,
+) -> Result<String, VerifyError> {
+    match verifier.get_internal_release() {
+        Ok(release) => Ok(release.version.to_string()),
+        Err(VerifyError::MissingTrailer(_)) => Ok(unsigned_fallback.to_string()),
+        Err(err) => Err(err),
     }
 }
 
@@ -232,6 +244,54 @@ mod tests {
             };
 
             assert!(err.to_string().contains("data format"));
+        }
+    }
+
+    mod running_version_tests {
+        use super::*;
+        use crate::verify::{MockBinaryVerifier, Release, Version};
+
+        #[test]
+        fn test_should_report_the_version_from_the_signed_trailer() {
+            let mut verifier = MockBinaryVerifier::new();
+            verifier.expect_get_internal_release().returning(|| {
+                Ok(Release {
+                    version: Version {
+                        major: 1,
+                        minor: 4,
+                        patch: 9,
+                    },
+                    metadata: metadata(1, 1),
+                })
+            });
+
+            let result = running_version(&verifier, "0.0.1");
+
+            assert!(matches!(result.as_deref(), Ok("1.4.9")));
+        }
+
+        #[test]
+        fn test_should_fall_back_when_the_binary_is_unsigned() {
+            let mut verifier = MockBinaryVerifier::new();
+            verifier
+                .expect_get_internal_release()
+                .returning(|| Err(VerifyError::MissingTrailer(PathBuf::from("/x/douglas"))));
+
+            let result = running_version(&verifier, "0.0.1");
+
+            assert!(matches!(result.as_deref(), Ok("0.0.1")));
+        }
+
+        #[test]
+        fn test_should_fail_when_the_release_cannot_be_verified() {
+            let mut verifier = MockBinaryVerifier::new();
+            verifier
+                .expect_get_internal_release()
+                .returning(|| Err(VerifyError::UnknownInternalVersion));
+
+            let result = running_version(&verifier, "0.0.1");
+
+            assert!(matches!(result, Err(VerifyError::UnknownInternalVersion)));
         }
     }
 

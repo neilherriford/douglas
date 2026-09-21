@@ -6,12 +6,8 @@
 # of this step is to prove `douglas upgrade` never touches them
 # (StopBract::new(false)), which a post-stop upgrade couldn't exercise.
 #
-# xtask signs whatever version is in the shared checkout's Cargo.toml, so
-# to get a genuinely *higher*-version candidate binary (required for
-# `create_plan`'s InvalidUpgrade check to pass) this bumps the patch
-# version just long enough to build+sign, then reverts it — the shared
-# checkout is live source other steps read, so this restores it
-# unconditionally even if the build fails partway through.
+# The candidate is a copy of the 05-build.sh binary re-signed as a higher
+# version (see build_upgrade_candidate), which `create_plan` requires.
 set -uo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")"
 source ../lib.sh

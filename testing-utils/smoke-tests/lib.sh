@@ -187,50 +187,50 @@ wait_until() {
     pass "$desc"
 }
 
-build_upgrade_candidate() {
-    local destination="$1"
+BUILT_BINARY="/mnt/share/cache/target/debug/douglas"
+XTASK_SIGN="cd /mnt/share/douglas && cargo run -p xtask --quiet -- sign"
 
+# next_version — sets CURRENT_VERSION (the checkout's Cargo.toml version) and
+# NEW_VERSION (one patch higher), so a candidate can be signed as a genuinely
+# higher version without touching the checkout.
+next_version() {
     CURRENT_VERSION="$(ssh_out "grep -m1 '^version' /mnt/share/douglas/Cargo.toml | sed -E 's/version = \"(.*)\"/\1/'")"
     IFS='.' read -r major minor patch <<<"$CURRENT_VERSION"
     NEW_VERSION="$major.$minor.$((patch + 1))"
+}
 
-    assert_success "bump Cargo.toml to v$NEW_VERSION to build a higher-version candidate" ssh_out \
-        "cd /mnt/share/douglas && sed -i \"s/^version = \\\"$CURRENT_VERSION\\\"/version = \\\"$NEW_VERSION\\\"/\" Cargo.toml"
+# build_upgrade_candidate <destination> [xtask sign flags...]
+# A signed copy of the binary 05-build.sh built, re-signed as the next patch
+# version (plus any extra `xtask sign` flags such as --core openbao=2). No
+# rebuild, so it takes seconds.
+build_upgrade_candidate() {
+    local destination="$1"
+    shift
 
-    assert_success "build and sign the v$NEW_VERSION candidate" ssh_out \
-        "cd /mnt/share/douglas && cargo run -p xtask --quiet -- build"
+    next_version
 
-    assert_success "deploy the candidate binary to $destination" ssh_out \
-        "cp /mnt/share/cache/target/debug/douglas $destination"
+    assert_success "copy the built binary to $destination" ssh_out \
+        "cp $BUILT_BINARY $destination"
 
-    assert_success "revert Cargo.toml back to v$CURRENT_VERSION" ssh_out \
-        "cd /mnt/share/douglas && sed -i \"s/^version = \\\"$NEW_VERSION\\\"/version = \\\"$CURRENT_VERSION\\\"/\" Cargo.toml"
+    assert_success "sign the copy as v$NEW_VERSION" ssh_out \
+        "$XTASK_SIGN $destination --version $NEW_VERSION $*"
 }
 
 # build_stub_upgrade_candidate <destination> <shell script body>
 # A signed, higher-version "douglas" that only runs the given shell
 # commands, so an upgrade to it can be made to fail at the point the new
 # version is started (exit 1) or right after it (exit 0 and leave nothing
-# running). Like build_upgrade_candidate, the version bump is reverted
-# unconditionally.
+# running).
 build_stub_upgrade_candidate() {
     local destination="$1" body="$2"
 
-    CURRENT_VERSION="$(ssh_out "grep -m1 '^version' /mnt/share/douglas/Cargo.toml | sed -E 's/version = \"(.*)\"/\1/'")"
-    IFS='.' read -r major minor patch <<<"$CURRENT_VERSION"
-    NEW_VERSION="$major.$minor.$((patch + 1))"
-
-    assert_success "bump Cargo.toml to v$NEW_VERSION to sign a higher-version stub" ssh_out \
-        "cd /mnt/share/douglas && sed -i \"s/^version = \\\"$CURRENT_VERSION\\\"/version = \\\"$NEW_VERSION\\\"/\" Cargo.toml"
+    next_version
 
     assert_success "write the stub candidate" ssh_out \
         "printf '#!/bin/sh\n%s\n' '$body' > $destination && chmod +x $destination"
 
     assert_success "sign the stub as v$NEW_VERSION" ssh_out \
-        "cd /mnt/share/douglas && cargo run -p xtask --quiet -- sign $destination"
-
-    assert_success "revert Cargo.toml back to v$CURRENT_VERSION" ssh_out \
-        "cd /mnt/share/douglas && sed -i \"s/^version = \\\"$NEW_VERSION\\\"/version = \\\"$CURRENT_VERSION\\\"/\" Cargo.toml"
+        "$XTASK_SIGN $destination --version $NEW_VERSION"
 }
 
 run_prelude() {

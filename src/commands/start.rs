@@ -1,11 +1,8 @@
-use crate::bootstrap::{
-    self,
-    compatibility::{self, CompatibilityError},
-    journal,
-};
+use crate::bootstrap::{self, compatibility, journal};
 use crate::cli::{OutputStyle, Presentation};
 use crate::commands::{CommandContext, names, print_failure, print_success, report_failure};
 use crate::util::join_display;
+use crate::verify::DouglasBinaryVerifier;
 use ::config::DouglasFolders;
 use credentials::create_credentials;
 use file_system::{
@@ -52,7 +49,7 @@ pub(crate) async fn start(plan_only: bool, presentation: Presentation) -> ExitCo
             permissions,
             environment_variable_reader,
             folder,
-            os,
+            os: Arc::clone(&os),
             douglas_folders: douglas_folders.clone(),
         },
     )
@@ -89,12 +86,23 @@ pub(crate) async fn start(plan_only: bool, presentation: Presentation) -> ExitCo
 
     log_deadwood_if_any(&reporter, bract_client.as_ref()).await;
 
-    if let Err(err) = compatibility::record_install(
-        &douglas_folders,
-        &UnixFileWriter::new(),
-        env!("CARGO_PKG_VERSION"),
-        &running,
-    ) {
+    let verifier = DouglasBinaryVerifier::new(Arc::clone(&os), Arc::new(UnixFileReader::new()));
+    let version = match compatibility::running_version(&verifier, env!("CARGO_PKG_VERSION")) {
+        Ok(version) => version,
+        Err(err) => {
+            report_compatibility_failure(
+                &reporter,
+                presentation,
+                "Determining the running release",
+                &err,
+            );
+            return ExitCode::from(1);
+        }
+    };
+
+    if let Err(err) =
+        compatibility::record_install(&douglas_folders, &UnixFileWriter::new(), &version, &running)
+    {
         report_compatibility_failure(
             &reporter,
             presentation,
@@ -141,7 +149,7 @@ fn report_compatibility_failure(
     reporter: &Arc<dyn Reporter>,
     presentation: Presentation,
     label: &str,
-    err: &CompatibilityError,
+    err: &dyn std::fmt::Display,
 ) {
     let guard = log::Span::new(Arc::clone(reporter), label, log::ScopeKind::Task).start_guard();
     report_failure(guard.span(), presentation.console_style(), &err.to_string());

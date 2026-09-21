@@ -25,6 +25,8 @@ enum Commands {
     Keygen,
     Sign {
         path: PathBuf,
+        #[command(flatten)]
+        overrides: Overrides,
     },
     Build {
         #[arg(long)]
@@ -32,12 +34,44 @@ enum Commands {
     },
 }
 
+#[derive(clap::Args, Default)]
+struct Overrides {
+    #[arg(long)]
+    version: Option<String>,
+    #[arg(long)]
+    format: Option<u8>,
+    #[arg(long = "core", value_name = "SEEDLING=VERSION", value_parser = parse_core)]
+    core: Vec<(String, u16)>,
+}
+
+impl Overrides {
+    fn apply(&self, mut metadata: ReleaseMetadata) -> ReleaseMetadata {
+        if let Some(format) = self.format {
+            metadata.format = format;
+        }
+        for (seedling, version) in &self.core {
+            metadata.core.insert(seedling.clone(), *version);
+        }
+        metadata
+    }
+}
+
+fn parse_core(raw: &str) -> Result<(String, u16), String> {
+    let (seedling, version) = raw
+        .split_once('=')
+        .ok_or_else(|| format!("'{raw}' is not SEEDLING=VERSION"))?;
+    let version = version
+        .parse::<u16>()
+        .map_err(|err| format!("'{raw}' has an invalid version: {err}"))?;
+    Ok((seedling.to_string(), version))
+}
+
 fn main() -> ExitCode {
     let cli = Cli::parse();
 
     let result = match cli.command {
         Commands::Keygen => keygen(),
-        Commands::Sign { path } => sign(&path),
+        Commands::Sign { path, overrides } => sign(&path, &overrides),
         Commands::Build { release } => build(release),
     };
 
@@ -165,16 +199,19 @@ fn signed_bytes(
     Ok(data)
 }
 
-fn sign(path: &Path) -> Result<(), String> {
+fn sign(path: &Path, overrides: &Overrides) -> Result<(), String> {
     let signing_key = load_signing_key()?;
-    let (major, minor, patch) = read_douglas_version()?;
+    let (major, minor, patch) = match &overrides.version {
+        Some(version) => parse_version(version)?,
+        None => read_douglas_version()?,
+    };
 
     let data = fs::read(path).map_err(|err| format!("failed to read {}: {err}", path.display()))?;
     let signed = signed_bytes(
         &signing_key,
         data,
         (major, minor, patch),
-        &ReleaseMetadata::current(),
+        &overrides.apply(ReleaseMetadata::current()),
     )?;
 
     fs::write(path, signed).map_err(|err| format!("failed to write {}: {err}", path.display()))?;
@@ -208,13 +245,50 @@ fn build(release: bool) -> Result<(), String> {
 
     let profile_dir = if release { "release" } else { "debug" };
     let binary_path = target_dir().join(profile_dir).join("douglas");
-    sign(&binary_path)
+    sign(&binary_path, &Overrides::default())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use ed25519_dalek::Verifier;
+
+    #[test]
+    fn test_parse_core_should_split_the_seedling_from_its_version() {
+        assert_eq!(parse_core("openbao=2").unwrap(), ("openbao".to_string(), 2));
+    }
+
+    #[test]
+    fn test_parse_core_should_reject_a_value_without_an_equals_sign() {
+        assert!(parse_core("openbao").is_err());
+    }
+
+    #[test]
+    fn test_parse_core_should_reject_a_non_numeric_version() {
+        assert!(parse_core("openbao=two").is_err());
+    }
+
+    #[test]
+    fn test_overrides_apply_should_leave_metadata_alone_when_nothing_is_overridden() {
+        let original = metadata(1);
+
+        assert_eq!(Overrides::default().apply(original.clone()), original);
+    }
+
+    #[test]
+    fn test_overrides_apply_should_replace_the_format_and_core_versions() {
+        let overrides = Overrides {
+            version: None,
+            format: Some(9),
+            core: vec![("openbao".to_string(), 5), ("traefik".to_string(), 3)],
+        };
+
+        let applied = overrides.apply(metadata(1));
+
+        assert_eq!(applied.format, 9);
+        assert_eq!(applied.core["openbao"], 5);
+        assert_eq!(applied.core["traefik"], 3);
+    }
 
     #[test]
     fn test_parse_version_should_split_major_minor_patch() {
