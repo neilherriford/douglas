@@ -177,12 +177,10 @@ impl StateObserver<'_> {
         credentials_available: bool,
         has_unseal_codes: bool,
     ) -> Result<State, OpenBaoError> {
-        if !status.initialized {
-            return Ok(State::Uninitialized);
-        }
-
-        if status.sealed {
-            return Ok(State::Sealed { has_unseal_codes });
+        match status.seal_state() {
+            openbao_types::SealState::Uninitialized => return Ok(State::Uninitialized),
+            openbao_types::SealState::Sealed => return Ok(State::Sealed { has_unseal_codes }),
+            openbao_types::SealState::Unsealed => {}
         }
 
         if !credentials_available {

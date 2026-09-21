@@ -42,6 +42,25 @@ pub struct Status {
     pub version: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SealState {
+    Uninitialized,
+    Sealed,
+    Unsealed,
+}
+
+impl Status {
+    pub fn seal_state(&self) -> SealState {
+        if !self.initialized {
+            SealState::Uninitialized
+        } else if self.sealed {
+            SealState::Sealed
+        } else {
+            SealState::Unsealed
+        }
+    }
+}
+
 impl Default for Status {
     fn default() -> Self {
         Self {
@@ -164,6 +183,35 @@ impl Serialize for Capability {
 
 #[cfg(test)]
 mod tests {
+    fn status(initialized: bool, sealed: bool) -> Status {
+        Status {
+            initialized,
+            sealed,
+            ..Status::default()
+        }
+    }
+
+    #[test]
+    fn test_seal_state_should_be_uninitialized_before_the_first_initialization() {
+        assert_eq!(status(false, true).seal_state(), SealState::Uninitialized);
+    }
+
+    #[test]
+    fn test_seal_state_should_call_an_uninitialized_instance_uninitialized_even_if_it_claims_to_be_unsealed()
+     {
+        assert_eq!(status(false, false).seal_state(), SealState::Uninitialized);
+    }
+
+    #[test]
+    fn test_seal_state_should_be_sealed_when_initialized_and_sealed() {
+        assert_eq!(status(true, true).seal_state(), SealState::Sealed);
+    }
+
+    #[test]
+    fn test_seal_state_should_be_unsealed_when_initialized_and_not_sealed() {
+        assert_eq!(status(true, false).seal_state(), SealState::Unsealed);
+    }
+
     use super::*;
 
     #[test]
