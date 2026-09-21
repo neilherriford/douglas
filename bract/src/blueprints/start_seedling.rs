@@ -4,7 +4,7 @@ use crate::{
         core_seedling_forbidden_for, observe_container, provision_seedling_secrets,
     },
     labels,
-    rolodex::{Rolodex, RolodexError},
+    rolodex::{Rolodex, RolodexError, ServiceAccount},
 };
 use async_trait::async_trait;
 use blueprint::{
@@ -55,21 +55,37 @@ struct Context<'a> {
     seedbank_client: &'a dyn seedbank_client::Client,
 }
 
-#[derive(Debug, Default)]
-struct State {
-    seedling_exists: bool,
-    seedling_credentials_exist: bool,
-    reached_max_fail_count: bool,
-    has_health_check_failure: bool,
-    image_exists: bool,
-    container_exists: bool,
-    mounts_initialized: bool,
-    container_is_startable: bool,
-    container_name: Option<docker_types::ContainerName>,
-    version: Option<seedbank_types::Version>,
+#[derive(Debug, PartialEq)]
+enum Readiness {
+    MountsNotInitialized,
+    Stopped,
+    Running,
+}
+
+#[derive(Debug)]
+struct Found {
+    container_name: docker_types::ContainerName,
+    version: seedbank_types::Version,
     origin: Option<seedbank_types::Origin>,
+    has_health_check_failure: bool,
+    readiness: Readiness,
+}
+
+#[derive(Debug)]
+enum Seedling {
+    Undefined,
+    MissingCredentials,
+    GaveUp,
+    MissingImage,
+    MissingContainer,
+    Container(Found),
+}
+
+#[derive(Debug)]
+struct State {
     agent_container: ContainerPresence,
-    agent_container_name: Option<docker_types::ContainerName>,
+    agent_container_name: docker_types::ContainerName,
+    seedling: Seedling,
 }
 
 pub(crate) struct Dependencies<'a> {
@@ -167,38 +183,44 @@ impl<'a> StateObserver<'a> {
             )
             .start_guard();
 
-        let mut result = State::default();
+        let agent_container_name = agent_container_name(name)?;
+        let agent_container = observe_container(self.docker_client, &agent_container_name).await?;
+        let seedling = self.discover_seedling(name).await?;
 
-        let agent_container = agent_container_name(name)?;
-        result.agent_container_name = Some(agent_container.clone());
-        result.agent_container = observe_container(self.docker_client, &agent_container).await?;
+        guard.finish(Ok(State {
+            agent_container,
+            agent_container_name,
+            seedling,
+        }))
+    }
 
+    async fn discover_seedling(
+        &self,
+        name: &seedbank_types::Name,
+    ) -> Result<Seedling, StartSeedlingError> {
         if !self.seedbank_client.exists(name).await? {
-            return Ok(result);
+            return Ok(Seedling::Undefined);
         }
-        result.seedling_exists = true;
 
         let Some(service_account) = self.rolodex.find_service_account(name.as_ref())? else {
-            return Ok(result);
+            return Ok(Seedling::MissingCredentials);
         };
-        result.seedling_credentials_exist = true;
 
         let health_check_log = self.seedbank_client.health_check_log(name).await?;
-        result.has_health_check_failure = health_check_log.is_some();
+        let has_health_check_failure = health_check_log.is_some();
 
-        result.reached_max_fail_count = match self.requested_by {
+        let reached_max_fail_count = match self.requested_by {
             RequestedBy::Operator => false,
             RequestedBy::Watchdog => health_check_log
                 .map(|log| log.reached_max_fail_count())
                 .unwrap_or(false),
         };
 
-        if result.reached_max_fail_count {
-            return Ok(result);
+        if reached_max_fail_count {
+            return Ok(Seedling::GaveUp);
         }
 
         let seedling = self.seedbank_client.load(name).await?;
-        result.version = Some(seedling.version.clone());
 
         if !self
             .docker_client
@@ -208,34 +230,70 @@ impl<'a> StateObserver<'a> {
             )
             .await?
         {
-            return Ok(result);
+            return Ok(Seedling::MissingImage);
         }
-        result.image_exists = true;
 
-        let derived_container_name: ContainerName = container_name(name)?;
-        result.container_name = Some(derived_container_name.clone());
+        let container_name: ContainerName = container_name(name)?;
         if !self
             .docker_client
-            .container_exists(ContainerRef::FullName(derived_container_name.clone()))
+            .container_exists(ContainerRef::FullName(container_name.clone()))
             .await?
         {
-            return Ok(result);
+            return Ok(Seedling::MissingContainer);
         }
-        result.container_exists = true;
 
         let container_labels = self
             .docker_client
-            .container_labels(ContainerRef::FullName(derived_container_name.clone()))
+            .container_labels(ContainerRef::FullName(container_name.clone()))
             .await?;
-        result.origin = labels::get_origin(&container_labels);
+        let origin = labels::get_origin(&container_labels);
 
-        for (mount_name, mount_definition) in seedling.definition.mounts {
+        let readiness = if self
+            .mounts_are_initialized(&seedling, &service_account)
+            .await?
+        {
+            self.discover_running(&container_name).await?
+        } else {
+            Readiness::MountsNotInitialized
+        };
+
+        Ok(Seedling::Container(Found {
+            container_name,
+            version: seedling.version,
+            origin,
+            has_health_check_failure,
+            readiness,
+        }))
+    }
+
+    async fn discover_running(
+        &self,
+        container_name: &ContainerName,
+    ) -> Result<Readiness, StartSeedlingError> {
+        let status = self
+            .docker_client
+            .container_status(ContainerRef::FullName(container_name.clone()))
+            .await?;
+
+        Ok(if status == docker_types::Status::Running {
+            Readiness::Running
+        } else {
+            Readiness::Stopped
+        })
+    }
+
+    async fn mounts_are_initialized(
+        &self,
+        seedling: &seedbank_types::Seedling,
+        service_account: &ServiceAccount,
+    ) -> Result<bool, StartSeedlingError> {
+        for (mount_name, mount_definition) in &seedling.definition.mounts {
             let expected = self
                 .douglas_folders
                 .seedling_mount(seedling.name.as_ref(), mount_name.as_ref());
 
             if !self.inspect.exists(&expected) {
-                return Ok(result);
+                return Ok(false);
             }
 
             let (owning_user, owning_group) =
@@ -244,46 +302,39 @@ impl<'a> StateObserver<'a> {
             if service_account.user.system_name != owning_user
                 || service_account.group.system_name != owning_group
             {
-                return Ok(result);
+                return Ok(false);
             }
 
             if self.permissions.get_mode(&expected)? != EXPECTED_MOUNT_MODE {
-                return Ok(result);
+                return Ok(false);
             }
 
             for content in mount_definition.contents() {
-                match content {
-                    MountContents::FolderOnly(relative_path) => {
-                        let mut expected = expected.clone();
-                        expected.push(relative_path);
-                        if !self.inspect.exists(&expected) {
-                            return Ok(result);
-                        }
-                    }
-                    MountContents::File(mount_file) => {
-                        let mut expected = expected.clone();
-                        expected.push(mount_file.file_relative_path.clone());
-                        if !self.inspect.exists(&expected) {
-                            return Ok(result);
-                        }
-                        let actual_bytes = self.file_reader.read_all_bytes(&expected)?;
-
-                        if mount_file.contents != actual_bytes {
-                            return Ok(result);
-                        }
-                    }
+                if !self.content_is_in_place(&expected, content)? {
+                    return Ok(false);
                 }
             }
         }
-        result.mounts_initialized = true;
+        Ok(true)
+    }
 
-        result.container_is_startable = self
-            .docker_client
-            .container_status(ContainerRef::FullName(derived_container_name.clone()))
-            .await?
-            != docker_types::Status::Running;
-
-        guard.finish(Ok(result))
+    fn content_is_in_place(
+        &self,
+        mount: &std::path::Path,
+        content: &MountContents,
+    ) -> Result<bool, StartSeedlingError> {
+        match content {
+            MountContents::FolderOnly(relative_path) => {
+                Ok(self.inspect.exists(&mount.join(relative_path)))
+            }
+            MountContents::File(mount_file) => {
+                let expected = mount.join(&mount_file.file_relative_path);
+                if !self.inspect.exists(&expected) {
+                    return Ok(false);
+                }
+                Ok(mount_file.contents == self.file_reader.read_all_bytes(&expected)?)
+            }
+        }
     }
 }
 
@@ -296,67 +347,55 @@ fn create_plan<'a>(
 ) -> Result<Vec<Step<Context<'a>>>, StartSeedlingError> {
     let mut steps: Vec<Step<Context>> = Vec::new();
 
-    if !state.seedling_exists {
-        return Err(StartSeedlingError::CannotStartSeedling(
-            "Seedling not defined".to_string(),
-        ));
-    }
+    let found = match state.seedling {
+        Seedling::Undefined => {
+            return Err(StartSeedlingError::CannotStartSeedling(
+                "Seedling not defined".to_string(),
+            ));
+        }
+        Seedling::GaveUp => {
+            return Err(StartSeedlingError::CannotStartSeedling(
+                "Seedling has failed its health checks".to_string(),
+            ));
+        }
+        Seedling::MissingCredentials => {
+            return Err(StartSeedlingError::CannotStartSeedling(
+                "Seedling credentials not created yet".to_string(),
+            ));
+        }
+        Seedling::MissingImage | Seedling::MissingContainer => {
+            return Err(StartSeedlingError::CannotStartSeedling(
+                "Docker instance not initialized".to_string(),
+            ));
+        }
+        Seedling::Container(found) => found,
+    };
 
-    if state.reached_max_fail_count {
-        return Err(StartSeedlingError::CannotStartSeedling(
-            "Seedling has failed its health checks".to_string(),
-        ));
-    }
-
-    if !state.seedling_credentials_exist {
-        return Err(StartSeedlingError::CannotStartSeedling(
-            "Seedling credentials not created yet".to_string(),
-        ));
-    }
-
-    if !state.image_exists {
-        return Err(StartSeedlingError::CannotStartSeedling(
-            "Docker instance not initialized".to_string(),
-        ));
-    }
-
-    if !state.container_exists {
-        return Err(StartSeedlingError::CannotStartSeedling(
-            "Docker instance not initialized".to_string(),
-        ));
-    }
-
-    if core_seedling_forbidden_for(state.origin, requested_by) {
+    if core_seedling_forbidden_for(found.origin, requested_by) {
         return Err(StartSeedlingError::CoreSeedling(name.to_string()));
     }
 
-    if !state.mounts_initialized {
-        return Err(StartSeedlingError::CannotStartSeedling(
-            "Could not initialize".to_string(),
-        ));
-    }
-    if !state.container_is_startable && !state.has_health_check_failure {
-        return Err(StartSeedlingError::CannotStartSeedling(
-            "The seedling is already running".to_string(),
-        ));
-    }
-    let already_running = !state.container_is_startable;
-
-    let version = state
-        .version
-        .ok_or(StartSeedlingError::CannotStartSeedling(
-            "Docker instance not initialized".to_string(),
-        ))?;
+    let already_running = match found.readiness {
+        Readiness::MountsNotInitialized => {
+            return Err(StartSeedlingError::CannotStartSeedling(
+                "Could not initialize".to_string(),
+            ));
+        }
+        Readiness::Running if !found.has_health_check_failure => {
+            return Err(StartSeedlingError::CannotStartSeedling(
+                "The seedling is already running".to_string(),
+            ));
+        }
+        Readiness::Running => true,
+        Readiness::Stopped => false,
+    };
 
     push_step(&mut steps, SetDesiredRunStatusToRunning::new(name.clone()));
 
-    if state.agent_container.exists()
-        && !state.agent_container.is_running()
-        && let Some(agent_container_name) = state.agent_container_name
-    {
+    if state.agent_container.exists() && !state.agent_container.is_running() {
         push_step(
             &mut steps,
-            StartAgentContainer::new(agent_container_name, agent_ip),
+            StartAgentContainer::new(state.agent_container_name, agent_ip),
         );
     }
 
@@ -365,12 +404,8 @@ fn create_plan<'a>(
         StartSeedling::new(
             name.clone(),
             health_check.clone(),
-            state
-                .container_name
-                .ok_or(StartSeedlingError::CannotStartSeedling(
-                    "Docker instance not initialized".to_string(),
-                ))?,
-            version,
+            found.container_name,
+            found.version,
             already_running,
         ),
     );
@@ -892,22 +927,26 @@ mod tests {
         "traefik".parse().unwrap()
     }
 
-    fn startable_state() -> State {
-        State {
-            seedling_exists: true,
-            seedling_credentials_exist: true,
-            image_exists: true,
-            container_exists: true,
-            mounts_initialized: true,
-            container_is_startable: true,
-            container_name: Some(container_name(&name()).unwrap()),
-            version: Some(seedbank_types::Version(1)),
+    fn found() -> Found {
+        Found {
+            container_name: container_name(&name()).unwrap(),
+            version: seedbank_types::Version(1),
             origin: Some(seedbank_types::Origin::User),
-            agent_container: ContainerPresence::Absent,
-            agent_container_name: Some(agent_container_name(&name()).unwrap()),
-            reached_max_fail_count: false,
             has_health_check_failure: false,
+            readiness: Readiness::Stopped,
         }
+    }
+
+    fn state_with(seedling: Seedling) -> State {
+        State {
+            agent_container: ContainerPresence::Absent,
+            agent_container_name: agent_container_name(&name()).unwrap(),
+            seedling,
+        }
+    }
+
+    fn startable_state() -> State {
+        state_with(Seedling::Container(found()))
     }
 
     fn health_check() -> seedbank_types::HealthCheck {
@@ -958,10 +997,7 @@ mod tests {
             &name(),
             &health_check(),
             agent_ip(),
-            State {
-                seedling_exists: false,
-                ..startable_state()
-            },
+            state_with(Seedling::Undefined),
             RequestedBy::Operator,
         );
 
@@ -977,10 +1013,7 @@ mod tests {
             &name(),
             &health_check(),
             agent_ip(),
-            State {
-                seedling_credentials_exist: false,
-                ..startable_state()
-            },
+            state_with(Seedling::MissingCredentials),
             RequestedBy::Operator,
         );
 
@@ -996,10 +1029,10 @@ mod tests {
             &name(),
             &health_check(),
             agent_ip(),
-            State {
-                mounts_initialized: false,
-                ..startable_state()
-            },
+            state_with(Seedling::Container(Found {
+                readiness: Readiness::MountsNotInitialized,
+                ..found()
+            })),
             RequestedBy::Operator,
         );
 
@@ -1015,10 +1048,10 @@ mod tests {
             &name(),
             &health_check(),
             agent_ip(),
-            State {
-                container_is_startable: false,
-                ..startable_state()
-            },
+            state_with(Seedling::Container(Found {
+                readiness: Readiness::Running,
+                ..found()
+            })),
             RequestedBy::Operator,
         );
 
@@ -1034,11 +1067,11 @@ mod tests {
             &name(),
             &health_check(),
             agent_ip(),
-            State {
-                container_is_startable: false,
+            state_with(Seedling::Container(Found {
+                readiness: Readiness::Running,
                 has_health_check_failure: true,
-                ..startable_state()
-            },
+                ..found()
+            })),
             RequestedBy::Operator,
         )
         .expect("should produce a plan");
@@ -1059,10 +1092,10 @@ mod tests {
             &name(),
             &health_check(),
             agent_ip(),
-            State {
+            state_with(Seedling::Container(Found {
                 origin: Some(seedbank_types::Origin::Core),
-                ..startable_state()
-            },
+                ..found()
+            })),
             RequestedBy::Operator,
         );
 
@@ -1075,10 +1108,10 @@ mod tests {
             &name(),
             &health_check(),
             agent_ip(),
-            State {
+            state_with(Seedling::Container(Found {
                 origin: Some(seedbank_types::Origin::Core),
-                ..startable_state()
-            },
+                ..found()
+            })),
             RequestedBy::Watchdog,
         )
         .expect("should produce a plan");
@@ -1164,6 +1197,476 @@ mod tests {
                 "Clearing seedling 'traefik' health check logs",
             ]
         );
+    }
+
+    fn plan_error(state: State) -> String {
+        let Err(err) = create_plan(
+            &name(),
+            &health_check(),
+            agent_ip(),
+            state,
+            RequestedBy::Operator,
+        ) else {
+            panic!("should refuse");
+        };
+        err.to_string()
+    }
+
+    #[test]
+    fn test_create_plan_should_say_why_it_refuses_at_each_stage() {
+        assert!(plan_error(state_with(Seedling::Undefined)).contains("not defined"));
+        assert!(plan_error(state_with(Seedling::MissingCredentials)).contains("credentials"));
+        assert!(plan_error(state_with(Seedling::GaveUp)).contains("failed its health checks"));
+        assert!(plan_error(state_with(Seedling::MissingImage)).contains("not initialized"));
+        assert!(plan_error(state_with(Seedling::MissingContainer)).contains("not initialized"));
+    }
+
+    #[test]
+    fn test_create_plan_should_refuse_a_core_seedling_before_looking_at_its_mounts() {
+        let result = create_plan(
+            &name(),
+            &health_check(),
+            agent_ip(),
+            state_with(Seedling::Container(Found {
+                origin: Some(seedbank_types::Origin::Core),
+                readiness: Readiness::MountsNotInitialized,
+                ..found()
+            })),
+            RequestedBy::Operator,
+        );
+
+        assert!(matches!(result, Err(StartSeedlingError::CoreSeedling(_))));
+    }
+
+    fn discovery_seedling() -> seedbank_types::Seedling {
+        seedling_with_mounts(std::collections::HashMap::new())
+    }
+
+    fn seedling_with_mounts(
+        mounts: std::collections::HashMap<seedbank_types::Name, seedbank_types::Mount>,
+    ) -> seedbank_types::Seedling {
+        seedbank_types::Seedling {
+            id: seedbank_types::Id { value: 0 },
+            name: name(),
+            version: seedbank_types::Version(1),
+            definition: seedbank_types::SeedlingDefinition::new(
+                docker_types::VersionedImageName::specific("hello-world", "1"),
+                mounts,
+                seedbank_types::Routing::None,
+                health_check(),
+            ),
+        }
+    }
+
+    fn service_account() -> crate::rolodex::ServiceAccount {
+        let credential = |id: u32| crate::rolodex::Credential {
+            id,
+            full_name: "doug.traefik".to_string(),
+            system_name: "douglas-traefik".to_string(),
+        };
+        crate::rolodex::ServiceAccount {
+            user: credential(1),
+            group: credential(2),
+        }
+    }
+
+    struct Discovery {
+        docker_client: docker::MockClient,
+        seedbank_client: seedbank_client::MockClient,
+        rolodex: crate::rolodex::MockRolodex,
+        inspect: file_system::MockInspect,
+        file_reader: file_system::MockFileReader,
+        permissions: file_system::MockPermissions,
+    }
+
+    impl Discovery {
+        fn new() -> Self {
+            Self::with_mounts(std::collections::HashMap::new())
+        }
+
+        fn with_mounts(
+            mounts: std::collections::HashMap<seedbank_types::Name, seedbank_types::Mount>,
+        ) -> Self {
+            let mut docker_client = docker::MockClient::new();
+            docker_client
+                .expect_container_exists()
+                .returning(|_| Ok(false));
+            let mut seedbank_client = seedbank_client::MockClient::new();
+            seedbank_client.expect_exists().returning(|_| Ok(true));
+            seedbank_client
+                .expect_health_check_log()
+                .returning(|_| Ok(None));
+            seedbank_client
+                .expect_load()
+                .returning(move |_| Ok(seedling_with_mounts(mounts.clone())));
+            let mut rolodex = crate::rolodex::MockRolodex::new();
+            rolodex
+                .expect_find_service_account()
+                .returning(|_| Ok(Some(service_account())));
+            Self {
+                docker_client,
+                seedbank_client,
+                rolodex,
+                inspect: file_system::MockInspect::new(),
+                file_reader: file_system::MockFileReader::new(),
+                permissions: file_system::MockPermissions::new(),
+            }
+        }
+
+        async fn discover(&self, requested_by: RequestedBy) -> Seedling {
+            let douglas_folders = DouglasFolders::new();
+            let registry: docker_types::Registry = "localhost:7376".parse().unwrap();
+            let observer = StateObserver {
+                docker_client: &self.docker_client,
+                seedbank_client: &self.seedbank_client,
+                rolodex: &self.rolodex,
+                douglas_folders: &douglas_folders,
+                inspect: &self.inspect,
+                file_reader: &self.file_reader,
+                permissions: &self.permissions,
+                registry: &registry,
+                requested_by,
+            };
+
+            observer
+                .discover_seedling(&name())
+                .await
+                .expect("should discover")
+        }
+    }
+
+    #[tokio::test]
+    async fn test_discover_should_report_a_seedling_that_is_not_defined() {
+        let mut discovery = Discovery::new();
+        discovery.seedbank_client = seedbank_client::MockClient::new();
+        discovery
+            .seedbank_client
+            .expect_exists()
+            .returning(|_| Ok(false));
+
+        let seedling = discovery.discover(RequestedBy::Operator).await;
+
+        assert!(matches!(seedling, Seedling::Undefined));
+    }
+
+    #[tokio::test]
+    async fn test_discover_should_report_missing_credentials() {
+        let mut discovery = Discovery::new();
+        discovery.rolodex = crate::rolodex::MockRolodex::new();
+        discovery
+            .rolodex
+            .expect_find_service_account()
+            .returning(|_| Ok(None));
+
+        let seedling = discovery.discover(RequestedBy::Operator).await;
+
+        assert!(matches!(seedling, Seedling::MissingCredentials));
+    }
+
+    fn exhausted_health_check_log() -> seedbank_types::HealthCheckLog {
+        seedbank_types::HealthCheckLog {
+            fail_count: 6,
+            updated_at: std::time::SystemTime::now(),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_discover_should_report_that_the_watchdog_gave_up_after_too_many_failures() {
+        let mut discovery = Discovery::new();
+        discovery.seedbank_client = seedbank_client::MockClient::new();
+        discovery
+            .seedbank_client
+            .expect_exists()
+            .returning(|_| Ok(true));
+        discovery
+            .seedbank_client
+            .expect_health_check_log()
+            .returning(|_| Ok(Some(exhausted_health_check_log())));
+
+        let seedling = discovery.discover(RequestedBy::Watchdog).await;
+
+        assert!(matches!(seedling, Seedling::GaveUp));
+    }
+
+    #[tokio::test]
+    async fn test_discover_should_not_give_up_for_an_operator_however_many_times_it_failed() {
+        let mut discovery = Discovery::new();
+        discovery.seedbank_client = seedbank_client::MockClient::new();
+        discovery
+            .seedbank_client
+            .expect_exists()
+            .returning(|_| Ok(true));
+        discovery
+            .seedbank_client
+            .expect_health_check_log()
+            .returning(|_| Ok(Some(exhausted_health_check_log())));
+        discovery
+            .seedbank_client
+            .expect_load()
+            .returning(|_| Ok(discovery_seedling()));
+        discovery
+            .docker_client
+            .expect_image_exists()
+            .returning(|_, _| Ok(false));
+
+        let seedling = discovery.discover(RequestedBy::Operator).await;
+
+        assert!(matches!(seedling, Seedling::MissingImage));
+    }
+
+    #[tokio::test]
+    async fn test_discover_should_report_a_missing_container_when_the_image_exists() {
+        let mut discovery = Discovery::new();
+        discovery
+            .docker_client
+            .expect_image_exists()
+            .returning(|_, _| Ok(true));
+
+        let seedling = discovery.discover(RequestedBy::Operator).await;
+
+        assert!(matches!(seedling, Seedling::MissingContainer));
+    }
+
+    async fn discover_container(status: docker_types::Status, failing: bool) -> Found {
+        let mut discovery = Discovery::new();
+        discovery.docker_client = docker::MockClient::new();
+        discovery
+            .docker_client
+            .expect_image_exists()
+            .returning(|_, _| Ok(true));
+        discovery
+            .docker_client
+            .expect_container_exists()
+            .returning(|_| Ok(true));
+        discovery
+            .docker_client
+            .expect_container_labels()
+            .returning(|_| {
+                Ok(vec![labels::create_origin_label(
+                    seedbank_types::Origin::Core,
+                )])
+            });
+        discovery
+            .docker_client
+            .expect_container_status()
+            .returning(move |_| Ok(status.clone()));
+        if failing {
+            discovery.seedbank_client = seedbank_client::MockClient::new();
+            discovery
+                .seedbank_client
+                .expect_exists()
+                .returning(|_| Ok(true));
+            discovery
+                .seedbank_client
+                .expect_health_check_log()
+                .returning(|_| Ok(Some(seedbank_types::HealthCheckLog::default())));
+            discovery
+                .seedbank_client
+                .expect_load()
+                .returning(|_| Ok(discovery_seedling()));
+        }
+
+        match discovery.discover(RequestedBy::Operator).await {
+            Seedling::Container(found) => found,
+            other => panic!("should find the container, got {other:?}"),
+        }
+    }
+
+    fn a_mount(
+        contents: std::collections::HashSet<seedbank_types::MountContents>,
+    ) -> std::collections::HashMap<seedbank_types::Name, seedbank_types::Mount> {
+        std::collections::HashMap::from([(
+            "data".parse().unwrap(),
+            seedbank_types::Mount::with_files(
+                seedbank_types::MountType::Persisted,
+                std::path::PathBuf::from("/data"),
+                seedbank_types::AccessMode::Writable,
+                contents,
+            ),
+        )])
+    }
+
+    fn relative(path: &str) -> file_system::RelativePath {
+        file_system::RelativePath::try_from(std::path::PathBuf::from(path)).unwrap()
+    }
+
+    async fn readiness_with_mounts(mut discovery: Discovery) -> Readiness {
+        discovery.docker_client = docker::MockClient::new();
+        discovery
+            .docker_client
+            .expect_image_exists()
+            .returning(|_, _| Ok(true));
+        discovery
+            .docker_client
+            .expect_container_exists()
+            .returning(|_| Ok(true));
+        discovery
+            .docker_client
+            .expect_container_labels()
+            .returning(|_| Ok(Vec::new()));
+        discovery
+            .docker_client
+            .expect_container_status()
+            .returning(|_| Ok(docker_types::Status::Exited));
+
+        match discovery.discover(RequestedBy::Operator).await {
+            Seedling::Container(found) => found.readiness,
+            other => panic!("should find the container, got {other:?}"),
+        }
+    }
+
+    fn mount_is_in_place(discovery: &mut Discovery) {
+        discovery.inspect.expect_exists().returning(|_| true);
+        discovery
+            .permissions
+            .expect_get_user_and_group_ownership()
+            .returning(|_| Ok(("douglas-traefik".to_string(), "douglas-traefik".to_string())));
+        discovery
+            .permissions
+            .expect_get_mode()
+            .returning(|_| Ok(EXPECTED_MOUNT_MODE));
+    }
+
+    #[tokio::test]
+    async fn test_discover_should_report_ready_when_every_mount_is_in_place() {
+        let mut discovery = Discovery::with_mounts(a_mount(std::collections::HashSet::new()));
+        mount_is_in_place(&mut discovery);
+
+        assert_eq!(readiness_with_mounts(discovery).await, Readiness::Stopped);
+    }
+
+    #[tokio::test]
+    async fn test_discover_should_report_mounts_not_initialized_when_the_mount_folder_is_missing() {
+        let mut discovery = Discovery::with_mounts(a_mount(std::collections::HashSet::new()));
+        discovery.inspect.expect_exists().returning(|_| false);
+
+        assert_eq!(
+            readiness_with_mounts(discovery).await,
+            Readiness::MountsNotInitialized
+        );
+    }
+
+    #[tokio::test]
+    async fn test_discover_should_report_mounts_not_initialized_when_the_owner_is_wrong() {
+        let mut discovery = Discovery::with_mounts(a_mount(std::collections::HashSet::new()));
+        discovery.inspect.expect_exists().returning(|_| true);
+        discovery
+            .permissions
+            .expect_get_user_and_group_ownership()
+            .returning(|_| Ok(("root".to_string(), "root".to_string())));
+
+        assert_eq!(
+            readiness_with_mounts(discovery).await,
+            Readiness::MountsNotInitialized
+        );
+    }
+
+    #[tokio::test]
+    async fn test_discover_should_report_mounts_not_initialized_when_the_mode_is_wrong() {
+        let mut discovery = Discovery::with_mounts(a_mount(std::collections::HashSet::new()));
+        discovery.inspect.expect_exists().returning(|_| true);
+        discovery
+            .permissions
+            .expect_get_user_and_group_ownership()
+            .returning(|_| Ok(("douglas-traefik".to_string(), "douglas-traefik".to_string())));
+        discovery
+            .permissions
+            .expect_get_mode()
+            .returning(|_| Ok(file_system::Modes::OwnerReadWrite));
+
+        assert_eq!(
+            readiness_with_mounts(discovery).await,
+            Readiness::MountsNotInitialized
+        );
+    }
+
+    #[tokio::test]
+    async fn test_discover_should_report_mounts_not_initialized_when_a_folder_inside_is_missing() {
+        let contents =
+            std::collections::HashSet::from([seedbank_types::MountContents::FolderOnly(relative(
+                "logs",
+            ))]);
+        let mut discovery = Discovery::with_mounts(a_mount(contents));
+        discovery
+            .inspect
+            .expect_exists()
+            .returning(|path| !path.ends_with("logs"));
+        discovery
+            .permissions
+            .expect_get_user_and_group_ownership()
+            .returning(|_| Ok(("douglas-traefik".to_string(), "douglas-traefik".to_string())));
+        discovery
+            .permissions
+            .expect_get_mode()
+            .returning(|_| Ok(EXPECTED_MOUNT_MODE));
+
+        assert_eq!(
+            readiness_with_mounts(discovery).await,
+            Readiness::MountsNotInitialized
+        );
+    }
+
+    fn mount_with_file(
+        contents: &[u8],
+    ) -> std::collections::HashMap<seedbank_types::Name, seedbank_types::Mount> {
+        a_mount(std::collections::HashSet::from([
+            seedbank_types::MountContents::File(seedbank_types::MountFile::new(
+                relative("config.yml"),
+                contents.to_vec(),
+            )),
+        ]))
+    }
+
+    #[tokio::test]
+    async fn test_discover_should_report_ready_when_a_mounted_file_has_the_expected_contents() {
+        let mut discovery = Discovery::with_mounts(mount_with_file(b"expected"));
+        mount_is_in_place(&mut discovery);
+        discovery
+            .file_reader
+            .expect_read_all_bytes()
+            .returning(|_| Ok(b"expected".to_vec()));
+
+        assert_eq!(readiness_with_mounts(discovery).await, Readiness::Stopped);
+    }
+
+    #[tokio::test]
+    async fn test_discover_should_report_mounts_not_initialized_when_a_mounted_file_has_other_contents()
+     {
+        let mut discovery = Discovery::with_mounts(mount_with_file(b"expected"));
+        mount_is_in_place(&mut discovery);
+        discovery
+            .file_reader
+            .expect_read_all_bytes()
+            .returning(|_| Ok(b"something else".to_vec()));
+
+        assert_eq!(
+            readiness_with_mounts(discovery).await,
+            Readiness::MountsNotInitialized
+        );
+    }
+
+    #[tokio::test]
+    async fn test_discover_should_report_a_stopped_container_with_its_version_and_origin() {
+        let found = discover_container(docker_types::Status::Exited, false).await;
+
+        assert_eq!(found.readiness, Readiness::Stopped);
+        assert_eq!(found.version, seedbank_types::Version(1));
+        assert_eq!(found.origin, Some(seedbank_types::Origin::Core));
+        assert!(!found.has_health_check_failure);
+    }
+
+    #[tokio::test]
+    async fn test_discover_should_report_a_running_container() {
+        let found = discover_container(docker_types::Status::Running, false).await;
+
+        assert_eq!(found.readiness, Readiness::Running);
+    }
+
+    #[tokio::test]
+    async fn test_discover_should_carry_an_outstanding_health_check_failure() {
+        let found = discover_container(docker_types::Status::Running, true).await;
+
+        assert!(found.has_health_check_failure);
     }
 
     #[tokio::test]
