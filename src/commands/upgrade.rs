@@ -1,6 +1,6 @@
 use crate::bootstrap::{self, upgrade::Direction};
 use crate::cli::Presentation;
-use crate::commands::{CommandContext, print_error};
+use crate::commands::{CommandContext, print_error, survive_hangup};
 use credentials::create_credentials;
 use file_system::{FileReader, UnixFileReader};
 use os::{Os, Unix};
@@ -21,6 +21,8 @@ pub(crate) async fn upgrade(
     else {
         return ExitCode::from(1);
     };
+
+    let _hangup = survive_hangup();
 
     let os: Arc<dyn Os> = Arc::new(Unix::new());
     let credentials = Arc::from(create_credentials(Arc::clone(&os)));

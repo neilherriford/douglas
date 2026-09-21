@@ -15,6 +15,10 @@ use crossterm::style::Stylize;
 use log::{Reporter, ScopeGuard, Span};
 use std::sync::Arc;
 
+pub(crate) fn survive_hangup() -> Option<tokio::signal::unix::Signal> {
+    tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup()).ok()
+}
+
 pub(crate) struct CommandContext {
     pub(crate) douglas_folders: DouglasFolders,
     pub(crate) reporter: Arc<dyn Reporter>,
@@ -183,5 +187,10 @@ mod tests {
     #[test]
     fn test_names_should_be_empty_for_an_empty_slice() {
         assert_eq!(names(&[]), Vec::<String>::new());
+    }
+
+    #[tokio::test]
+    async fn test_survive_hangup_should_install_a_handler_so_a_hangup_does_not_end_the_process() {
+        assert!(survive_hangup().is_some());
     }
 }

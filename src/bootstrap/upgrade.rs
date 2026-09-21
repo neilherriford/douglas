@@ -27,6 +27,7 @@ use os::Os;
 use release::{Difference, differences};
 use std::{
     collections::HashMap,
+    io::Write,
     path::{Path, PathBuf},
     sync::Arc,
     time::Duration,
@@ -621,8 +622,8 @@ fn relay(presentation: Presentation, stdout: &str, stderr: &str) {
     if presentation == Presentation::Interactive {
         return;
     }
-    print!("{stdout}");
-    eprint!("{stderr}");
+    let _ = std::io::stdout().write_all(stdout.as_bytes());
+    let _ = std::io::stderr().write_all(stderr.as_bytes());
 }
 
 fn start_installed_version(

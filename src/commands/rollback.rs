@@ -1,6 +1,6 @@
 use crate::bootstrap::{self, rollback, upgrade::Direction};
 use crate::cli::Presentation;
-use crate::commands::{CommandContext, print_error};
+use crate::commands::{CommandContext, print_error, survive_hangup};
 use crate::verify::{BinaryVerifier, DouglasBinaryVerifier};
 use credentials::create_credentials;
 use file_system::{
@@ -23,6 +23,8 @@ pub(crate) async fn rollback(
     else {
         return ExitCode::from(1);
     };
+
+    let _hangup = survive_hangup();
 
     let os: Arc<dyn Os> = Arc::new(Unix::new());
     let credentials: Arc<dyn credentials::Credentials> =

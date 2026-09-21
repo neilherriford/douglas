@@ -32,6 +32,12 @@ assert_non_empty "woodward pid baseline was captured" "$woodward_pid_before"
 assert_non_empty "resin pid baseline was captured" "$resin_pid_before"
 assert_non_empty "seedbank pid baseline was captured" "$seedbank_pid_before"
 
+## An ssh session that drops mid-upgrade sends the upgrade a hangup. Send it
+## two while the upgrade runs; it must carry on and finish anyway.
+
+assert_success "arrange for the upgrade to be hung up on partway through" ssh_out \
+    "rm -f /tmp/hup-sent; (sleep 6; sudo pkill -HUP -f \"^\$HOME/douglas .*upgrade\" && echo sent >> /tmp/hup-sent; sleep 10; sudo pkill -HUP -f \"^\$HOME/douglas .*upgrade\" && echo sent >> /tmp/hup-sent) >/dev/null 2>&1 &"
+
 if upgrade_output="$(ssh_out "sudo ~/douglas --output-style plain upgrade --path ~/douglas-new" 2>&1)"; then
     pass "douglas upgrade completes"
 else
@@ -44,6 +50,8 @@ fi
 # start's, which only appears if it inherited --output-style plain.
 assert_contains "the new binary's start ran with the requested output style" \
     "$upgrade_output" "Douglas started."
+
+assert_non_empty "the upgrade was hung up on while it ran" "$(ssh_out "cat /tmp/hup-sent 2>/dev/null")"
 
 # Everything below only means something if the upgrade actually ran.
 [ "$FAILURES" -eq 0 ] || finish
