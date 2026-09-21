@@ -326,29 +326,63 @@ fn print_status_report(output_style: OutputStyle, report: &StatusReport) {
 }
 
 fn print_openbao_report_plain(report: &bract_types::OpenBaoReport) {
-    println!("  running: {}", report.is_running);
-    if !report.is_running {
-        return;
+    for line in openbao_plain_lines(report) {
+        println!("{line}");
     }
-    println!("  initialized: {}", report.is_initialized);
-    println!("  sealed: {}", report.is_sealed);
-    println!("  credentials available: {}", report.credentials_available);
-    println!("  credentials work: {}", report.credentials_work);
-    if !report.credentials_work {
-        return;
+}
+
+fn openbao_plain_lines(report: &bract_types::OpenBaoReport) -> Vec<String> {
+    use bract_types::{DouglasCredentialsReport, OpenBaoReport};
+
+    match report {
+        OpenBaoReport::NotRunning => vec!["  running: false".to_string()],
+        OpenBaoReport::Uninitialized {
+            credentials_available,
+        } => openbao_seal_lines(false, true, *credentials_available),
+        OpenBaoReport::Sealed {
+            credentials_available,
+        } => openbao_seal_lines(true, true, *credentials_available),
+        OpenBaoReport::Unsealed { credentials } => match credentials {
+            DouglasCredentialsReport::Unavailable => openbao_seal_lines(true, false, false),
+            DouglasCredentialsReport::NotWorking => openbao_seal_lines(true, false, true),
+            DouglasCredentialsReport::Working(installed) => {
+                let mut lines = openbao_seal_lines(true, false, true);
+                lines.push("  credentials work: true".to_string());
+                lines.extend(openbao_installed_lines(installed));
+                lines
+            }
+        },
     }
-    println!("  approle enabled: {}", report.app_role_enabled);
-    println!("  acme enabled: {}", report.acme_enabled);
-    println!("  root ca configured: {}", report.root_ca_configured);
-    println!("  acme pki role created: {}", report.acme_pki_role_created);
-    println!("  mounts:");
-    if report.mounts.is_empty() {
-        println!("    none");
+}
+
+fn openbao_seal_lines(initialized: bool, sealed: bool, credentials_available: bool) -> Vec<String> {
+    vec![
+        "  running: true".to_string(),
+        format!("  initialized: {initialized}"),
+        format!("  sealed: {sealed}"),
+        format!("  credentials available: {credentials_available}"),
+    ]
+}
+
+fn openbao_installed_lines(installed: &bract_types::InstalledReport) -> Vec<String> {
+    let mut lines = vec![
+        format!("  approle enabled: {}", installed.app_role_enabled),
+        format!("  acme enabled: {}", installed.acme_enabled),
+        format!("  root ca configured: {}", installed.root_ca_configured),
+        format!(
+            "  acme pki role created: {}",
+            installed.acme_pki_role_created
+        ),
+        "  mounts:".to_string(),
+    ];
+    if installed.mounts.is_empty() {
+        lines.push("    none".to_string());
     } else {
-        for (path, kind) in &report.mounts {
-            println!("    {path} ({kind})");
+        for (path, kind) in &installed.mounts {
+            lines.push(format!("    {path} ({kind})"));
         }
     }
+    lines
 }
 
 #[cfg(test)]
@@ -572,5 +606,118 @@ mod tests {
 
         assert!(upgrade.is_none());
         assert!(matches!(error, Some(message) if message.contains("not valid")));
+    }
+
+    fn lines(report: &bract_types::OpenBaoReport) -> Vec<String> {
+        openbao_plain_lines(report)
+    }
+
+    #[test]
+    fn test_openbao_plain_lines_should_only_say_it_is_not_running_when_it_is_not() {
+        assert_eq!(
+            lines(&bract_types::OpenBaoReport::NotRunning),
+            vec!["  running: false"]
+        );
+    }
+
+    #[test]
+    fn test_openbao_plain_lines_should_report_an_uninitialized_instance_as_sealed() {
+        assert_eq!(
+            lines(&bract_types::OpenBaoReport::Uninitialized {
+                credentials_available: false
+            }),
+            vec![
+                "  running: true",
+                "  initialized: false",
+                "  sealed: true",
+                "  credentials available: false",
+            ]
+        );
+    }
+
+    #[test]
+    fn test_openbao_plain_lines_should_report_a_sealed_instance_with_its_credentials() {
+        assert_eq!(
+            lines(&bract_types::OpenBaoReport::Sealed {
+                credentials_available: true
+            }),
+            vec![
+                "  running: true",
+                "  initialized: true",
+                "  sealed: true",
+                "  credentials available: true",
+            ]
+        );
+    }
+
+    #[test]
+    fn test_openbao_plain_lines_should_stop_before_the_details_when_the_credentials_are_unusable() {
+        use bract_types::{DouglasCredentialsReport, OpenBaoReport};
+
+        assert_eq!(
+            lines(&OpenBaoReport::Unsealed {
+                credentials: DouglasCredentialsReport::Unavailable
+            }),
+            vec![
+                "  running: true",
+                "  initialized: true",
+                "  sealed: false",
+                "  credentials available: false",
+            ]
+        );
+        assert_eq!(
+            lines(&OpenBaoReport::Unsealed {
+                credentials: DouglasCredentialsReport::NotWorking
+            }),
+            vec![
+                "  running: true",
+                "  initialized: true",
+                "  sealed: false",
+                "  credentials available: true",
+            ]
+        );
+    }
+
+    #[test]
+    fn test_openbao_plain_lines_should_list_everything_installed_when_the_credentials_work() {
+        use bract_types::{DouglasCredentialsReport, InstalledReport, OpenBaoReport};
+
+        let report = OpenBaoReport::Unsealed {
+            credentials: DouglasCredentialsReport::Working(InstalledReport {
+                mounts: std::collections::HashMap::from([("kv/".to_string(), "kv".to_string())]),
+                app_role_enabled: true,
+                acme_enabled: false,
+                root_ca_configured: true,
+                acme_pki_role_created: false,
+            }),
+        };
+
+        assert_eq!(
+            lines(&report),
+            vec![
+                "  running: true",
+                "  initialized: true",
+                "  sealed: false",
+                "  credentials available: true",
+                "  credentials work: true",
+                "  approle enabled: true",
+                "  acme enabled: false",
+                "  root ca configured: true",
+                "  acme pki role created: false",
+                "  mounts:",
+                "    kv/ (kv)",
+            ]
+        );
+    }
+
+    #[test]
+    fn test_openbao_plain_lines_should_say_none_when_no_mounts_are_installed() {
+        use bract_types::{DouglasCredentialsReport, InstalledReport, OpenBaoReport};
+
+        let report = OpenBaoReport::Unsealed {
+            credentials: DouglasCredentialsReport::Working(InstalledReport::default()),
+        };
+
+        assert_eq!(lines(&report).last().map(String::as_str), Some("    none"));
     }
 }

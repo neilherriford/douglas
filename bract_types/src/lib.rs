@@ -3,13 +3,31 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-#[derive(Debug, Default, Serialize, Deserialize)]
-pub struct OpenBaoReport {
-    pub is_running: bool,
-    pub is_initialized: bool,
-    pub is_sealed: bool,
-    pub credentials_available: bool,
-    pub credentials_work: bool,
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum OpenBaoReport {
+    NotRunning,
+    Uninitialized {
+        credentials_available: bool,
+    },
+    Sealed {
+        credentials_available: bool,
+    },
+    Unsealed {
+        credentials: DouglasCredentialsReport,
+    },
+}
+
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum DouglasCredentialsReport {
+    Unavailable,
+    NotWorking,
+    Working(InstalledReport),
+}
+
+#[derive(Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct InstalledReport {
     pub mounts: HashMap<String, String>,
     pub app_role_enabled: bool,
     pub acme_enabled: bool,
@@ -290,10 +308,11 @@ mod tests {
 
     #[test]
     fn test_openbao_status_response_should_round_trip() {
-        let report = OpenBaoReport {
-            is_running: true,
-            mounts: std::collections::HashMap::from([("kv/".to_string(), "kv".to_string())]),
-            ..Default::default()
+        let report = OpenBaoReport::Unsealed {
+            credentials: DouglasCredentialsReport::Working(InstalledReport {
+                mounts: std::collections::HashMap::from([("kv/".to_string(), "kv".to_string())]),
+                ..Default::default()
+            }),
         };
         let message = ServerMessage::Response(Response::OpenBaoStatus(report));
 
@@ -301,12 +320,47 @@ mod tests {
         let deserialized: ServerMessage = serde_json::from_str(&serialized).unwrap();
 
         match deserialized {
-            ServerMessage::Response(Response::OpenBaoStatus(report)) => {
-                assert!(report.is_running);
-                assert_eq!(report.mounts.get("kv/"), Some(&"kv".to_string()));
+            ServerMessage::Response(Response::OpenBaoStatus(OpenBaoReport::Unsealed {
+                credentials: DouglasCredentialsReport::Working(installed),
+            })) => {
+                assert_eq!(installed.mounts.get("kv/"), Some(&"kv".to_string()));
             }
-            other => panic!("expected an OpenBaoStatus response, got {other:?}"),
+            other => panic!("expected a working OpenBaoStatus response, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn test_openbao_report_should_round_trip_every_state() {
+        for report in [
+            OpenBaoReport::NotRunning,
+            OpenBaoReport::Uninitialized {
+                credentials_available: true,
+            },
+            OpenBaoReport::Sealed {
+                credentials_available: false,
+            },
+            OpenBaoReport::Unsealed {
+                credentials: DouglasCredentialsReport::Unavailable,
+            },
+            OpenBaoReport::Unsealed {
+                credentials: DouglasCredentialsReport::NotWorking,
+            },
+            OpenBaoReport::Unsealed {
+                credentials: DouglasCredentialsReport::Working(InstalledReport::default()),
+            },
+        ] {
+            let serialized = serde_json::to_string(&report).unwrap();
+            let deserialized: OpenBaoReport = serde_json::from_str(&serialized).unwrap();
+
+            assert_eq!(deserialized, report);
+        }
+    }
+
+    #[test]
+    fn test_openbao_report_should_name_its_state_in_the_json() {
+        let serialized = serde_json::to_string(&OpenBaoReport::NotRunning).unwrap();
+
+        assert_eq!(serialized, r#"{"state":"not_running"}"#);
     }
 
     #[test]
