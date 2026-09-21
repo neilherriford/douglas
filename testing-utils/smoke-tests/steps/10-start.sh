@@ -180,4 +180,9 @@ rule_lines="$(ssh_out "sudo grep -cvE '^[[:space:]]*(#|$)' '$SUDOERS_FILE'")"
 assert_success "sudoers drop-in contains exactly one rule line" \
     test "$rule_lines" = "1"
 
+# `start` creates the douglas-admin group and adds dev to it, but a login
+# session only picks up group membership when it is opened, so drop the shared
+# ssh connection and let later steps open one that has it.
+close_ssh_master
+
 finish

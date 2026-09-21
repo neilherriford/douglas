@@ -23,14 +23,55 @@
 #   DOUGLAS_SMOKE_SSH_KEY=/path/to/key ./happy-path.sh
 #   DOUGLAS_SMOKE_SKIP_REBOOT=1 ./happy-path.sh  # reuse the VM's current state as-is
 #   ./steps/20-seedling-new.sh                   # run a single step while iterating
+#   ./happy-path.sh --only 81,82,86              # prerequisites (00, 05, 06, 10) + just these step numbers
+#   ./happy-path.sh --from 81 --to 87            # prerequisites + every step numbered 81 through 87
 set -uo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")"
 source lib.sh
 
+PREREQUISITES=(00 05 06 10)
+
+usage() {
+    echo "usage: $0 [--only N[,N...]] [--from N] [--to N]" >&2
+    exit 2
+}
+
+only=""
+from=""
+to=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --only) only="${2:-}"; shift 2 || usage ;;
+        --from) from="${2:-}"; shift 2 || usage ;;
+        --to) to="${2:-}"; shift 2 || usage ;;
+        *) usage ;;
+    esac
+done
+
+selected() {
+    local number="$1" wanted
+    if [ -z "$only$from$to" ]; then
+        return 0
+    fi
+    for wanted in "${PREREQUISITES[@]}"; do
+        [ "$number" = "$wanted" ] && return 0
+    done
+    if [ -n "$only" ]; then
+        for wanted in ${only//,/ }; do
+            [ "$number" = "$wanted" ] && return 0
+        done
+        return 1
+    fi
+    [ -z "$from" ] || [ "$((10#$number))" -ge "$((10#$from))" ] || return 1
+    [ -z "$to" ] || [ "$((10#$number))" -le "$((10#$to))" ] || return 1
+}
+
 run_started_at=$SECONDS
 
 for step in steps/[0-9]*.sh; do
+    step_number="$(basename "$step" | cut -d- -f1)"
+    selected "$step_number" || continue
     step_started_at=$SECONDS
     echo "${ORANGE}=== $step (started $(date '+%H:%M:%S')) ===${RESET}"
     if ! bash "$step"; then

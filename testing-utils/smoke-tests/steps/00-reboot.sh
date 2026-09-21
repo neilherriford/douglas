@@ -22,6 +22,7 @@ echo "Rebooting $VM to a clean state..."
 # the connection drops mid-session rather than exiting cleanly — so this
 # isn't asserted.
 ssh_out "sudo reboot" >/dev/null 2>&1 || true
+close_ssh_master
 
 # Give the VM a moment to actually go down before polling, so a connection
 # attempt that lands before the machine has started shutting down doesn't

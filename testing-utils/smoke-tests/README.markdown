@@ -28,6 +28,12 @@ anything else runs, and waits for SSH to come back up (up to
 `DOUGLAS_SMOKE_SKIP_REBOOT=1` if you're iterating quickly against a VM you
 already know is clean.
 
+To iterate on part of the suite, `./happy-path.sh --only 81,82,86` or
+`./happy-path.sh --from 81 --to 87` runs just those step numbers, always
+preceded by the prerequisites (00 reboot, 05 build, 06 verify, 10 start).
+Steps assume the state earlier steps leave behind, so pick a range whose
+inputs exist.
+
 `happy-path.sh` executes every script in `steps/`, in numeric-prefix order, and
 **stops at the first step that fails.** This is a linear lifecycle, not a set
 of independent checks — `seedling status` has nothing to report if `seedling

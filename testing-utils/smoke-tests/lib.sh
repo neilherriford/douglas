@@ -6,6 +6,8 @@
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && cd .. && pwd)"
 SSH_KEY="${DOUGLAS_SMOKE_SSH_KEY:-$REPO_ROOT/testing-utils/nix/ssh-keys/douglas_id_ed25519}"
 VM="${DOUGLAS_SMOKE_VM:-dev@douglas-dev.local}"
+SSH_CONTROL_PATH="/tmp/douglas-smoke-%C"
+SSH_MUX_OPTS=(-o ControlMaster=auto -o ControlPath="$SSH_CONTROL_PATH" -o ControlPersist=600)
 FAILURES=0
 
 BOLD_GREEN=$'\033[1;32m'
@@ -27,6 +29,12 @@ section() {
     echo "${ORANGE}=== $1 ===${RESET}"
 }
 
+# close_ssh_master — drop the shared multiplexed connection so the next
+# ssh_out opens a fresh one (used around the reboot).
+close_ssh_master() {
+    ssh -o ControlPath="$SSH_CONTROL_PATH" -O exit "$VM" >/dev/null 2>&1 || true
+}
+
 # ssh_out <remote command...>
 # Runs the remote command and strips this VM's `~/.bashrc` startup banner
 # (the "🚀 Douglas Development Environment" block, echoed unconditionally on
@@ -42,7 +50,7 @@ section() {
 # harness; interactive `ssh` from a terminal is untouched.
 ssh_out() {
     local status
-    ssh -o LogLevel=ERROR -i "$SSH_KEY" "$VM" "$@" | grep -vE '^(🚀|📁|📦|🔧)|^$'
+    ssh "${SSH_MUX_OPTS[@]}" -o LogLevel=ERROR -i "$SSH_KEY" "$VM" "$@" | tr -d '\000' | grep -vE '^(🚀|📁|📦|🔧)|^$'
     status="${PIPESTATUS[0]}"
     return "$status"
 }
