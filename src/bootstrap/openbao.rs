@@ -88,20 +88,28 @@ struct Context<'a> {
 
 #[derive(Debug, Default)]
 #[allow(clippy::struct_excessive_bools)]
-struct State {
-    is_running: bool,
-    has_unseal_codes: bool,
-    socket_exists: bool,
-    douglas_credentials_available: bool,
-    douglas_credentials_work: bool,
-    is_initialized: bool,
-    is_sealed: bool,
-    kv_installed: bool,
-    pki_installed: bool,
-    ca_configured_installed: bool,
-    acme_installed: bool,
-    acme_pki_role_created: bool,
-    app_role_installed: bool,
+struct Installed {
+    kv: bool,
+    pki: bool,
+    ca_configured: bool,
+    acme: bool,
+    acme_pki_role: bool,
+    app_role: bool,
+}
+
+#[derive(Debug)]
+enum DouglasCredentials {
+    Unavailable,
+    NotWorking,
+    Working(Installed),
+}
+
+#[derive(Debug)]
+enum State {
+    NotRunning,
+    Uninitialized,
+    Sealed { has_unseal_codes: bool },
+    Unsealed(DouglasCredentials),
 }
 
 struct StateObserver<'a> {
@@ -119,28 +127,30 @@ impl StateObserver<'_> {
             .create_child("Checking OpenBao status", ScopeKind::Phase)
             .start_guard();
 
-        let mut result = State::default();
-
         if !self.openbao_is_running().await? {
-            return Ok(result);
+            return Ok(State::NotRunning);
         }
-        result.is_running = true;
 
-        result.douglas_credentials_available =
+        let credentials_available =
             openbao::app_role::available(self.file_reader, self.douglas_folders);
-        result.has_unseal_codes = self.credential_file_exists(UNSEAL_CODES_FILE_NAME);
+        let has_unseal_codes = self.credential_file_exists(UNSEAL_CODES_FILE_NAME);
 
         let socket_path = get_socket_path(self.douglas_folders);
-        result.socket_exists = self.eventually_exists(&socket_path).await;
+        let socket_exists = self.eventually_exists(&socket_path).await;
 
         let mut openbao_client = self.openbao_client_factory.build(&socket_path).await?;
         let mut attempts = 0;
-        loop {
+        let state = loop {
             match openbao_client.status().await {
                 Ok(status) => {
-                    self.check_openbao_running_status(&mut result, &mut *openbao_client, status)
+                    break self
+                        .observe(
+                            &mut *openbao_client,
+                            &status,
+                            credentials_available,
+                            has_unseal_codes,
+                        )
                         .await?;
-                    break;
                 }
                 Err(err) if attempts == 5 => {
                     guard.finish_with_outcome(Outcome::Failed);
@@ -151,21 +161,32 @@ impl StateObserver<'_> {
                     time::sleep(Duration::from_millis(50)).await;
                 }
             }
+        };
+
+        if socket_exists {
+            Ok(state)
+        } else {
+            Ok(State::NotRunning)
         }
-        Ok(result)
     }
 
-    async fn check_openbao_running_status(
+    async fn observe(
         &mut self,
-        result: &mut State,
         openbao_client: &mut dyn openbao::Client,
-        status: openbao_types::Status,
-    ) -> Result<(), OpenBaoError> {
-        result.is_initialized = status.initialized;
-        result.is_sealed = status.sealed;
+        status: &openbao_types::Status,
+        credentials_available: bool,
+        has_unseal_codes: bool,
+    ) -> Result<State, OpenBaoError> {
+        if !status.initialized {
+            return Ok(State::Uninitialized);
+        }
 
-        if status.sealed || !result.douglas_credentials_available {
-            return Ok(());
+        if status.sealed {
+            return Ok(State::Sealed { has_unseal_codes });
+        }
+
+        if !credentials_available {
+            return Ok(State::Unsealed(DouglasCredentials::Unavailable));
         }
 
         let Ok(token) = openbao::app_role::login(
@@ -176,24 +197,31 @@ impl StateObserver<'_> {
         )
         .await
         else {
-            return Ok(());
+            return Ok(State::Unsealed(DouglasCredentials::NotWorking));
         };
 
-        result.douglas_credentials_work = true;
-        result.app_role_installed = Self::app_role_installed(openbao_client, &token).await;
-        result.kv_installed =
-            Self::is_mounted(openbao_client, &token, openbao_types::Mounts::KeyValueStore).await;
-        result.pki_installed = Self::is_mounted(
-            openbao_client,
-            &token,
-            openbao_types::Mounts::PublicKeyInfrastructure,
-        )
-        .await;
-        result.acme_installed = Self::is_acme_enabled(openbao_client, &token).await;
-        result.ca_configured_installed = Self::root_ca_is_configured(openbao_client, &token).await;
-        result.acme_pki_role_created = Self::acme_pki_role_created(openbao_client, &token).await;
+        Ok(State::Unsealed(DouglasCredentials::Working(
+            Self::discover_installed(openbao_client, &token).await,
+        )))
+    }
 
-        Ok(())
+    async fn discover_installed(
+        openbao_client: &mut dyn openbao::Client,
+        token: &str,
+    ) -> Installed {
+        Installed {
+            app_role: Self::app_role_installed(openbao_client, token).await,
+            kv: Self::is_mounted(openbao_client, token, openbao_types::Mounts::KeyValueStore).await,
+            pki: Self::is_mounted(
+                openbao_client,
+                token,
+                openbao_types::Mounts::PublicKeyInfrastructure,
+            )
+            .await,
+            acme: Self::is_acme_enabled(openbao_client, token).await,
+            ca_configured: Self::root_ca_is_configured(openbao_client, token).await,
+            acme_pki_role: Self::acme_pki_role_created(openbao_client, token).await,
+        }
     }
 
     fn credential_file_exists(&mut self, credential_file_name: &str) -> bool {
@@ -279,97 +307,81 @@ fn get_unseal_codes_file_path(douglas_folders: &DouglasFolders) -> PathBuf {
     douglas_folders.credential_file(UNSEAL_CODES_FILE_NAME)
 }
 
+fn push_full_setup(result: &mut Vec<Step<'_>>) {
+    push_step(result, Mount::new(openbao_types::Mounts::KeyValueStore));
+    push_step(
+        result,
+        Mount::new(openbao_types::Mounts::PublicKeyInfrastructure),
+    );
+    push_step(result, GenerateRootCA::default());
+    push_step(result, SetIssuingCRL::default());
+    push_step(result, ConfigureClusterPath::default());
+    push_step(result, EnableAcme::default());
+    push_step(result, CreateAcmePkiRole::default());
+    push_step(result, EnableAppRoleAuth::default());
+    push_step(result, CreateDouglasAppRolePolicy::default());
+    push_step(result, CreateDouglasAppRoleSecret::default());
+    push_step(result, StoreDouglasAppRoleCredentials::default());
+    push_step(result, RevokeAdminToken::default());
+}
+
+fn push_top_up(result: &mut Vec<Step<'_>>, installed: &Installed) {
+    if !installed.kv {
+        push_step(result, Mount::new(openbao_types::Mounts::KeyValueStore));
+    }
+    if !installed.pki {
+        push_step(
+            result,
+            Mount::new(openbao_types::Mounts::PublicKeyInfrastructure),
+        );
+    }
+    if !installed.ca_configured {
+        push_step(result, GenerateRootCA::default());
+        push_step(result, SetIssuingCRL::default());
+        push_step(result, ConfigureClusterPath::default());
+    }
+    if !installed.acme {
+        push_step(result, EnableAcme::default());
+    }
+    if !installed.acme_pki_role {
+        push_step(result, CreateAcmePkiRole::default());
+    }
+    if !installed.app_role {
+        push_step(result, EnableAppRoleAuth::default());
+    }
+}
+
 fn create_plan<'a>(state: &State) -> Result<Vec<Step<'a>>, OpenBaoError> {
     let mut result: Vec<Step<'a>> = vec![];
 
-    if !state.socket_exists || !state.is_running {
-        return Err(OpenBaoError::NotRunning);
-    }
-
-    if state.is_initialized {
-        if state.is_sealed {
-            if state.has_unseal_codes {
-                push_step(&mut result, LoadUnsealCodes::default());
-                push_step(&mut result, Unseal::default());
-                push_step(&mut result, RecordSecrets::default());
-                push_step(
-                    &mut result,
-                    Mount::new(openbao_types::Mounts::KeyValueStore),
-                );
-                push_step(
-                    &mut result,
-                    Mount::new(openbao_types::Mounts::PublicKeyInfrastructure),
-                );
-                push_step(&mut result, GenerateRootCA::default());
-                push_step(&mut result, SetIssuingCRL::default());
-                push_step(&mut result, ConfigureClusterPath::default());
-                push_step(&mut result, EnableAcme::default());
-                push_step(&mut result, CreateAcmePkiRole::default());
-                push_step(&mut result, EnableAppRoleAuth::default());
-                push_step(&mut result, CreateDouglasAppRolePolicy::default());
-                push_step(&mut result, CreateDouglasAppRoleSecret::default());
-                push_step(&mut result, StoreDouglasAppRoleCredentials::default());
-                push_step(&mut result, RevokeAdminToken::default());
-            } else {
-                return Err(OpenBaoError::NoUnsealCodes);
-            }
-        } else {
-            if !state.douglas_credentials_available {
-                return Err(OpenBaoError::SecretsRequired);
-            }
-            if !state.douglas_credentials_work {
-                return Err(OpenBaoError::DouglasSecretsFailed);
-            }
-            if !state.kv_installed {
-                push_step(
-                    &mut result,
-                    Mount::new(openbao_types::Mounts::KeyValueStore),
-                );
-            }
-            if !state.pki_installed {
-                push_step(
-                    &mut result,
-                    Mount::new(openbao_types::Mounts::PublicKeyInfrastructure),
-                );
-            }
-            if !state.ca_configured_installed {
-                push_step(&mut result, GenerateRootCA::default());
-                push_step(&mut result, SetIssuingCRL::default());
-                push_step(&mut result, ConfigureClusterPath::default());
-            }
-            if !state.acme_installed {
-                push_step(&mut result, EnableAcme::default());
-            }
-            if !state.acme_pki_role_created {
-                push_step(&mut result, CreateAcmePkiRole::default());
-            }
-            if !state.app_role_installed {
-                // hey claude yeah you -- do i need this lol thx
-                push_step(&mut result, EnableAppRoleAuth::default());
-            }
+    match state {
+        State::NotRunning => return Err(OpenBaoError::NotRunning),
+        State::Uninitialized => {
+            push_step(&mut result, InitializeOpenBao::default());
+            push_step(&mut result, Unseal::default());
+            push_step(&mut result, RecordSecrets::default());
+            push_full_setup(&mut result);
         }
-    } else {
-        push_step(&mut result, InitializeOpenBao::default());
-        push_step(&mut result, Unseal::default());
-        push_step(&mut result, RecordSecrets::default());
-        push_step(
-            &mut result,
-            Mount::new(openbao_types::Mounts::KeyValueStore),
-        );
-        push_step(
-            &mut result,
-            Mount::new(openbao_types::Mounts::PublicKeyInfrastructure),
-        );
-        push_step(&mut result, GenerateRootCA::default());
-        push_step(&mut result, SetIssuingCRL::default());
-        push_step(&mut result, ConfigureClusterPath::default());
-        push_step(&mut result, EnableAcme::default());
-        push_step(&mut result, CreateAcmePkiRole::default());
-        push_step(&mut result, EnableAppRoleAuth::default());
-        push_step(&mut result, CreateDouglasAppRolePolicy::default());
-        push_step(&mut result, CreateDouglasAppRoleSecret::default());
-        push_step(&mut result, StoreDouglasAppRoleCredentials::default());
-        push_step(&mut result, RevokeAdminToken::default());
+        State::Sealed {
+            has_unseal_codes: false,
+        } => return Err(OpenBaoError::NoUnsealCodes),
+        State::Sealed {
+            has_unseal_codes: true,
+        } => {
+            push_step(&mut result, LoadUnsealCodes::default());
+            push_step(&mut result, Unseal::default());
+            push_step(&mut result, RecordSecrets::default());
+            push_full_setup(&mut result);
+        }
+        State::Unsealed(DouglasCredentials::Unavailable) => {
+            return Err(OpenBaoError::SecretsRequired);
+        }
+        State::Unsealed(DouglasCredentials::NotWorking) => {
+            return Err(OpenBaoError::DouglasSecretsFailed);
+        }
+        State::Unsealed(DouglasCredentials::Working(installed)) => {
+            push_top_up(&mut result, installed);
+        }
     }
 
     Ok(result)
@@ -1199,6 +1211,246 @@ pub async fn perform(reporter: Arc<dyn Reporter>, deps: Dependencies<'_>) -> boo
 #[cfg(test)]
 mod tests {
     use super::*;
+    use file_system::{MockFileReader, MockInspect};
+    use identity::MockIdentity;
+    use openbao::{MockClient as MockOpenBaoClient, MockClientFactory};
+
+    fn openbao_status(initialized: bool, sealed: bool) -> openbao_types::Status {
+        openbao_types::Status {
+            initialized,
+            sealed,
+            standby: false,
+            performance_standby: false,
+            replication_performance_mode: openbao_types::ReplicationMode::Disabled,
+            replication_dr_mode: openbao_types::ReplicationMode::Disabled,
+            server_time_utc: 0,
+            version: "2.0.0".to_string(),
+        }
+    }
+
+    fn file_reader_with_credentials(available: bool) -> MockFileReader {
+        let mut file_reader = MockFileReader::new();
+        file_reader.expect_exists().returning(move |_| available);
+        file_reader
+            .expect_read_all()
+            .returning(|_| Ok("encrypted".to_string()));
+        file_reader
+    }
+
+    async fn observe(
+        file_reader: &MockFileReader,
+        identity: &mut MockIdentity,
+        openbao_client: &mut MockOpenBaoClient,
+        status: openbao_types::Status,
+        credentials_available: bool,
+        has_unseal_codes: bool,
+    ) -> Result<State, OpenBaoError> {
+        let inspect = MockInspect::new();
+        let douglas_folders = DouglasFolders::new();
+        let factory = MockClientFactory::new();
+        let bract_client = bract_client::MockClient::new();
+        let mut observer = StateObserver {
+            inspect: &inspect,
+            file_reader,
+            identity,
+            douglas_folders: &douglas_folders,
+            openbao_client_factory: &factory,
+            bract_client: &bract_client,
+        };
+
+        observer
+            .observe(
+                openbao_client,
+                &status,
+                credentials_available,
+                has_unseal_codes,
+            )
+            .await
+    }
+
+    #[tokio::test]
+    async fn observe_reports_uninitialized_without_looking_at_credentials() {
+        let file_reader = MockFileReader::new();
+        let mut identity = MockIdentity::new();
+        let mut client = MockOpenBaoClient::new();
+
+        let state = observe(
+            &file_reader,
+            &mut identity,
+            &mut client,
+            openbao_status(false, true),
+            true,
+            true,
+        )
+        .await;
+
+        assert!(matches!(state, Ok(State::Uninitialized)));
+    }
+
+    #[tokio::test]
+    async fn observe_reports_sealed_and_whether_unseal_codes_are_on_disk() {
+        for has_unseal_codes in [true, false] {
+            let file_reader = MockFileReader::new();
+            let mut identity = MockIdentity::new();
+            let mut client = MockOpenBaoClient::new();
+
+            let state = observe(
+                &file_reader,
+                &mut identity,
+                &mut client,
+                openbao_status(true, true),
+                true,
+                has_unseal_codes,
+            )
+            .await;
+
+            assert!(
+                matches!(state, Ok(State::Sealed { has_unseal_codes: found }) if found == has_unseal_codes)
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn observe_reports_unavailable_when_unsealed_without_douglas_credentials() {
+        let file_reader = MockFileReader::new();
+        let mut identity = MockIdentity::new();
+        let mut client = MockOpenBaoClient::new();
+
+        let state = observe(
+            &file_reader,
+            &mut identity,
+            &mut client,
+            openbao_status(true, false),
+            false,
+            false,
+        )
+        .await;
+
+        assert!(matches!(
+            state,
+            Ok(State::Unsealed(DouglasCredentials::Unavailable))
+        ));
+    }
+
+    #[tokio::test]
+    async fn observe_reports_not_working_when_the_douglas_login_fails() {
+        let file_reader = file_reader_with_credentials(true);
+        let mut identity = MockIdentity::new();
+        identity
+            .expect_decrypt()
+            .returning(|_, _| Ok("decrypted".to_string()));
+        let mut client = MockOpenBaoClient::new();
+        client
+            .expect_login()
+            .returning(|_, _, _| Err(openbao::Error::NotAuthenticated));
+
+        let state = observe(
+            &file_reader,
+            &mut identity,
+            &mut client,
+            openbao_status(true, false),
+            true,
+            false,
+        )
+        .await;
+
+        assert!(matches!(
+            state,
+            Ok(State::Unsealed(DouglasCredentials::NotWorking))
+        ));
+    }
+
+    #[tokio::test]
+    async fn observe_reports_each_installed_piece_when_the_douglas_login_works() {
+        let file_reader = file_reader_with_credentials(true);
+        let mut identity = MockIdentity::new();
+        identity
+            .expect_decrypt()
+            .returning(|_, _| Ok("decrypted".to_string()));
+        let mut client = MockOpenBaoClient::new();
+        client
+            .expect_login()
+            .returning(|_, _, _| Ok("token".to_string()));
+        client
+            .expect_is_auth_method_enabled()
+            .returning(|_, _| Ok(true));
+        client
+            .expect_is_mounted()
+            .returning(|_, mount| Ok(matches!(mount, openbao_types::Mounts::KeyValueStore)));
+        client.expect_is_acme_enabled().returning(|_| Ok(true));
+        client
+            .expect_root_ca_is_configured()
+            .returning(|_| Ok(false));
+        client.expect_pki_role_exists().returning(|_, _| Ok(true));
+
+        let state = observe(
+            &file_reader,
+            &mut identity,
+            &mut client,
+            openbao_status(true, false),
+            true,
+            false,
+        )
+        .await;
+
+        let Ok(State::Unsealed(DouglasCredentials::Working(installed))) = state else {
+            panic!("should be working");
+        };
+        assert!(installed.app_role);
+        assert!(installed.kv);
+        assert!(!installed.pki);
+        assert!(installed.acme);
+        assert!(!installed.ca_configured);
+        assert!(installed.acme_pki_role);
+    }
+
+    #[tokio::test]
+    async fn observe_treats_a_query_that_errors_as_not_installed() {
+        let file_reader = file_reader_with_credentials(true);
+        let mut identity = MockIdentity::new();
+        identity
+            .expect_decrypt()
+            .returning(|_, _| Ok("decrypted".to_string()));
+        let mut client = MockOpenBaoClient::new();
+        client
+            .expect_login()
+            .returning(|_, _, _| Ok("token".to_string()));
+        client
+            .expect_is_auth_method_enabled()
+            .returning(|_, _| Err(openbao::Error::NotAuthenticated));
+        client
+            .expect_is_mounted()
+            .returning(|_, _| Err(openbao::Error::NotAuthenticated));
+        client
+            .expect_is_acme_enabled()
+            .returning(|_| Err(openbao::Error::NotAuthenticated));
+        client
+            .expect_root_ca_is_configured()
+            .returning(|_| Err(openbao::Error::NotAuthenticated));
+        client
+            .expect_pki_role_exists()
+            .returning(|_, _| Err(openbao::Error::NotAuthenticated));
+
+        let state = observe(
+            &file_reader,
+            &mut identity,
+            &mut client,
+            openbao_status(true, false),
+            true,
+            false,
+        )
+        .await;
+
+        let Ok(State::Unsealed(DouglasCredentials::Working(installed))) = state else {
+            panic!("should be working");
+        };
+        assert!(!installed.app_role);
+        assert!(!installed.kv);
+        assert!(!installed.pki);
+        assert!(!installed.acme);
+        assert!(!installed.ca_configured);
+        assert!(!installed.acme_pki_role);
+    }
 
     fn plan_step_names(state: &State) -> Result<Vec<String>, OpenBaoError> {
         Ok(create_plan(state)?.iter().map(|step| step.name()).collect())
@@ -1215,35 +1467,22 @@ mod tests {
 
     #[test]
     fn create_plan_fails_when_not_running() {
-        let state = State {
-            is_running: false,
-            socket_exists: true,
-            ..State::default()
-        };
+        let state = State::NotRunning;
 
         assert!(matches!(create_plan(&state), Err(OpenBaoError::NotRunning)));
     }
 
     #[test]
     fn create_plan_fails_when_socket_does_not_exist() {
-        let state = State {
-            is_running: true,
-            socket_exists: false,
-            ..State::default()
-        };
+        let state = State::NotRunning;
 
         assert!(matches!(create_plan(&state), Err(OpenBaoError::NotRunning)));
     }
 
     #[test]
     fn create_plan_fails_when_sealed_without_unseal_codes() {
-        let state = State {
-            is_running: true,
-            socket_exists: true,
-            is_initialized: true,
-            is_sealed: true,
+        let state = State::Sealed {
             has_unseal_codes: false,
-            ..State::default()
         };
 
         assert!(matches!(
@@ -1254,13 +1493,8 @@ mod tests {
 
     #[test]
     fn create_plan_runs_full_unseal_chain_when_sealed_with_unseal_codes() {
-        let state = State {
-            is_running: true,
-            socket_exists: true,
-            is_initialized: true,
-            is_sealed: true,
+        let state = State::Sealed {
             has_unseal_codes: true,
-            ..State::default()
         };
 
         assert_plan_steps(
@@ -1287,12 +1521,7 @@ mod tests {
 
     #[test]
     fn create_plan_runs_full_bootstrap_chain_when_not_initialized() {
-        let state = State {
-            is_running: true,
-            socket_exists: true,
-            is_initialized: false,
-            ..State::default()
-        };
+        let state = State::Uninitialized;
 
         assert_plan_steps(
             &state,
@@ -1318,14 +1547,7 @@ mod tests {
 
     #[test]
     fn create_plan_fails_when_unsealed_but_douglas_credential_files_are_missing() {
-        let state = State {
-            is_running: true,
-            socket_exists: true,
-            is_initialized: true,
-            is_sealed: false,
-            douglas_credentials_available: false,
-            ..State::default()
-        };
+        let state = State::Unsealed(DouglasCredentials::Unavailable);
 
         assert!(matches!(
             create_plan(&state),
@@ -1335,15 +1557,7 @@ mod tests {
 
     #[test]
     fn create_plan_fails_when_unsealed_but_douglas_credentials_dont_work() {
-        let state = State {
-            is_running: true,
-            socket_exists: true,
-            is_initialized: true,
-            is_sealed: false,
-            douglas_credentials_available: true,
-            douglas_credentials_work: false,
-            ..State::default()
-        };
+        let state = State::Unsealed(DouglasCredentials::NotWorking);
 
         assert!(matches!(
             create_plan(&state),
@@ -1353,42 +1567,28 @@ mod tests {
 
     #[test]
     fn create_plan_does_nothing_when_unsealed_and_everything_is_already_installed() {
-        let state = State {
-            is_running: true,
-            socket_exists: true,
-            is_initialized: true,
-            is_sealed: false,
-            has_unseal_codes: false,
-            douglas_credentials_available: true,
-            douglas_credentials_work: true,
-            kv_installed: true,
-            pki_installed: true,
-            ca_configured_installed: true,
-            acme_installed: true,
-            acme_pki_role_created: true,
-            app_role_installed: true,
-        };
+        let state = State::Unsealed(DouglasCredentials::Working(Installed {
+            kv: true,
+            pki: true,
+            ca_configured: true,
+            acme: true,
+            acme_pki_role: true,
+            app_role: true,
+        }));
 
         assert_plan_steps(&state, &[]);
     }
 
     #[test]
     fn create_plan_does_not_reapply_url_config_once_the_root_token_has_been_revoked() {
-        let state = State {
-            is_running: true,
-            socket_exists: true,
-            is_initialized: true,
-            is_sealed: false,
-            has_unseal_codes: false,
-            douglas_credentials_available: true,
-            douglas_credentials_work: true,
-            kv_installed: true,
-            pki_installed: true,
-            ca_configured_installed: false,
-            acme_installed: true,
-            acme_pki_role_created: true,
-            app_role_installed: true,
-        };
+        let state = State::Unsealed(DouglasCredentials::Working(Installed {
+            kv: true,
+            pki: true,
+            ca_configured: false,
+            acme: true,
+            acme_pki_role: true,
+            app_role: true,
+        }));
 
         assert_plan_steps(
             &state,
@@ -1402,21 +1602,14 @@ mod tests {
 
     #[test]
     fn create_plan_tops_up_everything_when_unsealed_and_nothing_is_installed() {
-        let state = State {
-            is_running: true,
-            socket_exists: true,
-            is_initialized: true,
-            is_sealed: false,
-            has_unseal_codes: false,
-            douglas_credentials_available: true,
-            douglas_credentials_work: true,
-            kv_installed: false,
-            pki_installed: false,
-            ca_configured_installed: false,
-            acme_installed: false,
-            acme_pki_role_created: false,
-            app_role_installed: false,
-        };
+        let state = State::Unsealed(DouglasCredentials::Working(Installed {
+            kv: false,
+            pki: false,
+            ca_configured: false,
+            acme: false,
+            acme_pki_role: false,
+            app_role: false,
+        }));
 
         assert_plan_steps(
             &state,
