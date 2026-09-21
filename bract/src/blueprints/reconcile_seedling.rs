@@ -1,7 +1,8 @@
 use crate::{
     blueprints::{
-        AGENT_MOUNT_RAM_DISK_SIZE_MB, EXPECTED_MOUNT_MODE, SYSTEM_NETWORK_NAME, build_client,
-        container_name, provision_seedling_secrets, seedling_network_name,
+        AGENT_MOUNT_RAM_DISK_SIZE_MB, ContainerPresence, EXPECTED_MOUNT_MODE, SYSTEM_NETWORK_NAME,
+        build_client, container_name, observe_container, provision_seedling_secrets,
+        seedling_network_name,
     },
     labels::{self},
     rolodex::{Rolodex, RolodexError},
@@ -104,8 +105,7 @@ struct State {
     missing_mount_mode: Vec<(PathBuf, Modes)>,
     missing_mount_files: Vec<(PathBuf, String, Vec<u8>)>,
     agent_missing_service_credentials: bool,
-    agent_container_exists: bool,
-    agent_container_is_running: bool,
+    agent_container: ContainerPresence,
 }
 
 #[derive(Default, Debug, PartialEq, Eq)]
@@ -272,8 +272,7 @@ impl<'a> StateObserver<'a> {
             missing_mount_mode: Vec::new(),
             missing_mount_files: Vec::new(),
             agent_missing_service_credentials: true,
-            agent_container_exists: false,
-            agent_container_is_running: false,
+            agent_container: ContainerPresence::Absent,
         };
 
         if agent_requested {
@@ -282,14 +281,8 @@ impl<'a> StateObserver<'a> {
                 self.rolodex.find_service_account(&agent_account)?.is_none();
 
             let agent_container = agent_container_name(name)?;
-            result.agent_container_exists = self
-                .docker_client
-                .container_exists(ContainerRef::FullName(agent_container.clone()))
-                .await?;
-            if result.agent_container_exists {
-                result.agent_container_is_running =
-                    self.discover_container_is_running(&agent_container).await?;
-            }
+            result.agent_container =
+                observe_container(self.docker_client, &agent_container).await?;
         }
 
         result.seedling_version = self
@@ -693,7 +686,7 @@ fn create_plan<'a>(
     if agent_requested {
         push_step(&mut steps, EnsureAgentMount::new(name.clone()));
 
-        if !state.agent_container_exists {
+        if !state.agent_container.exists() {
             push_step(
                 &mut steps,
                 BuildAgentContainer::new(name.clone(), version.clone()),
@@ -702,7 +695,7 @@ fn create_plan<'a>(
                 &mut steps,
                 StartContainer::new(agent_container_name(name)?, version.clone()),
             );
-        } else if !state.agent_container_is_running {
+        } else if !state.agent_container.is_running() {
             push_step(
                 &mut steps,
                 StartContainer::new(agent_container_name(name)?, version.clone()),
@@ -2265,8 +2258,7 @@ mod tests {
             missing_mount_mode: Vec::new(),
             missing_mount_files: Vec::new(),
             agent_missing_service_credentials: false,
-            agent_container_exists: true,
-            agent_container_is_running: true,
+            agent_container: ContainerPresence::Present(docker_types::Status::Running),
         }
     }
 
@@ -2422,8 +2414,7 @@ mod tests {
             &seedbank_types::Version(1),
             &secrets_seedling_definition(),
             State {
-                agent_container_exists: false,
-                agent_container_is_running: false,
+                agent_container: ContainerPresence::Absent,
                 ..state()
             },
             &registry(),
@@ -2448,8 +2439,7 @@ mod tests {
             &seedbank_types::Version(1),
             &secrets_seedling_definition(),
             State {
-                agent_container_exists: true,
-                agent_container_is_running: false,
+                agent_container: ContainerPresence::Present(docker_types::Status::Exited),
                 ..state()
             },
             &registry(),
@@ -2493,8 +2483,7 @@ mod tests {
             &seedbank_types::Version(1),
             &seedling_definition(),
             State {
-                agent_container_exists: false,
-                agent_container_is_running: false,
+                agent_container: ContainerPresence::Absent,
                 agent_missing_service_credentials: true,
                 ..state()
             },

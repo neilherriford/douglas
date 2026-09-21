@@ -82,10 +82,14 @@ pub(crate) async fn observe_container(
         return Ok(ContainerPresence::Absent);
     }
 
-    let status = docker_client
+    match docker_client
         .container_status(docker::client::ContainerRef::FullName(name.clone()))
-        .await?;
-    Ok(ContainerPresence::Present(status))
+        .await
+    {
+        Ok(status) => Ok(ContainerPresence::Present(status)),
+        Err(docker::DockerError::ResourceNotFound) => Ok(ContainerPresence::Absent),
+        Err(err) => Err(err),
+    }
 }
 
 pub(crate) async fn build_client<T, BuildErr: std::fmt::Display, E>(
@@ -313,5 +317,22 @@ mod tests {
         let result = observe_container(&docker_client, &name).await;
 
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_observe_container_should_call_a_container_that_vanishes_before_its_status_is_read_absent()
+     {
+        let mut docker_client = docker::MockClient::new();
+        docker_client
+            .expect_container_exists()
+            .returning(|_| Ok(true));
+        docker_client
+            .expect_container_status()
+            .returning(|_| Err(docker::DockerError::ResourceNotFound));
+        let name = container_name(&"hello-world".parse().unwrap()).unwrap();
+
+        let result = observe_container(&docker_client, &name).await;
+
+        assert!(matches!(result, Ok(ContainerPresence::Absent)));
     }
 }

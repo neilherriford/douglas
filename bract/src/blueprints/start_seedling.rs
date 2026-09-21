@@ -1,7 +1,7 @@
 use crate::{
     blueprints::{
-        EXPECTED_MOUNT_MODE, RequestedBy, container_name, core_seedling_forbidden_for,
-        provision_seedling_secrets,
+        ContainerPresence, EXPECTED_MOUNT_MODE, RequestedBy, container_name,
+        core_seedling_forbidden_for, observe_container, provision_seedling_secrets,
     },
     labels,
     rolodex::{Rolodex, RolodexError},
@@ -68,8 +68,7 @@ struct State {
     container_name: Option<docker_types::ContainerName>,
     version: Option<seedbank_types::Version>,
     origin: Option<seedbank_types::Origin>,
-    agent_container_exists: bool,
-    agent_container_is_running: bool,
+    agent_container: ContainerPresence,
     agent_container_name: Option<docker_types::ContainerName>,
 }
 
@@ -172,17 +171,7 @@ impl<'a> StateObserver<'a> {
 
         let agent_container = agent_container_name(name)?;
         result.agent_container_name = Some(agent_container.clone());
-        result.agent_container_exists = self
-            .docker_client
-            .container_exists(ContainerRef::FullName(agent_container.clone()))
-            .await?;
-        if result.agent_container_exists {
-            result.agent_container_is_running = self
-                .docker_client
-                .container_status(ContainerRef::FullName(agent_container))
-                .await?
-                == docker_types::Status::Running;
-        }
+        result.agent_container = observe_container(self.docker_client, &agent_container).await?;
 
         if !self.seedbank_client.exists(name).await? {
             return Ok(result);
@@ -361,8 +350,8 @@ fn create_plan<'a>(
 
     push_step(&mut steps, SetDesiredRunStatusToRunning::new(name.clone()));
 
-    if state.agent_container_exists
-        && !state.agent_container_is_running
+    if state.agent_container.exists()
+        && !state.agent_container.is_running()
         && let Some(agent_container_name) = state.agent_container_name
     {
         push_step(
@@ -914,8 +903,7 @@ mod tests {
             container_name: Some(container_name(&name()).unwrap()),
             version: Some(seedbank_types::Version(1)),
             origin: Some(seedbank_types::Origin::User),
-            agent_container_exists: false,
-            agent_container_is_running: false,
+            agent_container: ContainerPresence::Absent,
             agent_container_name: Some(agent_container_name(&name()).unwrap()),
             reached_max_fail_count: false,
             has_health_check_failure: false,
@@ -1112,8 +1100,7 @@ mod tests {
             &health_check(),
             agent_ip(),
             State {
-                agent_container_exists: true,
-                agent_container_is_running: false,
+                agent_container: ContainerPresence::Present(docker_types::Status::Exited),
                 ..startable_state()
             },
             RequestedBy::Operator,
@@ -1138,8 +1125,7 @@ mod tests {
             &health_check(),
             agent_ip(),
             State {
-                agent_container_exists: false,
-                agent_container_is_running: false,
+                agent_container: ContainerPresence::Absent,
                 ..startable_state()
             },
             RequestedBy::Operator,
@@ -1163,8 +1149,7 @@ mod tests {
             &health_check(),
             agent_ip(),
             State {
-                agent_container_exists: true,
-                agent_container_is_running: true,
+                agent_container: ContainerPresence::Present(docker_types::Status::Running),
                 ..startable_state()
             },
             RequestedBy::Operator,
