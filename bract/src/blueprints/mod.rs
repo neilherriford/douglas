@@ -40,6 +40,54 @@ pub(crate) fn core_seedling_forbidden_for(
     origin == Some(seedbank_types::Origin::Core) && requested_by == RequestedBy::Operator
 }
 
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) enum ContainerPresence {
+    #[default]
+    Absent,
+    Present(docker_types::Status),
+}
+
+impl ContainerPresence {
+    pub(crate) fn exists(&self) -> bool {
+        matches!(self, ContainerPresence::Present(_))
+    }
+
+    pub(crate) fn is_running(&self) -> bool {
+        matches!(
+            self,
+            ContainerPresence::Present(docker_types::Status::Running)
+        )
+    }
+
+    pub(crate) fn is_stopped(&self) -> bool {
+        matches!(
+            self,
+            ContainerPresence::Present(
+                docker_types::Status::Created
+                    | docker_types::Status::Exited
+                    | docker_types::Status::Dead
+            )
+        )
+    }
+}
+
+pub(crate) async fn observe_container(
+    docker_client: &dyn docker::client::Client,
+    name: &docker_types::ContainerName,
+) -> Result<ContainerPresence, docker::DockerError> {
+    if !docker_client
+        .container_exists(docker::client::ContainerRef::FullName(name.clone()))
+        .await?
+    {
+        return Ok(ContainerPresence::Absent);
+    }
+
+    let status = docker_client
+        .container_status(docker::client::ContainerRef::FullName(name.clone()))
+        .await?;
+    Ok(ContainerPresence::Present(status))
+}
+
 pub(crate) async fn build_client<T, BuildErr: std::fmt::Display, E>(
     build: impl std::future::Future<Output = Result<T, BuildErr>>,
     to_error: impl FnOnce(Vec<String>) -> E,
@@ -161,5 +209,109 @@ mod tests {
         expected.push("config");
         expected.push("dynamic");
         assert_eq!(result, expected);
+    }
+
+    fn present(status: docker_types::Status) -> ContainerPresence {
+        ContainerPresence::Present(status)
+    }
+
+    #[test]
+    fn test_container_presence_should_default_to_absent() {
+        assert_eq!(ContainerPresence::default(), ContainerPresence::Absent);
+    }
+
+    #[test]
+    fn test_container_presence_absent_should_be_neither_existing_running_nor_stopped() {
+        let absent = ContainerPresence::Absent;
+
+        assert!(!absent.exists());
+        assert!(!absent.is_running());
+        assert!(!absent.is_stopped());
+    }
+
+    #[test]
+    fn test_container_presence_running_should_exist_and_be_running_but_not_stopped() {
+        let running = present(docker_types::Status::Running);
+
+        assert!(running.exists());
+        assert!(running.is_running());
+        assert!(!running.is_stopped());
+    }
+
+    #[test]
+    fn test_container_presence_should_call_created_exited_and_dead_stopped() {
+        for status in [
+            docker_types::Status::Created,
+            docker_types::Status::Exited,
+            docker_types::Status::Dead,
+        ] {
+            let stopped = present(status);
+
+            assert!(stopped.exists());
+            assert!(stopped.is_stopped());
+            assert!(!stopped.is_running());
+        }
+    }
+
+    #[test]
+    fn test_container_presence_should_call_paused_restarting_and_removing_neither_running_nor_stopped()
+     {
+        for status in [
+            docker_types::Status::Paused,
+            docker_types::Status::Restarting,
+            docker_types::Status::Removing,
+        ] {
+            let in_between = present(status);
+
+            assert!(in_between.exists());
+            assert!(!in_between.is_running());
+            assert!(!in_between.is_stopped());
+        }
+    }
+
+    #[tokio::test]
+    async fn test_observe_container_should_not_ask_for_the_status_of_a_container_that_is_absent() {
+        let mut docker_client = docker::MockClient::new();
+        docker_client
+            .expect_container_exists()
+            .returning(|_| Ok(false));
+        docker_client.expect_container_status().times(0);
+        let name = container_name(&"hello-world".parse().unwrap()).unwrap();
+
+        let result = observe_container(&docker_client, &name).await;
+
+        assert!(matches!(result, Ok(ContainerPresence::Absent)));
+    }
+
+    #[tokio::test]
+    async fn test_observe_container_should_carry_the_status_of_a_container_that_exists() {
+        let mut docker_client = docker::MockClient::new();
+        docker_client
+            .expect_container_exists()
+            .returning(|_| Ok(true));
+        docker_client
+            .expect_container_status()
+            .returning(|_| Ok(docker_types::Status::Paused));
+        let name = container_name(&"hello-world".parse().unwrap()).unwrap();
+
+        let result = observe_container(&docker_client, &name).await;
+
+        assert!(matches!(
+            result,
+            Ok(ContainerPresence::Present(docker_types::Status::Paused))
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_observe_container_should_pass_on_a_docker_error() {
+        let mut docker_client = docker::MockClient::new();
+        docker_client
+            .expect_container_exists()
+            .returning(|_| Err(docker::DockerError::ResourceNotFound));
+        let name = container_name(&"hello-world".parse().unwrap()).unwrap();
+
+        let result = observe_container(&docker_client, &name).await;
+
+        assert!(result.is_err());
     }
 }

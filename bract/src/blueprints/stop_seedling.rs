@@ -1,4 +1,6 @@
-use crate::blueprints::{RequestedBy, container_name, core_seedling_forbidden_for};
+use crate::blueprints::{
+    ContainerPresence, RequestedBy, container_name, core_seedling_forbidden_for, observe_container,
+};
 use crate::labels;
 use async_trait::async_trait;
 use blueprint::{
@@ -32,13 +34,11 @@ struct Context<'a> {
 
 #[derive(Debug)]
 struct State {
-    container_exists: bool,
-    container_is_running: bool,
+    container: ContainerPresence,
     container_name: docker_types::ContainerName,
     version: Option<seedbank_types::Version>,
     origin: Option<seedbank_types::Origin>,
-    agent_container_exists: bool,
-    agent_container_is_running: bool,
+    agent_container: ContainerPresence,
     agent_container_name: docker_types::ContainerName,
 }
 
@@ -102,42 +102,21 @@ impl<'a> StateObserver<'a> {
             .start_guard();
 
         let mut result = State {
-            container_exists: false,
-            container_is_running: false,
+            container: ContainerPresence::Absent,
             container_name: container_name(name)?,
             version: None,
             origin: None,
-            agent_container_exists: false,
-            agent_container_is_running: false,
+            agent_container: ContainerPresence::Absent,
             agent_container_name: agent_container_name(name)?,
         };
 
-        result.agent_container_exists = self
-            .docker_client
-            .container_exists(ContainerRef::FullName(result.agent_container_name.clone()))
-            .await?;
-        if result.agent_container_exists {
-            result.agent_container_is_running = self
-                .docker_client
-                .container_status(ContainerRef::FullName(result.agent_container_name.clone()))
-                .await?
-                == docker_types::Status::Running;
-        }
+        result.agent_container =
+            observe_container(self.docker_client, &result.agent_container_name).await?;
 
-        if !self
-            .docker_client
-            .container_exists(ContainerRef::FullName(result.container_name.clone()))
-            .await?
-        {
+        result.container = observe_container(self.docker_client, &result.container_name).await?;
+        if !result.container.exists() {
             return Ok(result);
         }
-        result.container_exists = true;
-
-        result.container_is_running = self
-            .docker_client
-            .container_status(ContainerRef::FullName(result.container_name.clone()))
-            .await?
-            == docker_types::Status::Running;
 
         let container_labels = self
             .docker_client
@@ -157,20 +136,20 @@ fn create_plan<'a>(
 ) -> Result<Vec<Step<Context<'a>>>, StopSeedlingError> {
     let mut steps: Vec<Step<Context>> = Vec::new();
 
-    if state.container_exists && core_seedling_forbidden_for(state.origin, requested_by) {
+    if state.container.exists() && core_seedling_forbidden_for(state.origin, requested_by) {
         return Err(StopSeedlingError::CoreSeedling(name.to_string()));
     }
 
     push_step(&mut steps, SetDesiredRunStatusToStopped::new(name.clone()));
 
-    if state.container_exists && state.container_is_running {
+    if state.container.is_running() {
         push_step(
             &mut steps,
             StopSeedling::new(name.clone(), state.container_name, state.version),
         );
     }
 
-    if state.agent_container_is_running {
+    if state.agent_container.is_running() {
         push_step(
             &mut steps,
             StopSeedling::new(name.clone(), state.agent_container_name, None),
@@ -324,13 +303,11 @@ mod tests {
 
     fn stoppable_state() -> State {
         State {
-            container_exists: true,
-            container_is_running: true,
+            container: ContainerPresence::Present(docker_types::Status::Running),
             container_name: container_name(&name()).unwrap(),
             version: Some(seedbank_types::Version(1)),
             origin: Some(seedbank_types::Origin::User),
-            agent_container_exists: false,
-            agent_container_is_running: false,
+            agent_container: ContainerPresence::Absent,
             agent_container_name: agent_container_name(&name()).unwrap(),
         }
     }
@@ -379,7 +356,25 @@ mod tests {
         let steps = create_plan(
             &name(),
             State {
-                container_exists: false,
+                container: ContainerPresence::Absent,
+                ..stoppable_state()
+            },
+            RequestedBy::Operator,
+        )
+        .expect("should produce a plan");
+
+        assert_eq!(
+            step_descriptions(steps),
+            vec!["Setting seedling 'traefik' desired running status to stopped"]
+        );
+    }
+
+    #[test]
+    fn test_create_plan_should_not_stop_a_container_that_is_paused() {
+        let steps = create_plan(
+            &name(),
+            State {
+                container: ContainerPresence::Present(docker_types::Status::Paused),
                 ..stoppable_state()
             },
             RequestedBy::Operator,
@@ -397,7 +392,7 @@ mod tests {
         let steps = create_plan(
             &name(),
             State {
-                container_is_running: false,
+                container: ContainerPresence::Present(docker_types::Status::Exited),
                 ..stoppable_state()
             },
             RequestedBy::Operator,
@@ -450,8 +445,7 @@ mod tests {
         let steps = create_plan(
             &name(),
             State {
-                agent_container_exists: true,
-                agent_container_is_running: true,
+                agent_container: ContainerPresence::Present(docker_types::Status::Running),
                 ..stoppable_state()
             },
             RequestedBy::Operator,
@@ -473,8 +467,7 @@ mod tests {
         let steps = create_plan(
             &name(),
             State {
-                agent_container_exists: true,
-                agent_container_is_running: false,
+                agent_container: ContainerPresence::Present(docker_types::Status::Exited),
                 ..stoppable_state()
             },
             RequestedBy::Operator,

@@ -1,5 +1,6 @@
 use crate::blueprints::{
-    build_client, provision_seedling_secrets, seedling_network_name, traefik_dynamic_dir,
+    ContainerPresence, build_client, observe_container, provision_seedling_secrets,
+    seedling_network_name, traefik_dynamic_dir,
 };
 use crate::labels;
 use async_trait::async_trait;
@@ -56,8 +57,7 @@ struct Context<'a> {
 
 #[derive(Debug)]
 struct State {
-    container_exists: bool,
-    container_is_stopped: bool,
+    container: ContainerPresence,
     container_name: docker_types::ContainerName,
     version: Option<seedbank_types::Version>,
     origin: Option<seedbank_types::Origin>,
@@ -65,8 +65,7 @@ struct State {
     seedbank_entry_exists: bool,
     route_exists: bool,
     mounts_dir_exists: bool,
-    agent_container_exists: bool,
-    agent_container_is_stopped: bool,
+    agent_container: ContainerPresence,
     agent_container_name: docker_types::ContainerName,
     agent_mount_is_ram_disk: bool,
 }
@@ -167,8 +166,7 @@ impl<'a> StateObserver<'a> {
         route_path.push(format!("{name}.yml"));
 
         let mut result = State {
-            container_exists: false,
-            container_is_stopped: false,
+            container: ContainerPresence::Absent,
             container_name: container_name(name)?,
             version: None,
             origin: None,
@@ -178,8 +176,7 @@ impl<'a> StateObserver<'a> {
             mounts_dir_exists: self
                 .folder
                 .exists(&douglas_folders.seedling_mounts_dir(name.as_ref())),
-            agent_container_exists: false,
-            agent_container_is_stopped: false,
+            agent_container: ContainerPresence::Absent,
             agent_container_name: agent_container_name(name)?,
             agent_mount_is_ram_disk: ram_disk.is_mounted(
                 &provision_seedling_secrets::agent_mount_dir(douglas_folders, name),
@@ -194,37 +191,13 @@ impl<'a> StateObserver<'a> {
             .network_exists(&seedling_network_name(name)?)
             .await?;
 
-        result.agent_container_exists = self
-            .docker_client
-            .container_exists(ContainerRef::FullName(result.agent_container_name.clone()))
-            .await?;
-        if result.agent_container_exists {
-            result.agent_container_is_stopped = matches!(
-                self.docker_client
-                    .container_status(ContainerRef::FullName(result.agent_container_name.clone()))
-                    .await?,
-                docker_types::Status::Created
-                    | docker_types::Status::Exited
-                    | docker_types::Status::Dead
-            );
-        }
+        result.agent_container =
+            observe_container(self.docker_client, &result.agent_container_name).await?;
 
-        if !self
-            .docker_client
-            .container_exists(ContainerRef::FullName(result.container_name.clone()))
-            .await?
-        {
+        result.container = observe_container(self.docker_client, &result.container_name).await?;
+        if !result.container.exists() {
             return guard.finish(Ok(result));
         }
-        result.container_exists = true;
-        result.container_is_stopped = matches!(
-            self.docker_client
-                .container_status(ContainerRef::FullName(result.container_name.clone()))
-                .await?,
-            docker_types::Status::Created
-                | docker_types::Status::Exited
-                | docker_types::Status::Dead
-        );
 
         let container_labels = self
             .docker_client
@@ -257,12 +230,12 @@ fn create_plan<'a>(
     if state.origin == Some(seedbank_types::Origin::Core) {
         return Err(DropSeedlingError::CoreSeedling(name.to_string()));
     }
-    if state.container_exists && !state.container_is_stopped {
+    if state.container.exists() && !state.container.is_stopped() {
         return Err(DropSeedlingError::CannotDropSeedling(
             "Seedling is not stopped".to_string(),
         ));
     }
-    if state.agent_container_exists && !state.agent_container_is_stopped {
+    if state.agent_container.exists() && !state.agent_container.is_stopped() {
         return Err(DropSeedlingError::CannotDropSeedling(
             "Seedling is not stopped".to_string(),
         ));
@@ -272,14 +245,14 @@ fn create_plan<'a>(
         push_step(&mut steps, RemoveTraefikRoute::new(name.clone()));
     }
 
-    if state.container_exists {
+    if state.container.exists() {
         push_step(
             &mut steps,
             DropSeedling::new(name.clone(), state.container_name, state.version),
         );
     }
 
-    if state.agent_container_exists {
+    if state.agent_container.exists() {
         push_step(
             &mut steps,
             DropSeedling::new(name.clone(), state.agent_container_name, None),
@@ -687,8 +660,7 @@ mod tests {
 
     fn droppable_state() -> State {
         State {
-            container_exists: true,
-            container_is_stopped: true,
+            container: ContainerPresence::Present(docker_types::Status::Exited),
             container_name: container_name(&name()).unwrap(),
             version: Some(seedbank_types::Version(1)),
             origin: Some(seedbank_types::Origin::User),
@@ -696,8 +668,7 @@ mod tests {
             seedbank_entry_exists: true,
             route_exists: true,
             mounts_dir_exists: true,
-            agent_container_exists: false,
-            agent_container_is_stopped: false,
+            agent_container: ContainerPresence::Absent,
             agent_container_name: agent_container_name(&name()).unwrap(),
             agent_mount_is_ram_disk: false,
         }
@@ -745,8 +716,7 @@ mod tests {
         let steps = create_plan(
             &name(),
             State {
-                container_exists: false,
-                container_is_stopped: false,
+                container: ContainerPresence::Absent,
                 network_exists: false,
                 ..droppable_state()
             },
@@ -820,11 +790,48 @@ mod tests {
     }
 
     #[test]
+    fn test_create_plan_should_refuse_a_container_that_is_paused_or_restarting() {
+        for status in [
+            docker_types::Status::Paused,
+            docker_types::Status::Restarting,
+            docker_types::Status::Removing,
+        ] {
+            let result = create_plan(
+                &name(),
+                State {
+                    container: ContainerPresence::Present(status),
+                    ..droppable_state()
+                },
+            );
+
+            assert!(matches!(
+                result,
+                Err(DropSeedlingError::CannotDropSeedling(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn test_create_plan_should_drop_a_container_that_was_created_but_never_started_or_is_dead() {
+        for status in [docker_types::Status::Created, docker_types::Status::Dead] {
+            let result = create_plan(
+                &name(),
+                State {
+                    container: ContainerPresence::Present(status),
+                    ..droppable_state()
+                },
+            );
+
+            assert!(result.is_ok());
+        }
+    }
+
+    #[test]
     fn test_create_plan_should_refuse_when_not_stopped() {
         let result = create_plan(
             &name(),
             State {
-                container_is_stopped: false,
+                container: ContainerPresence::Present(docker_types::Status::Running),
                 ..droppable_state()
             },
         );
@@ -853,8 +860,7 @@ mod tests {
         let steps = create_plan(
             &name(),
             State {
-                agent_container_exists: true,
-                agent_container_is_stopped: true,
+                agent_container: ContainerPresence::Present(docker_types::Status::Exited),
                 ..droppable_state()
             },
         )
@@ -915,8 +921,7 @@ mod tests {
         let result = create_plan(
             &name(),
             State {
-                agent_container_exists: true,
-                agent_container_is_stopped: false,
+                agent_container: ContainerPresence::Present(docker_types::Status::Running),
                 ..droppable_state()
             },
         );
