@@ -96,20 +96,21 @@ async fn bootstrap_with_reporter(
             .await?
     };
 
-    if !state.is_root {
-        guard.span().message(Level::Warn, "Must be root");
-        return guard.finish(Err(BootstrapError::MustBeRoot));
-    }
-
-    if state.docker_running_status == RunningStatus::NotRunning {
-        guard.span().message(Level::Warn, "Docker must be running");
-        return guard.finish(Err(BootstrapError::MustHaveRunningDocker));
-    }
-
-    if state.docker_running_status == RunningStatus::Running
-        && let Err(err) = ensure_system_network(docker_client.as_ref()).await
-    {
-        return guard.finish(Err(BootstrapError::FailedBoostrap(vec![err.to_string()])));
+    match &state {
+        State::NotRoot => {
+            guard.span().message(Level::Warn, "Must be root");
+            return guard.finish(Err(BootstrapError::MustBeRoot));
+        }
+        State::DockerUnavailable => {
+            guard.span().message(Level::Warn, "Docker must be running");
+            return guard.finish(Err(BootstrapError::MustHaveRunningDocker));
+        }
+        State::Ready(_) => {
+            if let Err(err) = ensure_system_network(docker_client.as_ref()).await {
+                return guard.finish(Err(BootstrapError::FailedBoostrap(vec![err.to_string()])));
+            }
+        }
+        State::AlreadyRunning => {}
     }
 
     let binary_path = match os.current_executable() {
@@ -321,15 +322,24 @@ impl<'a> HasPermissions for Context<'a> {
     }
 }
 
-#[derive(Default)]
-struct State {
-    is_root: bool,
-    bract_running_status: RunningStatus,
-    docker_running_status: RunningStatus,
+enum SudoersEntry {
+    Missing,
+    Present {
+        correct_ownership: bool,
+        correct_mode: bool,
+    },
+}
+
+struct Ready {
     service: ServiceState,
-    sudoers_entry_exists: bool,
-    sudoers_entry_has_correct_mode: bool,
-    sudoers_entry_has_correct_ownership: bool,
+    sudoers: SudoersEntry,
+}
+
+enum State {
+    AlreadyRunning,
+    NotRoot,
+    DockerUnavailable,
+    Ready(Ready),
 }
 
 struct StateObserver<'a> {
@@ -353,39 +363,37 @@ impl<'a> StateObserver<'a> {
             )
             .start_guard();
 
-        let mut result = State {
-            bract_running_status: self.check_bract_socket(guard.span(), definition),
-            ..Default::default()
-        };
-
-        if result.bract_running_status == RunningStatus::Running {
-            return guard.finish(Ok(result));
-        }
-
         if !self.credentials.is_root() {
-            return guard.finish(Ok(result));
-        }
-        result.is_root = true;
-        result.docker_running_status = self.check_docker_running_status(guard.span()).await;
-        if result.docker_running_status != RunningStatus::Running {
-            return guard.finish(Ok(result));
+            return guard.finish(Ok(State::NotRoot));
         }
 
-        result.service = discover_service_state(definition, self.credentials, folder, permissions)?;
+        if self.check_bract_socket(guard.span(), definition) == RunningStatus::Running {
+            return guard.finish(Ok(State::AlreadyRunning));
+        }
+
+        if self.check_docker_running_status(guard.span()).await != RunningStatus::Running {
+            return guard.finish(Ok(State::DockerUnavailable));
+        }
+
+        let service = discover_service_state(definition, self.credentials, folder, permissions)?;
 
         let sudoers_file = sudoers_file_path();
-        if inspect.exists(&sudoers_file) {
-            result.sudoers_entry_exists = true;
-            result.sudoers_entry_has_correct_ownership = permissions
-                .get_user_and_group_ownership(&sudoers_file)
-                .is_ok_and(|(user, group)| {
-                    user == credentials::ROOT_USER_NAME && group == credentials::ROOT_GROUP_NAME
-                });
-            result.sudoers_entry_has_correct_mode = permissions
-                .get_mode(&sudoers_file)
-                .is_ok_and(|mode| mode == Modes::OwnerReadGroupRead);
-        }
-        guard.finish(Ok(result))
+        let sudoers = if inspect.exists(&sudoers_file) {
+            SudoersEntry::Present {
+                correct_ownership: permissions
+                    .get_user_and_group_ownership(&sudoers_file)
+                    .is_ok_and(|(user, group)| {
+                        user == credentials::ROOT_USER_NAME && group == credentials::ROOT_GROUP_NAME
+                    }),
+                correct_mode: permissions
+                    .get_mode(&sudoers_file)
+                    .is_ok_and(|mode| mode == Modes::OwnerReadGroupRead),
+            }
+        } else {
+            SudoersEntry::Missing
+        };
+
+        guard.finish(Ok(State::Ready(Ready { service, sudoers })))
     }
 
     fn check_bract_socket(&self, span: &Span, definition: &ServiceDefinition) -> RunningStatus {
@@ -411,19 +419,14 @@ fn create_plan<'a>(
     state: State,
     douglas_folders: &DouglasFolders,
 ) -> Result<Vec<Step<Context<'a>>>, BootstrapError> {
-    if state.bract_running_status == RunningStatus::Running {
-        return Ok(Vec::new());
-    }
+    let ready = match state {
+        State::AlreadyRunning => return Ok(Vec::new()),
+        State::NotRoot => return Err(BootstrapError::MustBeRoot),
+        State::DockerUnavailable => return Err(BootstrapError::MustHaveRunningDocker),
+        State::Ready(ready) => ready,
+    };
 
-    if state.docker_running_status != RunningStatus::Running {
-        return Err(BootstrapError::MustHaveRunningDocker);
-    }
-
-    if !state.is_root {
-        return Err(BootstrapError::MustBeRoot);
-    }
-
-    let mut steps = plan_service_bootstrap(definition, &state.service);
+    let mut steps = plan_service_bootstrap(definition, &ready.service);
 
     push_step(&mut steps, CreateFolder::new(sudoers_directory_path()));
     push_step(
@@ -439,15 +442,22 @@ fn create_plan<'a>(
         SetMode::new(sudoers_directory_path(), Modes::Other(0o755)),
     );
 
-    if !state.sudoers_entry_exists {
-        push_step(
-            &mut steps,
-            CreateSudoersFile::new(douglas_folders.binary_link()),
-        );
-    }
+    let (correct_ownership, correct_mode) = match ready.sudoers {
+        SudoersEntry::Missing => {
+            push_step(
+                &mut steps,
+                CreateSudoersFile::new(douglas_folders.binary_link()),
+            );
+            (false, false)
+        }
+        SudoersEntry::Present {
+            correct_ownership,
+            correct_mode,
+        } => (correct_ownership, correct_mode),
+    };
     push_step(&mut steps, ValidateSudoersFile::default());
 
-    if !state.sudoers_entry_has_correct_ownership {
+    if !correct_ownership {
         push_step(
             &mut steps,
             SetOwnership::new(
@@ -458,7 +468,7 @@ fn create_plan<'a>(
         );
     }
 
-    if !state.sudoers_entry_has_correct_mode {
+    if !correct_mode {
         push_step(
             &mut steps,
             SetMode::new(sudoers_file_path(), Modes::OwnerReadGroupRead),
@@ -596,12 +606,12 @@ impl<'a> Command<Context<'a>> for ValidateSudoersFile {
 #[cfg(test)]
 mod tests {
     use super::{
-        BRACT, Context, CreateSudoersFile, Dependencies, State, VISUDO_CANDIDATES,
-        ValidateSudoersFile, ValidateSudoersFileError, bootstrap_with_reporter, create_plan,
-        ensure_binary_link, service_definition, sudoers_rule,
+        BRACT, Context, CreateSudoersFile, Dependencies, Ready, State, SudoersEntry,
+        VISUDO_CANDIDATES, ValidateSudoersFile, ValidateSudoersFileError, bootstrap_with_reporter,
+        create_plan, ensure_binary_link, service_definition, sudoers_rule,
     };
     use crate::BootstrapError;
-    use blueprint::{Command, RunningStatus, service::ServiceState};
+    use blueprint::{Command, service::ServiceState};
     use config::DouglasFolders;
     use credentials::{
         MockCredentials,
@@ -630,16 +640,15 @@ mod tests {
         os::OsError::IoError(std::io::Error::from(std::io::ErrorKind::NotFound))
     }
 
-    fn bootstrappable_state() -> State {
-        State {
-            is_root: true,
-            bract_running_status: RunningStatus::NotRunning,
-            docker_running_status: RunningStatus::Running,
+    fn ready_with(sudoers: SudoersEntry) -> State {
+        State::Ready(Ready {
             service: ServiceState::default(),
-            sudoers_entry_exists: false,
-            sudoers_entry_has_correct_mode: false,
-            sudoers_entry_has_correct_ownership: false,
-        }
+            sudoers,
+        })
+    }
+
+    fn bootstrappable_state() -> State {
+        ready_with(SudoersEntry::Missing)
     }
 
     #[test]
@@ -1006,12 +1015,10 @@ mod tests {
         let douglas_folders = DouglasFolders::new();
         let definition = service_definition(&douglas_folders);
 
-        let state = State {
-            sudoers_entry_exists: true,
-            sudoers_entry_has_correct_mode: true,
-            sudoers_entry_has_correct_ownership: true,
-            ..bootstrappable_state()
-        };
+        let state = ready_with(SudoersEntry::Present {
+            correct_ownership: true,
+            correct_mode: true,
+        });
 
         let plan = create_plan(&definition, state, &douglas_folders).expect("plan should resolve");
 
@@ -1027,14 +1034,59 @@ mod tests {
     }
 
     #[test]
+    fn test_create_plan_should_only_fix_the_ownership_when_only_the_ownership_is_wrong() {
+        let douglas_folders = DouglasFolders::new();
+        let definition = service_definition(&douglas_folders);
+
+        let state = ready_with(SudoersEntry::Present {
+            correct_ownership: false,
+            correct_mode: true,
+        });
+
+        let plan = create_plan(&definition, state, &douglas_folders).expect("plan should resolve");
+
+        assert_eq!(
+            step_descriptions(&plan),
+            vec![
+                "Create folder '/etc/sudoers.d'",
+                "Set ownership on '/etc/sudoers.d' to user 'root' group 'root'",
+                "Set mode on '/etc/sudoers.d' to '0o755'",
+                "Validate sudoers file",
+                "Set ownership on '/etc/sudoers.d/douglas-kick' to user 'root' group 'root'",
+            ]
+        );
+    }
+
+    #[test]
+    fn test_create_plan_should_only_fix_the_mode_when_only_the_mode_is_wrong() {
+        let douglas_folders = DouglasFolders::new();
+        let definition = service_definition(&douglas_folders);
+
+        let state = ready_with(SudoersEntry::Present {
+            correct_ownership: true,
+            correct_mode: false,
+        });
+
+        let plan = create_plan(&definition, state, &douglas_folders).expect("plan should resolve");
+
+        assert_eq!(
+            step_descriptions(&plan),
+            vec![
+                "Create folder '/etc/sudoers.d'",
+                "Set ownership on '/etc/sudoers.d' to user 'root' group 'root'",
+                "Set mode on '/etc/sudoers.d' to '0o755'",
+                "Validate sudoers file",
+                "Set mode on '/etc/sudoers.d/douglas-kick' to '0o440'",
+            ]
+        );
+    }
+
+    #[test]
     fn test_create_plan_should_be_empty_when_bract_is_already_running() {
         let douglas_folders = DouglasFolders::new();
         let definition = service_definition(&douglas_folders);
 
-        let state = State {
-            bract_running_status: RunningStatus::Running,
-            ..bootstrappable_state()
-        };
+        let state = State::AlreadyRunning;
 
         let plan = create_plan(&definition, state, &douglas_folders).expect("plan should resolve");
 
@@ -1046,10 +1098,7 @@ mod tests {
         let douglas_folders = DouglasFolders::new();
         let definition = service_definition(&douglas_folders);
 
-        let state = State {
-            is_root: false,
-            ..bootstrappable_state()
-        };
+        let state = State::NotRoot;
 
         let result = create_plan(&definition, state, &douglas_folders);
 
@@ -1061,10 +1110,7 @@ mod tests {
         let douglas_folders = DouglasFolders::new();
         let definition = service_definition(&douglas_folders);
 
-        let state = State {
-            docker_running_status: RunningStatus::NotRunning,
-            ..bootstrappable_state()
-        };
+        let state = State::DockerUnavailable;
 
         let result = create_plan(&definition, state, &douglas_folders);
 
