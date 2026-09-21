@@ -1,9 +1,11 @@
+use crate::bootstrap::journal;
 use crate::cli::OutputStyle;
 use crate::commands::CommandContext;
 use ::config::DouglasFolders;
 use bract_client::Client;
-use file_system::{Folder, UnixFileReader, UnixFolder};
+use file_system::{FileReader, Folder, UnixFileReader, UnixFolder};
 use log::Span;
+use os::{Os, Unix};
 use resin_client::ClientBuilder as _;
 use std::{process::ExitCode, sync::Arc};
 
@@ -22,6 +24,14 @@ struct CoreServiceStatus {
 }
 
 #[derive(serde::Serialize)]
+struct UpgradeReport {
+    state: &'static str,
+    from: String,
+    to: String,
+    previous_binary: std::path::PathBuf,
+}
+
+#[derive(serde::Serialize)]
 struct StatusReport {
     seedlings: Vec<SeedlingStatusEntry>,
     seedlings_error: Option<String>,
@@ -30,6 +40,8 @@ struct StatusReport {
     traefik_routes_error: Option<String>,
     openbao: Option<bract_types::OpenBaoReport>,
     openbao_error: Option<String>,
+    upgrade: Option<UpgradeReport>,
+    upgrade_error: Option<String>,
 }
 
 fn bract_error_means_unreachable(err: &bract_client::Error) -> bool {
@@ -115,6 +127,33 @@ fn probe_woodward(douglas_folders: &DouglasFolders, span: &Span) -> CoreServiceS
     }
 }
 
+fn probe_upgrade(
+    douglas_folders: &DouglasFolders,
+    file_reader: &dyn FileReader,
+    os: &dyn Os,
+) -> (Option<UpgradeReport>, Option<String>) {
+    match journal::load(douglas_folders, file_reader) {
+        Ok(None) => (None, None),
+        Ok(Some(entry)) => {
+            let state = if journal::is_interrupted(os, &entry) {
+                "interrupted"
+            } else {
+                "in progress"
+            };
+            (
+                Some(UpgradeReport {
+                    state,
+                    from: entry.from,
+                    to: entry.to,
+                    previous_binary: entry.previous_binary,
+                }),
+                None,
+            )
+        }
+        Err(err) => (None, Some(err.to_string())),
+    }
+}
+
 fn list_traefik_routes(
     folder: &dyn Folder,
     douglas_folders: &DouglasFolders,
@@ -193,6 +232,9 @@ pub(crate) async fn status(output_style: OutputStyle) -> ExitCode {
         Err(err) => (None, Some(err.to_string())),
     };
 
+    let (upgrade, upgrade_error) =
+        probe_upgrade(&douglas_folders, &supervisor_reader, &Unix::new());
+
     print_status_report(
         output_style,
         &StatusReport {
@@ -203,6 +245,8 @@ pub(crate) async fn status(output_style: OutputStyle) -> ExitCode {
             traefik_routes_error,
             openbao: openbao_report,
             openbao_error,
+            upgrade,
+            upgrade_error,
         },
     );
 
@@ -262,6 +306,20 @@ fn print_status_report(output_style: OutputStyle, report: &StatusReport) {
                 (Some(openbao), _) => print_openbao_report_plain(openbao),
                 (None, Some(err)) => println!("  unavailable ({err})"),
                 (None, None) => println!("  unavailable"),
+            }
+
+            if let Some(upgrade) = &report.upgrade {
+                println!("Upgrade:");
+                println!(
+                    "  {}: from {} to {}; the previous version is kept at {}",
+                    upgrade.state,
+                    upgrade.from,
+                    upgrade.to,
+                    upgrade.previous_binary.display()
+                );
+            } else if let Some(err) = &report.upgrade_error {
+                println!("Upgrade:");
+                println!("  unavailable ({err})");
             }
         }
     }
@@ -444,5 +502,75 @@ mod tests {
         let result = list_traefik_routes(&folder, &DouglasFolders::new());
 
         assert!(result.is_err());
+    }
+
+    fn journal_json(pid: u32) -> String {
+        format!(
+            "{{\"from\":\"0.0.1\",\"to\":\"0.0.2\",\"previous_binary\":\"/var/lib/douglas/bin/douglas-0.0.1\",\"pid\":{pid}}}"
+        )
+    }
+
+    fn reader_returning(result: Result<String, FileSystemError>) -> file_system::MockFileReader {
+        let mut reader = file_system::MockFileReader::new();
+        reader.expect_read_all().return_once(move |_| result);
+        reader
+    }
+
+    #[test]
+    fn test_probe_upgrade_should_report_nothing_when_there_is_no_journal() {
+        let reader = reader_returning(Err(FileSystemError::NotFoundError(
+            std::path::PathBuf::from("/journal"),
+        )));
+        let os = os::MockOs::new();
+
+        let (upgrade, error) = probe_upgrade(&DouglasFolders::new(), &reader, &os);
+
+        assert!(upgrade.is_none());
+        assert!(error.is_none());
+    }
+
+    #[test]
+    fn test_probe_upgrade_should_report_an_interrupted_upgrade_when_its_process_is_gone() {
+        let reader = reader_returning(Ok(journal_json(4242)));
+        let mut os = os::MockOs::new();
+        os.expect_is_active_pid()
+            .withf(|pid| *pid == 4242)
+            .returning(|_| Ok(false));
+
+        let (upgrade, error) = probe_upgrade(&DouglasFolders::new(), &reader, &os);
+
+        let Some(upgrade) = upgrade else {
+            panic!("should report");
+        };
+        assert_eq!(upgrade.state, "interrupted");
+        assert_eq!(upgrade.from, "0.0.1");
+        assert_eq!(upgrade.to, "0.0.2");
+        assert_eq!(
+            upgrade.previous_binary,
+            std::path::PathBuf::from("/var/lib/douglas/bin/douglas-0.0.1")
+        );
+        assert!(error.is_none());
+    }
+
+    #[test]
+    fn test_probe_upgrade_should_report_an_upgrade_in_progress_while_its_process_is_running() {
+        let reader = reader_returning(Ok(journal_json(4242)));
+        let mut os = os::MockOs::new();
+        os.expect_is_active_pid().returning(|_| Ok(true));
+
+        let (upgrade, _) = probe_upgrade(&DouglasFolders::new(), &reader, &os);
+
+        assert!(matches!(upgrade, Some(report) if report.state == "in progress"));
+    }
+
+    #[test]
+    fn test_probe_upgrade_should_report_a_journal_that_cannot_be_read_as_an_error() {
+        let reader = reader_returning(Ok("not json".to_string()));
+        let os = os::MockOs::new();
+
+        let (upgrade, error) = probe_upgrade(&DouglasFolders::new(), &reader, &os);
+
+        assert!(upgrade.is_none());
+        assert!(matches!(error, Some(message) if message.contains("not valid")));
     }
 }
