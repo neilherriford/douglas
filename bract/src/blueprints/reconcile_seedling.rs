@@ -95,9 +95,7 @@ struct State {
     seedling_version: VersionComparison,
     container_name: ContainerName,
     image_status: ImageStatus,
-    container_status: VersionComparison,
-    container_version: Option<seedbank_types::Version>,
-    container_is_running: bool,
+    container: Container,
     missing_service_credentials: bool,
     missing_share_groups: Vec<(seedbank_types::Name, Vec<String>)>,
     missing_mount_folders: Vec<PathBuf>,
@@ -106,6 +104,19 @@ struct State {
     missing_mount_files: Vec<(PathBuf, String, Vec<u8>)>,
     agent_missing_service_credentials: bool,
     agent_container: ContainerPresence,
+}
+
+#[derive(Debug)]
+enum Container {
+    Missing,
+    Current {
+        running: bool,
+    },
+    Stale {
+        version: seedbank_types::Version,
+        running: bool,
+    },
+    Newer,
 }
 
 #[derive(Default, Debug, PartialEq, Eq)]
@@ -262,9 +273,7 @@ impl<'a> StateObserver<'a> {
             seedling_version: VersionComparison::Missing,
             container_name: container_name(name)?,
             image_status: ImageStatus::Unknown,
-            container_status: VersionComparison::Missing,
-            container_version: None,
-            container_is_running: false,
+            container: Container::Missing,
             missing_service_credentials: true,
             missing_share_groups: Vec::new(),
             missing_mount_folders: Vec::new(),
@@ -301,20 +310,12 @@ impl<'a> StateObserver<'a> {
             &format!("Image status: {:?}", result.image_status),
         );
 
-        (result.container_status, result.container_version) = self
-            .discover_container_status(&result.container_name, version)
+        result.container = self
+            .discover_container(&result.container_name, version)
             .await?;
         guard.span().message(
             Level::Info,
-            &format!("Container version status: {:?}", result.container_status),
-        );
-
-        result.container_is_running = self
-            .discover_container_is_running(&result.container_name)
-            .await?;
-        guard.span().message(
-            Level::Info,
-            &format!("Container running: {}", result.container_is_running),
+            &format!("Container status: {:?}", result.container),
         );
 
         result.missing_service_credentials =
@@ -502,28 +503,31 @@ impl<'a> StateObserver<'a> {
         }
     }
 
-    async fn discover_container_status(
+    async fn discover_container(
         &self,
         container_name: &ContainerName,
         version: &seedbank_types::Version,
-    ) -> Result<(VersionComparison, Option<seedbank_types::Version>), ReconcileSeedlingError> {
-        match self
+    ) -> Result<Container, ReconcileSeedlingError> {
+        let labels = match self
             .docker_client
             .container_labels(ContainerRef::FullName(container_name.clone()))
             .await
         {
-            Ok(labels) => {
-                let actual_version = labels::get_version(&labels)?;
+            Ok(labels) => labels,
+            Err(DockerError::ResourceNotFound) => return Ok(Container::Missing),
+            Err(err) => return Err(ReconcileSeedlingError::DockerError(err)),
+        };
+        let actual_version = labels::get_version(&labels)?;
 
-                let comparison = match version.cmp(&actual_version) {
-                    Ordering::Less => VersionComparison::Newer,
-                    Ordering::Equal => VersionComparison::Current,
-                    Ordering::Greater => VersionComparison::Stale,
-                };
-                Ok((comparison, Some(actual_version)))
-            }
-            Err(DockerError::ResourceNotFound) => Ok((VersionComparison::Missing, None)),
-            Err(err) => Err(ReconcileSeedlingError::DockerError(err)),
+        match version.cmp(&actual_version) {
+            Ordering::Less => Ok(Container::Newer),
+            Ordering::Equal => Ok(Container::Current {
+                running: self.discover_container_is_running(container_name).await?,
+            }),
+            Ordering::Greater => Ok(Container::Stale {
+                version: actual_version,
+                running: self.discover_container_is_running(container_name).await?,
+            }),
         }
     }
 
@@ -705,8 +709,8 @@ fn create_plan<'a>(
 
     let container_name = state.container_name;
 
-    match state.container_status {
-        VersionComparison::Missing => {
+    match state.container {
+        Container::Missing => {
             push_step(
                 &mut steps,
                 BuildContainer::new(name.clone(), version.clone()),
@@ -716,20 +720,19 @@ fn create_plan<'a>(
                 StartContainer::new(container_name, version.clone()),
             );
         }
-        VersionComparison::Current => {
-            if !state.container_is_running {
+        Container::Current { running } => {
+            if !running {
                 push_step(
                     &mut steps,
                     StartContainer::new(container_name, version.clone()),
                 );
             }
         }
-        VersionComparison::Stale => {
-            let current_version = state
-                .container_version
-                .expect("stale container status implies a known container version");
-
-            if state.container_is_running {
+        Container::Stale {
+            version: current_version,
+            running,
+        } => {
+            if running {
                 push_step(
                     &mut steps,
                     StopContainer::new(container_name.clone(), current_version.clone()),
@@ -748,7 +751,7 @@ fn create_plan<'a>(
                 StartContainer::new(container_name, version.clone()),
             );
         }
-        VersionComparison::Newer => return Err(ReconcileSeedlingError::WouldDowngrade),
+        Container::Newer => return Err(ReconcileSeedlingError::WouldDowngrade),
     }
 
     Ok(steps)
@@ -2248,9 +2251,7 @@ mod tests {
             seedling_version: VersionComparison::Current,
             container_name: container_name(&name()).unwrap(),
             image_status: ImageStatus::Local,
-            container_status: VersionComparison::Current,
-            container_version: Some(seedbank_types::Version(1)),
-            container_is_running: true,
+            container: Container::Current { running: true },
             missing_service_credentials: false,
             missing_share_groups: Vec::new(),
             missing_mount_folders: Vec::new(),
@@ -2273,8 +2274,7 @@ mod tests {
             &seedbank_types::Version(1),
             &seedling_definition(),
             State {
-                container_status: VersionComparison::Newer,
-                container_version: Some(seedbank_types::Version(2)),
+                container: Container::Newer,
                 ..state()
             },
             &registry(),
@@ -2375,15 +2375,36 @@ mod tests {
     }
 
     #[test]
+    fn test_create_plan_should_start_a_current_container_that_is_not_running() {
+        let steps = create_plan(
+            &name(),
+            &seedbank_types::Version(1),
+            &seedling_definition(),
+            State {
+                container: Container::Current { running: false },
+                ..state()
+            },
+            &registry(),
+        )
+        .expect("should produce a plan");
+
+        assert_eq!(
+            step_descriptions(steps),
+            vec![
+                "Setting seedling 'traefik' desired running status to running",
+                "Starting container 'doug.traefik' (v1)",
+            ]
+        );
+    }
+
+    #[test]
     fn test_create_plan_should_build_and_start_a_missing_container() {
         let steps = create_plan(
             &name(),
             &seedbank_types::Version(2),
             &seedling_definition(),
             State {
-                container_status: VersionComparison::Missing,
-                container_version: None,
-                container_is_running: false,
+                container: Container::Missing,
                 ..state()
             },
             &registry(),
@@ -2524,9 +2545,10 @@ mod tests {
             &seedbank_types::Version(2),
             &seedling_definition(),
             State {
-                container_status: VersionComparison::Stale,
-                container_version: Some(seedbank_types::Version(1)),
-                container_is_running: true,
+                container: Container::Stale {
+                    version: seedbank_types::Version(1),
+                    running: true,
+                },
                 ..state()
             },
             &registry(),
@@ -2552,9 +2574,10 @@ mod tests {
             &seedbank_types::Version(2),
             &seedling_definition(),
             State {
-                container_status: VersionComparison::Stale,
-                container_version: Some(seedbank_types::Version(1)),
-                container_is_running: false,
+                container: Container::Stale {
+                    version: seedbank_types::Version(1),
+                    running: false,
+                },
                 ..state()
             },
             &registry(),
@@ -3205,5 +3228,144 @@ mod tests {
         let result = command.rollback(&span, &mut context).await;
 
         assert!(result.is_ok());
+    }
+
+    async fn discover_container_with(
+        docker_client: docker::MockClient,
+        seedling_version: u16,
+    ) -> Result<Container, ReconcileSeedlingError> {
+        let seedbank_client = seedbank_client::MockClient::new();
+        let mut resin_client = resin_client::MockClient::new();
+        let rolodex = crate::rolodex::MockRolodex::new();
+        let douglas_folders = DouglasFolders::new();
+        let folder = file_system::MockFolder::new();
+        let inspect = file_system::MockInspect::new();
+        let file_reader = file_system::MockFileReader::new();
+        let permissions = file_system::MockPermissions::new();
+        let registry = registry();
+        let observer = StateObserver {
+            docker_client: &docker_client,
+            seedbank_client: &seedbank_client,
+            resin_client: &mut resin_client,
+            rolodex: &rolodex,
+            douglas_folders: &douglas_folders,
+            folder: &folder,
+            inspect: &inspect,
+            file_reader: &file_reader,
+            permissions: &permissions,
+            registry: &registry,
+        };
+
+        observer
+            .discover_container(
+                &container_name(&name()).unwrap(),
+                &seedbank_types::Version(seedling_version),
+            )
+            .await
+    }
+
+    fn docker_with_version(
+        container_version: u16,
+        status: Result<docker_types::Status, DockerError>,
+    ) -> docker::MockClient {
+        let mut docker_client = docker::MockClient::new();
+        docker_client.expect_container_labels().returning(move |_| {
+            Ok(vec![labels::create_version_label(
+                &seedbank_types::Version(container_version),
+            )])
+        });
+        let mut status = Some(status);
+        docker_client
+            .expect_container_status()
+            .returning(move |_| match status.take() {
+                Some(result) => result,
+                None => Ok(docker_types::Status::Running),
+            });
+        docker_client
+    }
+
+    #[tokio::test]
+    async fn test_discover_container_should_be_missing_when_the_container_has_no_labels_to_read() {
+        let mut docker_client = docker::MockClient::new();
+        docker_client
+            .expect_container_labels()
+            .returning(|_| Err(DockerError::ResourceNotFound));
+        docker_client.expect_container_status().times(0);
+
+        let result = discover_container_with(docker_client, 1).await;
+
+        assert!(matches!(result, Ok(Container::Missing)));
+    }
+
+    #[tokio::test]
+    async fn test_discover_container_should_be_current_and_running_when_versions_match_and_it_runs()
+    {
+        let docker_client = docker_with_version(1, Ok(docker_types::Status::Running));
+
+        let result = discover_container_with(docker_client, 1).await;
+
+        assert!(matches!(result, Ok(Container::Current { running: true })));
+    }
+
+    #[tokio::test]
+    async fn test_discover_container_should_be_current_and_not_running_when_it_has_exited() {
+        let docker_client = docker_with_version(1, Ok(docker_types::Status::Exited));
+
+        let result = discover_container_with(docker_client, 1).await;
+
+        assert!(matches!(result, Ok(Container::Current { running: false })));
+    }
+
+    #[tokio::test]
+    async fn test_discover_container_should_call_a_container_that_vanishes_before_its_status_is_read_not_running()
+     {
+        let docker_client = docker_with_version(1, Err(DockerError::ResourceNotFound));
+
+        let result = discover_container_with(docker_client, 1).await;
+
+        assert!(matches!(result, Ok(Container::Current { running: false })));
+    }
+
+    #[tokio::test]
+    async fn test_discover_container_should_be_stale_with_the_container_version_when_the_seedling_is_newer()
+     {
+        let docker_client = docker_with_version(1, Ok(docker_types::Status::Running));
+
+        let result = discover_container_with(docker_client, 2).await;
+
+        assert!(matches!(
+            result,
+            Ok(Container::Stale { version, running: true }) if version == seedbank_types::Version(1)
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_discover_container_should_be_newer_without_asking_whether_it_runs() {
+        let mut docker_client = docker::MockClient::new();
+        docker_client.expect_container_labels().returning(|_| {
+            Ok(vec![labels::create_version_label(
+                &seedbank_types::Version(3),
+            )])
+        });
+        docker_client.expect_container_status().times(0);
+
+        let result = discover_container_with(docker_client, 2).await;
+
+        assert!(matches!(result, Ok(Container::Newer)));
+    }
+
+    #[tokio::test]
+    async fn test_discover_container_should_pass_on_any_other_docker_error() {
+        let mut docker_client = docker::MockClient::new();
+        docker_client
+            .expect_container_labels()
+            .returning(|_| Err(DockerError::PingFailed("down".to_string())));
+
+        let result = discover_container_with(docker_client, 1).await;
+
+        assert!(matches!(
+            result,
+            Err(ReconcileSeedlingError::DockerError(_))
+        ));
     }
 }
