@@ -39,12 +39,16 @@ impl HasServiceControl for Context<'_> {
 }
 
 #[derive(Default)]
-struct State {
-    is_root: bool,
-    woodward_running_status: RunningStatus,
-    resin_running_status: RunningStatus,
-    seedbank_running_status: RunningStatus,
-    bract_running_status: RunningStatus,
+struct Liveness {
+    woodward: RunningStatus,
+    resin: RunningStatus,
+    seedbank: RunningStatus,
+    bract: RunningStatus,
+}
+
+enum State {
+    NotRoot,
+    Root(Liveness),
 }
 
 struct StateObserver<'a> {
@@ -65,41 +69,40 @@ impl StateObserver<'_> {
             .start_guard();
 
         if !self.credentials.is_root() {
-            return guard.finish(Ok(State::default()));
+            return guard.finish(Ok(State::NotRoot));
         }
 
-        let result = State {
-            is_root: true,
-            bract_running_status: check_liveness(guard.span(), self.bract_liveness_check),
-            seedbank_running_status: check_liveness(guard.span(), self.seedbank_liveness_check),
-            resin_running_status: check_liveness(guard.span(), self.resin_liveness_check),
-            woodward_running_status: check_liveness(guard.span(), self.woodward_liveness_check),
-        };
+        let result = State::Root(Liveness {
+            bract: check_liveness(guard.span(), self.bract_liveness_check),
+            seedbank: check_liveness(guard.span(), self.seedbank_liveness_check),
+            resin: check_liveness(guard.span(), self.resin_liveness_check),
+            woodward: check_liveness(guard.span(), self.woodward_liveness_check),
+        });
 
         guard.finish(Ok(result))
     }
 }
 
 fn create_plan<'a>(state: &State) -> Result<Vec<Step<'a>>, StopError> {
-    if !state.is_root {
+    let State::Root(liveness) = state else {
         return Err(StopError::MustBeRoot);
-    }
+    };
 
     let mut result = Vec::new();
 
-    if matches!(state.woodward_running_status, RunningStatus::Running) {
+    if matches!(liveness.woodward, RunningStatus::Running) {
         push_step(&mut result, KillService::new(config::services::WOODWARD));
     }
 
-    if matches!(state.bract_running_status, RunningStatus::Running) {
+    if matches!(liveness.bract, RunningStatus::Running) {
         push_step(&mut result, StopBract::new(true));
     }
 
-    if matches!(state.seedbank_running_status, RunningStatus::Running) {
+    if matches!(liveness.seedbank, RunningStatus::Running) {
         push_step(&mut result, KillService::new(config::services::SEEDBANK));
     }
 
-    if matches!(state.resin_running_status, RunningStatus::Running) {
+    if matches!(liveness.resin, RunningStatus::Running) {
         push_step(&mut result, KillService::new(config::services::RESIN));
     }
 
@@ -310,10 +313,7 @@ mod tests {
 
         #[test]
         fn test_should_error_when_not_root() {
-            let state = State {
-                is_root: false,
-                ..Default::default()
-            };
+            let state = State::NotRoot;
 
             let result = create_plan(&state);
 
@@ -322,10 +322,7 @@ mod tests {
 
         #[test]
         fn test_should_produce_no_steps_when_nothing_is_running() {
-            let state = State {
-                is_root: true,
-                ..Default::default()
-            };
+            let state = State::Root(Liveness::default());
 
             let Ok(steps) = create_plan(&state) else {
                 panic!("should plan");
@@ -337,13 +334,12 @@ mod tests {
         #[test]
         fn test_should_order_woodward_then_bract_then_seedbank_then_resin_when_everything_is_running()
          {
-            let state = State {
-                is_root: true,
-                woodward_running_status: RunningStatus::Running,
-                bract_running_status: RunningStatus::Running,
-                seedbank_running_status: RunningStatus::Running,
-                resin_running_status: RunningStatus::Running,
-            };
+            let state = State::Root(Liveness {
+                woodward: RunningStatus::Running,
+                bract: RunningStatus::Running,
+                seedbank: RunningStatus::Running,
+                resin: RunningStatus::Running,
+            });
 
             let Ok(steps) = create_plan(&state) else {
                 panic!("should plan");
@@ -364,13 +360,12 @@ mod tests {
 
         #[test]
         fn test_should_only_include_steps_for_services_that_are_running() {
-            let state = State {
-                is_root: true,
-                woodward_running_status: RunningStatus::Running,
-                bract_running_status: RunningStatus::NotRunning,
-                seedbank_running_status: RunningStatus::Running,
-                resin_running_status: RunningStatus::NotRunning,
-            };
+            let state = State::Root(Liveness {
+                woodward: RunningStatus::Running,
+                bract: RunningStatus::NotRunning,
+                seedbank: RunningStatus::Running,
+                resin: RunningStatus::NotRunning,
+            });
 
             let Ok(steps) = create_plan(&state) else {
                 panic!("should plan");
