@@ -1,16 +1,9 @@
+use crate::util::{join_display, read_if_present};
 use ::config::DouglasFolders;
 use file_system::{FileReader, FileSystemError, FileWriter};
 use release::{Conflict, InstallMarker, ReleaseError, ReleaseMetadata};
 use std::path::PathBuf;
 use thiserror::Error;
-
-fn describe(conflicts: &[Conflict]) -> String {
-    conflicts
-        .iter()
-        .map(ToString::to_string)
-        .collect::<Vec<_>>()
-        .join("; ")
-}
 
 #[derive(Error, Debug)]
 pub enum CompatibilityError {
@@ -26,7 +19,7 @@ pub enum CompatibilityError {
     Invalid { path: PathBuf, source: ReleaseError },
     #[error(
         "This binary cannot start against the data installed on this host: {}",
-        describe(.0)
+        join_display(.0, "; ")
     )]
     Incompatible(Vec<Conflict>),
     #[error("The install marker {} could not be written: {source}", .path.display())]
@@ -43,10 +36,13 @@ pub(crate) fn ensure_compatible(
 ) -> Result<(), CompatibilityError> {
     let path = douglas_folders.install_marker();
 
-    let raw = match file_reader.read_all(&path) {
-        Ok(raw) => raw,
-        Err(err) if err.is_not_found() => return Ok(()),
-        Err(source) => return Err(CompatibilityError::Unreadable { path, source }),
+    let Some(raw) =
+        read_if_present(file_reader, &path).map_err(|source| CompatibilityError::Unreadable {
+            path: path.clone(),
+            source,
+        })?
+    else {
+        return Ok(());
     };
 
     let marker = InstallMarker::from_json(&raw)

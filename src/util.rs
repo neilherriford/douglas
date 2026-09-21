@@ -3,6 +3,7 @@ use blueprint::{
     listener::{LivenessCheck, check_liveness},
 };
 use command_fds::{CommandFdExt, FdMapping};
+use file_system::{FileReader, FileSystemError};
 use log::{Level, Outcome, ScopeGuard, Span};
 use os::Os;
 use os_pipe::{PipeReader, PipeWriter};
@@ -10,6 +11,25 @@ use std::{
     os::fd::{AsRawFd, OwnedFd},
     time::{Duration, Instant},
 };
+
+pub(crate) fn join_display<T: std::fmt::Display>(items: &[T], separator: &str) -> String {
+    items
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(separator)
+}
+
+pub(crate) fn read_if_present(
+    file_reader: &dyn FileReader,
+    path: &std::path::Path,
+) -> Result<Option<String>, FileSystemError> {
+    match file_reader.read_all(path) {
+        Ok(contents) => Ok(Some(contents)),
+        Err(err) if err.is_not_found() => Ok(None),
+        Err(err) => Err(err),
+    }
+}
 
 pub(crate) fn spawn_service(
     name: &'static str,
@@ -102,6 +122,59 @@ pub(crate) async fn wait_until_running(liveness: &LivenessCheck, span: &Span) ->
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn test_join_display_should_join_items_with_the_separator() {
+        assert_eq!(join_display(&[1, 2, 3], "; "), "1; 2; 3");
+    }
+
+    #[test]
+    fn test_join_display_should_be_empty_for_no_items() {
+        assert_eq!(join_display::<u8>(&[], ", "), "");
+    }
+
+    #[test]
+    fn test_join_display_should_not_add_a_separator_around_a_single_item() {
+        assert_eq!(join_display(&["only"], "; "), "only");
+    }
+
+    #[test]
+    fn test_read_if_present_should_return_the_contents() {
+        let mut reader = file_system::MockFileReader::new();
+        reader
+            .expect_read_all()
+            .returning(|_| Ok("contents".to_string()));
+
+        let result = read_if_present(&reader, std::path::Path::new("/x"));
+
+        assert!(matches!(result, Ok(Some(contents)) if contents == "contents"));
+    }
+
+    #[test]
+    fn test_read_if_present_should_return_none_when_the_file_is_missing() {
+        let mut reader = file_system::MockFileReader::new();
+        reader
+            .expect_read_all()
+            .returning(|path| Err(FileSystemError::NotFoundError(path.to_path_buf())));
+
+        let result = read_if_present(&reader, std::path::Path::new("/x"));
+
+        assert!(matches!(result, Ok(None)));
+    }
+
+    #[test]
+    fn test_read_if_present_should_pass_on_any_other_error() {
+        let mut reader = file_system::MockFileReader::new();
+        reader.expect_read_all().returning(|path| {
+            Err(FileSystemError::IoErrorAtPath {
+                path: path.to_path_buf(),
+                error: std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+            })
+        });
+
+        let result = read_if_present(&reader, std::path::Path::new("/x"));
+
+        assert!(result.is_err());
+    }
     use super::*;
     use log::{Event, EventKind, Level, ScopeId, ScopeKind};
     use std::sync::Arc;

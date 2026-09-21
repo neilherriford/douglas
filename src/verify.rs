@@ -27,6 +27,29 @@ impl std::fmt::Display for Version {
     }
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct VersionParseError;
+
+impl std::str::FromStr for Version {
+    type Err = VersionParseError;
+
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        let mut parts = text.split('.');
+        let mut next = || parts.next().and_then(|part| part.parse().ok());
+        let version = Version {
+            major: next().ok_or(VersionParseError)?,
+            minor: next().ok_or(VersionParseError)?,
+            patch: next().ok_or(VersionParseError)?,
+        };
+
+        if version.to_string() == text {
+            Ok(version)
+        } else {
+            Err(VersionParseError)
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Release {
     pub version: Version,
@@ -149,6 +172,32 @@ fn verify_trailer(verifying_key: &VerifyingKey, data: &[u8]) -> Result<Release, 
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn test_version_should_parse_a_dotted_version() {
+        assert_eq!(
+            "0.2.11".parse::<Version>(),
+            Ok(Version {
+                major: 0,
+                minor: 2,
+                patch: 11
+            })
+        );
+    }
+
+    #[test]
+    fn test_version_should_reject_anything_that_is_not_exactly_three_numbers() {
+        for text in ["0.2", "0.2.x", "0.2.3.4", "", "256.0.0", "-1.0.0", "1..2"] {
+            assert_eq!(text.parse::<Version>(), Err(VersionParseError), "{text}");
+        }
+    }
+
+    #[test]
+    fn test_version_should_reject_a_form_that_does_not_print_back_the_same() {
+        assert_eq!("00.2.1".parse::<Version>(), Err(VersionParseError));
+        assert_eq!("1.02.3".parse::<Version>(), Err(VersionParseError));
+        assert_eq!("+1.2.3".parse::<Version>(), Err(VersionParseError));
+    }
+
     use super::*;
     use ed25519_dalek::{Signer, SigningKey};
     use file_system::MockFileReader;

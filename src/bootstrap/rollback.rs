@@ -28,8 +28,8 @@ pub(crate) fn choose(
 ) -> Result<Version, RollbackError> {
     let requested = requested
         .map(|text| {
-            retention::parse_version(text)
-                .ok_or_else(|| RollbackError::NotAVersion(text.to_string()))
+            text.parse::<Version>()
+                .map_err(|_| RollbackError::NotAVersion(text.to_string()))
         })
         .transpose()?;
 

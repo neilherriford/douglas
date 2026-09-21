@@ -1,3 +1,4 @@
+use crate::util::read_if_present;
 use ::config::DouglasFolders;
 use file_system::{FileDeleter, FileReader, FileSystemError, FileWriter};
 use os::Os;
@@ -64,10 +65,13 @@ pub(crate) fn load(
 ) -> Result<Option<UpgradeJournal>, JournalError> {
     let path = douglas_folders.upgrade_journal();
 
-    let raw = match file_reader.read_all(&path) {
-        Ok(raw) => raw,
-        Err(err) if err.is_not_found() => return Ok(None),
-        Err(source) => return Err(JournalError::Unreadable { path, source }),
+    let Some(raw) =
+        read_if_present(file_reader, &path).map_err(|source| JournalError::Unreadable {
+            path: path.clone(),
+            source,
+        })?
+    else {
+        return Ok(None);
     };
 
     serde_json::from_str(&raw)

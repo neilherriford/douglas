@@ -1,3 +1,4 @@
+use crate::util::join_display;
 use crate::verify::Version;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
@@ -19,24 +20,8 @@ pub(crate) fn partial_path(retained: &Path) -> Option<PathBuf> {
     Some(retained.with_file_name(format!("{}.partial", name.to_string_lossy())))
 }
 
-pub(crate) fn parse_version(text: &str) -> Option<Version> {
-    let mut parts = text.split('.');
-    let major = parts.next()?.parse().ok()?;
-    let minor = parts.next()?.parse().ok()?;
-    let patch = parts.next()?.parse().ok()?;
-    if parts.next().is_some() {
-        return None;
-    }
-    let version = Version {
-        major,
-        minor,
-        patch,
-    };
-    (version.to_string() == text).then_some(version)
-}
-
 pub(crate) fn parse_retained(name: &str) -> Option<Version> {
-    parse_version(name.strip_prefix(PREFIX)?)
+    name.strip_prefix(PREFIX)?.parse().ok()
 }
 
 #[derive(Error, Debug, PartialEq, Eq)]
@@ -65,10 +50,7 @@ pub(crate) fn rollback_target(
         Some(version) if kept.contains(&version) => Ok(version),
         Some(version) => Err(RollbackTargetError::NotKept(
             version,
-            kept.iter()
-                .map(ToString::to_string)
-                .collect::<Vec<_>>()
-                .join(", "),
+            join_display(&kept, ", "),
         )),
         None => kept
             .into_iter()
@@ -205,15 +187,6 @@ mod tests {
         let listing = names(&["douglas-0.0.1", "douglas-0.0.2"]);
 
         assert_eq!(expired(&listing, 0).len(), 2);
-    }
-
-    #[test]
-    fn test_parse_version_should_read_a_dotted_version_and_reject_the_rest() {
-        assert_eq!(parse_version("0.2.11"), Some(version(0, 2, 11)));
-        assert_eq!(parse_version("0.2"), None);
-        assert_eq!(parse_version("0.2.x"), None);
-        assert_eq!(parse_version("00.2.1"), None);
-        assert_eq!(parse_version(""), None);
     }
 
     #[test]

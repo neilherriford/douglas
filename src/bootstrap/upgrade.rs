@@ -5,6 +5,7 @@ use crate::{
     },
     cli::Presentation,
     commands::{print_failure, report_failure},
+    util::join_display,
     verify::{BinaryVerifier, DouglasBinaryVerifier, Version},
 };
 use async_trait::async_trait;
@@ -48,12 +49,12 @@ pub enum UpgradeError {
     InvalidRollback,
     #[error(
         "Cannot roll back to that version: the data and core seedlings it expects differ from what is installed ({})",
-        describe_differences(.0)
+        join_display(.0, "; ")
     )]
     CannotRollBack(Vec<Difference>),
     #[error(
         "This upgrade cannot be rolled back from ({}); pass --allow-one-way to proceed anyway",
-        describe_differences(.0)
+        join_display(.0, "; ")
     )]
     OneWay(Vec<Difference>),
     #[error("The new version failed to start (exit code {code}): {detail}")]
@@ -64,14 +65,6 @@ pub enum UpgradeError {
     Unhealthy { service: String, reason: String },
     #[error("File system error: {0}")]
     FileSystemError(#[from] FileSystemError),
-}
-
-fn describe_differences(found: &[Difference]) -> String {
-    found
-        .iter()
-        .map(std::string::ToString::to_string)
-        .collect::<Vec<_>>()
-        .join("; ")
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -990,7 +983,7 @@ pub async fn perform(
             Level::Warn,
             &format!(
                 "This upgrade cannot be rolled back from ({})",
-                describe_differences(one_way)
+                join_display(one_way, "; ")
             ),
         );
     }

@@ -5,6 +5,7 @@ use crate::bootstrap::{
 };
 use crate::cli::{OutputStyle, Presentation};
 use crate::commands::{CommandContext, names, print_failure, print_success, report_failure};
+use crate::util::join_display;
 use ::config::DouglasFolders;
 use credentials::create_credentials;
 use file_system::{
@@ -220,9 +221,9 @@ async fn log_deadwood_if_any(
             ]
             .into_iter()
             .filter(|(_, names)| !names.is_empty())
-            .map(|(label, names)| format!("{label}(s): {}", names.join(", ")))
-            .collect::<Vec<_>>()
-            .join("; ");
+            .map(|(label, names)| format!("{label}(s): {}", join_display(&names, ", ")))
+            .collect::<Vec<_>>();
+            let details = join_display(&details, "; ");
 
             guard.span().message(
                 log::Level::Warn,
