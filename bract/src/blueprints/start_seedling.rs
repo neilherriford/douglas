@@ -7,11 +7,7 @@ use crate::{
     rolodex::{Rolodex, RolodexError, ServiceAccount},
 };
 use async_trait::async_trait;
-use blueprint::{
-    Command, Step,
-    bootstrap::{execute_plan, resolve_plan},
-    push_step,
-};
+use blueprint::{Command, Step, bootstrap::run_plan, push_step};
 use bract_types::agent_container_name;
 use config::DouglasFolders;
 use docker::client::{ContainerRef, ImageRef};
@@ -130,28 +126,23 @@ pub async fn execute(
     let seedling = deps.seedbank_client.load(name).await?;
     let (_, agent_ip) = provision_seedling_secrets::agent_private_network(&seedling.id);
 
-    let plan = match resolve_plan(
-        guard.span(),
-        create_plan(
-            name,
-            &seedling.definition.health_check,
-            agent_ip,
-            state,
-            requested_by,
-        ),
-    ) {
-        Ok(plan) => plan,
-        Err(err) => return guard.finish(Err(err)),
-    };
-
     let result = {
         let mut context = Context {
             docker_client: deps.docker_client,
             seedbank_client: deps.seedbank_client,
         };
-        execute_plan(guard.span(), plan, &mut context, |reason| {
-            StartSeedlingError::FailedBoostrap(vec![reason])
-        })
+        run_plan(
+            guard.span(),
+            create_plan(
+                name,
+                &seedling.definition.health_check,
+                agent_ip,
+                state,
+                requested_by,
+            ),
+            &mut context,
+            StartSeedlingError::FailedBoostrap,
+        )
         .await
     };
 

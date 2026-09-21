@@ -2,7 +2,7 @@ use crate::BootstrapError;
 use async_trait::async_trait;
 use blueprint::{
     Command, HasCredentials, HasFolder, HasPermissions, RunningStatus, Step,
-    bootstrap::{build_boot_reporter, execute_plan, resolve_plan},
+    bootstrap::{build_boot_reporter, run_plan},
     commands::{CreateFolder, SetMode, SetOwnership},
     listener::{ListenerDefinition, LivenessCheck, check_liveness},
     push_step,
@@ -118,14 +118,6 @@ async fn bootstrap_with_reporter(
         Err(err) => return guard.finish(Err(BootstrapError::from(err))),
     };
 
-    let plan = match resolve_plan(
-        guard.span(),
-        create_plan(&definition, state, douglas_folders),
-    ) {
-        Ok(plan) => plan,
-        Err(err) => return guard.finish(Err(err)),
-    };
-
     let mut context = Context {
         credentials,
         folder,
@@ -134,9 +126,12 @@ async fn bootstrap_with_reporter(
         permissions,
         os,
     };
-    let result = execute_plan(guard.span(), plan, &mut context, |reason| {
-        BootstrapError::FailedBoostrap(vec![reason])
-    })
+    let result = run_plan(
+        guard.span(),
+        create_plan(&definition, state, douglas_folders),
+        &mut context,
+        BootstrapError::FailedBoostrap,
+    )
     .await;
 
     if result.is_ok()

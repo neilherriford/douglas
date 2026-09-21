@@ -3,11 +3,7 @@ use crate::{
     rolodex::Rolodex,
 };
 use async_trait::async_trait;
-use blueprint::{
-    Command, Step,
-    bootstrap::{execute_plan, resolve_plan},
-    push_step,
-};
+use blueprint::{Command, Step, bootstrap::run_plan, push_step};
 use config::DouglasFolders;
 use credentials::Credentials;
 use docker::client::ContainerRef;
@@ -97,11 +93,6 @@ pub async fn execute(
         state_observer.discover(guard.span()).await?
     };
 
-    let plan = match resolve_plan(guard.span(), create_plan(state)) {
-        Ok(plan) => plan,
-        Err(err) => return guard.finish(Err(err)),
-    };
-
     let result = {
         let mut context = Context {
             docker_client: deps.docker_client,
@@ -121,9 +112,12 @@ pub async fn execute(
             agent_provisioning: deps.agent_provisioning,
             ram_disk: deps.ram_disk,
         };
-        execute_plan(guard.span(), plan, &mut context, |reason| {
-            WatchdogError::FailedBoostrap(vec![reason])
-        })
+        run_plan(
+            guard.span(),
+            create_plan(state),
+            &mut context,
+            WatchdogError::FailedBoostrap,
+        )
         .await
     };
 

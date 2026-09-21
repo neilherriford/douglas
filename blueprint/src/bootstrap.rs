@@ -21,6 +21,16 @@ pub fn resolve_plan<TContext, E>(
     plan
 }
 
+pub async fn run_plan<TContext: Send, E>(
+    span: &Span,
+    plan: Result<Vec<Step<TContext>>, E>,
+    context: &mut TContext,
+    on_failed: impl FnOnce(Vec<String>) -> E,
+) -> Result<(), E> {
+    let plan = resolve_plan(span, plan)?;
+    execute_plan(span, plan, context, |reason| on_failed(vec![reason])).await
+}
+
 pub async fn execute_plan<TContext: Send, E>(
     span: &Span,
     plan: Vec<Step<TContext>>,
@@ -142,8 +152,7 @@ mod tests {
     async fn test_execute_plan_should_pass_the_failure_reason_to_on_failed() {
         let span = root_span();
         let mut context = ();
-        let plan: Vec<Step<()>> =
-            vec![Box::new(SucceedingCommand), Box::new(FailingCommand)];
+        let plan: Vec<Step<()>> = vec![Box::new(SucceedingCommand), Box::new(FailingCommand)];
 
         let result = execute_plan(&span, plan, &mut context, |reason| reason).await;
 
@@ -151,5 +160,45 @@ mod tests {
         assert!(reason.contains("step 1"));
         assert!(reason.contains("Failing"));
         assert!(reason.contains("boom"));
+    }
+
+    #[tokio::test]
+    async fn test_run_plan_should_succeed_when_every_step_succeeds() {
+        let span = root_span();
+        let mut context = ();
+        let plan: Result<Vec<Step<()>>, Vec<String>> = Ok(vec![Box::new(SucceedingCommand)]);
+
+        let result = run_plan(&span, plan, &mut context, |reasons| reasons).await;
+
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_run_plan_should_return_the_planning_error_without_running_anything() {
+        let span = root_span();
+        let mut context = ();
+        let plan: Result<Vec<Step<()>>, Vec<String>> = Err(vec!["cannot plan".to_string()]);
+
+        let result = run_plan(&span, plan, &mut context, |_| vec!["not used".to_string()]).await;
+
+        assert_eq!(
+            result.expect_err("should fail"),
+            vec!["cannot plan".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_run_plan_should_hand_the_failure_reason_to_on_failed_as_a_list() {
+        let span = root_span();
+        let mut context = ();
+        let plan: Result<Vec<Step<()>>, Vec<String>> =
+            Ok(vec![Box::new(SucceedingCommand), Box::new(FailingCommand)]);
+
+        let result = run_plan(&span, plan, &mut context, |reasons| reasons).await;
+
+        let reasons = result.expect_err("should fail");
+        assert_eq!(reasons.len(), 1);
+        assert!(reasons[0].contains("step 1"));
+        assert!(reasons[0].contains("boom"));
     }
 }

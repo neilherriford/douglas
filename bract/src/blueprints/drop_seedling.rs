@@ -5,11 +5,7 @@ use crate::blueprints::{
 };
 use crate::labels;
 use async_trait::async_trait;
-use blueprint::{
-    Command, Step,
-    bootstrap::{execute_plan, resolve_plan},
-    push_step,
-};
+use blueprint::{Command, Step, bootstrap::run_plan, push_step};
 use bract_types::{agent_container_name, container_name};
 use config::DouglasFolders;
 use docker::client::ContainerRef;
@@ -123,11 +119,6 @@ pub async fn execute(
             .await?
     };
 
-    let plan = match resolve_plan(guard.span(), create_plan(name, state)) {
-        Ok(plan) => plan,
-        Err(err) => return guard.finish(Err(err)),
-    };
-
     let result = {
         let mut context = Context {
             docker_client: deps.docker_client,
@@ -138,9 +129,12 @@ pub async fn execute(
             douglas_folders: deps.douglas_folders,
             ram_disk: deps.ram_disk,
         };
-        execute_plan(guard.span(), plan, &mut context, |reason| {
-            DropSeedlingError::FailedBoostrap(vec![reason])
-        })
+        run_plan(
+            guard.span(),
+            create_plan(name, state),
+            &mut context,
+            DropSeedlingError::FailedBoostrap,
+        )
         .await
     };
 

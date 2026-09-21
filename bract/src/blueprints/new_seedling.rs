@@ -1,10 +1,6 @@
 use crate::blueprints::build_client;
 use async_trait::async_trait;
-use blueprint::{
-    Command, Step,
-    bootstrap::{execute_plan, resolve_plan},
-    push_step,
-};
+use blueprint::{Command, Step, bootstrap::run_plan, push_step};
 use docker::client::{ContainerRef, ImageRef};
 use docker_types::DockerNameError;
 use log::{Reporter, ScopeKind, Span};
@@ -89,19 +85,14 @@ pub async fn execute(
             .await?
     };
 
-    let plan = match resolve_plan(
-        guard.span(),
-        create_plan(name, user_seedling_definition, state),
-    ) {
-        Ok(plan) => plan,
-        Err(err) => return guard.finish(Err(err)),
-    };
-
     {
         let mut context = Context { seedbank_client };
-        if let Err(err) = execute_plan(guard.span(), plan, &mut context, |reason| {
-            NewSeedlingError::FailedBoostrap(vec![reason])
-        })
+        if let Err(err) = run_plan(
+            guard.span(),
+            create_plan(name, user_seedling_definition, state),
+            &mut context,
+            NewSeedlingError::FailedBoostrap,
+        )
         .await
         {
             return guard.finish(Err(err));

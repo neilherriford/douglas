@@ -9,11 +9,7 @@ use crate::{
     rolodex::{Rolodex, RolodexError},
 };
 use async_trait::async_trait;
-use blueprint::{
-    Command, Step,
-    bootstrap::{execute_plan, resolve_plan},
-    push_step,
-};
+use blueprint::{Command, Step, bootstrap::run_plan, push_step};
 use bract_types::agent_container_name;
 use config::DouglasFolders;
 use credentials::Credentials;
@@ -210,14 +206,6 @@ pub async fn execute(
             .await?
     };
 
-    let plan = match resolve_plan(
-        guard.span(),
-        create_plan(name, version, seedling_definition, state, deps.registry),
-    ) {
-        Ok(plan) => plan,
-        Err(err) => return guard.finish(Err(err)),
-    };
-
     let result = {
         let mut context = Context {
             name,
@@ -238,9 +226,12 @@ pub async fn execute(
             registry: deps.registry,
             ram_disk: deps.ram_disk,
         };
-        execute_plan(guard.span(), plan, &mut context, |reason| {
-            ReconcileSeedlingError::FailedBoostrap(vec![reason])
-        })
+        run_plan(
+            guard.span(),
+            create_plan(name, version, seedling_definition, state, deps.registry),
+            &mut context,
+            ReconcileSeedlingError::FailedBoostrap,
+        )
         .await
     };
 
