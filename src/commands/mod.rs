@@ -112,6 +112,17 @@ pub(crate) fn print_error(output_style: OutputStyle, message: &str) {
     }
 }
 
+pub(crate) fn print_failure(output_style: Option<OutputStyle>, message: &str) {
+    if let Some(output_style) = output_style {
+        print_error(output_style, message);
+    }
+}
+
+pub(crate) fn report_failure(span: &Span, output_style: Option<OutputStyle>, message: &str) {
+    span.message(log::Level::Warn, message);
+    print_failure(output_style, message);
+}
+
 pub(crate) fn parse_seedling_name(
     guard: &log::ScopeGuard,
     output_style: OutputStyle,
@@ -120,10 +131,7 @@ pub(crate) fn parse_seedling_name(
     if let Ok(name) = name.parse() {
         Some(name)
     } else {
-        guard
-            .span()
-            .message(log::Level::Warn, "Invalid seedling name");
-        print_error(output_style, "Invalid seedling name");
+        report_failure(guard.span(), Some(output_style), "Invalid seedling name");
         None
     }
 }
@@ -134,6 +142,42 @@ pub(crate) fn names(items: &[seedbank_types::Name]) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    struct CapturingReporter {
+        messages: std::sync::Mutex<Vec<(log::Level, String)>>,
+    }
+
+    impl log::Reporter for CapturingReporter {
+        fn emit(&self, event: log::Event) {
+            if let log::EventKind::Message { level, text } = event.kind {
+                let Ok(mut messages) = self.messages.lock() else {
+                    panic!("messages mutex poisoned");
+                };
+                messages.push((level, text));
+            }
+        }
+    }
+
+    #[test]
+    fn test_report_failure_should_log_the_message_as_a_warning() {
+        let reporter = Arc::new(CapturingReporter {
+            messages: std::sync::Mutex::new(Vec::new()),
+        });
+        let span = Span::new(
+            Arc::clone(&reporter) as Arc<dyn log::Reporter>,
+            "test",
+            log::ScopeKind::Task,
+        );
+
+        report_failure(&span, None, "it went wrong");
+
+        let Ok(messages) = reporter.messages.lock() else {
+            panic!("messages mutex poisoned");
+        };
+        assert_eq!(messages.len(), 1);
+        assert!(matches!(messages[0].0, log::Level::Warn));
+        assert_eq!(messages[0].1, "it went wrong");
+    }
+
     use super::*;
     use std::sync::Arc;
 

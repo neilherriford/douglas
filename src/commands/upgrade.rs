@@ -1,6 +1,6 @@
 use crate::bootstrap::{self, upgrade::Direction};
 use crate::cli::Presentation;
-use crate::commands::{CommandContext, print_error, survive_hangup};
+use crate::commands::{CommandContext, print_failure, survive_hangup};
 use credentials::create_credentials;
 use file_system::{FileReader, UnixFileReader};
 use os::{Os, Unix};
@@ -45,9 +45,7 @@ pub(crate) async fn upgrade(
     .await;
 
     if !succeeded {
-        if let Some(style) = presentation.console_style() {
-            print_error(style, "Upgrade failed");
-        }
+        print_failure(presentation.console_style(), "Upgrade failed");
         return ExitCode::from(1);
     }
 

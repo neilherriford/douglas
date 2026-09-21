@@ -1,6 +1,6 @@
 use crate::bootstrap;
 use crate::cli::Presentation;
-use crate::commands::{CommandContext, print_error, print_success};
+use crate::commands::{CommandContext, print_failure, print_success};
 use credentials::create_credentials;
 use file_system::{FileReader, UnixFileReader};
 use os::{Os, Unix};
@@ -32,9 +32,7 @@ pub(crate) async fn stop(plan_only: bool, presentation: Presentation) -> ExitCod
     .await;
 
     if !succeeded {
-        if let Some(style) = presentation.console_style() {
-            print_error(style, "System stop failed");
-        }
+        print_failure(presentation.console_style(), "System stop failed");
         return ExitCode::from(1);
     }
 

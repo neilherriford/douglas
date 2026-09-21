@@ -4,7 +4,7 @@ use crate::{
         retention, staged_copy::Installer,
     },
     cli::Presentation,
-    commands::print_error,
+    commands::{print_failure, report_failure},
     verify::{BinaryVerifier, DouglasBinaryVerifier, Version},
 };
 use async_trait::async_trait;
@@ -982,11 +982,8 @@ pub async fn perform(
     let state = match state_observer.discover(guard.span(), path, direction) {
         Ok(state) => state,
         Err(err) => {
-            guard.span().message(Level::Warn, &err.to_string());
+            report_failure(guard.span(), presentation.console_style(), &err.to_string());
             guard.finish_with_outcome(log::Outcome::Failed);
-            if let Some(style) = presentation.console_style() {
-                print_error(style, &err.to_string());
-            }
             return false;
         }
     };
@@ -1028,11 +1025,8 @@ pub async fn perform(
     ) {
         Ok(plan) => plan,
         Err(err) => {
-            guard.span().message(Level::Warn, &err.to_string());
+            report_failure(guard.span(), presentation.console_style(), &err.to_string());
             guard.finish_with_outcome(log::Outcome::Failed);
-            if let Some(style) = presentation.console_style() {
-                print_error(style, &err.to_string());
-            }
             return false;
         }
     };
@@ -1065,9 +1059,7 @@ pub async fn perform(
         }
         Err(reason) => {
             guard.finish_with_outcome(Outcome::Failed);
-            if let Some(style) = presentation.console_style() {
-                print_error(style, &reason);
-            }
+            print_failure(presentation.console_style(), &reason);
             false
         }
     }

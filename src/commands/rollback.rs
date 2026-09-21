@@ -1,12 +1,12 @@
 use crate::bootstrap::{self, rollback, upgrade::Direction};
 use crate::cli::Presentation;
-use crate::commands::{CommandContext, print_error, survive_hangup};
+use crate::commands::{CommandContext, report_failure, survive_hangup};
 use crate::verify::{BinaryVerifier, DouglasBinaryVerifier};
 use credentials::create_credentials;
 use file_system::{
     FileReader, UnixFileCopier, UnixFileDeleter, UnixFileReader, UnixFolder, UnixPermissions,
 };
-use log::{Level, ScopeKind, Span};
+use log::{ScopeKind, Span};
 use os::{Os, Unix};
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -32,15 +32,12 @@ pub(crate) async fn rollback(
     let file_reader: Arc<dyn FileReader> = Arc::new(UnixFileReader::new());
 
     let fail = |message: &str| {
-        Span::new(
+        let span = Span::new(
             Arc::clone(&reporter),
             "Rolling back douglas",
             ScopeKind::Task,
-        )
-        .message(Level::Warn, message);
-        if let Some(style) = presentation.console_style() {
-            print_error(style, message);
-        }
+        );
+        report_failure(&span, presentation.console_style(), message);
         ExitCode::from(1)
     };
 

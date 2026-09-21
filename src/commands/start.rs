@@ -4,7 +4,7 @@ use crate::bootstrap::{
     journal,
 };
 use crate::cli::{OutputStyle, Presentation};
-use crate::commands::{CommandContext, names, print_error, print_success};
+use crate::commands::{CommandContext, names, print_failure, print_success, report_failure};
 use ::config::DouglasFolders;
 use credentials::create_credentials;
 use file_system::{
@@ -58,9 +58,7 @@ pub(crate) async fn start(plan_only: bool, presentation: Presentation) -> ExitCo
     .await;
 
     if !succeeded {
-        if let Some(style) = output_style {
-            print_error(style, "System bootstrap failed");
-        }
+        print_failure(output_style, "System bootstrap failed");
         return ExitCode::from(1);
     }
 
@@ -80,9 +78,7 @@ pub(crate) async fn start(plan_only: bool, presentation: Presentation) -> ExitCo
         bootstrap::core_seedlings::perform(Arc::clone(&reporter), Arc::clone(&bract_client)).await;
 
     if !succeeded {
-        if let Some(style) = output_style {
-            print_error(style, "Seedling reconciliation failed");
-        }
+        print_failure(output_style, "Seedling reconciliation failed");
         return ExitCode::from(1);
     }
 
@@ -147,12 +143,8 @@ fn report_compatibility_failure(
     err: &CompatibilityError,
 ) {
     let guard = log::Span::new(Arc::clone(reporter), label, log::ScopeKind::Task).start_guard();
-    guard.span().message(log::Level::Warn, &err.to_string());
+    report_failure(guard.span(), presentation.console_style(), &err.to_string());
     guard.finish_with_outcome(log::Outcome::Failed);
-
-    if let Some(style) = presentation.console_style() {
-        print_error(style, &err.to_string());
-    }
 }
 
 async fn bootstrap_openbao(
@@ -173,9 +165,10 @@ async fn bootstrap_openbao(
     );
 
     if let Err(err) = identity.initialize() {
-        if let Some(style) = output_style {
-            print_error(style, &format!("Failed to initialize identity: {err}"));
-        }
+        print_failure(
+            output_style,
+            &format!("Failed to initialize identity: {err}"),
+        );
         return false;
     }
 
@@ -196,9 +189,7 @@ async fn bootstrap_openbao(
     .await;
 
     if !succeeded {
-        if let Some(style) = output_style {
-            print_error(style, "OpenBao bootstrap failed");
-        }
+        print_failure(output_style, "OpenBao bootstrap failed");
         return false;
     }
 
