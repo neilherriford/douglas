@@ -1,5 +1,5 @@
 use crate::blueprints::{
-    container_name, openbao_socket_path, seedling_network_name, traefik_dynamic_dir,
+    IgnoreMissing, container_name, openbao_socket_path, seedling_network_name, traefik_dynamic_dir,
 };
 use bract_types::{Deadwood, agent_container_name};
 use config::DouglasFolders;
@@ -79,24 +79,24 @@ async fn prune(deps: Dependencies<'_>, deadwood: &Deadwood) -> Result<(), PruneD
         let _ = docker_client
             .stop_container(ContainerRef::FullName(container.clone()))
             .await;
-        match docker_client
+        if let Err(err) = docker_client
             .delete_container(ContainerRef::FullName(container))
             .await
+            .ignore_missing()
         {
-            Ok(()) | Err(docker::DockerError::ResourceNotFound) => {}
-            Err(err) => return Err(err.into()),
+            return Err(err.into());
         }
 
         let agent_container = agent_container_name(name)?;
         let _ = docker_client
             .stop_container(ContainerRef::FullName(agent_container.clone()))
             .await;
-        match docker_client
+        if let Err(err) = docker_client
             .delete_container(ContainerRef::FullName(agent_container))
             .await
+            .ignore_missing()
         {
-            Ok(()) | Err(docker::DockerError::ResourceNotFound) => {}
-            Err(err) => return Err(err.into()),
+            return Err(err.into());
         }
     }
 
@@ -160,12 +160,12 @@ async fn disconnect_traefik(
     let traefik_container = container_name(&traefik_name)?;
     let seedling_network = seedling_network_name(seedling_name)?;
 
-    match docker_client
+    if let Err(err) = docker_client
         .disconnect_network(&seedling_network, ContainerRef::FullName(traefik_container))
         .await
+        .ignore_missing()
     {
-        Ok(()) | Err(docker::DockerError::ResourceNotFound) => {}
-        Err(err) => return Err(err.into()),
+        return Err(err.into());
     }
 
     Ok(())

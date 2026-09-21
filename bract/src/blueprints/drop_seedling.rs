@@ -1,3 +1,4 @@
+use crate::blueprints::container_steps::{DropContainerStep, HasDockerClient, Subject};
 use crate::blueprints::{
     ContainerPresence, build_client, observe_container, provision_seedling_secrets,
     seedling_network_name, traefik_dynamic_dir,
@@ -53,6 +54,12 @@ struct Context<'a> {
     folder_deleter: &'a dyn FolderDeleter,
     douglas_folders: &'a DouglasFolders,
     ram_disk: &'a dyn RamDisk,
+}
+
+impl HasDockerClient for Context<'_> {
+    fn docker_client(&self) -> &dyn docker::client::Client {
+        self.docker_client
+    }
 }
 
 #[derive(Debug)]
@@ -248,14 +255,14 @@ fn create_plan<'a>(
     if state.container.exists() {
         push_step(
             &mut steps,
-            DropSeedling::new(name.clone(), state.container_name, state.version),
+            DropContainerStep::new(Subject::seedling(name, state.version), state.container_name),
         );
     }
 
     if state.agent_container.exists() {
         push_step(
             &mut steps,
-            DropSeedling::new(name.clone(), state.agent_container_name, None),
+            DropContainerStep::new(Subject::seedling(name, None), state.agent_container_name),
         );
     }
 
@@ -279,61 +286,6 @@ fn create_plan<'a>(
     push_step(&mut steps, DeleteResinRepository::new(name.clone()));
 
     Ok(steps)
-}
-
-struct DropSeedling {
-    seedling_name: seedbank_types::Name,
-    container_name: docker_types::ContainerName,
-    version: Option<seedbank_types::Version>,
-}
-
-impl DropSeedling {
-    pub fn new(
-        seedling_name: seedbank_types::Name,
-        container_name: docker_types::ContainerName,
-        version: Option<seedbank_types::Version>,
-    ) -> Self {
-        Self {
-            seedling_name,
-            container_name,
-            version,
-        }
-    }
-}
-
-impl std::fmt::Display for DropSeedling {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match &self.version {
-            Some(version) => write!(f, "Dropping seedling '{}' (v{version})", self.seedling_name),
-            None => write!(f, "Dropping seedling '{}'", self.seedling_name),
-        }
-    }
-}
-
-#[async_trait]
-impl<'a> Command<Context<'a>> for DropSeedling {
-    fn name(&self) -> String {
-        "Dropping seedling".to_string()
-    }
-
-    async fn run(
-        &mut self,
-        span: &Span,
-        context: &mut Context<'a>,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let message = match &self.version {
-            Some(version) => format!("Dropping seedling '{}' (v{version})…", self.seedling_name),
-            None => format!("Dropping seedling '{}'…", self.seedling_name),
-        };
-        let guard = span.create_child(&message, ScopeKind::Step).start_guard();
-
-        context
-            .docker_client
-            .delete_container(ContainerRef::FullName(self.container_name.clone()))
-            .await?;
-
-        guard.finish(Ok(()))
-    }
 }
 
 struct RemoveTraefikRoute {

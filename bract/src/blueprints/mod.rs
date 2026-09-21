@@ -4,6 +4,7 @@ use file_system::Modes;
 use std::path::PathBuf;
 
 pub mod bootstrap;
+pub(crate) mod container_steps;
 pub(crate) mod drop_seedling;
 pub(crate) mod find_deadwood;
 pub(crate) mod new_seedling;
@@ -38,6 +39,19 @@ pub(crate) fn core_seedling_forbidden_for(
     requested_by: RequestedBy,
 ) -> bool {
     origin == Some(seedbank_types::Origin::Core) && requested_by == RequestedBy::Operator
+}
+
+pub(crate) trait IgnoreMissing {
+    fn ignore_missing(self) -> Result<(), docker::DockerError>;
+}
+
+impl IgnoreMissing for Result<(), docker::DockerError> {
+    fn ignore_missing(self) -> Self {
+        match self {
+            Err(docker::DockerError::ResourceNotFound) => Ok(()),
+            other => other,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -334,5 +348,27 @@ mod tests {
         let result = observe_container(&docker_client, &name).await;
 
         assert!(matches!(result, Ok(ContainerPresence::Absent)));
+    }
+
+    #[test]
+    fn test_ignore_missing_should_turn_a_missing_resource_into_success() {
+        let result: Result<(), docker::DockerError> = Err(docker::DockerError::ResourceNotFound);
+
+        assert!(result.ignore_missing().is_ok());
+    }
+
+    #[test]
+    fn test_ignore_missing_should_keep_success() {
+        let result: Result<(), docker::DockerError> = Ok(());
+
+        assert!(result.ignore_missing().is_ok());
+    }
+
+    #[test]
+    fn test_ignore_missing_should_keep_any_other_error() {
+        let result: Result<(), docker::DockerError> =
+            Err(docker::DockerError::PingFailed("down".to_string()));
+
+        assert!(result.ignore_missing().is_err());
     }
 }

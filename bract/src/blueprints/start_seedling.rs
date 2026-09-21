@@ -1,6 +1,6 @@
 use crate::{
     blueprints::{
-        ContainerPresence, EXPECTED_MOUNT_MODE, RequestedBy, container_name,
+        ContainerPresence, EXPECTED_MOUNT_MODE, IgnoreMissing, RequestedBy, container_name,
         core_seedling_forbidden_for, observe_container, provision_seedling_secrets,
     },
     labels,
@@ -604,16 +604,14 @@ impl<'a> Command<Context<'a>> for StartAgentContainer {
             )
             .start_guard();
 
-        match context
+        if let Err(err) = context
             .docker_client
             .stop_container(ContainerRef::FullName(self.container_name.clone()))
             .await
+            .ignore_missing()
         {
-            Ok(()) | Err(docker::DockerError::ResourceNotFound) => {}
-            Err(err) => {
-                guard.finish_with_outcome(log::Outcome::Failed);
-                return Err(Box::new(err));
-            }
+            guard.finish_with_outcome(log::Outcome::Failed);
+            return Err(Box::new(err));
         }
 
         guard.finish_with_outcome(log::Outcome::Ok);
@@ -765,16 +763,14 @@ impl<'a> Command<Context<'a>> for StartSeedling {
             )
             .start_guard();
 
-        match context
+        if let Err(err) = context
             .docker_client
             .stop_container(self.container_ref())
             .await
+            .ignore_missing()
         {
-            Ok(()) | Err(docker::DockerError::ResourceNotFound) => {}
-            Err(err) => {
-                guard.finish_with_outcome(log::Outcome::Failed);
-                return Err(Box::new(err));
-            }
+            guard.finish_with_outcome(log::Outcome::Failed);
+            return Err(Box::new(err));
         }
 
         guard.finish_with_outcome(log::Outcome::Ok);

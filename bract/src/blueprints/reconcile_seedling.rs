@@ -1,8 +1,9 @@
 use crate::{
     blueprints::{
-        AGENT_MOUNT_RAM_DISK_SIZE_MB, ContainerPresence, EXPECTED_MOUNT_MODE, SYSTEM_NETWORK_NAME,
-        build_client, container_name, observe_container, provision_seedling_secrets,
-        seedling_network_name,
+        AGENT_MOUNT_RAM_DISK_SIZE_MB, ContainerPresence, EXPECTED_MOUNT_MODE, IgnoreMissing,
+        SYSTEM_NETWORK_NAME, build_client, container_name,
+        container_steps::{DropContainerStep, HasDockerClient, StopContainerStep, Subject},
+        observe_container, provision_seedling_secrets, seedling_network_name,
     },
     labels::{self},
     rolodex::{Rolodex, RolodexError},
@@ -68,6 +69,12 @@ pub enum ReconcileSeedlingError {
     WouldDowngrade,
     #[error("Agent provisioning was requested but not available")]
     MissingAgentProvisioning,
+}
+
+impl HasDockerClient for Context<'_> {
+    fn docker_client(&self) -> &dyn docker::client::Client {
+        self.docker_client
+    }
 }
 
 struct Context<'a> {
@@ -735,12 +742,18 @@ fn create_plan<'a>(
             if running {
                 push_step(
                     &mut steps,
-                    StopContainer::new(container_name.clone(), current_version.clone()),
+                    StopContainerStep::new(
+                        Subject::container(&container_name, current_version.clone()),
+                        container_name.clone(),
+                    ),
                 );
             }
             push_step(
                 &mut steps,
-                DropContainer::new(container_name.clone(), current_version),
+                DropContainerStep::new(
+                    Subject::container(&container_name, current_version),
+                    container_name.clone(),
+                ),
             );
             push_step(
                 &mut steps,
@@ -1601,124 +1614,6 @@ impl<'a> Command<Context<'a>> for PullImageFromResin {
     }
 }
 
-struct StopContainer {
-    name: ContainerName,
-    version: seedbank_types::Version,
-}
-
-impl StopContainer {
-    pub fn new(name: ContainerName, version: seedbank_types::Version) -> Self {
-        Self { name, version }
-    }
-}
-
-impl std::fmt::Display for StopContainer {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Stopping container '{}' (v{})", self.name, self.version)
-    }
-}
-
-#[async_trait]
-impl<'a> Command<Context<'a>> for StopContainer {
-    fn name(&self) -> String {
-        "Stopping container".to_string()
-    }
-
-    async fn run(
-        &mut self,
-        span: &Span,
-        context: &mut Context<'a>,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let guard = span
-            .create_child(
-                &format!("Stopping container '{}' (v{})…", self.name, self.version),
-                ScopeKind::Step,
-            )
-            .start_guard();
-
-        context
-            .docker_client
-            .stop_container(ContainerRef::FullName(self.name.clone()))
-            .await?;
-
-        guard.finish_with_outcome(log::Outcome::Ok);
-        Ok(())
-    }
-
-    async fn rollback(
-        &mut self,
-        span: &Span,
-        context: &mut Context<'a>,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let guard = span
-            .create_child(
-                &format!("Restarting container '{}' (v{})", self.name, self.version),
-                ScopeKind::Step,
-            )
-            .start_guard();
-
-        match context
-            .docker_client
-            .start_container(ContainerRef::FullName(self.name.clone()))
-            .await
-        {
-            Ok(()) | Err(DockerError::ResourceNotFound) => {}
-            Err(err) => {
-                guard.finish_with_outcome(log::Outcome::Failed);
-                return Err(Box::new(err));
-            }
-        }
-
-        guard.finish_with_outcome(log::Outcome::Ok);
-        Ok(())
-    }
-}
-
-struct DropContainer {
-    name: ContainerName,
-    version: seedbank_types::Version,
-}
-
-impl DropContainer {
-    pub fn new(name: ContainerName, version: seedbank_types::Version) -> Self {
-        Self { name, version }
-    }
-}
-
-impl std::fmt::Display for DropContainer {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Dropping container '{}' (v{})", self.name, self.version)
-    }
-}
-
-#[async_trait]
-impl<'a> Command<Context<'a>> for DropContainer {
-    fn name(&self) -> String {
-        "Dropping container".to_string()
-    }
-
-    async fn run(
-        &mut self,
-        span: &Span,
-        context: &mut Context<'a>,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let guard = span
-            .create_child(
-                &format!("Dropping container '{}' (v{})…", self.name, self.version),
-                ScopeKind::Step,
-            )
-            .start_guard();
-
-        context
-            .docker_client
-            .delete_container(ContainerRef::FullName(self.name.clone()))
-            .await?;
-
-        guard.finish_with_outcome(log::Outcome::Ok);
-        Ok(())
-    }
-}
-
 fn published_ports_for(
     seedling_definition: &seedbank_types::SeedlingDefinition,
 ) -> Vec<docker_types::PortMapping> {
@@ -1926,16 +1821,14 @@ impl<'a> Command<Context<'a>> for BuildContainer {
             .start_guard();
 
         let built_container_name = container_name(&self.name)?;
-        match context
+        if let Err(err) = context
             .docker_client
             .delete_container(ContainerRef::FullName(built_container_name))
             .await
+            .ignore_missing()
         {
-            Ok(()) | Err(DockerError::ResourceNotFound) => {}
-            Err(err) => {
-                guard.finish_with_outcome(log::Outcome::Failed);
-                return Err(Box::new(err));
-            }
+            guard.finish_with_outcome(log::Outcome::Failed);
+            return Err(Box::new(err));
         }
 
         if self.created_network {
@@ -2110,16 +2003,14 @@ impl<'a> Command<Context<'a>> for BuildAgentContainer {
             .start_guard();
 
         let built_container_name = agent_container_name(&self.seedling_name)?;
-        match context
+        if let Err(err) = context
             .docker_client
             .delete_container(ContainerRef::FullName(built_container_name))
             .await
+            .ignore_missing()
         {
-            Ok(()) | Err(DockerError::ResourceNotFound) => {}
-            Err(err) => {
-                guard.finish_with_outcome(log::Outcome::Failed);
-                return Err(Box::new(err));
-            }
+            guard.finish_with_outcome(log::Outcome::Failed);
+            return Err(Box::new(err));
         }
 
         if self.created_network {
@@ -2191,16 +2082,14 @@ impl<'a> Command<Context<'a>> for StartContainer {
             )
             .start_guard();
 
-        match context
+        if let Err(err) = context
             .docker_client
             .stop_container(ContainerRef::FullName(self.name.clone()))
             .await
+            .ignore_missing()
         {
-            Ok(()) | Err(DockerError::ResourceNotFound) => {}
-            Err(err) => {
-                guard.finish_with_outcome(log::Outcome::Failed);
-                return Err(Box::new(err));
-            }
+            guard.finish_with_outcome(log::Outcome::Failed);
+            return Err(Box::new(err));
         }
 
         guard.finish_with_outcome(log::Outcome::Ok);
@@ -3221,8 +3110,10 @@ mod tests {
             &registry,
         );
 
-        let mut command =
-            StopContainer::new(container_name(&seedling_name).unwrap(), version.clone());
+        let mut command = StopContainerStep::new(
+            Subject::container(&container_name(&seedling_name).unwrap(), version.clone()),
+            container_name(&seedling_name).unwrap(),
+        );
         let span = root_span();
 
         let result = command.rollback(&span, &mut context).await;
