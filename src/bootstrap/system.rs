@@ -1,3 +1,4 @@
+use crate::bootstrap::{CORE_SERVICES, LivenessCheckError, require_liveness};
 use crate::util::{require, spawn_service, wait_until_running};
 use async_trait::async_trait;
 use blueprint::{
@@ -30,10 +31,8 @@ pub enum BootstrapError {
     SpawnError(#[from] FdMappingCollision),
     #[error("Timed out waiting for {0} to start (5 minutes exceeded)")]
     StartTimeout(String),
-    #[error("Service '{0}' has no configured liveness check")]
-    MissingLivenessCheck(String),
-    #[error("Unknown service '{0}'")]
-    UnknownService(String),
+    #[error("{0}")]
+    Liveness(#[from] LivenessCheckError),
     #[error("File system error: {0}")]
     FileSystemError(#[from] FileSystemError),
 }
@@ -51,72 +50,21 @@ struct DouglasService {
     definition: ServiceDefinition,
 }
 
-pub(crate) fn liveness_check(
-    service_name: &str,
-    douglas_folders: &DouglasFolders,
-) -> Result<LivenessCheck, BootstrapError> {
-    let definition = if service_name == config::services::BRACT {
-        bract::service_definition(douglas_folders)
-    } else if service_name == config::services::SEEDBANK {
-        seedbank::service_definition(douglas_folders)
-    } else if service_name == config::services::RESIN {
-        resin::service_definition(douglas_folders)
-    } else {
-        return Err(BootstrapError::UnknownService(service_name.to_string()));
-    };
-
-    require_liveness(&definition, service_name)
-}
-
-fn require_liveness(
-    definition: &ServiceDefinition,
-    service_name: &str,
-) -> Result<LivenessCheck, BootstrapError> {
-    definition
-        .liveness
-        .clone()
-        .ok_or_else(|| BootstrapError::MissingLivenessCheck(service_name.to_string()))
-}
-
 fn known_services(douglas_folders: &DouglasFolders) -> Result<Vec<DouglasService>, BootstrapError> {
-    let bract_definition = bract::service_definition(douglas_folders);
-    let bract_liveness = require_liveness(&bract_definition, config::services::BRACT)?;
+    CORE_SERVICES
+        .iter()
+        .map(|service| {
+            let definition = service.definition(douglas_folders);
+            let liveness = require_liveness(&definition, service.name)?;
 
-    let seedbank_definition = seedbank::service_definition(douglas_folders);
-    let seedbank_liveness = require_liveness(&seedbank_definition, config::services::SEEDBANK)?;
-
-    let resin_definition = resin::service_definition(douglas_folders);
-    let resin_liveness = require_liveness(&resin_definition, config::services::RESIN)?;
-
-    let woodward_definition = woodward::service_definition(douglas_folders);
-    let woodward_liveness = require_liveness(&woodward_definition, config::services::WOODWARD)?;
-
-    Ok(vec![
-        DouglasService {
-            name: config::services::BRACT,
-            bootstrap_reporting: bract_definition.bootstrap_reporting,
-            liveness: bract_liveness,
-            definition: bract_definition,
-        },
-        DouglasService {
-            name: config::services::RESIN,
-            bootstrap_reporting: resin_definition.bootstrap_reporting,
-            liveness: resin_liveness,
-            definition: resin_definition,
-        },
-        DouglasService {
-            name: config::services::SEEDBANK,
-            bootstrap_reporting: seedbank_definition.bootstrap_reporting,
-            liveness: seedbank_liveness,
-            definition: seedbank_definition,
-        },
-        DouglasService {
-            name: config::services::WOODWARD,
-            bootstrap_reporting: woodward_definition.bootstrap_reporting,
-            liveness: woodward_liveness,
-            definition: woodward_definition,
-        },
-    ])
+            Ok(DouglasService {
+                name: service.name,
+                bootstrap_reporting: definition.bootstrap_reporting,
+                liveness,
+                definition,
+            })
+        })
+        .collect()
 }
 
 struct Context<'a> {
@@ -568,9 +516,7 @@ fn ensure_supervised_heartbeat_dirs_accessible(
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        BootstrapError, DouglasService, State, Work, create_plan, liveness_check, require_liveness,
-    };
+    use super::{BootstrapError, DouglasService, State, Work, create_plan};
     use std::path::PathBuf;
 
     use blueprint::{
@@ -776,70 +722,6 @@ mod tests {
                 .filter(|d| d.starts_with("Start "))
                 .count(),
             2
-        );
-    }
-
-    #[test]
-    fn test_require_liveness_should_return_the_configured_check() {
-        let definition = ServiceDefinition::new(
-            ServiceUser::create_managed("foo"),
-            "foo",
-            Vec::new(),
-            &[],
-            BootstrapReporting::Pipe,
-            Some(tcp_liveness(1234)),
-        );
-
-        let result = require_liveness(&definition, "foo");
-
-        assert!(matches!(
-            result,
-            Ok(LivenessCheck::TcpPort { port: 1234, .. })
-        ));
-    }
-
-    #[test]
-    fn test_require_liveness_should_error_when_none_is_configured() {
-        let definition = ServiceDefinition::new(
-            ServiceUser::create_managed("foo"),
-            "foo",
-            Vec::new(),
-            &[],
-            BootstrapReporting::Pipe,
-            None,
-        );
-
-        let result = require_liveness(&definition, "foo");
-
-        assert!(matches!(result, Err(BootstrapError::MissingLivenessCheck(name)) if name == "foo"));
-    }
-
-    #[test]
-    fn test_liveness_check_should_resolve_bract_to_a_unix_socket() {
-        let douglas_folders = config::DouglasFolders::new();
-
-        let result = liveness_check(config::services::BRACT, &douglas_folders);
-
-        assert!(matches!(result, Ok(LivenessCheck::UnixSocket(_))));
-    }
-
-    #[test]
-    fn test_liveness_check_should_resolve_resin_to_a_tcp_port() {
-        let douglas_folders = config::DouglasFolders::new();
-
-        let result = liveness_check(config::services::RESIN, &douglas_folders);
-
-        assert!(matches!(result, Ok(LivenessCheck::TcpPort { .. })));
-    }
-
-    #[test]
-    fn test_liveness_check_should_reject_an_unknown_service() {
-        let douglas_folders = config::DouglasFolders::new();
-
-        let result = liveness_check("not-a-real-service", &douglas_folders);
-
-        assert!(
-            matches!(result, Err(BootstrapError::UnknownService(name)) if name == "not-a-real-service")
         );
     }
 }

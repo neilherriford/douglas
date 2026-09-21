@@ -95,26 +95,49 @@ pub enum LivenessCheckError {
     UnknownService(String),
 }
 
+pub(crate) struct CoreService {
+    pub(crate) name: &'static str,
+    definition: fn(&DouglasFolders) -> ServiceDefinition,
+}
+
+impl CoreService {
+    pub(crate) fn definition(&self, douglas_folders: &DouglasFolders) -> ServiceDefinition {
+        (self.definition)(douglas_folders)
+    }
+}
+
+pub(crate) static CORE_SERVICES: [CoreService; 4] = [
+    CoreService {
+        name: config::services::BRACT,
+        definition: bract::service_definition,
+    },
+    CoreService {
+        name: config::services::RESIN,
+        definition: resin::service_definition,
+    },
+    CoreService {
+        name: config::services::SEEDBANK,
+        definition: seedbank::service_definition,
+    },
+    CoreService {
+        name: config::services::WOODWARD,
+        definition: woodward::service_definition,
+    },
+];
+
 pub(crate) fn liveness_check(
     service_name: &str,
     douglas_folders: &DouglasFolders,
 ) -> Result<LivenessCheck, LivenessCheckError> {
-    let definition = if service_name == config::services::BRACT {
-        bract::service_definition(douglas_folders)
-    } else if service_name == config::services::SEEDBANK {
-        seedbank::service_definition(douglas_folders)
-    } else if service_name == config::services::RESIN {
-        resin::service_definition(douglas_folders)
-    } else if service_name == config::services::WOODWARD {
-        woodward::service_definition(douglas_folders)
-    } else {
-        return Err(LivenessCheckError::UnknownService(service_name.to_string()));
-    };
+    let service = CORE_SERVICES
+        .iter()
+        .find(|service| service.name == service_name)
+        .ok_or_else(|| LivenessCheckError::UnknownService(service_name.to_string()))?;
 
-    require_liveness(&definition, service_name)
+    require_liveness(&service.definition(douglas_folders), service_name)
 }
 
-fn require_liveness(
+pub(crate) fn require_liveness(
     definition: &ServiceDefinition,
     service_name: &str,
 ) -> Result<LivenessCheck, LivenessCheckError> {
@@ -359,5 +382,87 @@ impl<C: HasServiceControl + Send> Command<C> for StopBract {
         }
 
         guard.finish(Ok(()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use blueprint::{
+        listener::LivenessCheck,
+        service::{BootstrapReporting, ServiceDefinition, ServiceUser},
+    };
+
+    fn tcp_liveness(port: u16) -> LivenessCheck {
+        LivenessCheck::TcpPort {
+            host: "127.0.0.1".to_string(),
+            port,
+        }
+    }
+
+    #[test]
+    fn test_require_liveness_should_return_the_configured_check() {
+        let definition = ServiceDefinition::new(
+            ServiceUser::create_managed("foo"),
+            "foo",
+            Vec::new(),
+            &[],
+            BootstrapReporting::Pipe,
+            Some(tcp_liveness(1234)),
+        );
+
+        let result = require_liveness(&definition, "foo");
+
+        assert!(matches!(
+            result,
+            Ok(LivenessCheck::TcpPort { port: 1234, .. })
+        ));
+    }
+
+    #[test]
+    fn test_require_liveness_should_error_when_none_is_configured() {
+        let definition = ServiceDefinition::new(
+            ServiceUser::create_managed("foo"),
+            "foo",
+            Vec::new(),
+            &[],
+            BootstrapReporting::Pipe,
+            None,
+        );
+
+        let result = require_liveness(&definition, "foo");
+
+        assert!(
+            matches!(result, Err(LivenessCheckError::MissingLivenessCheck(name)) if name == "foo")
+        );
+    }
+
+    #[test]
+    fn test_liveness_check_should_resolve_bract_to_a_unix_socket() {
+        let douglas_folders = config::DouglasFolders::new();
+
+        let result = liveness_check(config::services::BRACT, &douglas_folders);
+
+        assert!(matches!(result, Ok(LivenessCheck::UnixSocket(_))));
+    }
+
+    #[test]
+    fn test_liveness_check_should_resolve_resin_to_a_tcp_port() {
+        let douglas_folders = config::DouglasFolders::new();
+
+        let result = liveness_check(config::services::RESIN, &douglas_folders);
+
+        assert!(matches!(result, Ok(LivenessCheck::TcpPort { .. })));
+    }
+
+    #[test]
+    fn test_liveness_check_should_reject_an_unknown_service() {
+        let douglas_folders = config::DouglasFolders::new();
+
+        let result = liveness_check("not-a-real-service", &douglas_folders);
+
+        assert!(
+            matches!(result, Err(LivenessCheckError::UnknownService(name)) if name == "not-a-real-service")
+        );
     }
 }

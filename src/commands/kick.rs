@@ -62,19 +62,17 @@ async fn start_service(
 ) -> bool {
     match spawn_service(kick_target.service_name(), None, true, os, guard.span()) {
         Ok(()) => {
-            let liveness = match bootstrap::system::liveness_check(
-                kick_target.service_name(),
-                douglas_folders,
-            ) {
-                Ok(liveness) => liveness,
-                Err(err) => {
-                    guard.span().message(
-                        log::Level::Warn,
-                        &format!("Could not determine liveness check for {kick_target}: {err}"),
-                    );
-                    return false;
-                }
-            };
+            let liveness =
+                match bootstrap::liveness_check(kick_target.service_name(), douglas_folders) {
+                    Ok(liveness) => liveness,
+                    Err(err) => {
+                        guard.span().message(
+                            log::Level::Warn,
+                            &format!("Could not determine liveness check for {kick_target}: {err}"),
+                        );
+                        return false;
+                    }
+                };
 
             if wait_until_running(&liveness, guard.span()).await {
                 guard.span().message(

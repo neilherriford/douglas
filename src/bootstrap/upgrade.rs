@@ -1,7 +1,7 @@
 use crate::{
     bootstrap::{
-        HasServiceControl, KillService, OwnedServiceControl, ServiceControl, StopBract, journal,
-        retention, staged_copy::Installer,
+        CORE_SERVICES, HasServiceControl, KillService, OwnedServiceControl, ServiceControl,
+        StopBract, journal, retention, staged_copy::Installer,
     },
     cli::Presentation,
     commands::{print_failure, report_failure},
@@ -217,6 +217,15 @@ impl StateObserver<'_> {
     }
 }
 
+fn stop_services_steps<'a>() -> Vec<Step<'a>> {
+    let mut steps: Vec<Step<'a>> = Vec::new();
+    push_step(&mut steps, KillService::new(config::services::WOODWARD));
+    push_step(&mut steps, StopBract::new(false));
+    push_step(&mut steps, KillService::new(config::services::RESIN));
+    push_step(&mut steps, KillService::new(config::services::SEEDBANK));
+    steps
+}
+
 fn create_plan<'a>(
     state: &State,
     path: &Path,
@@ -284,10 +293,7 @@ fn create_plan<'a>(
         push_step(&mut result, RestartPreviousVersion::new(presentation));
     }
     push_step(&mut result, RecordUpgrade::new(current, candidate));
-    push_step(&mut result, KillService::new(config::services::WOODWARD));
-    push_step(&mut result, StopBract::new(false));
-    push_step(&mut result, KillService::new(config::services::RESIN));
-    push_step(&mut result, KillService::new(config::services::SEEDBANK));
+    result.extend(stop_services_steps());
     push_step(
         &mut result,
         OverwriteDouglasExecutable::new(path, current, restorable),
@@ -642,14 +648,8 @@ impl StartNewVersion {
         Self { presentation }
     }
 
-    async fn stop_what_the_new_version_started<'a>(span: &Span, context: &mut Context<'a>) {
-        let mut steps: Vec<Step<'a>> = Vec::new();
-        push_step(&mut steps, KillService::new(config::services::WOODWARD));
-        push_step(&mut steps, StopBract::new(false));
-        push_step(&mut steps, KillService::new(config::services::RESIN));
-        push_step(&mut steps, KillService::new(config::services::SEEDBANK));
-
-        for step in &mut steps {
+    async fn stop_what_the_new_version_started(span: &Span, context: &mut Context<'_>) {
+        for mut step in stop_services_steps() {
             if let Err(err) = step.run(span, context).await {
                 span.message(Level::Info, &format!("[{step}] {err}"));
             }
@@ -705,12 +705,6 @@ impl<'a> Command<Context<'a>> for StartNewVersion {
 
 const HEALTH_SOAK: Duration = Duration::from_secs(10);
 const HEALTH_INTERVAL: Duration = Duration::from_secs(1);
-const HEALTH_SERVICES: [&str; 4] = [
-    config::services::WOODWARD,
-    config::services::BRACT,
-    config::services::RESIN,
-    config::services::SEEDBANK,
-];
 
 #[derive(Debug)]
 struct ConfirmHealthy {
@@ -737,7 +731,7 @@ impl ConfirmHealthy {
     ) -> Result<(), UpgradeError> {
         let control = &context.service_control;
 
-        for service in HEALTH_SERVICES {
+        for service in CORE_SERVICES.iter().map(|service| service.name) {
             let unhealthy = |reason: String| UpgradeError::Unhealthy {
                 service: service.to_string(),
                 reason,

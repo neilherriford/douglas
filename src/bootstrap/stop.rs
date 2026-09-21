@@ -51,12 +51,16 @@ enum State {
     Root(Liveness),
 }
 
+struct LivenessChecks {
+    bract: LivenessCheck,
+    seedbank: LivenessCheck,
+    resin: LivenessCheck,
+    woodward: LivenessCheck,
+}
+
 struct StateObserver<'a> {
     credentials: &'a dyn Credentials,
-    bract_liveness_check: &'a LivenessCheck,
-    seedbank_liveness_check: &'a LivenessCheck,
-    resin_liveness_check: &'a LivenessCheck,
-    woodward_liveness_check: &'a LivenessCheck,
+    liveness_checks: &'a LivenessChecks,
 }
 
 impl StateObserver<'_> {
@@ -73,10 +77,10 @@ impl StateObserver<'_> {
         }
 
         let result = State::Root(Liveness {
-            bract: check_liveness(guard.span(), self.bract_liveness_check),
-            seedbank: check_liveness(guard.span(), self.seedbank_liveness_check),
-            resin: check_liveness(guard.span(), self.resin_liveness_check),
-            woodward: check_liveness(guard.span(), self.woodward_liveness_check),
+            bract: check_liveness(guard.span(), &self.liveness_checks.bract),
+            seedbank: check_liveness(guard.span(), &self.liveness_checks.seedbank),
+            resin: check_liveness(guard.span(), &self.liveness_checks.resin),
+            woodward: check_liveness(guard.span(), &self.liveness_checks.woodward),
         });
 
         guard.finish(Ok(result))
@@ -134,6 +138,18 @@ fn try_fetch_liveness_check(
     }
 }
 
+fn fetch_liveness_checks(
+    guard: &ScopeGuard,
+    douglas_folders: &DouglasFolders,
+) -> Option<LivenessChecks> {
+    Some(LivenessChecks {
+        bract: try_fetch_liveness_check(guard, config::services::BRACT, douglas_folders)?,
+        seedbank: try_fetch_liveness_check(guard, config::services::SEEDBANK, douglas_folders)?,
+        resin: try_fetch_liveness_check(guard, config::services::RESIN, douglas_folders)?,
+        woodward: try_fetch_liveness_check(guard, config::services::WOODWARD, douglas_folders)?,
+    })
+}
+
 pub async fn perform(reporter: Arc<dyn Reporter>, plan_only: bool, deps: Dependencies) -> bool {
     let guard = Span::new(
         Arc::clone(&reporter),
@@ -142,40 +158,14 @@ pub async fn perform(reporter: Arc<dyn Reporter>, plan_only: bool, deps: Depende
     )
     .start_guard();
 
-    let Some(bract_liveness_check) =
-        &try_fetch_liveness_check(&guard, config::services::BRACT, &deps.douglas_folders)
-    else {
-        guard.finish_with_outcome(log::Outcome::Failed);
-        return false;
-    };
-
-    let Some(seedbank_liveness_check) =
-        &try_fetch_liveness_check(&guard, config::services::SEEDBANK, &deps.douglas_folders)
-    else {
-        guard.finish_with_outcome(log::Outcome::Failed);
-        return false;
-    };
-
-    let Some(resin_liveness_check) =
-        &try_fetch_liveness_check(&guard, config::services::RESIN, &deps.douglas_folders)
-    else {
-        guard.finish_with_outcome(log::Outcome::Failed);
-        return false;
-    };
-
-    let Some(woodward_liveness_check) =
-        &try_fetch_liveness_check(&guard, config::services::WOODWARD, &deps.douglas_folders)
-    else {
+    let Some(liveness_checks) = fetch_liveness_checks(&guard, &deps.douglas_folders) else {
         guard.finish_with_outcome(log::Outcome::Failed);
         return false;
     };
 
     let mut state_observer = StateObserver {
         credentials: deps.credentials.as_ref(),
-        bract_liveness_check,
-        seedbank_liveness_check,
-        resin_liveness_check,
-        woodward_liveness_check,
+        liveness_checks: &liveness_checks,
     };
     let state = match state_observer.discover(guard.span()) {
         Ok(state) => state,
