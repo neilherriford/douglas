@@ -1,3 +1,6 @@
+mod image_reference;
+pub use image_reference::{ImageReference, ImageReferenceError};
+
 use refined_string::{StringRules, Validated};
 use regex::Regex;
 use serde::ser::{SerializeMap, SerializeSeq, SerializeStruct};
