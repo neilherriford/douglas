@@ -11,7 +11,7 @@ use axum::{
     response::IntoResponse,
 };
 use log::{Outcome, Reporter, ScopeKind, Span};
-use resin_types::Name;
+use resin_types::{Name, Repository};
 use sha2::Sha256;
 use std::{str::FromStr, sync::Arc};
 use tokio_util::io::ReaderStream;
@@ -78,7 +78,7 @@ async fn get_digest_from_reference(
         return Ok(digest);
     }
 
-    match tag_store.read(name, reference) {
+    match tag_store.read(&Repository::Local(name.clone()), reference) {
         Ok(digest) => Ok(digest),
         Err(TagStoreError::UnknownRepository(_)) | Err(TagStoreError::UnknwonTag { .. }) => {
             blob_store
@@ -212,7 +212,9 @@ async fn write_manifest(
                 .save(&name, &computed, source, media_type, ResourceKind::Manifest)
                 .await?;
 
-            state.tag_store.write(&name, &reference, &computed)?;
+            state
+                .tag_store
+                .write(&Repository::Local(name.clone()), &reference, &computed)?;
             computed
         }
     };
@@ -324,8 +326,9 @@ fn remove_tags_pointing_to(
     digest: &Digest,
 ) {
     let guard = Span::new(Arc::clone(reporter), "Tag cleanup", ScopeKind::Task).start_guard();
+    let repository = Repository::Local(name.clone());
 
-    let tags = match tag_store.list(name) {
+    let tags = match tag_store.list(&repository) {
         Ok(tags) => tags,
         Err(err) => {
             guard.span().message(
@@ -341,14 +344,14 @@ fn remove_tags_pointing_to(
 
     for tag in tags {
         let points_at_deleted_digest = tag_store
-            .read(name, &tag)
+            .read(&repository, &tag)
             .is_ok_and(|resolved| resolved == *digest);
 
         if !points_at_deleted_digest {
             continue;
         }
 
-        if let Err(err) = tag_store.delete(name, &tag) {
+        if let Err(err) = tag_store.delete(&repository, &tag) {
             had_error = true;
             guard.span().message(
                 log::Level::Warn,

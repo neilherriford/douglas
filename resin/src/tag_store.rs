@@ -3,7 +3,7 @@ use crate::{
     tag_store::TagStoreError::UnknownRepository,
 };
 use file_system::{EntryKind, FileDeleter, FileReader, FileSystemError, FileWriter, Folder};
-use resin_types::Name;
+use resin_types::Repository;
 use std::{path::PathBuf, sync::Arc};
 use thiserror::Error;
 
@@ -24,10 +24,15 @@ pub enum TagStoreError {
 
 #[cfg_attr(test, mockall::automock)]
 pub trait TagStore: Send + Sync {
-    fn list(&self, name: &Name) -> Result<Vec<String>, TagStoreError>;
-    fn read(&self, name: &Name, tag: &str) -> Result<Digest, TagStoreError>;
-    fn write(&self, name: &Name, tag: &str, digest: &Digest) -> Result<(), TagStoreError>;
-    fn delete(&self, name: &Name, tag: &str) -> Result<bool, TagStoreError>;
+    fn list(&self, repository: &Repository) -> Result<Vec<String>, TagStoreError>;
+    fn read(&self, repository: &Repository, tag: &str) -> Result<Digest, TagStoreError>;
+    fn write(
+        &self,
+        repository: &Repository,
+        tag: &str,
+        digest: &Digest,
+    ) -> Result<(), TagStoreError>;
+    fn delete(&self, repository: &Repository, tag: &str) -> Result<bool, TagStoreError>;
 }
 
 pub struct FileTagStore {
@@ -55,34 +60,34 @@ impl FileTagStore {
         }
     }
 
-    fn get_repository_path(&self, name: &Name) -> PathBuf {
+    fn get_repository_path(&self, repository: &Repository) -> PathBuf {
         let mut result = self.root.clone();
-        result.push(name.fs_safe());
+        result.push(repository.storage_path());
         result
     }
 
-    fn get_tags_path(&self, name: &Name) -> PathBuf {
-        let mut result = self.get_repository_path(name);
+    fn get_tags_path(&self, repository: &Repository) -> PathBuf {
+        let mut result = self.get_repository_path(repository);
         result.push("_manifests");
         result.push("tags");
         result
     }
 
-    fn assert_repository_exists(&self, name: &Name) -> Result<(), TagStoreError> {
-        let repository_path = self.get_repository_path(name);
+    fn assert_repository_exists(&self, repository: &Repository) -> Result<(), TagStoreError> {
+        let repository_path = self.get_repository_path(repository);
         if self.folder.exists(&repository_path) {
             Ok(())
         } else {
-            Err(UnknownRepository(name.to_string()))
+            Err(UnknownRepository(repository.to_string()))
         }
     }
 }
 
 impl TagStore for FileTagStore {
-    fn list(&self, name: &Name) -> Result<Vec<String>, TagStoreError> {
-        self.assert_repository_exists(name)?;
+    fn list(&self, repository: &Repository) -> Result<Vec<String>, TagStoreError> {
+        self.assert_repository_exists(repository)?;
 
-        let tag_path = self.get_tags_path(name);
+        let tag_path = self.get_tags_path(repository);
         if !self.folder.exists(&tag_path) {
             return Ok(Vec::new());
         }
@@ -99,10 +104,10 @@ impl TagStore for FileTagStore {
         Ok(tags)
     }
 
-    fn read(&self, name: &Name, tag: &str) -> Result<Digest, TagStoreError> {
-        self.assert_repository_exists(name)?;
+    fn read(&self, repository: &Repository, tag: &str) -> Result<Digest, TagStoreError> {
+        self.assert_repository_exists(repository)?;
 
-        let mut tag_path = self.get_tags_path(name);
+        let mut tag_path = self.get_tags_path(repository);
         tag_path.push(tag);
 
         if self.file_reader.exists(&tag_path) {
@@ -111,16 +116,21 @@ impl TagStore for FileTagStore {
             Ok(digest)
         } else {
             Err(TagStoreError::UnknwonTag {
-                repository: name.to_string(),
+                repository: repository.to_string(),
                 tag: tag.to_string(),
             })
         }
     }
 
-    fn write(&self, name: &Name, tag: &str, digest: &Digest) -> Result<(), TagStoreError> {
-        self.assert_repository_exists(name)?;
+    fn write(
+        &self,
+        repository: &Repository,
+        tag: &str,
+        digest: &Digest,
+    ) -> Result<(), TagStoreError> {
+        self.assert_repository_exists(repository)?;
 
-        let mut tags_path = self.get_tags_path(name);
+        let mut tags_path = self.get_tags_path(repository);
         if !self.folder.exists(&tags_path) {
             self.folder.create_recursively(&tags_path)?;
         }
@@ -132,10 +142,10 @@ impl TagStore for FileTagStore {
         Ok(())
     }
 
-    fn delete(&self, name: &Name, tag: &str) -> Result<bool, TagStoreError> {
-        self.assert_repository_exists(name)?;
+    fn delete(&self, repository: &Repository, tag: &str) -> Result<bool, TagStoreError> {
+        self.assert_repository_exists(repository)?;
 
-        let mut tag_path = self.get_tags_path(name);
+        let mut tag_path = self.get_tags_path(repository);
         tag_path.push(tag);
 
         if self.file_reader.exists(&tag_path) {
@@ -152,8 +162,8 @@ mod tests {
     mod list {
         use crate::tag_store::{FileTagStore, TagStore, TagStoreError};
         use file_system::{Entry, MockFileDeleter, MockFileReader, MockFileWriter, MockFolder};
-        use resin_types::Name;
-        use std::{path::PathBuf, str::FromStr, sync::Arc};
+        use resin_types::Repository;
+        use std::{path::PathBuf, sync::Arc};
 
         #[test]
         fn should_return_error_if_repository_does_not_exist() {
@@ -163,7 +173,7 @@ mod tests {
             let file_writer = MockFileWriter::new();
             let file_deleter = MockFileDeleter::new();
 
-            folder.given_does_not_exist("/tmp/oops/");
+            folder.given_does_not_exist("/tmp/local/oops/");
 
             let store = FileTagStore::new(
                 root,
@@ -174,7 +184,7 @@ mod tests {
             );
 
             assert!(matches!(
-                store.list(&Name::from_str("oops").expect("parsable")),
+                store.list(&"oops".parse::<Repository>().expect("parsable")),
                 Err(TagStoreError::UnknownRepository(r)) if r == "oops"
             ))
         }
@@ -187,8 +197,8 @@ mod tests {
             let file_writer = MockFileWriter::new();
             let file_deleter = MockFileDeleter::new();
 
-            folder.given_exists("/tmp/foo/");
-            folder.given_does_not_exist("/tmp/foo/_manifests/tags");
+            folder.given_exists("/tmp/local/foo/");
+            folder.given_does_not_exist("/tmp/local/foo/_manifests/tags");
 
             let store = FileTagStore::new(
                 root,
@@ -199,7 +209,7 @@ mod tests {
             );
 
             assert!(matches!(
-                store.list(&Name::from_str("foo").expect("parsable")),
+                store.list(&"foo".parse::<Repository>().expect("parsable")),
                 Ok(tags) if tags.is_empty()
             ))
         }
@@ -212,10 +222,10 @@ mod tests {
             let file_writer = MockFileWriter::new();
             let file_deleter = MockFileDeleter::new();
 
-            folder.given_exists("/tmp/oops/");
-            folder.given_exists("/tmp/oops/_manifests/tags");
+            folder.given_exists("/tmp/local/oops/");
+            folder.given_exists("/tmp/local/oops/_manifests/tags");
             folder.given_folder_entries(
-                "/tmp/oops/_manifests/tags",
+                "/tmp/local/oops/_manifests/tags",
                 vec![
                     Entry::create_directory("foo"),
                     Entry::create_file_entry("bar"),
@@ -231,7 +241,7 @@ mod tests {
             );
 
             assert!(matches!(
-                store.list(&Name::from_str("oops").expect("parsable")),
+                store.list(&"oops".parse::<Repository>().expect("parsable")),
                 Ok(items) if items == vec!["bar".to_string()]
             ));
         }
@@ -244,10 +254,10 @@ mod tests {
             let file_writer = MockFileWriter::new();
             let file_deleter = MockFileDeleter::new();
 
-            folder.given_exists("/tmp/oops/");
-            folder.given_exists("/tmp/oops/_manifests/tags");
+            folder.given_exists("/tmp/local/oops/");
+            folder.given_exists("/tmp/local/oops/_manifests/tags");
             folder.given_folder_entries(
-                "/tmp/oops/_manifests/tags",
+                "/tmp/local/oops/_manifests/tags",
                 vec![
                     Entry::create_file_entry("v2"),
                     Entry::create_file_entry("latest"),
@@ -264,7 +274,7 @@ mod tests {
             );
 
             assert!(matches!(
-                store.list(&Name::from_str("oops").expect("parsable")),
+                store.list(&"oops".parse::<Repository>().expect("parsable")),
                 Ok(items) if items == vec!["latest".to_string(), "v1".to_string(), "v2".to_string()]
             ));
         }
@@ -277,7 +287,7 @@ mod tests {
             let file_writer = MockFileWriter::new();
             let file_deleter = MockFileDeleter::new();
 
-            folder.given_does_not_exist("/tmp/myns%2Foops/");
+            folder.given_does_not_exist("/tmp/local/myns%2Foops/");
 
             let store = FileTagStore::new(
                 root,
@@ -288,7 +298,7 @@ mod tests {
             );
 
             assert!(matches!(
-                store.list(&Name::from_namespaced("myns", "oops").expect("parsable")),
+                store.list(&"myns/oops".parse::<Repository>().expect("parsable")),
                 Err(TagStoreError::UnknownRepository(r)) if r == "myns/oops"
             ))
         }
@@ -300,8 +310,8 @@ mod tests {
             tag_store::{FileTagStore, TagStore, TagStoreError},
         };
         use file_system::{MockFileDeleter, MockFileReader, MockFileWriter, MockFolder};
-        use resin_types::Name;
-        use std::{path::PathBuf, str::FromStr, sync::Arc};
+        use resin_types::Repository;
+        use std::{path::PathBuf, sync::Arc};
 
         #[test]
         fn should_return_error_if_repository_does_not_exist() {
@@ -311,7 +321,7 @@ mod tests {
             let file_writer = MockFileWriter::new();
             let file_deleter = MockFileDeleter::new();
 
-            folder.given_does_not_exist("/tmp/oops/");
+            folder.given_does_not_exist("/tmp/local/oops/");
 
             let store = FileTagStore::new(
                 root,
@@ -322,7 +332,7 @@ mod tests {
             );
 
             assert!(matches!(
-                store.read(&Name::from_str("oops").expect("parsable"), "foo"),
+                store.read(&"oops".parse::<Repository>().expect("parsable"), "foo"),
                 Err(TagStoreError::UnknownRepository(r)) if r == "oops"
             ))
         }
@@ -335,8 +345,8 @@ mod tests {
             let file_writer = MockFileWriter::new();
             let file_deleter = MockFileDeleter::new();
 
-            folder.given_exists("/tmp/foo/");
-            file_reader.given_does_not_exist("/tmp/foo/_manifests/tags/bar");
+            folder.given_exists("/tmp/local/foo/");
+            file_reader.given_does_not_exist("/tmp/local/foo/_manifests/tags/bar");
 
             let store = FileTagStore::new(
                 root,
@@ -347,7 +357,7 @@ mod tests {
             );
 
             assert!(matches!(
-                store.read(&Name::from_str("foo").expect("parsable"), "bar"),
+                store.read(&"foo".parse::<Repository>().expect("parsable"), "bar"),
                 Err(TagStoreError::UnknwonTag { repository: r, tag: t }) if r == "foo" && t == "bar"
             ));
         }
@@ -360,9 +370,10 @@ mod tests {
             let file_writer = MockFileWriter::new();
             let file_deleter = MockFileDeleter::new();
 
-            folder.given_exists("/tmp/foo/");
-            file_reader.given_exists("/tmp/foo/_manifests/tags/bar");
-            file_reader.given_can_read_all_with_contents("/tmp/foo/_manifests/tags/bar", "whoops");
+            folder.given_exists("/tmp/local/foo/");
+            file_reader.given_exists("/tmp/local/foo/_manifests/tags/bar");
+            file_reader
+                .given_can_read_all_with_contents("/tmp/local/foo/_manifests/tags/bar", "whoops");
 
             let store = FileTagStore::new(
                 root,
@@ -373,7 +384,7 @@ mod tests {
             );
 
             assert!(matches!(
-                store.read(&Name::from_str("foo").expect("parsable"), "bar"),
+                store.read(&"foo".parse::<Repository>().expect("parsable"), "bar"),
                 Err(TagStoreError::DigestError(DigestError::InvalidDigest))
             ));
         }
@@ -386,11 +397,11 @@ mod tests {
             let file_writer = MockFileWriter::new();
             let file_deleter = MockFileDeleter::new();
 
-            folder.given_exists("/tmp/foo/");
-            file_reader.given_exists("/tmp/foo/_manifests/tags/bar");
+            folder.given_exists("/tmp/local/foo/");
+            file_reader.given_exists("/tmp/local/foo/_manifests/tags/bar");
             let sha = "ff".repeat(32);
             file_reader.given_can_read_all_with_contents(
-                "/tmp/foo/_manifests/tags/bar",
+                "/tmp/local/foo/_manifests/tags/bar",
                 &format!("sha256:{sha}"),
             );
 
@@ -403,7 +414,7 @@ mod tests {
             );
 
             assert!(matches!(
-                store.read(&Name::from_str("foo").expect("parsable"), "bar"),
+                store.read(&"foo".parse::<Repository>().expect("parsable"), "bar"),
                 Ok(digest) if digest.hex() == sha
             ));
         }
@@ -416,11 +427,11 @@ mod tests {
             let file_writer = MockFileWriter::new();
             let file_deleter = MockFileDeleter::new();
 
-            folder.given_exists("/tmp/foo/");
-            file_reader.given_exists("/tmp/foo/_manifests/tags/bar");
+            folder.given_exists("/tmp/local/foo/");
+            file_reader.given_exists("/tmp/local/foo/_manifests/tags/bar");
             let sha = "ff".repeat(32);
             file_reader.given_can_read_all_with_contents(
-                "/tmp/foo/_manifests/tags/bar",
+                "/tmp/local/foo/_manifests/tags/bar",
                 &format!("sha256:{sha}\n"),
             );
 
@@ -433,7 +444,7 @@ mod tests {
             );
 
             assert!(matches!(
-                store.read(&Name::from_str("foo").expect("parsable"), "bar"),
+                store.read(&"foo".parse::<Repository>().expect("parsable"), "bar"),
                 Ok(digest) if digest.hex() == sha
             ));
         }
@@ -446,11 +457,11 @@ mod tests {
             let file_writer = MockFileWriter::new();
             let file_deleter = MockFileDeleter::new();
 
-            folder.given_exists("/tmp/myns%2Ffoo/");
-            file_reader.given_exists("/tmp/myns%2Ffoo/_manifests/tags/bar");
+            folder.given_exists("/tmp/local/myns%2Ffoo/");
+            file_reader.given_exists("/tmp/local/myns%2Ffoo/_manifests/tags/bar");
             let sha = "ff".repeat(32);
             file_reader.given_can_read_all_with_contents(
-                "/tmp/myns%2Ffoo/_manifests/tags/bar",
+                "/tmp/local/myns%2Ffoo/_manifests/tags/bar",
                 &format!("sha256:{sha}"),
             );
 
@@ -463,7 +474,7 @@ mod tests {
             );
 
             assert!(matches!(
-                store.read(&Name::from_namespaced("myns", "foo").expect("parsable"), "bar"),
+                store.read(&"myns/foo".parse::<Repository>().expect("parsable"), "bar"),
                 Ok(digest) if digest.hex() == sha
             ));
         }
@@ -475,8 +486,8 @@ mod tests {
             tag_store::{FileTagStore, TagStore, TagStoreError},
         };
         use file_system::{MockFileDeleter, MockFileReader, MockFileWriter, MockFolder};
-        use resin_types::Name;
-        use std::{path::PathBuf, str::FromStr, sync::Arc};
+        use resin_types::Repository;
+        use std::{path::PathBuf, sync::Arc};
 
         #[test]
         fn should_return_error_if_repository_does_not_exist() {
@@ -486,7 +497,7 @@ mod tests {
             let file_writer = MockFileWriter::new();
             let file_deleter = MockFileDeleter::new();
 
-            folder.given_does_not_exist("/tmp/oops/");
+            folder.given_does_not_exist("/tmp/local/oops/");
 
             let store = FileTagStore::new(
                 root,
@@ -500,7 +511,7 @@ mod tests {
             let digest = Digest(format!("sha256:{sha}"));
 
             assert!(matches!(
-                store.write(&Name::from_str("oops").expect("parsable"), "foo", &digest),
+                store.write(&"oops".parse::<Repository>().expect("parsable"), "foo", &digest),
                 Err(TagStoreError::UnknownRepository(r)) if r == "oops"
             ))
         }
@@ -516,10 +527,10 @@ mod tests {
             let sha = "ff".repeat(32);
             let digest = Digest(format!("sha256:{sha}"));
 
-            folder.given_exists("/tmp/foo/");
-            folder.given_exists("/tmp/foo/_manifests/tags");
+            folder.given_exists("/tmp/local/foo/");
+            folder.given_exists("/tmp/local/foo/_manifests/tags");
             file_writer.expect_write_to_file_with_contents(
-                "/tmp/foo/_manifests/tags/bar",
+                "/tmp/local/foo/_manifests/tags/bar",
                 &digest.to_string(),
             );
 
@@ -532,7 +543,11 @@ mod tests {
             );
 
             assert!(matches!(
-                store.write(&Name::from_str("foo").expect("parsable"), "bar", &digest),
+                store.write(
+                    &"foo".parse::<Repository>().expect("parsable"),
+                    "bar",
+                    &digest
+                ),
                 Ok(())
             ))
         }
@@ -548,11 +563,11 @@ mod tests {
             let sha = "ff".repeat(32);
             let digest = Digest(format!("sha256:{sha}"));
 
-            folder.given_exists("/tmp/foo/");
-            folder.given_does_not_exist("/tmp/foo/_manifests/tags");
-            folder.expect_create_folder_recursively_with("/tmp/foo/_manifests/tags");
+            folder.given_exists("/tmp/local/foo/");
+            folder.given_does_not_exist("/tmp/local/foo/_manifests/tags");
+            folder.expect_create_folder_recursively_with("/tmp/local/foo/_manifests/tags");
             file_writer.expect_write_to_file_with_contents(
-                "/tmp/foo/_manifests/tags/bar",
+                "/tmp/local/foo/_manifests/tags/bar",
                 &digest.to_string(),
             );
 
@@ -565,7 +580,11 @@ mod tests {
             );
 
             assert!(matches!(
-                store.write(&Name::from_str("foo").expect("parsable"), "bar", &digest),
+                store.write(
+                    &"foo".parse::<Repository>().expect("parsable"),
+                    "bar",
+                    &digest
+                ),
                 Ok(())
             ))
         }
@@ -581,10 +600,10 @@ mod tests {
             let sha = "ff".repeat(32);
             let digest = Digest(format!("sha256:{sha}"));
 
-            folder.given_exists("/tmp/myns%2Ffoo/");
-            folder.given_exists("/tmp/myns%2Ffoo/_manifests/tags");
+            folder.given_exists("/tmp/local/myns%2Ffoo/");
+            folder.given_exists("/tmp/local/myns%2Ffoo/_manifests/tags");
             file_writer.expect_write_to_file_with_contents(
-                "/tmp/myns%2Ffoo/_manifests/tags/bar",
+                "/tmp/local/myns%2Ffoo/_manifests/tags/bar",
                 &digest.to_string(),
             );
 
@@ -598,7 +617,7 @@ mod tests {
 
             assert!(matches!(
                 store.write(
-                    &Name::from_namespaced("myns", "foo").expect("parsable"),
+                    &"myns/foo".parse::<Repository>().expect("parsable"),
                     "bar",
                     &digest
                 ),
@@ -610,8 +629,8 @@ mod tests {
     mod delete {
         use crate::tag_store::{FileTagStore, TagStore, TagStoreError};
         use file_system::{MockFileDeleter, MockFileReader, MockFileWriter, MockFolder};
-        use resin_types::Name;
-        use std::{path::PathBuf, str::FromStr, sync::Arc};
+        use resin_types::Repository;
+        use std::{path::PathBuf, sync::Arc};
 
         #[test]
         fn should_return_error_if_repository_does_not_exist() {
@@ -621,7 +640,7 @@ mod tests {
             let file_writer = MockFileWriter::new();
             let file_deleter = MockFileDeleter::new();
 
-            folder.given_does_not_exist("/tmp/oops/");
+            folder.given_does_not_exist("/tmp/local/oops/");
 
             let store = FileTagStore::new(
                 root,
@@ -632,7 +651,7 @@ mod tests {
             );
 
             assert!(matches!(
-                store.delete(&Name::from_str("oops").expect("parsable"), "foo"),
+                store.delete(&"oops".parse::<Repository>().expect("parsable"), "foo"),
                 Err(TagStoreError::UnknownRepository(r)) if r == "oops"
             ))
         }
@@ -645,8 +664,8 @@ mod tests {
             let file_writer = MockFileWriter::new();
             let file_deleter = MockFileDeleter::new();
 
-            folder.given_exists("/tmp/foo/");
-            file_reader.given_does_not_exist("/tmp/foo/_manifests/tags/bar");
+            folder.given_exists("/tmp/local/foo/");
+            file_reader.given_does_not_exist("/tmp/local/foo/_manifests/tags/bar");
 
             let store = FileTagStore::new(
                 root,
@@ -657,7 +676,7 @@ mod tests {
             );
 
             assert!(matches!(
-                store.delete(&Name::from_str("foo").expect("parsable"), "bar"),
+                store.delete(&"foo".parse::<Repository>().expect("parsable"), "bar"),
                 Ok(false)
             ))
         }
@@ -670,9 +689,9 @@ mod tests {
             let file_writer = MockFileWriter::new();
             let mut file_deleter = MockFileDeleter::new();
 
-            folder.given_exists("/tmp/foo/");
-            file_reader.given_exists("/tmp/foo/_manifests/tags/bar");
-            file_deleter.expect_file_to_be_deleted("/tmp/foo/_manifests/tags/bar");
+            folder.given_exists("/tmp/local/foo/");
+            file_reader.given_exists("/tmp/local/foo/_manifests/tags/bar");
+            file_deleter.expect_file_to_be_deleted("/tmp/local/foo/_manifests/tags/bar");
 
             let store = FileTagStore::new(
                 root,
@@ -683,7 +702,7 @@ mod tests {
             );
 
             assert!(matches!(
-                store.delete(&Name::from_str("foo").expect("parsable"), "bar"),
+                store.delete(&"foo".parse::<Repository>().expect("parsable"), "bar"),
                 Ok(true)
             ))
         }

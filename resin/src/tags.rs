@@ -7,7 +7,7 @@ use axum::{
     http::StatusCode,
     response::IntoResponse,
 };
-use resin_types::Name;
+use resin_types::{Name, Repository};
 use serde::Deserialize;
 use serde_json::{Map, Value};
 use std::{str::FromStr, sync::Arc};
@@ -55,7 +55,9 @@ async fn get_tag_list(
     name: Name,
     params: TagListParams,
 ) -> Result<impl IntoResponse, ServerError> {
-    let all_tags = tag_store.list(&name).map_err(to_tag_error)?;
+    let all_tags = tag_store
+        .list(&Repository::Local(name.clone()))
+        .map_err(to_tag_error)?;
     let (page, has_more) = paginate_tags(&all_tags, params.last.as_deref(), params.n);
 
     let mut map = Map::new();
