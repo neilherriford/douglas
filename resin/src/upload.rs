@@ -1,4 +1,5 @@
 use crate::UploadState;
+use crate::authorize::authorize_write;
 use crate::{ServerError, digest::Digest};
 use axum::extract::Query;
 use axum::http::HeaderMap;
@@ -8,7 +9,7 @@ use axum::{
     response::IntoResponse,
 };
 use http_body::Body as HttpBody;
-use resin_types::Name;
+use resin_types::{Name, Repository};
 use serde::Deserialize;
 use std::{
     io,
@@ -28,10 +29,12 @@ pub(crate) struct StartParams {
 
 pub(crate) async fn start(
     State(state): State<UploadState>,
-    Path(name): Path<String>,
+    Path(repository): Path<String>,
     Query(params): Query<StartParams>,
 ) -> Result<impl IntoResponse, ServerError> {
-    start_upload(state, Name::from_str(&name)?, params)
+    let repository: Repository = repository.parse()?;
+    let name = authorize_write(&repository, state.seedling_registration_client.as_ref()).await?;
+    start_upload(state, name, params)
 }
 
 fn start_upload(
@@ -68,9 +71,11 @@ fn start_upload(
 
 pub(crate) async fn status(
     State(state): State<UploadState>,
-    Path((name, uuid)): Path<(String, Uuid)>,
+    Path((repository, uuid)): Path<(String, Uuid)>,
 ) -> Result<impl IntoResponse, ServerError> {
-    get_status(state, uuid, Name::from_str(&name)?)
+    let repository: Repository = repository.parse()?;
+    let name = repository.require_local()?;
+    get_status(state, uuid, name.clone())
 }
 
 fn get_status(
@@ -91,12 +96,14 @@ fn get_status(
 
 pub(crate) async fn write_chunk(
     State(state): State<UploadState>,
-    Path((name, uuid)): Path<(String, Uuid)>,
+    Path((repository, uuid)): Path<(String, Uuid)>,
     headers: HeaderMap,
     body: axum::body::Body,
 ) -> Result<impl IntoResponse, ServerError> {
     let range_start = parse_range_start(&headers)?;
-    write(state, Name::from_str(&name)?, uuid, range_start, body).await
+    let repository: Repository = repository.parse()?;
+    let name = authorize_write(&repository, state.seedling_registration_client.as_ref()).await?;
+    write(state, name, uuid, range_start, body).await
 }
 
 async fn write(
@@ -184,11 +191,13 @@ pub(crate) struct CompleteParams {
 
 pub(crate) async fn complete(
     State(state): State<UploadState>,
-    Path((name, uuid)): Path<(String, Uuid)>,
+    Path((repository, uuid)): Path<(String, Uuid)>,
     Query(params): Query<CompleteParams>,
     headers: HeaderMap,
 ) -> Result<impl IntoResponse, ServerError> {
-    complete_upload(state, uuid, params, Name::from_str(&name)?, headers)
+    let repository: Repository = repository.parse()?;
+    let name = authorize_write(&repository, state.seedling_registration_client.as_ref()).await?;
+    complete_upload(state, uuid, params, name, headers)
 }
 
 fn complete_upload(
@@ -218,9 +227,11 @@ fn complete_upload(
 
 pub(crate) async fn abort(
     State(state): State<UploadState>,
-    Path((name, uuid)): Path<(String, Uuid)>,
+    Path((repository, uuid)): Path<(String, Uuid)>,
 ) -> Result<impl IntoResponse, ServerError> {
-    abort_upload(state, Name::from_str(&name)?, uuid)
+    let repository: Repository = repository.parse()?;
+    let name = authorize_write(&repository, state.seedling_registration_client.as_ref()).await?;
+    abort_upload(state, name, uuid)
 }
 
 fn abort_upload(
@@ -287,6 +298,7 @@ mod tests {
         };
         use axum::response::IntoResponse;
         use resin_types::Name;
+        use seedling_registration_client::MockClient;
         use std::{str::FromStr, sync::Arc};
         use uuid::Uuid;
 
@@ -303,6 +315,7 @@ mod tests {
             let state = UploadState {
                 blob_uploader: Arc::new(blob_uploader),
                 blob_mounter: Arc::new(blob_mounter),
+                seedling_registration_client: Arc::new(MockClient::new()),
             };
             let name = Name::from_str("foo").unwrap();
             let params = StartParams {
@@ -334,6 +347,7 @@ mod tests {
             let state = UploadState {
                 blob_uploader: Arc::new(blob_uploader),
                 blob_mounter: Arc::new(blob_mounter),
+                seedling_registration_client: Arc::new(MockClient::new()),
             };
             let name = Name::from_str("foo").unwrap();
             let params = StartParams {
@@ -359,6 +373,7 @@ mod tests {
             let state = UploadState {
                 blob_uploader: Arc::new(blob_uploader),
                 blob_mounter: Arc::new(blob_mounter),
+                seedling_registration_client: Arc::new(MockClient::new()),
             };
             let name = Name::from_str("foo").unwrap();
             let params = StartParams {
@@ -382,6 +397,7 @@ mod tests {
             let state = UploadState {
                 blob_uploader: Arc::new(blob_uploader),
                 blob_mounter: Arc::new(blob_mounter),
+                seedling_registration_client: Arc::new(MockClient::new()),
             };
             let name = Name::from_str("foo").unwrap();
             let params = StartParams {
@@ -408,6 +424,7 @@ mod tests {
             let state = UploadState {
                 blob_uploader: Arc::new(blob_uploader),
                 blob_mounter: Arc::new(blob_mounter),
+                seedling_registration_client: Arc::new(MockClient::new()),
             };
             let name = Name::from_str("foo").unwrap();
             let params = StartParams {

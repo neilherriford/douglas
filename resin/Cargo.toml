@@ -33,6 +33,7 @@ simple_rest_client = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
+tower = "0.5"
 uuid = { workspace = true }
 
 [features]
@@ -44,4 +45,3 @@ file_system = { workspace = true, features = ["mock"] }
 reconcile_trigger_client = { workspace = true, features = ["mock"] }
 seedling_registration_client = { workspace = true, features = ["mock"] }
 simple_rest_client = { workspace = true, features = ["mock"] }
-tower = "0.5"

@@ -1,5 +1,6 @@
 use crate::{
     BlobState, ServerError,
+    authorize::authorize_write,
     blob_store::{BlobStoreError, ResourceKind},
     digest::Digest,
 };
@@ -9,7 +10,7 @@ use axum::{
     http::StatusCode,
     response::IntoResponse,
 };
-use resin_types::Name;
+use resin_types::{Name, Repository};
 use std::{str::FromStr, sync::Arc};
 use tokio_util::io::ReaderStream;
 
@@ -22,16 +23,11 @@ fn to_blob_error(error: BlobStoreError) -> ServerError {
 
 pub(crate) async fn info(
     State(state): State<BlobState>,
-    Path((name, raw_digest)): Path<(String, String)>,
+    Path((repository, raw_digest)): Path<(String, String)>,
 ) -> Result<impl IntoResponse, ServerError> {
-    read_blob_info(state, Name::from_str(&name)?, raw_digest).await
-}
-
-pub(crate) async fn info_namespaced(
-    State(state): State<BlobState>,
-    Path((namespace, name, raw_digest)): Path<(String, String, String)>,
-) -> Result<impl IntoResponse, ServerError> {
-    read_blob_info(state, Name::from_namespaced(&namespace, &name)?, raw_digest).await
+    let repository: Repository = repository.parse()?;
+    let name = repository.require_local()?;
+    read_blob_info(state, name.clone(), raw_digest).await
 }
 
 async fn read_blob_info(
@@ -60,16 +56,11 @@ async fn read_blob_info(
 
 pub(crate) async fn blob(
     State(state): State<BlobState>,
-    Path((name, raw_digest)): Path<(String, String)>,
+    Path((repository, raw_digest)): Path<(String, String)>,
 ) -> Result<impl IntoResponse, ServerError> {
-    read_blob(state, Name::from_str(&name)?, raw_digest).await
-}
-
-pub(crate) async fn blob_namespaced(
-    State(state): State<BlobState>,
-    Path((namespace, name, raw_digest)): Path<(String, String, String)>,
-) -> Result<impl IntoResponse, ServerError> {
-    read_blob(state, Name::from_namespaced(&namespace, &name)?, raw_digest).await
+    let repository: Repository = repository.parse()?;
+    let name = repository.require_local()?;
+    read_blob(state, name.clone(), raw_digest).await
 }
 
 async fn read_blob(
@@ -115,9 +106,11 @@ async fn read_blob(
 
 pub(crate) async fn delete(
     State(state): State<BlobState>,
-    Path((name, raw_digest)): Path<(String, String)>,
+    Path((repository, raw_digest)): Path<(String, String)>,
 ) -> Result<impl IntoResponse, ServerError> {
-    delete_blob(state, Name::from_str(&name)?, raw_digest).await
+    let repository: Repository = repository.parse()?;
+    let name = authorize_write(&repository, state.seedling_registration_client.as_ref()).await?;
+    delete_blob(state, name, raw_digest).await
 }
 
 async fn delete_blob(

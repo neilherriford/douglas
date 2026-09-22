@@ -1,3 +1,4 @@
+mod authorize;
 mod blob_mounter;
 mod blob_paths;
 mod blob_store;
@@ -32,7 +33,7 @@ use crate::{
     tag_store::{FileTagStore, TagStore, TagStoreError},
 };
 use axum::{
-    Json, Router,
+    Json, Router, ServiceExt,
     extract::{DefaultBodyLimit, Request, State},
     http::StatusCode,
     middleware::{self, Next},
@@ -51,11 +52,12 @@ use futures_util::FutureExt;
 use heartbeat::{HeartbeatWriter, LocalHeartbeatWriter};
 use log::{BufferedFileReporter, Outcome, Reporter, ScopeKind, Span, TuiReporter};
 use os::{Os, Unix};
-use resin_types::{NameParseError, Repository};
+use resin_types::{NameParseError, Repository, RepositoryError};
 use serde_json::json;
 use std::path::Path;
 use std::{path::PathBuf, sync::Arc};
 use thiserror::Error;
+use tower::{Layer, util::MapRequestLayer};
 
 #[derive(Debug, Error)]
 pub enum Error {
@@ -127,6 +129,17 @@ impl From<seedling_registration_client::Error> for ServerError {
     }
 }
 
+impl From<RepositoryError> for ServerError {
+    fn from(error: RepositoryError) -> Self {
+        match error {
+            RepositoryError::NotLocal(repository) => ServerError::MethodNotAllowed(format!(
+                "{repository} is not available: upstream repositories are not supported yet"
+            )),
+            other => ServerError::InvalidName(other.to_string()),
+        }
+    }
+}
+
 impl IntoResponse for ServerError {
     fn into_response(self) -> axum::response::Response {
         let (status, code, message) = match self {
@@ -189,20 +202,18 @@ impl IntoResponse for ServerError {
     }
 }
 
-async fn reject_namespaced() -> ServerError {
-    ServerError::BadRequest("namespaced seedlings are not supported".to_string())
-}
-
 #[derive(Clone)]
 struct UploadState {
     blob_uploader: Arc<dyn BlobUploader>,
     blob_mounter: Arc<dyn BlobMounter>,
+    seedling_registration_client: Arc<dyn seedling_registration_client::Client>,
 }
 
 #[derive(Clone)]
 struct BlobState {
     blob_store: Arc<dyn BlobStore>,
     reporter: Arc<dyn Reporter>,
+    seedling_registration_client: Arc<dyn seedling_registration_client::Client>,
 }
 
 #[derive(Clone)]
@@ -212,6 +223,12 @@ struct ManifestState {
     reporter: Arc<dyn Reporter>,
     seedling_registration_client: Arc<dyn seedling_registration_client::Client>,
     reconcile_trigger_client: Arc<dyn reconcile_trigger_client::Client>,
+}
+
+#[derive(Clone)]
+struct SystemState {
+    repository_store: Arc<dyn RepositoryStore>,
+    seedling_registration_client: Arc<dyn seedling_registration_client::Client>,
 }
 
 struct LocalBlobRoot {
@@ -447,32 +464,18 @@ impl Server {
         let upload_state = UploadState {
             blob_uploader: Arc::clone(&self.blob_uploader),
             blob_mounter: Arc::clone(&self.blob_mounter),
+            seedling_registration_client: Arc::clone(&self.seedling_registration_client),
         };
 
         Router::new()
-            .route("/v2/{name}/blobs/uploads", post(upload::start))
-            .route("/v2/{name}/blobs/uploads/", post(upload::start)) // Docker sends trailing slash
+            .route("/v2/{repository}/blobs/uploads", post(upload::start))
+            .route("/v2/{repository}/blobs/uploads/", post(upload::start)) // Docker sends trailing slash
             .route(
-                "/v2/{namespace}/{name}/blobs/uploads",
-                post(reject_namespaced),
-            )
-            .route(
-                "/v2/{namespace}/{name}/blobs/uploads/",
-                post(reject_namespaced),
-            )
-            .route(
-                "/v2/{name}/blobs/uploads/{uuid}",
+                "/v2/{repository}/blobs/uploads/{uuid}",
                 get(upload::status)
                     .patch(upload::write_chunk)
                     .put(upload::complete)
                     .delete(upload::abort),
-            )
-            .route(
-                "/v2/{namespace}/{name}/blobs/uploads/{uuid}",
-                get(reject_namespaced)
-                    .patch(reject_namespaced)
-                    .put(reject_namespaced)
-                    .delete(reject_namespaced),
             )
             .with_state(upload_state)
     }
@@ -481,18 +484,13 @@ impl Server {
         let blob_state = BlobState {
             blob_store: Arc::clone(&self.blob_store),
             reporter: Arc::clone(&self.reporter),
+            seedling_registration_client: Arc::clone(&self.seedling_registration_client),
         };
 
         Router::new()
             .route(
-                "/v2/{name}/blobs/{digest}",
+                "/v2/{repository}/blobs/{digest}",
                 head(blobs::info).get(blobs::blob).delete(blobs::delete),
-            )
-            .route(
-                "/v2/{namespace}/{name}/blobs/{digest}",
-                head(blobs::info_namespaced)
-                    .get(blobs::blob_namespaced)
-                    .delete(reject_namespaced),
             )
             .with_state(blob_state)
     }
@@ -508,36 +506,32 @@ impl Server {
 
         Router::new()
             .route(
-                "/v2/{name}/manifests/{ref}",
+                "/v2/{repository}/manifests/{ref}",
                 head(manifest::info)
                     .get(manifest::read)
                     .put(manifest::write)
                     .delete(manifest::delete),
-            )
-            .route(
-                "/v2/{namespace}/{name}/manifests/{ref}",
-                head(manifest::info_namespaced)
-                    .get(manifest::read_namespaced)
-                    .put(reject_namespaced)
-                    .delete(reject_namespaced),
             )
             .with_state(manifest_state)
     }
 
     fn tags_routes(&self) -> Router {
         Router::new()
-            .route("/v2/{name}/tags/list", get(tags::list))
-            .route("/v2/{namespace}/{name}/tags/list", get(reject_namespaced))
+            .route("/v2/{repository}/tags/list", get(tags::list))
             .with_state(Arc::clone(&self.tag_store))
     }
 
     fn system_routes(&self) -> Router {
+        let system_state = SystemState {
+            repository_store: Arc::clone(&self.repository_store),
+            seedling_registration_client: Arc::clone(&self.seedling_registration_client),
+        };
+
         Router::new()
             .route("/v2/_catalog", get(system::catalog))
             .route("/v2/", get(system::v2))
-            .route("/v2/{name}/", delete(system::delete_repository))
-            .route("/v2/{namespace}/{name}/", delete(reject_namespaced))
-            .with_state(Arc::clone(&self.repository_store))
+            .route("/v2/{repository}/", delete(system::delete_repository))
+            .with_state(system_state)
     }
 
     pub async fn start(&self) -> Result<(), Error> {
@@ -559,6 +553,7 @@ impl Server {
                 log_request,
             ))
             .layer(DefaultBodyLimit::disable());
+        let app = MapRequestLayer::new(fold_repository_segment).layer(app);
 
         let listener = match tokio::net::TcpListener::bind(format!("127.0.0.1:{}", self.port)).await
         {
@@ -577,8 +572,11 @@ impl Server {
             &format!("listening on {:?}", listener.local_addr()),
         );
 
+        let make_service = app.into_make_service();
+        let serve_result = axum::serve(listener, make_service);
+
         tokio::select! {
-            result = axum::serve(listener, app) => match result {
+            result = serve_result => match result {
                 Ok(()) => {
                     guard.finish_with_outcome(Outcome::Ok);
                     Ok(())
@@ -608,6 +606,138 @@ impl Server {
                 span.message(log::Level::Warn, &format!("Heartbeat write failed: {err}"));
             }
         }
+    }
+}
+
+fn tail_length(segments: &[&str]) -> Option<usize> {
+    match segments {
+        [.., "blobs", "uploads", _] => Some(3),
+        [.., "blobs", "uploads"] => Some(2),
+        [.., "blobs", _] => Some(2),
+        [.., "manifests", _] => Some(2),
+        [.., "tags", "list"] => Some(2),
+        _ => None,
+    }
+}
+
+fn fold_path(path: &str) -> String {
+    let Some(rest) = path.strip_prefix("/v2/") else {
+        return path.to_string();
+    };
+    let trailing_slash = rest.ends_with('/');
+    let trimmed = rest.strip_suffix('/').unwrap_or(rest);
+    if trimmed.is_empty() {
+        return path.to_string();
+    }
+
+    let segments: Vec<&str> = trimmed.split('/').collect();
+    let tail = tail_length(&segments).or(if trailing_slash { Some(0) } else { None });
+    let Some(tail) = tail else {
+        return path.to_string();
+    };
+
+    let name_length = segments.len() - tail;
+    if name_length < 1 {
+        return path.to_string();
+    }
+
+    let folded_name = segments[..name_length].join("%2F");
+    let tail_segments = &segments[name_length..];
+
+    if tail_segments.is_empty() {
+        format!("/v2/{folded_name}/")
+    } else {
+        let tail_path = tail_segments.join("/");
+        if trailing_slash {
+            format!("/v2/{folded_name}/{tail_path}/")
+        } else {
+            format!("/v2/{folded_name}/{tail_path}")
+        }
+    }
+}
+
+fn fold_repository_segment(mut request: Request) -> Request {
+    let folded = fold_path(request.uri().path());
+    let rewritten = match request.uri().query() {
+        Some(query) => format!("{folded}?{query}"),
+        None => folded,
+    };
+    if let Ok(uri) = rewritten.parse() {
+        *request.uri_mut() = uri;
+    }
+    request
+}
+
+#[cfg(test)]
+mod fold_path_tests {
+    use super::fold_path;
+
+    #[test]
+    fn test_should_leave_a_single_segment_repository_unchanged() {
+        assert_eq!(
+            fold_path("/v2/hello-world/blobs/uploads"),
+            "/v2/hello-world/blobs/uploads"
+        );
+    }
+
+    #[test]
+    fn test_should_fold_a_namespaced_local_repository() {
+        assert_eq!(
+            fold_path("/v2/openbao/openbao/manifests/2.4.3"),
+            "/v2/openbao%2Fopenbao/manifests/2.4.3"
+        );
+    }
+
+    #[test]
+    fn test_should_fold_a_multi_segment_upstream_repository() {
+        assert_eq!(
+            fold_path("/v2/ghcr.io/foo/bar/manifests/1.0"),
+            "/v2/ghcr.io%2Ffoo%2Fbar/manifests/1.0"
+        );
+    }
+
+    #[test]
+    fn test_should_fold_blobs_uploads_with_a_trailing_slash() {
+        assert_eq!(
+            fold_path("/v2/openbao/openbao/blobs/uploads/"),
+            "/v2/openbao%2Fopenbao/blobs/uploads/"
+        );
+    }
+
+    #[test]
+    fn test_should_fold_a_blob_upload_continuation() {
+        assert_eq!(
+            fold_path("/v2/openbao/openbao/blobs/uploads/some-uuid"),
+            "/v2/openbao%2Fopenbao/blobs/uploads/some-uuid"
+        );
+    }
+
+    #[test]
+    fn test_should_fold_a_bare_repository_delete_path() {
+        assert_eq!(fold_path("/v2/openbao/openbao/"), "/v2/openbao%2Fopenbao/");
+    }
+
+    #[test]
+    fn test_should_leave_the_catalog_route_unchanged() {
+        assert_eq!(fold_path("/v2/_catalog"), "/v2/_catalog");
+    }
+
+    #[test]
+    fn test_should_leave_the_ping_route_unchanged() {
+        assert_eq!(fold_path("/v2/"), "/v2/");
+    }
+
+    #[test]
+    fn test_should_leave_a_non_v2_path_unchanged() {
+        assert_eq!(fold_path("/healthz"), "/healthz");
+    }
+
+    #[test]
+    fn test_should_fold_tags_list() {
+        assert_eq!(
+            fold_path("/v2/openbao/openbao/tags/list"),
+            "/v2/openbao%2Fopenbao/tags/list"
+        );
     }
 }
 

@@ -1,21 +1,21 @@
-use crate::{RepositoryStore, ServerError};
+use crate::{ServerError, SystemState, authorize::authorize_write};
 use axum::{
     extract::{Path, State},
     http::StatusCode,
     response::IntoResponse,
 };
-use resin_types::{Name, Repository};
+use resin_types::Repository;
 use serde_json::{Map, Value};
-use std::{str::FromStr, sync::Arc};
 
 pub(crate) async fn catalog(
-    State(repository_store): State<Arc<dyn RepositoryStore>>,
+    State(state): State<SystemState>,
 ) -> Result<impl IntoResponse, ServerError> {
     let names = Value::Array(
-        repository_store
+        state
+            .repository_store
             .list()?
             .iter()
-            .map(|name| Value::String(name.to_string()))
+            .map(|repository| Value::String(repository.to_string()))
             .collect(),
     );
 
@@ -39,11 +39,12 @@ pub(crate) async fn catalog(
 }
 
 pub(crate) async fn delete_repository(
-    State(repository_store): State<Arc<dyn RepositoryStore>>,
-    Path(name): Path<String>,
+    State(state): State<SystemState>,
+    Path(repository): Path<String>,
 ) -> Result<impl IntoResponse, ServerError> {
-    let name = Name::from_str(&name)?;
-    repository_store.delete(&Repository::Local(name))?;
+    let repository: Repository = repository.parse()?;
+    let name = authorize_write(&repository, state.seedling_registration_client.as_ref()).await?;
+    state.repository_store.delete(&Repository::Local(name))?;
     Ok(StatusCode::NO_CONTENT)
 }
 

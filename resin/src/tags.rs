@@ -10,7 +10,7 @@ use axum::{
 use resin_types::{Name, Repository};
 use serde::Deserialize;
 use serde_json::{Map, Value};
-use std::{str::FromStr, sync::Arc};
+use std::sync::Arc;
 
 #[derive(Deserialize)]
 pub(crate) struct TagListParams {
@@ -27,10 +27,12 @@ fn to_tag_error(error: TagStoreError) -> ServerError {
 
 pub(crate) async fn list(
     State(tag_store): State<Arc<dyn TagStore>>,
-    Path(name): Path<String>,
+    Path(repository): Path<String>,
     Query(params): Query<TagListParams>,
 ) -> Result<impl IntoResponse, ServerError> {
-    get_tag_list(tag_store, Name::from_str(&name)?, params).await
+    let repository: Repository = repository.parse()?;
+    let name = repository.require_local()?;
+    get_tag_list(tag_store, name.clone(), params).await
 }
 
 fn paginate_tags<'a>(
