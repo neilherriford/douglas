@@ -8,7 +8,7 @@ use file_system::{
 };
 #[cfg(test)]
 use mockall::automock;
-use resin_types::Name;
+use resin_types::{Name, Repository};
 use serde::Deserialize;
 use sha2::Sha256;
 use std::{
@@ -97,7 +97,11 @@ pub trait BlobStore: Send + Sync {
 
 #[cfg_attr(test, automock)]
 pub trait BlobRoot: Send + Sync {
-    fn get(&self, name: &Name, resource_kind: ResourceKind) -> Result<PathBuf, FileSystemError>;
+    fn get(
+        &self,
+        repository: &Repository,
+        resource_kind: ResourceKind,
+    ) -> Result<PathBuf, FileSystemError>;
 }
 
 pub struct FileBlobStore {
@@ -227,7 +231,11 @@ impl BlobStore for FileBlobStore {
             return Ok(());
         }
 
-        let blob_root = create_blob_store_error(claimed, self.blob_root.get(name, resource_kind))?;
+        let blob_root = create_blob_store_error(
+            claimed,
+            self.blob_root
+                .get(&Repository::Local(name.clone()), resource_kind),
+        )?;
         let blob_root = blob_root.as_path();
         let mut unverified_file =
             create_blob_store_error(claimed, self.create_unverified_file(blob_root, claimed))?;
@@ -256,7 +264,11 @@ impl BlobStore for FileBlobStore {
         digest: &digest::Digest,
         resource_kind: ResourceKind,
     ) -> Result<bool, BlobStoreError> {
-        let blob_root = create_blob_store_error(digest, self.blob_root.get(name, resource_kind))?;
+        let blob_root = create_blob_store_error(
+            digest,
+            self.blob_root
+                .get(&Repository::Local(name.clone()), resource_kind),
+        )?;
         let blob_root = blob_root.as_path();
         let paths = BlobFilePaths::new(blob_root, digest);
         Ok(self.inspect.exists(&paths.final_file))
@@ -268,7 +280,11 @@ impl BlobStore for FileBlobStore {
         digest: &digest::Digest,
         resource_kind: ResourceKind,
     ) -> Result<Box<dyn AsyncRead + Send + Unpin>, BlobStoreError> {
-        let blob_root = create_blob_store_error(digest, self.blob_root.get(name, resource_kind))?;
+        let blob_root = create_blob_store_error(
+            digest,
+            self.blob_root
+                .get(&Repository::Local(name.clone()), resource_kind),
+        )?;
         let blob_root = blob_root.as_path();
         let paths = BlobFilePaths::new(blob_root, digest);
 
@@ -287,7 +303,11 @@ impl BlobStore for FileBlobStore {
         digest: &digest::Digest,
         resource_kind: ResourceKind,
     ) -> Result<Stats, BlobStoreError> {
-        let blob_root = create_blob_store_error(digest, self.blob_root.get(name, resource_kind))?;
+        let blob_root = create_blob_store_error(
+            digest,
+            self.blob_root
+                .get(&Repository::Local(name.clone()), resource_kind),
+        )?;
         let blob_root = blob_root.as_path();
         let paths = BlobFilePaths::new(blob_root, digest);
         if self.inspect.exists(&paths.final_file) {
@@ -318,7 +338,11 @@ impl BlobStore for FileBlobStore {
         digest: &digest::Digest,
         resource_kind: ResourceKind,
     ) -> Result<(), BlobStoreError> {
-        let blob_root = create_blob_store_error(digest, self.blob_root.get(name, resource_kind))?;
+        let blob_root = create_blob_store_error(
+            digest,
+            self.blob_root
+                .get(&Repository::Local(name.clone()), resource_kind),
+        )?;
         let blob_root = blob_root.as_path();
         let paths = BlobFilePaths::new(blob_root, digest);
         if self.inspect.exists(&paths.final_file) {
@@ -1344,7 +1368,7 @@ mod tests {
         mod round_trip {
             use crate::blob_store::{BlobRoot, BlobStore, FileBlobStore, ResourceKind};
             use crate::digest;
-            use resin_types::Name;
+            use resin_types::{Name, Repository};
 
             use file_system::{
                 BufferedFileWiter, Entry, EntryKind, FileDeleter, FileReader, FileRenamer,
@@ -1570,7 +1594,7 @@ mod tests {
             impl BlobRoot for FakeDisk {
                 fn get(
                     &self,
-                    _name: &Name,
+                    _repository: &Repository,
                     _resource_kind: ResourceKind,
                 ) -> Result<PathBuf, FileSystemError> {
                     Ok(PathBuf::from("/blobs"))

@@ -51,7 +51,7 @@ use futures_util::FutureExt;
 use heartbeat::{HeartbeatWriter, LocalHeartbeatWriter};
 use log::{BufferedFileReporter, Outcome, Reporter, ScopeKind, Span, TuiReporter};
 use os::{Os, Unix};
-use resin_types::{Name, NameParseError};
+use resin_types::{NameParseError, Repository};
 use serde_json::json;
 use std::path::Path;
 use std::{path::PathBuf, sync::Arc};
@@ -227,16 +227,20 @@ impl LocalBlobRoot {
         }
     }
 
-    fn create_repository_root_path(name: &Name, repositories_root: &Path) -> PathBuf {
+    fn create_repository_root_path(repository: &Repository, repositories_root: &Path) -> PathBuf {
         let mut result = repositories_root.to_path_buf();
-        result.push(name.fs_safe());
+        result.push(repository.storage_path());
         result
     }
 }
 
 impl BlobRoot for LocalBlobRoot {
-    fn get(&self, name: &Name, resource_kind: ResourceKind) -> Result<PathBuf, FileSystemError> {
-        let mut result = Self::create_repository_root_path(name, &self.repositories_root);
+    fn get(
+        &self,
+        repository: &Repository,
+        resource_kind: ResourceKind,
+    ) -> Result<PathBuf, FileSystemError> {
+        let mut result = Self::create_repository_root_path(repository, &self.repositories_root);
 
         if resource_kind == ResourceKind::Manifest {
             result.push("_manifests");
@@ -245,6 +249,60 @@ impl BlobRoot for LocalBlobRoot {
         }
 
         Ok(result)
+    }
+}
+
+#[cfg(test)]
+mod local_blob_root_tests {
+    use super::{BlobRoot, LocalBlobRoot, ResourceKind};
+    use file_system::MockFolder;
+    use resin_types::Repository;
+    use std::{path::PathBuf, sync::Arc};
+
+    #[test]
+    fn test_should_root_a_local_repository_under_the_local_subtree() {
+        let blob_root =
+            LocalBlobRoot::new(&PathBuf::from("/repositories"), Arc::new(MockFolder::new()));
+        let repository: Repository = "hello-world".parse().unwrap();
+
+        let result = blob_root.get(&repository, ResourceKind::Blob).unwrap();
+
+        assert_eq!(result, PathBuf::from("/repositories/local/hello-world"));
+    }
+
+    #[test]
+    fn test_should_root_an_upstream_repository_under_its_host() {
+        let blob_root =
+            LocalBlobRoot::new(&PathBuf::from("/repositories"), Arc::new(MockFolder::new()));
+        let repository: Repository = "ghcr.io/foo/bar".parse().unwrap();
+
+        let result = blob_root.get(&repository, ResourceKind::Blob).unwrap();
+
+        assert_eq!(
+            result,
+            PathBuf::from("/repositories/upstream/ghcr.io/foo%2Fbar")
+        );
+    }
+
+    #[test]
+    fn test_should_create_the_revisions_directory_for_a_manifest() {
+        let mut folder = MockFolder::new();
+        folder
+            .expect_create_recursively()
+            .withf(|path| {
+                path == std::path::Path::new("/repositories/local/hello-world/_manifests/revisions")
+            })
+            .returning(|path| Ok(path.to_path_buf()));
+
+        let blob_root = LocalBlobRoot::new(&PathBuf::from("/repositories"), Arc::new(folder));
+        let repository: Repository = "hello-world".parse().unwrap();
+
+        let result = blob_root.get(&repository, ResourceKind::Manifest).unwrap();
+
+        assert_eq!(
+            result,
+            PathBuf::from("/repositories/local/hello-world/_manifests/revisions")
+        );
     }
 }
 
