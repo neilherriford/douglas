@@ -4,7 +4,7 @@ use axum::{
     http::StatusCode,
     response::IntoResponse,
 };
-use resin_types::Name;
+use resin_types::{Name, Repository};
 use serde_json::{Map, Value};
 use std::{str::FromStr, sync::Arc};
 
@@ -43,7 +43,7 @@ pub(crate) async fn delete_repository(
     Path(name): Path<String>,
 ) -> Result<impl IntoResponse, ServerError> {
     let name = Name::from_str(&name)?;
-    repository_store.delete(&name)?;
+    repository_store.delete(&Repository::Local(name))?;
     Ok(StatusCode::NO_CONTENT)
 }
 

@@ -1,6 +1,6 @@
 use crate::{blob_paths::BlobFilePaths, digest::Digest, repository_store::RepositoryStore};
 use file_system::{FileDeleter, FileSystemError, Folder, Inspect, Links};
-use resin_types::Name;
+use resin_types::{Name, Repository};
 use std::{path::PathBuf, sync::Arc};
 
 #[cfg_attr(test, mockall::automock)]
@@ -43,7 +43,7 @@ impl FileBlobMounter {
 
     fn repository_root(&self, name: &Name) -> PathBuf {
         let mut result = self.repositories_root.clone();
-        result.push(name.fs_safe());
+        result.push(Repository::Local(name.clone()).storage_path());
         result
     }
 
@@ -71,10 +71,13 @@ impl FileBlobMounter {
         skip: Option<&Name>,
     ) -> Result<Option<BlobFilePaths>, FileSystemError> {
         for repository in self.repository_store.list()? {
-            if Some(&repository) == skip {
+            let Ok(name) = repository.require_local() else {
+                continue;
+            };
+            if Some(name) == skip {
                 continue;
             }
-            if let Some(found) = self.search_in_repository(&repository, digest)? {
+            if let Some(found) = self.search_in_repository(name, digest)? {
                 return Ok(Some(found));
             }
         }
@@ -133,7 +136,7 @@ mod tests {
             FileDeleter, Folder, Inspect, Links, MockFileDeleter, MockFolder, MockInspect,
             MockLinks,
         };
-        use resin_types::Name;
+        use resin_types::{Name, Repository};
         use std::{path::PathBuf, str::FromStr, sync::Arc};
 
         const HEX: &str = "1b96011418a3675a82b529695daac30914827d65d2ff3e0bc6873526a1beefcf";
@@ -144,7 +147,7 @@ mod tests {
         }
 
         fn blob_paths(registry: &str) -> (String, String) {
-            let final_file = format!("/tmp/{registry}/blobs/sha256/{PREFIX}/{HEX}/{HEX}");
+            let final_file = format!("/tmp/local/{registry}/blobs/sha256/{PREFIX}/{HEX}/{HEX}");
             let mediatype_file = format!("{final_file}.mediatype");
             (final_file, mediatype_file)
         }
@@ -163,9 +166,9 @@ mod tests {
             let (dest_final, dest_mediatype) = blob_paths("dest");
 
             folder
-                .given_exists("/tmp/source")
+                .given_exists("/tmp/local/source")
                 .expect_create_folder_recursively_with(&format!(
-                    "/tmp/dest/blobs/sha256/{PREFIX}/{HEX}"
+                    "/tmp/local/dest/blobs/sha256/{PREFIX}/{HEX}"
                 ));
             inspect
                 .given_exists(&source_final)
@@ -203,19 +206,22 @@ mod tests {
             let (dest_final, dest_mediatype) = blob_paths("dest");
 
             folder
-                .given_exists("/tmp/source")
-                .given_exists("/tmp/other")
+                .given_exists("/tmp/local/source")
+                .given_exists("/tmp/local/other")
                 .expect_create_folder_recursively_with(&format!(
-                    "/tmp/dest/blobs/sha256/{PREFIX}/{HEX}"
+                    "/tmp/local/dest/blobs/sha256/{PREFIX}/{HEX}"
                 ));
             inspect
                 .given_does_not_exist(&blob_paths("source").0)
                 .given_exists(&other_final)
                 .given_exists(&other_mediatype);
 
-            repository_store
-                .expect_list()
-                .returning(move || Ok(vec![source.clone(), other.clone()]));
+            repository_store.expect_list().returning(move || {
+                Ok(vec![
+                    Repository::Local(source.clone()),
+                    Repository::Local(other.clone()),
+                ])
+            });
 
             links
                 .expect_create_hard_with(&other_final, &dest_final)
@@ -253,18 +259,21 @@ mod tests {
             let (dest_final, dest_mediatype) = blob_paths("dest");
 
             folder
-                .given_does_not_exist("/tmp/missing")
-                .given_exists("/tmp/other")
+                .given_does_not_exist("/tmp/local/missing")
+                .given_exists("/tmp/local/other")
                 .expect_create_folder_recursively_with(&format!(
-                    "/tmp/dest/blobs/sha256/{PREFIX}/{HEX}"
+                    "/tmp/local/dest/blobs/sha256/{PREFIX}/{HEX}"
                 ));
             inspect
                 .given_exists(&other_final)
                 .given_exists(&other_mediatype);
 
-            repository_store
-                .expect_list()
-                .returning(move || Ok(vec![missing.clone(), other.clone()]));
+            repository_store.expect_list().returning(move || {
+                Ok(vec![
+                    Repository::Local(missing.clone()),
+                    Repository::Local(other.clone()),
+                ])
+            });
 
             links
                 .expect_create_hard_with(&other_final, &dest_final)
@@ -303,19 +312,22 @@ mod tests {
             let (dest_final, dest_mediatype) = blob_paths("dest");
 
             folder
-                .given_exists("/tmp/foo")
-                .given_exists("/tmp/bar")
+                .given_exists("/tmp/local/foo")
+                .given_exists("/tmp/local/bar")
                 .expect_create_folder_recursively_with(&format!(
-                    "/tmp/dest/blobs/sha256/{PREFIX}/{HEX}"
+                    "/tmp/local/dest/blobs/sha256/{PREFIX}/{HEX}"
                 ));
             inspect
                 .given_does_not_exist(&foo_final)
                 .given_exists(&bar_final)
                 .given_exists(&bar_mediatype);
 
-            repository_store
-                .expect_list()
-                .returning(move || Ok(vec![foo.clone(), bar.clone()]));
+            repository_store.expect_list().returning(move || {
+                Ok(vec![
+                    Repository::Local(foo.clone()),
+                    Repository::Local(bar.clone()),
+                ])
+            });
 
             links
                 .expect_create_hard_with(&bar_final, &dest_final)
@@ -347,12 +359,15 @@ mod tests {
             let destination = Name::from_str("dest").unwrap();
 
             folder
-                .given_does_not_exist("/tmp/foo")
-                .given_does_not_exist("/tmp/bar");
+                .given_does_not_exist("/tmp/local/foo")
+                .given_does_not_exist("/tmp/local/bar");
 
-            repository_store
-                .expect_list()
-                .returning(move || Ok(vec![foo.clone(), bar.clone()]));
+            repository_store.expect_list().returning(move || {
+                Ok(vec![
+                    Repository::Local(foo.clone()),
+                    Repository::Local(bar.clone()),
+                ])
+            });
 
             let mounter = FileBlobMounter::new(
                 Arc::new(repository_store),
@@ -381,9 +396,9 @@ mod tests {
             let (dest_final, dest_mediatype) = blob_paths("dest");
 
             folder
-                .given_exists("/tmp/source")
+                .given_exists("/tmp/local/source")
                 .expect_create_folder_recursively_with(&format!(
-                    "/tmp/dest/blobs/sha256/{PREFIX}/{HEX}"
+                    "/tmp/local/dest/blobs/sha256/{PREFIX}/{HEX}"
                 ));
             inspect
                 .given_exists(&source_final)
