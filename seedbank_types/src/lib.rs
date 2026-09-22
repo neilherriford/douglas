@@ -1,4 +1,4 @@
-use docker_types::{Capability, VersionedImageName};
+use docker_types::{Capability, ImageReference, VersionedImageName};
 use file_system::{RelativePath, RelativePathError};
 use refined_string::{StringRules, Validated};
 use regex::Regex;
@@ -347,6 +347,14 @@ pub enum Origin {
     User,
 }
 
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "value", rename_all = "snake_case")]
+pub enum ImageSource {
+    #[default]
+    Pushed,
+    External(ImageReference),
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HealthCheckCommand(String);
 
@@ -455,6 +463,8 @@ impl SeedlingDefinition {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UserSeedlingDefinition {
+    #[serde(default)]
+    pub image: ImageSource,
     pub mounts: HashMap<Name, Mount>,
     pub ports: PortSpec,
     #[serde(default)]
@@ -467,12 +477,18 @@ pub struct UserSeedlingDefinition {
 impl UserSeedlingDefinition {
     pub fn new(mounts: HashMap<Name, Mount>, ports: PortSpec, health_check: HealthCheck) -> Self {
         Self {
+            image: ImageSource::default(),
             mounts,
             ports,
             route: RouteSpec::default(),
             secrets: None,
             health_check,
         }
+    }
+
+    pub fn with_image(mut self, image: ImageSource) -> Self {
+        self.image = image;
+        self
     }
 }
 
@@ -530,16 +546,34 @@ pub enum Request {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum Response {
-    Names { names: Vec<Name> },
-    Exists { exists: bool },
-    Status { status: SeedlingStatus },
-    Seedling { seedling: Box<Seedling> },
-    Default { name: Option<Name> },
+    Names {
+        names: Vec<Name>,
+    },
+    Exists {
+        exists: bool,
+    },
+    Status {
+        status: SeedlingStatus,
+    },
+    Seedling {
+        seedling: Box<Seedling>,
+    },
+    Default {
+        name: Option<Name>,
+    },
     Ok,
-    Error { message: String },
-    DesiredRunStatus { desired_run_status: DesiredRunStatus },
-    HealthCheckLog { log: Option<HealthCheckLog> },
-    IncrementHealthLogFailCount { reached_max_fail_count: bool },
+    Error {
+        message: String,
+    },
+    DesiredRunStatus {
+        desired_run_status: DesiredRunStatus,
+    },
+    HealthCheckLog {
+        log: Option<HealthCheckLog>,
+    },
+    IncrementHealthLogFailCount {
+        reached_max_fail_count: bool,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -730,5 +764,75 @@ mod tests {
             toml::from_str(&toml_without_origin).expect("should deserialize");
 
         assert_eq!(definition.origin, Origin::User);
+    }
+
+    #[test]
+    fn test_image_source_should_default_to_pushed() {
+        assert_eq!(ImageSource::default(), ImageSource::Pushed);
+    }
+
+    #[test]
+    fn test_image_source_pushed_should_round_trip_through_toml() {
+        let toml = toml::to_string(&ImageSource::Pushed).expect("should serialize");
+
+        let round_tripped: ImageSource = toml::from_str(&toml).expect("should deserialize");
+
+        assert_eq!(round_tripped, ImageSource::Pushed);
+    }
+
+    #[test]
+    fn test_image_source_external_should_round_trip_through_toml() {
+        let reference: ImageReference = "docker.io/library/nginx:1.27".parse().unwrap();
+        let source = ImageSource::External(reference);
+
+        let toml = toml::to_string(&source).expect("should serialize");
+        let round_tripped: ImageSource = toml::from_str(&toml).expect("should deserialize");
+
+        assert_eq!(round_tripped, source);
+    }
+
+    fn user_seedling_definition() -> UserSeedlingDefinition {
+        UserSeedlingDefinition::new(
+            HashMap::new(),
+            PortSpec {
+                public: 8080,
+                additional: Vec::new(),
+            },
+            HealthCheck {
+                command: HealthCheckCommand::from_str("true").unwrap(),
+                wait_time_in_seconds: NonZeroU8::new(1).unwrap(),
+            },
+        )
+    }
+
+    #[test]
+    fn test_user_seedling_definition_new_should_default_image_to_pushed() {
+        assert_eq!(user_seedling_definition().image, ImageSource::Pushed);
+    }
+
+    #[test]
+    fn test_user_seedling_definition_should_carry_the_image_set_via_with_image() {
+        let reference: ImageReference = "docker.io/library/nginx:1.27".parse().unwrap();
+        let definition =
+            user_seedling_definition().with_image(ImageSource::External(reference.clone()));
+
+        assert_eq!(definition.image, ImageSource::External(reference));
+    }
+
+    #[test]
+    fn test_user_seedling_definition_should_default_image_to_pushed_when_omitted_from_serialized_toml()
+     {
+        let toml = r#"
+            mounts = {}
+            ports = { public = 8080, additional = [] }
+
+            [health_check]
+            command = "true"
+            wait_time_in_seconds = 1
+        "#;
+
+        let definition: UserSeedlingDefinition = toml::from_str(toml).expect("should deserialize");
+
+        assert_eq!(definition.image, ImageSource::Pushed);
     }
 }
