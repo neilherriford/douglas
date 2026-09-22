@@ -31,9 +31,17 @@ assert_contains "douglas status reports the hello-world traefik route" \
 # watchdog sweep (every 30s) since desired=Stopped while running. Sleeping
 # past one full sweep and re-checking is the only way to catch that: the
 # assertions above run within a second of the push and would pass either
-# way.
-echo "Waiting out one watchdog sweep to confirm push-triggered reconcile set desired_run_status..."
-sleep 35
+# way. Waits for a sweep to be logged as finished after this point rather
+# than sleeping a fixed time.
+BRACT_LOG="/var/log/douglas/bract/bract.log"
+bract_log_lines_before="$(log_line_count "$BRACT_LOG")"
+
+watchdog_sweep_finished() {
+    local new_lines
+    new_lines="$(ssh_out sudo tail -n "+$((bract_log_lines_before + 1))" "$BRACT_LOG")"
+    [[ "$new_lines" == *"Running watchdog sweep outcome=ok"* ]]
+}
+wait_until "a watchdog sweep ran after the push-only reconcile" 45 watchdog_sweep_finished
 
 assert_success "hello-world container survives a watchdog sweep after push-only reconcile" ssh_out \
     "docker ps --filter name=doug.hello-world --filter status=running -q | grep -q ."
