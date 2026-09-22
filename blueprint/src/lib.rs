@@ -62,7 +62,9 @@ impl<'a> HasPermissions for StandardContext<'a> {
 
 #[async_trait]
 pub trait Command<TContext>: std::fmt::Display + Send {
-    fn name(&self) -> String;
+    fn name(&self) -> String {
+        self.to_string()
+    }
     async fn run(
         &mut self,
         span: &Span,

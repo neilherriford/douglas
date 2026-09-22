@@ -320,11 +320,6 @@ impl std::fmt::Display for MarkExecutable {
 
 #[async_trait]
 impl<'a> Command<Context<'a>> for MarkExecutable {
-    fn name(&self) -> String {
-        let pretty_path = path_to_string(&self.path);
-        format!("Mark {pretty_path} executable")
-    }
-
     async fn run(
         &mut self,
         span: &Span,
@@ -396,10 +391,6 @@ impl std::fmt::Display for RetainPreviousBinary {
 
 #[async_trait]
 impl<'a> Command<Context<'a>> for RetainPreviousBinary {
-    fn name(&self) -> String {
-        "Keep the current version for rollback".to_string()
-    }
-
     async fn run(
         &mut self,
         span: &Span,
@@ -500,10 +491,6 @@ impl std::fmt::Display for OverwriteDouglasExecutable {
 
 #[async_trait]
 impl<'a> Command<Context<'a>> for OverwriteDouglasExecutable {
-    fn name(&self) -> String {
-        "Overwrite current version with new version".to_string()
-    }
-
     async fn run(
         &mut self,
         span: &Span,
@@ -658,10 +645,6 @@ impl std::fmt::Display for StartNewVersion {
 
 #[async_trait]
 impl<'a> Command<Context<'a>> for StartNewVersion {
-    fn name(&self) -> String {
-        "Start the new version".to_string()
-    }
-
     async fn run(
         &mut self,
         span: &Span,
@@ -764,10 +747,6 @@ impl std::fmt::Display for ConfirmHealthy {
 
 #[async_trait]
 impl<'a> Command<Context<'a>> for ConfirmHealthy {
-    fn name(&self) -> String {
-        "Confirm the new version is healthy".to_string()
-    }
-
     async fn run(
         &mut self,
         span: &Span,
@@ -812,10 +791,6 @@ impl std::fmt::Display for RecordUpgrade {
 
 #[async_trait]
 impl<'a> Command<Context<'a>> for RecordUpgrade {
-    fn name(&self) -> String {
-        "Record the upgrade in progress".to_string()
-    }
-
     async fn run(
         &mut self,
         span: &Span,
@@ -862,10 +837,6 @@ impl std::fmt::Display for ClearUpgradeRecord {
 
 #[async_trait]
 impl<'a> Command<Context<'a>> for ClearUpgradeRecord {
-    fn name(&self) -> String {
-        "Clear the upgrade record".to_string()
-    }
-
     async fn run(
         &mut self,
         span: &Span,
@@ -901,10 +872,6 @@ impl std::fmt::Display for RestartPreviousVersion {
 
 #[async_trait]
 impl<'a> Command<Context<'a>> for RestartPreviousVersion {
-    fn name(&self) -> String {
-        "Bring the previous version back up if the upgrade fails".to_string()
-    }
-
     async fn run(
         &mut self,
         _span: &Span,

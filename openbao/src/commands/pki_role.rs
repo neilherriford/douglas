@@ -1,4 +1,3 @@
-// openbao/src/commands/create_role.rs
 use crate::{Error, commands::open_bao_token_header};
 use log::{Reporter, Span};
 use serde::Serialize;

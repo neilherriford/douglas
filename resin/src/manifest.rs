@@ -189,7 +189,6 @@ async fn write_manifest(
 ) -> Result<impl IntoResponse, ServerError> {
     assert_seedling_registered(state.seedling_registration_client.as_ref(), &name).await?;
 
-    // let manifest_blob_root = state.paths.manifest_blob_root(&name)?;
     let media_type = headers
         .get("Content-Type")
         .and_then(|value| value.to_str().ok())
@@ -298,7 +297,6 @@ async fn delete_manifest(
     name: Name,
     reference: String,
 ) -> Result<impl IntoResponse, ServerError> {
-    // let manifest_blob_root = state.paths.manifest_blob_root(&name)?;
     let digest = Digest::from_str(&reference).map_err(|_| {
         ServerError::MethodNotAllowed(
             "manifest delete requires a digest reference, not a tag".to_string(),
