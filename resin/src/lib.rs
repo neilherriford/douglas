@@ -385,20 +385,13 @@ impl Server {
         })
     }
 
-    pub async fn start(&self) -> Result<(), Error> {
-        let guard = Span::new(
-            Arc::clone(&self.reporter),
-            "Starting douglas system",
-            log::ScopeKind::Group,
-        )
-        .start_guard();
-
+    fn upload_routes(&self) -> Router {
         let upload_state = UploadState {
             blob_uploader: Arc::clone(&self.blob_uploader),
             blob_mounter: Arc::clone(&self.blob_mounter),
         };
 
-        let upload_routes = Router::new()
+        Router::new()
             .route("/v2/{name}/blobs/uploads", post(upload::start))
             .route("/v2/{name}/blobs/uploads/", post(upload::start)) // Docker sends trailing slash
             .route(
@@ -423,14 +416,16 @@ impl Server {
                     .put(reject_namespaced)
                     .delete(reject_namespaced),
             )
-            .with_state(upload_state);
+            .with_state(upload_state)
+    }
 
+    fn blob_routes(&self) -> Router {
         let blob_state = BlobState {
             blob_store: Arc::clone(&self.blob_store),
             reporter: Arc::clone(&self.reporter),
         };
 
-        let blob_routes = Router::new()
+        Router::new()
             .route(
                 "/v2/{name}/blobs/{digest}",
                 head(blobs::info).get(blobs::blob).delete(blobs::delete),
@@ -441,8 +436,10 @@ impl Server {
                     .get(blobs::blob_namespaced)
                     .delete(reject_namespaced),
             )
-            .with_state(blob_state);
+            .with_state(blob_state)
+    }
 
+    fn manifest_routes(&self) -> Router {
         let manifest_state = ManifestState {
             blob_store: Arc::clone(&self.blob_store),
             tag_store: Arc::clone(&self.tag_store),
@@ -451,7 +448,7 @@ impl Server {
             reconcile_trigger_client: Arc::clone(&self.reconcile_trigger_client),
         };
 
-        let manifest_routes = Router::new()
+        Router::new()
             .route(
                 "/v2/{name}/manifests/{ref}",
                 head(manifest::info)
@@ -466,26 +463,39 @@ impl Server {
                     .put(reject_namespaced)
                     .delete(reject_namespaced),
             )
-            .with_state(manifest_state);
+            .with_state(manifest_state)
+    }
 
-        let tags_routes = Router::new()
+    fn tags_routes(&self) -> Router {
+        Router::new()
             .route("/v2/{name}/tags/list", get(tags::list))
             .route("/v2/{namespace}/{name}/tags/list", get(reject_namespaced))
-            .with_state(Arc::clone(&self.tag_store));
+            .with_state(Arc::clone(&self.tag_store))
+    }
 
-        let system_routes = Router::new()
+    fn system_routes(&self) -> Router {
+        Router::new()
             .route("/v2/_catalog", get(system::catalog))
             .route("/v2/", get(system::v2))
             .route("/v2/{name}/", delete(system::delete_repository))
             .route("/v2/{namespace}/{name}/", delete(reject_namespaced))
-            .with_state(Arc::clone(&self.repository_store));
+            .with_state(Arc::clone(&self.repository_store))
+    }
+
+    pub async fn start(&self) -> Result<(), Error> {
+        let guard = Span::new(
+            Arc::clone(&self.reporter),
+            "Starting douglas system",
+            log::ScopeKind::Group,
+        )
+        .start_guard();
 
         let app = Router::new()
-            .merge(upload_routes)
-            .merge(blob_routes)
-            .merge(manifest_routes)
-            .merge(tags_routes)
-            .merge(system_routes)
+            .merge(self.upload_routes())
+            .merge(self.blob_routes())
+            .merge(self.manifest_routes())
+            .merge(self.tags_routes())
+            .merge(self.system_routes())
             .layer(middleware::from_fn_with_state(
                 Arc::clone(&self.reporter),
                 log_request,

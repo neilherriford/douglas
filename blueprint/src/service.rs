@@ -90,16 +90,51 @@ impl ServiceDefinition {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum GroupPresence {
+    #[default]
+    Present,
+    Missing,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum UserAccountState {
+    #[default]
+    Ready,
+    Unmanaged,
+    Missing,
+    MissingGroupMembership,
+}
+
 #[derive(Default)]
 pub struct ServiceState {
-    pub group_missing: bool,
-    pub user_missing: bool,
-    pub group_membership_missing: bool,
+    pub group: GroupPresence,
+    pub user: UserAccountState,
     pub additional_groups_missing: Vec<String>,
     pub additional_group_memberships_missing: Vec<GroupMembershipRequirement>,
     pub folders_missing: Vec<PathBuf>,
     pub folders_missing_ownership: Vec<FolderOwnershipRequirement>,
     pub folders_missing_mode: Vec<FolderModeRequirement>,
+}
+
+fn discover_user_account_state(
+    definition: &ServiceDefinition,
+    group: GroupPresence,
+    credentials: &dyn Credentials,
+) -> UserAccountState {
+    let ServiceUser::Managed(name) = &definition.user else {
+        return UserAccountState::Unmanaged;
+    };
+
+    if !credentials.user_exists(name) {
+        return UserAccountState::Missing;
+    }
+
+    if group == GroupPresence::Present && !user_is_in_group(credentials, &definition.group, name) {
+        UserAccountState::MissingGroupMembership
+    } else {
+        UserAccountState::Ready
+    }
 }
 
 pub fn discover_service_state(
@@ -108,22 +143,18 @@ pub fn discover_service_state(
     folder: &dyn Folder,
     permissions: &dyn Permissions,
 ) -> Result<ServiceState, FileSystemError> {
+    let group = if credentials.group_exists(&definition.group) {
+        GroupPresence::Present
+    } else {
+        GroupPresence::Missing
+    };
+    let user = discover_user_account_state(definition, group, credentials);
+
     let mut state = ServiceState {
-        group_missing: !credentials.group_exists(&definition.group),
-        user_missing: matches!(
-            &definition.user, ServiceUser::Managed(name)
-            if !credentials.user_exists(name)
-        ),
+        group,
+        user,
         ..Default::default()
     };
-
-    state.group_membership_missing = matches!(
-        &definition.user,
-        ServiceUser::Managed(name)
-        if !state.group_missing
-            && !state.user_missing
-            && !user_is_in_group(credentials, &definition.group, name)
-    );
 
     let user_name = definition.user.name();
     for group_name in &definition.additional_groups {
@@ -228,20 +259,22 @@ where
 {
     let mut steps: Vec<Step<C>> = Vec::new();
 
-    if state.group_missing {
+    if state.group == GroupPresence::Missing {
         steps.push(Box::new(commands::CreateGroup::new(&definition.group)));
     }
 
-    if state.user_missing {
-        steps.push(Box::new(commands::CreateUser::new(
+    match state.user {
+        UserAccountState::Missing => steps.push(Box::new(commands::CreateUser::new(
             &definition.user.name(),
             &definition.group,
-        )));
-    } else if state.group_membership_missing {
-        steps.push(Box::new(commands::AddUserToGroup::new(
-            &definition.user.name(),
-            &definition.group,
-        )));
+        ))),
+        UserAccountState::MissingGroupMembership => {
+            steps.push(Box::new(commands::AddUserToGroup::new(
+                &definition.user.name(),
+                &definition.group,
+            )));
+        }
+        UserAccountState::Ready | UserAccountState::Unmanaged => {}
     }
 
     for group_name in &state.additional_groups_missing {
@@ -281,7 +314,8 @@ where
 mod tests {
     mod discover_service_state {
         use crate::service::{
-            BootstrapReporting, ServiceDefinition, ServiceUser, discover_service_state,
+            BootstrapReporting, GroupPresence, ServiceDefinition, ServiceUser, UserAccountState,
+            discover_service_state,
         };
         use credentials::MockCredentials;
         use file_system::{MockFolder, MockPermissions, Modes};
@@ -356,7 +390,7 @@ mod tests {
             let state = discover_service_state(&definition(), &credentials, &folder, &permissions)
                 .expect("should discover");
 
-            assert!(state.group_missing);
+            assert_eq!(state.group, GroupPresence::Missing);
         }
 
         #[test]
@@ -381,7 +415,7 @@ mod tests {
             let state = discover_service_state(&definition(), &credentials, &folder, &permissions)
                 .expect("should discover");
 
-            assert!(state.user_missing);
+            assert_eq!(state.user, UserAccountState::Missing);
         }
 
         #[test]
@@ -411,7 +445,7 @@ mod tests {
             let state = discover_service_state(&definition(), &credentials, &folder, &permissions)
                 .expect("should discover");
 
-            assert!(state.group_membership_missing);
+            assert_eq!(state.user, UserAccountState::MissingGroupMembership);
         }
 
         #[test]
@@ -435,7 +469,7 @@ mod tests {
             let state = discover_service_state(&definition(), &credentials, &folder, &permissions)
                 .expect("should discover");
 
-            assert!(!state.group_membership_missing);
+            assert_eq!(state.user, UserAccountState::Ready);
         }
 
         #[test]
@@ -459,7 +493,7 @@ mod tests {
             let state = discover_service_state(&definition(), &credentials, &folder, &permissions)
                 .expect("should discover");
 
-            assert!(!state.group_membership_missing);
+            assert_eq!(state.user, UserAccountState::Ready);
         }
 
         #[test]
@@ -557,9 +591,8 @@ mod tests {
             let state = discover_service_state(&definition(), &credentials, &folder, &permissions)
                 .expect("should discover");
 
-            assert!(!state.group_missing);
-            assert!(!state.user_missing);
-            assert!(!state.group_membership_missing);
+            assert_eq!(state.group, GroupPresence::Present);
+            assert_eq!(state.user, UserAccountState::Ready);
             assert!(state.folders_missing.is_empty());
             assert!(state.folders_missing_ownership.is_empty());
             assert!(state.folders_missing_mode.is_empty());
@@ -591,9 +624,8 @@ mod tests {
             )
             .expect("should discover");
 
-            assert!(state.group_missing);
-            assert!(!state.user_missing);
-            assert!(!state.group_membership_missing);
+            assert_eq!(state.group, GroupPresence::Missing);
+            assert_eq!(state.user, UserAccountState::Unmanaged);
         }
 
         #[test]
@@ -746,8 +778,8 @@ mod tests {
             Command, FolderModeRequirement, FolderOwnershipRequirement, GroupMembershipRequirement,
             HasCredentials, HasFolder, HasPermissions,
             service::{
-                BootstrapReporting, ServiceDefinition, ServiceState, ServiceUser,
-                plan_service_bootstrap,
+                BootstrapReporting, GroupPresence, ServiceDefinition, ServiceState, ServiceUser,
+                UserAccountState, plan_service_bootstrap,
             },
         };
         use credentials::Credentials;
@@ -801,8 +833,8 @@ mod tests {
         #[test]
         fn test_should_create_group_and_user_when_both_missing() {
             let state = ServiceState {
-                group_missing: true,
-                user_missing: true,
+                group: GroupPresence::Missing,
+                user: UserAccountState::Missing,
                 ..Default::default()
             };
 
@@ -817,7 +849,7 @@ mod tests {
         #[test]
         fn test_should_not_create_user_when_only_group_missing() {
             let state = ServiceState {
-                group_missing: true,
+                group: GroupPresence::Missing,
                 ..Default::default()
             };
 
@@ -831,7 +863,7 @@ mod tests {
         #[test]
         fn test_should_add_user_to_group_when_user_exists_but_not_a_member() {
             let state = ServiceState {
-                group_membership_missing: true,
+                user: UserAccountState::MissingGroupMembership,
                 ..Default::default()
             };
 
@@ -843,10 +875,9 @@ mod tests {
         }
 
         #[test]
-        fn test_should_not_add_user_to_group_when_user_was_just_created() {
+        fn test_should_not_add_user_to_group_when_the_user_is_missing() {
             let state = ServiceState {
-                user_missing: true,
-                group_membership_missing: true,
+                user: UserAccountState::Missing,
                 ..Default::default()
             };
 

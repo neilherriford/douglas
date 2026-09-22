@@ -624,106 +624,159 @@ fn create_plan<'a>(
     registry: &docker_types::Registry,
 ) -> Result<Vec<Step<Context<'a>>>, ReconcileSeedlingError> {
     let mut steps: Vec<Step<Context>> = Vec::new();
+    let agent_requested = seedling_definition.secrets.is_some();
 
+    plan_seedling_and_credentials_steps(
+        &mut steps,
+        name,
+        version,
+        seedling_definition,
+        &state,
+        agent_requested,
+    );
+    plan_mount_steps(&mut steps, name, &mut state);
+    plan_image_step(
+        &mut steps,
+        registry,
+        seedling_definition,
+        state.image_status,
+    )?;
+
+    if agent_requested {
+        plan_agent_container_steps(&mut steps, name, version, &state.agent_container)?;
+    }
+
+    plan_container_steps(
+        &mut steps,
+        name,
+        version,
+        state.container_name,
+        state.container,
+    )?;
+
+    Ok(steps)
+}
+
+fn plan_seedling_and_credentials_steps(
+    steps: &mut Vec<Step<Context<'_>>>,
+    name: &seedbank_types::Name,
+    version: &seedbank_types::Version,
+    seedling_definition: &seedbank_types::SeedlingDefinition,
+    state: &State,
+    agent_requested: bool,
+) {
     match state.seedling_version {
         VersionComparison::Missing => push_step(
-            &mut steps,
+            steps,
             CreateSeedling::new(name.clone(), version.clone(), seedling_definition.clone()),
         ),
         VersionComparison::Current | VersionComparison::Newer => {}
         VersionComparison::Stale => push_step(
-            &mut steps,
+            steps,
             UpdateSeedling::new(name.clone(), version.clone(), seedling_definition.clone()),
         ),
     }
 
-    push_step(&mut steps, SetDesiredRunStatusToRunning::new(name.clone()));
+    push_step(steps, SetDesiredRunStatusToRunning::new(name.clone()));
 
     if state.missing_service_credentials {
-        push_step(&mut steps, CreateServiceAccount::new(name.clone()));
+        push_step(steps, CreateServiceAccount::new(name.clone()));
     }
-
-    let agent_requested = seedling_definition.secrets.is_some();
 
     if agent_requested && state.agent_missing_service_credentials {
-        push_step(&mut steps, CreateAgentServiceAccount::new(name.clone()));
+        push_step(steps, CreateAgentServiceAccount::new(name.clone()));
     }
+}
 
-    for (mount_name, guest_names) in state.missing_share_groups {
+fn plan_mount_steps(
+    steps: &mut Vec<Step<Context<'_>>>,
+    name: &seedbank_types::Name,
+    state: &mut State,
+) {
+    for (mount_name, guest_names) in state.missing_share_groups.drain(..) {
         push_step(
-            &mut steps,
+            steps,
             CreateShareGroup::new(name.clone(), mount_name, guest_names),
         );
     }
 
-    for missing_mount_folder in state.missing_mount_folders {
-        push_step(&mut steps, CreateMountFolder::new(missing_mount_folder));
+    for missing_mount_folder in state.missing_mount_folders.drain(..) {
+        push_step(steps, CreateMountFolder::new(missing_mount_folder));
     }
 
-    for (path, mount_name, kind) in state.needs_mount_ownership {
-        push_step(&mut steps, SetMountOwnership::new(path, mount_name, kind));
+    for (path, mount_name, kind) in state.needs_mount_ownership.drain(..) {
+        push_step(steps, SetMountOwnership::new(path, mount_name, kind));
     }
 
-    for (path, mode) in state.missing_mount_mode {
-        push_step(&mut steps, SetMountMode::new(path, mode));
+    for (path, mode) in state.missing_mount_mode.drain(..) {
+        push_step(steps, SetMountMode::new(path, mode));
     }
 
     for (parrent_path, file_name, contents) in state.missing_mount_files.drain(std::ops::RangeFull)
     {
-        push_step(
-            &mut steps,
-            WriteFile::new(parrent_path, file_name, contents),
-        );
+        push_step(steps, WriteFile::new(parrent_path, file_name, contents));
     }
+}
 
-    match state.image_status {
+fn plan_image_step(
+    steps: &mut Vec<Step<Context<'_>>>,
+    registry: &docker_types::Registry,
+    seedling_definition: &seedbank_types::SeedlingDefinition,
+    image_status: ImageStatus,
+) -> Result<(), ReconcileSeedlingError> {
+    match image_status {
         ImageStatus::Unknown => return Err(ReconcileSeedlingError::MissingImage),
         ImageStatus::Local => {}
         ImageStatus::AvailableFromResin => push_step(
-            &mut steps,
+            steps,
             PullImageFromResin::new(registry, seedling_definition.image.clone()),
         ),
     }
+    Ok(())
+}
 
-    if agent_requested {
-        push_step(&mut steps, EnsureAgentMount::new(name.clone()));
+fn plan_agent_container_steps(
+    steps: &mut Vec<Step<Context<'_>>>,
+    name: &seedbank_types::Name,
+    version: &seedbank_types::Version,
+    agent_container: &ContainerPresence,
+) -> Result<(), ReconcileSeedlingError> {
+    push_step(steps, EnsureAgentMount::new(name.clone()));
 
-        if !state.agent_container.exists() {
-            push_step(
-                &mut steps,
-                BuildAgentContainer::new(name.clone(), version.clone()),
-            );
-            push_step(
-                &mut steps,
-                StartContainer::new(agent_container_name(name)?, version.clone()),
-            );
-        } else if !state.agent_container.is_running() {
-            push_step(
-                &mut steps,
-                StartContainer::new(agent_container_name(name)?, version.clone()),
-            );
-        }
+    if !agent_container.exists() {
+        push_step(
+            steps,
+            BuildAgentContainer::new(name.clone(), version.clone()),
+        );
+        push_step(
+            steps,
+            StartContainer::new(agent_container_name(name)?, version.clone()),
+        );
+    } else if !agent_container.is_running() {
+        push_step(
+            steps,
+            StartContainer::new(agent_container_name(name)?, version.clone()),
+        );
     }
 
-    let container_name = state.container_name;
+    Ok(())
+}
 
-    match state.container {
+fn plan_container_steps(
+    steps: &mut Vec<Step<Context<'_>>>,
+    name: &seedbank_types::Name,
+    version: &seedbank_types::Version,
+    container_name: ContainerName,
+    container: Container,
+) -> Result<(), ReconcileSeedlingError> {
+    match container {
         Container::Missing => {
-            push_step(
-                &mut steps,
-                BuildContainer::new(name.clone(), version.clone()),
-            );
-            push_step(
-                &mut steps,
-                StartContainer::new(container_name, version.clone()),
-            );
+            push_step(steps, BuildContainer::new(name.clone(), version.clone()));
+            push_step(steps, StartContainer::new(container_name, version.clone()));
         }
         Container::Current { running } => {
             if !running {
-                push_step(
-                    &mut steps,
-                    StartContainer::new(container_name, version.clone()),
-                );
+                push_step(steps, StartContainer::new(container_name, version.clone()));
             }
         }
         Container::Stale {
@@ -732,7 +785,7 @@ fn create_plan<'a>(
         } => {
             if running {
                 push_step(
-                    &mut steps,
+                    steps,
                     StopContainerStep::new(
                         Subject::container(&container_name, current_version.clone()),
                         container_name.clone(),
@@ -740,25 +793,19 @@ fn create_plan<'a>(
                 );
             }
             push_step(
-                &mut steps,
+                steps,
                 DropContainerStep::new(
                     Subject::container(&container_name, current_version),
                     container_name.clone(),
                 ),
             );
-            push_step(
-                &mut steps,
-                BuildContainer::new(name.clone(), version.clone()),
-            );
-            push_step(
-                &mut steps,
-                StartContainer::new(container_name, version.clone()),
-            );
+            push_step(steps, BuildContainer::new(name.clone(), version.clone()));
+            push_step(steps, StartContainer::new(container_name, version.clone()));
         }
         Container::Newer => return Err(ReconcileSeedlingError::WouldDowngrade),
     }
 
-    Ok(steps)
+    Ok(())
 }
 
 struct CreateSeedling {
