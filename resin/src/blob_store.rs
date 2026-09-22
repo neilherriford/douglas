@@ -8,7 +8,7 @@ use file_system::{
 };
 #[cfg(test)]
 use mockall::automock;
-use resin_types::{Name, Repository};
+use resin_types::Repository;
 use serde::Deserialize;
 use sha2::Sha256;
 use std::{
@@ -33,6 +33,16 @@ pub enum BlobStoreError {
         claimed: digest::Digest,
         computed: digest::Digest,
     },
+    #[error("{0} is not a local repository")]
+    NotLocal(String),
+    #[error("Unsupported upstream registry: {0}")]
+    UnsupportedUpstream(String),
+}
+
+impl From<resin_types::RepositoryError> for BlobStoreError {
+    fn from(error: resin_types::RepositoryError) -> Self {
+        BlobStoreError::NotLocal(error.to_string())
+    }
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Deserialize)]
@@ -52,7 +62,7 @@ pub enum ResourceKind {
 pub trait BlobStore: Send + Sync {
     async fn save(
         &self,
-        name: &Name,
+        repository: &Repository,
         claimed: &digest::Digest,
         reader: Box<dyn AsyncRead + Send + Unpin>,
         mediatype: &str,
@@ -61,35 +71,35 @@ pub trait BlobStore: Send + Sync {
 
     async fn get(
         &self,
-        name: &Name,
+        repository: &Repository,
         digest: &digest::Digest,
         resource_kind: ResourceKind,
     ) -> Result<Box<dyn AsyncRead + Send + Unpin>, BlobStoreError>;
 
     async fn exists(
         &self,
-        name: &Name,
+        repository: &Repository,
         digest: &digest::Digest,
         resource_kind: ResourceKind,
     ) -> Result<bool, BlobStoreError>;
 
     async fn stats(
         &self,
-        name: &Name,
+        repository: &Repository,
         digest: &digest::Digest,
         resource_kind: ResourceKind,
     ) -> Result<Stats, BlobStoreError>;
 
     async fn delete(
         &self,
-        name: &Name,
+        repository: &Repository,
         digest: &digest::Digest,
         resource_kind: ResourceKind,
     ) -> Result<(), BlobStoreError>;
 
     async fn resolve_reference(
         &self,
-        name: &Name,
+        repository: &Repository,
         reference: &str,
         resource_kind: ResourceKind,
     ) -> Result<digest::Digest, BlobStoreError>;
@@ -221,21 +231,18 @@ where
 impl BlobStore for FileBlobStore {
     async fn save(
         &self,
-        name: &Name,
+        repository: &Repository,
         claimed: &digest::Digest,
         source: Box<dyn AsyncRead + Send + Unpin>,
         mediatype: &str,
         resource_kind: ResourceKind,
     ) -> Result<(), BlobStoreError> {
-        if self.exists(name, claimed, resource_kind).await? {
+        if self.exists(repository, claimed, resource_kind).await? {
             return Ok(());
         }
 
-        let blob_root = create_blob_store_error(
-            claimed,
-            self.blob_root
-                .get(&Repository::Local(name.clone()), resource_kind),
-        )?;
+        let blob_root =
+            create_blob_store_error(claimed, self.blob_root.get(repository, resource_kind))?;
         let blob_root = blob_root.as_path();
         let mut unverified_file =
             create_blob_store_error(claimed, self.create_unverified_file(blob_root, claimed))?;
@@ -260,15 +267,12 @@ impl BlobStore for FileBlobStore {
 
     async fn exists(
         &self,
-        name: &Name,
+        repository: &Repository,
         digest: &digest::Digest,
         resource_kind: ResourceKind,
     ) -> Result<bool, BlobStoreError> {
-        let blob_root = create_blob_store_error(
-            digest,
-            self.blob_root
-                .get(&Repository::Local(name.clone()), resource_kind),
-        )?;
+        let blob_root =
+            create_blob_store_error(digest, self.blob_root.get(repository, resource_kind))?;
         let blob_root = blob_root.as_path();
         let paths = BlobFilePaths::new(blob_root, digest);
         Ok(self.inspect.exists(&paths.final_file))
@@ -276,15 +280,12 @@ impl BlobStore for FileBlobStore {
 
     async fn get(
         &self,
-        name: &Name,
+        repository: &Repository,
         digest: &digest::Digest,
         resource_kind: ResourceKind,
     ) -> Result<Box<dyn AsyncRead + Send + Unpin>, BlobStoreError> {
-        let blob_root = create_blob_store_error(
-            digest,
-            self.blob_root
-                .get(&Repository::Local(name.clone()), resource_kind),
-        )?;
+        let blob_root =
+            create_blob_store_error(digest, self.blob_root.get(repository, resource_kind))?;
         let blob_root = blob_root.as_path();
         let paths = BlobFilePaths::new(blob_root, digest);
 
@@ -299,15 +300,12 @@ impl BlobStore for FileBlobStore {
 
     async fn stats(
         &self,
-        name: &Name,
+        repository: &Repository,
         digest: &digest::Digest,
         resource_kind: ResourceKind,
     ) -> Result<Stats, BlobStoreError> {
-        let blob_root = create_blob_store_error(
-            digest,
-            self.blob_root
-                .get(&Repository::Local(name.clone()), resource_kind),
-        )?;
+        let blob_root =
+            create_blob_store_error(digest, self.blob_root.get(repository, resource_kind))?;
         let blob_root = blob_root.as_path();
         let paths = BlobFilePaths::new(blob_root, digest);
         if self.inspect.exists(&paths.final_file) {
@@ -334,15 +332,12 @@ impl BlobStore for FileBlobStore {
 
     async fn delete(
         &self,
-        name: &Name,
+        repository: &Repository,
         digest: &digest::Digest,
         resource_kind: ResourceKind,
     ) -> Result<(), BlobStoreError> {
-        let blob_root = create_blob_store_error(
-            digest,
-            self.blob_root
-                .get(&Repository::Local(name.clone()), resource_kind),
-        )?;
+        let blob_root =
+            create_blob_store_error(digest, self.blob_root.get(repository, resource_kind))?;
         let blob_root = blob_root.as_path();
         let paths = BlobFilePaths::new(blob_root, digest);
         if self.inspect.exists(&paths.final_file) {
@@ -369,7 +364,7 @@ impl BlobStore for FileBlobStore {
 
     async fn resolve_reference(
         &self,
-        _name: &Name,
+        _repository: &Repository,
         reference: &str,
         _resource_kind: ResourceKind,
     ) -> Result<digest::Digest, BlobStoreError> {
@@ -479,7 +474,7 @@ mod tests {
                 BlobStore, BlobStoreError, FileBlobStore, MockBlobRoot, ResourceKind,
             };
             use crate::digest;
-            use resin_types::Name;
+            use resin_types::Repository;
 
             use file_system::{
                 FileSystemError, MockBufferedFileWiter, MockFileDeleter, MockFileReader,
@@ -504,7 +499,7 @@ mod tests {
                 }
             }
 
-            fn test_name() -> Name {
+            fn test_repository() -> Repository {
                 "blob".parse().unwrap()
             }
 
@@ -545,7 +540,7 @@ mod tests {
                 let digest = digest::Digest("sha256:f00d".to_string());
                 let result = store
                     .save(
-                        &test_name(),
+                        &test_repository(),
                         &digest,
                         Box::new(source),
                         "mediatype",
@@ -599,7 +594,7 @@ mod tests {
                 let digest = digest::Digest("sha256:f00d".to_string());
                 let result = store
                     .save(
-                        &test_name(),
+                        &test_repository(),
                         &digest,
                         Box::new(source),
                         "mediatype",
@@ -650,7 +645,7 @@ mod tests {
                 let digest = digest::Digest("sha256:f00d".to_string());
                 let result = store
                     .save(
-                        &test_name(),
+                        &test_repository(),
                         &digest,
                         Box::new(source),
                         "mediatype",
@@ -703,7 +698,7 @@ mod tests {
                 let digest = digest::Digest("sha256:f00d".to_string());
                 let result = store
                     .save(
-                        &test_name(),
+                        &test_repository(),
                         &digest,
                         Box::new(source),
                         "mediatype",
@@ -778,7 +773,7 @@ mod tests {
                 let digest = digest::Digest(format!("sha256:{actual_sha}"));
                 let result = store
                     .save(
-                        &test_name(),
+                        &test_repository(),
                         &digest,
                         Box::new(source),
                         "mediatype",
@@ -819,7 +814,7 @@ mod tests {
                 let digest = digest::Digest(format!("sha256:{actual_sha}"));
                 let result = store
                     .save(
-                        &test_name(),
+                        &test_repository(),
                         &digest,
                         Box::new(source),
                         "mediatype",
@@ -889,7 +884,7 @@ mod tests {
                 let digest = digest::Digest(format!("sha256:{actual_sha}"));
                 let result = store
                     .save(
-                        &test_name(),
+                        &test_repository(),
                         &digest,
                         Box::new(source),
                         "mediatype",
@@ -904,7 +899,7 @@ mod tests {
         mod exists {
             use crate::blob_store::{BlobStore, FileBlobStore, MockBlobRoot, ResourceKind};
             use crate::digest;
-            use resin_types::Name;
+            use resin_types::Repository;
 
             use file_system::{
                 MockFileDeleter, MockFileReader, MockFileRenamer, MockFileWriter, MockFolder,
@@ -912,7 +907,7 @@ mod tests {
             };
             use std::sync::Arc;
 
-            fn test_name() -> Name {
+            fn test_repository() -> Repository {
                 "blob".parse().unwrap()
             }
 
@@ -947,7 +942,7 @@ mod tests {
                 );
                 let actual = store
                     .exists(
-                        &test_name(),
+                        &test_repository(),
                         &digest::Digest(format!("sha256:{sha}")),
                         ResourceKind::Blob,
                     )
@@ -978,7 +973,7 @@ mod tests {
                 );
                 let actual = store
                     .exists(
-                        &test_name(),
+                        &test_repository(),
                         &digest::Digest(format!("sha256:{sha}")),
                         ResourceKind::Blob,
                     )
@@ -993,7 +988,7 @@ mod tests {
                 BlobStore, BlobStoreError, FileBlobStore, MockBlobRoot, ResourceKind,
             };
             use crate::digest;
-            use resin_types::Name;
+            use resin_types::Repository;
 
             use file_system::{
                 FileSystemError, MockFileDeleter, MockFileReader, MockFileRenamer, MockFileWriter,
@@ -1002,7 +997,7 @@ mod tests {
             use mockall::predicate;
             use std::{path::PathBuf, sync::Arc};
 
-            fn test_name() -> Name {
+            fn test_repository() -> Repository {
                 "blob".parse().unwrap()
             }
 
@@ -1036,7 +1031,9 @@ mod tests {
                     Arc::new(inspect),
                 );
                 let request = digest::Digest(format!("sha256:{sha}"));
-                let actual = store.get(&test_name(), &request, ResourceKind::Blob).await;
+                let actual = store
+                    .get(&test_repository(), &request, ResourceKind::Blob)
+                    .await;
                 assert!(matches!(
                     actual,
                     Err(BlobStoreError::DigestNotFound(digest)) if digest == request.to_string()
@@ -1076,7 +1073,7 @@ mod tests {
                 );
                 let actual = store
                     .get(
-                        &test_name(),
+                        &test_repository(),
                         &digest::Digest(format!("sha256:{sha}")),
                         ResourceKind::Blob,
                     )
@@ -1119,7 +1116,7 @@ mod tests {
                 );
                 let actual = store
                     .get(
-                        &test_name(),
+                        &test_repository(),
                         &digest::Digest(format!("sha256:{sha}")),
                         ResourceKind::Blob,
                     )
@@ -1133,7 +1130,7 @@ mod tests {
                 BlobStore, BlobStoreError, FileBlobStore, MockBlobRoot, ResourceKind,
             };
             use crate::digest;
-            use resin_types::Name;
+            use resin_types::Repository;
 
             use file_system::{
                 Entry, FileSystemError, MockFileDeleter, MockFileReader, MockFileRenamer,
@@ -1142,7 +1139,7 @@ mod tests {
             use mockall::predicate;
             use std::{path::PathBuf, sync::Arc};
 
-            fn test_name() -> Name {
+            fn test_repository() -> Repository {
                 "blob".parse().unwrap()
             }
 
@@ -1178,7 +1175,7 @@ mod tests {
 
                 let request = digest::Digest(format!("sha256:{sha}"));
                 let actual = store
-                    .delete(&test_name(), &request, ResourceKind::Blob)
+                    .delete(&test_repository(), &request, ResourceKind::Blob)
                     .await;
                 assert!(matches!(
                     actual,
@@ -1216,7 +1213,7 @@ mod tests {
 
                 let request = digest::Digest(format!("sha256:{sha}"));
                 let actual = store
-                    .delete(&test_name(), &request, ResourceKind::Blob)
+                    .delete(&test_repository(), &request, ResourceKind::Blob)
                     .await;
                 assert!(matches!(
                     actual,
@@ -1258,7 +1255,7 @@ mod tests {
 
                 let request = digest::Digest(format!("sha256:{sha}"));
                 let actual = store
-                    .delete(&test_name(), &request, ResourceKind::Blob)
+                    .delete(&test_repository(), &request, ResourceKind::Blob)
                     .await;
                 assert!(matches!(
                     actual,
@@ -1305,7 +1302,7 @@ mod tests {
 
                 let request = digest::Digest(format!("sha256:{sha}"));
                 let actual = store
-                    .delete(&test_name(), &request, ResourceKind::Blob)
+                    .delete(&test_repository(), &request, ResourceKind::Blob)
                     .await;
                 assert!(matches!(actual, Ok(())));
             }
@@ -1314,7 +1311,7 @@ mod tests {
         mod resolve_reference {
             use crate::blob_store::ResourceKind;
             use crate::blob_store::{BlobStore, BlobStoreError, FileBlobStore, MockBlobRoot};
-            use resin_types::Name;
+            use resin_types::Repository;
 
             use file_system::{
                 MockFileDeleter, MockFileReader, MockFileRenamer, MockFileWriter, MockFolder,
@@ -1322,7 +1319,7 @@ mod tests {
             };
             use std::sync::Arc;
 
-            fn test_name() -> Name {
+            fn test_repository() -> Repository {
                 "blob".parse().unwrap()
             }
 
@@ -1344,7 +1341,7 @@ mod tests {
 
                 let actual = store()
                     .resolve_reference(
-                        &test_name(),
+                        &test_repository(),
                         &format!("sha256:{sha}"),
                         ResourceKind::Manifest,
                     )
@@ -1356,7 +1353,7 @@ mod tests {
             #[tokio::test]
             async fn test_should_fail_when_reference_is_a_tag() {
                 let actual = store()
-                    .resolve_reference(&test_name(), "latest", ResourceKind::Manifest)
+                    .resolve_reference(&test_repository(), "latest", ResourceKind::Manifest)
                     .await;
 
                 assert!(
@@ -1368,7 +1365,7 @@ mod tests {
         mod round_trip {
             use crate::blob_store::{BlobRoot, BlobStore, FileBlobStore, ResourceKind};
             use crate::digest;
-            use resin_types::{Name, Repository};
+            use resin_types::Repository;
 
             use file_system::{
                 BufferedFileWiter, Entry, EntryKind, FileDeleter, FileReader, FileRenamer,
@@ -1620,11 +1617,11 @@ mod tests {
                 let data = b"Lorem ipsum dolor sit amet, consectetur adipiscing elit.";
                 let claim: digest::Digest =
                     format!("sha256:{sha}").parse().expect("valid test digest");
-                let name: Name = "blob".parse().unwrap();
+                let repository: Repository = "blob".parse().unwrap();
                 let store = make_store(FakeDisk::new());
                 store
                     .save(
-                        &name,
+                        &repository,
                         &claim,
                         Box::new(data.as_ref()),
                         "mediatype",
@@ -1634,14 +1631,14 @@ mod tests {
                     .expect("save should succeed");
 
                 let stats = store
-                    .stats(&name, &claim, ResourceKind::Blob)
+                    .stats(&repository, &claim, ResourceKind::Blob)
                     .await
                     .expect("stats should succeed");
                 assert_eq!(stats.mediatype, "mediatype");
                 assert_eq!(stats.size, data.len() as u64);
 
                 let mut reader = store
-                    .get(&name, &claim, ResourceKind::Blob)
+                    .get(&repository, &claim, ResourceKind::Blob)
                     .await
                     .expect("get should succeed");
                 let mut actual = Vec::new();
@@ -1659,7 +1656,7 @@ mod tests {
             BlobStore, BlobStoreError, FileBlobStore, MockBlobRoot, ResourceKind,
         };
         use crate::digest;
-        use resin_types::Name;
+        use resin_types::Repository;
 
         use file_system::{
             Entry, MockFileDeleter, MockFileReader, MockFileRenamer, MockFileWriter, MockFolder,
@@ -1668,7 +1665,7 @@ mod tests {
         use mockall::predicate;
         use std::{path::PathBuf, sync::Arc};
 
-        fn test_name() -> Name {
+        fn test_repository() -> Repository {
             "blob".parse().unwrap()
         }
 
@@ -1704,7 +1701,7 @@ mod tests {
 
             let request = digest::Digest(format!("sha256:{sha}"));
             let actual = store
-                .stats(&test_name(), &request, ResourceKind::Blob)
+                .stats(&test_repository(), &request, ResourceKind::Blob)
                 .await;
             assert!(matches!(
                 actual,
@@ -1744,7 +1741,7 @@ mod tests {
 
             let request = digest::Digest(format!("sha256:{sha}"));
             let actual = store
-                .stats(&test_name(), &request, ResourceKind::Blob)
+                .stats(&test_repository(), &request, ResourceKind::Blob)
                 .await;
             assert!(matches!(
                 actual,
@@ -1782,7 +1779,7 @@ mod tests {
 
             let request = digest::Digest(format!("sha256:{sha}"));
             let actual = store
-                .stats(&test_name(), &request, ResourceKind::Blob)
+                .stats(&test_repository(), &request, ResourceKind::Blob)
                 .await;
             assert!(matches!(
                 actual,
@@ -1827,7 +1824,7 @@ mod tests {
 
             let request = digest::Digest(format!("sha256:{sha}"));
             let actual = store
-                .stats(&test_name(), &request, ResourceKind::Blob)
+                .stats(&test_repository(), &request, ResourceKind::Blob)
                 .await;
             assert!(matches!(
                 actual,

@@ -10,7 +10,7 @@ use axum::{
     http::StatusCode,
     response::IntoResponse,
 };
-use resin_types::{Name, Repository};
+use resin_types::Repository;
 use std::{str::FromStr, sync::Arc};
 use tokio_util::io::ReaderStream;
 
@@ -25,20 +25,18 @@ pub(crate) async fn info(
     State(state): State<BlobState>,
     Path((repository, raw_digest)): Path<(String, String)>,
 ) -> Result<impl IntoResponse, ServerError> {
-    let repository: Repository = repository.parse()?;
-    let name = repository.require_local()?;
-    read_blob_info(state, name.clone(), raw_digest).await
+    read_blob_info(state, repository.parse()?, raw_digest).await
 }
 
 async fn read_blob_info(
     state: BlobState,
-    name: Name,
+    repository: Repository,
     raw_digest: String,
 ) -> Result<impl IntoResponse, ServerError> {
     let digest = Digest::from_str(&raw_digest)?;
     let stats = state
         .blob_store
-        .stats(&name, &digest, ResourceKind::Blob)
+        .stats(&repository, &digest, ResourceKind::Blob)
         .await
         .map_err(to_blob_error)?;
     Ok((
@@ -58,31 +56,29 @@ pub(crate) async fn blob(
     State(state): State<BlobState>,
     Path((repository, raw_digest)): Path<(String, String)>,
 ) -> Result<impl IntoResponse, ServerError> {
-    let repository: Repository = repository.parse()?;
-    let name = repository.require_local()?;
-    read_blob(state, name.clone(), raw_digest).await
+    read_blob(state, repository.parse()?, raw_digest).await
 }
 
 async fn read_blob(
     state: BlobState,
-    name: Name,
+    repository: Repository,
     raw_digest: String,
 ) -> Result<impl IntoResponse, ServerError> {
     let digest = Digest::from_str(&raw_digest)?;
     let stats = state
         .blob_store
-        .stats(&name, &digest, ResourceKind::Blob)
+        .stats(&repository, &digest, ResourceKind::Blob)
         .await
         .map_err(to_blob_error)?;
     let reader = state
         .blob_store
-        .get(&name, &digest, ResourceKind::Blob)
+        .get(&repository, &digest, ResourceKind::Blob)
         .await
         .map_err(to_blob_error)?;
     let reader = crate::stream_logging::LoggingReader::new(
         reader,
         Arc::clone(&state.reporter),
-        format!("blob {name} {digest}"),
+        format!("blob {repository} {digest}"),
     );
     let stream = ReaderStream::new(reader);
 
@@ -110,18 +106,18 @@ pub(crate) async fn delete(
 ) -> Result<impl IntoResponse, ServerError> {
     let repository: Repository = repository.parse()?;
     let name = authorize_write(&repository, state.seedling_registration_client.as_ref()).await?;
-    delete_blob(state, name, raw_digest).await
+    delete_blob(state, Repository::Local(name), raw_digest).await
 }
 
 async fn delete_blob(
     state: BlobState,
-    name: Name,
+    repository: Repository,
     raw_digest: String,
 ) -> Result<impl IntoResponse, ServerError> {
     let digest = Digest::from_str(&raw_digest)?;
     state
         .blob_store
-        .delete(&name, &digest, ResourceKind::Blob)
+        .delete(&repository, &digest, ResourceKind::Blob)
         .await
         .map_err(to_blob_error)?;
 

@@ -1,7 +1,6 @@
 use async_trait::async_trait;
-use docker_types::{ImagePathComponent, ImagePathComponentError};
 use log::{Outcome, Reporter, ScopeKind, Span};
-use resin_types::Name;
+use resin_types::RepositoryPath;
 use serde::Deserialize;
 use simple_rest_client::{
     Request, RestClient, RestClientError, ServerClosedConnections,
@@ -21,14 +20,12 @@ pub enum TokenExchangeError {
     ResponseAssertionFailed(#[from] AssertionError),
     #[error("Unexpected response body {0}")]
     UnexpectedResponseBody(#[from] serde_json::Error),
-    #[error("Invalid repository name {0}")]
-    InvalidRepositoryName(#[from] ImagePathComponentError),
 }
 
 #[cfg_attr(test, mockall::automock)]
 #[async_trait]
 pub trait TokenExchange: Send + Sync {
-    async fn fetch_token(&self, name: &Name) -> Result<String, TokenExchangeError>;
+    async fn fetch_token(&self, path: &RepositoryPath) -> Result<String, TokenExchangeError>;
 }
 
 pub struct DockerHubTokenExchange {
@@ -44,25 +41,12 @@ impl DockerHubTokenExchange {
     pub fn new(reporter: Arc<dyn Reporter>) -> Self {
         Self { reporter }
     }
-
-    fn repository_name(name: &Name) -> Result<String, TokenExchangeError> {
-        let namespace = match name.namespace() {
-            Some(namespace) => namespace
-                .to_string()
-                .parse::<ImagePathComponent>()?
-                .to_string(),
-            None => "library".to_string(),
-        };
-        let component: ImagePathComponent = name.name().to_string().parse()?;
-
-        Ok(format!("{namespace}/{component}"))
-    }
 }
 
 #[async_trait]
 impl TokenExchange for DockerHubTokenExchange {
-    async fn fetch_token(&self, name: &Name) -> Result<String, TokenExchangeError> {
-        let repository_name = Self::repository_name(name)?;
+    async fn fetch_token(&self, path: &RepositoryPath) -> Result<String, TokenExchangeError> {
+        let repository_name = path.to_string();
 
         let guard = Span::new(
             Arc::clone(&self.reporter),
@@ -104,30 +88,6 @@ impl TokenExchange for DockerHubTokenExchange {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    mod repository_name {
-        use super::*;
-
-        #[test]
-        fn test_repository_name_should_default_to_library_when_there_is_no_namespace() {
-            let name: Name = "traefik".parse().unwrap();
-
-            assert_eq!(
-                DockerHubTokenExchange::repository_name(&name).unwrap(),
-                "library/traefik"
-            );
-        }
-
-        #[test]
-        fn test_repository_name_should_use_the_namespace_as_is_when_present() {
-            let name = Name::from_namespaced("someuser", "someimage").unwrap();
-
-            assert_eq!(
-                DockerHubTokenExchange::repository_name(&name).unwrap(),
-                "someuser/someimage"
-            );
-        }
-    }
 
     mod token_response {
         use super::*;

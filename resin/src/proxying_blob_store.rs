@@ -6,7 +6,7 @@ use crate::{
 use async_trait::async_trait;
 use bytes::{Buf, Bytes};
 use log::{Outcome, Reporter, ScopeKind, Span};
-use resin_types::Name;
+use resin_types::{Repository, RepositoryPath, Upstream};
 use simple_rest_client::{
     Header, Request, Response, ServerClosedConnections, StreamedResponse, header_predicates,
     tls_socket::{RedirectFollowingClient, TlsRedirectFollowingClient},
@@ -30,7 +30,6 @@ pub struct ProxyingBlobStore {
     rest_client: Mutex<Box<dyn RedirectFollowingClient>>,
 }
 
-const DOCKER_REGISTRY: &str = "registry-1.docker.io";
 type BodyAsyncReader = Box<dyn tokio::io::AsyncRead + Send + Unpin>;
 
 impl ProxyingBlobStore {
@@ -46,20 +45,31 @@ impl ProxyingBlobStore {
         }
     }
 
-    fn reference_path(name: &Name, reference: &str, resource_kind: ResourceKind) -> String {
+    fn require_docker_hub(upstream: &Upstream) -> Result<(), BlobStoreError> {
+        if matches!(upstream, Upstream::DockerHub) {
+            Ok(())
+        } else {
+            Err(BlobStoreError::UnsupportedUpstream(
+                upstream.canonical_host(),
+            ))
+        }
+    }
+
+    fn reference_path(
+        path: &RepositoryPath,
+        reference: &str,
+        resource_kind: ResourceKind,
+    ) -> String {
         let segment = match resource_kind {
             ResourceKind::Blob => "blobs",
             ResourceKind::Manifest => "manifests",
         };
 
-        match name.namespace() {
-            Some(_) => format!("/v2/{name}/{segment}/{reference}"),
-            None => format!("/v2/library/{name}/{segment}/{reference}"),
-        }
+        format!("/v2/{path}/{segment}/{reference}")
     }
 
-    fn blob_path(name: &Name, digest: &Digest, resource_kind: ResourceKind) -> String {
-        Self::reference_path(name, &digest.to_string(), resource_kind)
+    fn blob_path(path: &RepositoryPath, digest: &Digest, resource_kind: ResourceKind) -> String {
+        Self::reference_path(path, &digest.to_string(), resource_kind)
     }
 
     fn failed(
@@ -109,10 +119,14 @@ impl ProxyingBlobStore {
         }
     }
 
-    async fn remote_token(&self, name: &Name, digest: &Digest) -> Result<String, BlobStoreError> {
+    async fn remote_token(
+        &self,
+        path: &RepositoryPath,
+        digest: &Digest,
+    ) -> Result<String, BlobStoreError> {
         self.with_timeout("token fetch", digest, async {
             self.token_exchange
-                .fetch_token(name)
+                .fetch_token(path)
                 .await
                 .map_err(|err| Self::failed(digest, err))
         })
@@ -121,14 +135,16 @@ impl ProxyingBlobStore {
 
     async fn remote_get(
         &self,
-        name: &Name,
+        upstream: &Upstream,
+        path: &RepositoryPath,
         digest: &Digest,
         resource_kind: ResourceKind,
     ) -> Result<(String, BodyAsyncReader), BlobStoreError> {
-        let token = self.remote_token(name, digest).await?;
+        Self::require_docker_hub(upstream)?;
+        let token = self.remote_token(path, digest).await?;
 
         let request = Request::Get {
-            path: Self::blob_path(name, digest, resource_kind),
+            path: Self::blob_path(path, digest, resource_kind),
             headers: vec![Header::authorization_bearer(&token)],
             query: HashMap::new(),
         };
@@ -140,13 +156,14 @@ impl ProxyingBlobStore {
         )
         .start_guard();
         let span = guard.span().clone();
+        let api_host = upstream.api_host();
 
         let result = self
             .with_timeout("streaming GET", digest, async move {
                 self.rest_client
                     .lock()
                     .await
-                    .execute_streaming(&span, DOCKER_REGISTRY, request)
+                    .execute_streaming(&span, &api_host, request)
                     .await
                     .map_err(|err| Self::failed(digest, err))
             })
@@ -171,9 +188,14 @@ impl ProxyingBlobStore {
             }
             // See the matching arm in remote_stats: Docker Hub's anonymous
             // 401 means the same thing a 404 would here.
-            StreamedResponse::Error {
-                status: 404 | 401, ..
-            } => Err(BlobStoreError::DigestNotFound(digest.to_string())),
+            StreamedResponse::Error { status: 404, .. } => {
+                Err(BlobStoreError::DigestNotFound(digest.to_string()))
+            }
+            StreamedResponse::Error { status: 401, .. }
+                if matches!(upstream, Upstream::DockerHub) =>
+            {
+                Err(BlobStoreError::DigestNotFound(digest.to_string()))
+            }
             StreamedResponse::Error { status, body, .. } => Err(Self::failed(
                 digest,
                 format!("status {status}: {}", body.unwrap_or_default()),
@@ -183,11 +205,15 @@ impl ProxyingBlobStore {
 
     async fn remote_exists(
         &self,
-        name: &Name,
+        upstream: &Upstream,
+        path: &RepositoryPath,
         digest: &Digest,
         resource_kind: ResourceKind,
     ) -> Result<bool, BlobStoreError> {
-        match self.remote_stats(name, digest, resource_kind).await {
+        match self
+            .remote_stats(upstream, path, digest, resource_kind)
+            .await
+        {
             Ok(_) => Ok(true),
             Err(BlobStoreError::DigestNotFound(_)) => Ok(false),
             Err(err) => Err(err),
@@ -196,14 +222,16 @@ impl ProxyingBlobStore {
 
     async fn remote_stats(
         &self,
-        name: &Name,
+        upstream: &Upstream,
+        path: &RepositoryPath,
         digest: &Digest,
         resource_kind: ResourceKind,
     ) -> Result<Stats, BlobStoreError> {
-        let token = self.remote_token(name, digest).await?;
+        Self::require_docker_hub(upstream)?;
+        let token = self.remote_token(path, digest).await?;
 
         let request = Request::Head {
-            path: Self::blob_path(name, digest, resource_kind),
+            path: Self::blob_path(path, digest, resource_kind),
             headers: vec![Header::authorization_bearer(&token)],
             query: HashMap::new(),
         };
@@ -215,13 +243,14 @@ impl ProxyingBlobStore {
         )
         .start_guard();
         let span = guard.span().clone();
+        let api_host = upstream.api_host();
 
         let result = self
             .with_timeout("HEAD", digest, async move {
                 self.rest_client
                     .lock()
                     .await
-                    .execute(&span, DOCKER_REGISTRY, request)
+                    .execute(&span, &api_host, request)
                     .await
                     .map_err(|err| Self::failed(digest, err))
             })
@@ -255,10 +284,13 @@ impl ProxyingBlobStore {
             // "doesn't exist" from "exists but you can't see it", so both
             // collapse to 401/insufficient_scope. Since we only ever call
             // Docker Hub anonymously here, a 401 means "no such public repo",
-            // same as a 404.
-            Response::Error {
-                status: 404 | 401, ..
-            } => Err(BlobStoreError::DigestNotFound(digest.to_string())),
+            // same as a 404. Other registries don't share that quirk.
+            Response::Error { status: 404, .. } => {
+                Err(BlobStoreError::DigestNotFound(digest.to_string()))
+            }
+            Response::Error { status: 401, .. } if matches!(upstream, Upstream::DockerHub) => {
+                Err(BlobStoreError::DigestNotFound(digest.to_string()))
+            }
             Response::Error { status, body, .. } => Err(Self::failed(
                 digest,
                 format!("status {status}: {}", body.unwrap_or_default()),
@@ -268,18 +300,20 @@ impl ProxyingBlobStore {
 
     async fn remote_resolve_reference(
         &self,
-        name: &Name,
+        upstream: &Upstream,
+        path: &RepositoryPath,
         reference: &str,
         resource_kind: ResourceKind,
     ) -> Result<Digest, BlobStoreError> {
+        Self::require_docker_hub(upstream)?;
         let token = self
             .token_exchange
-            .fetch_token(name)
+            .fetch_token(path)
             .await
             .map_err(|err| Self::failed(reference, err))?;
 
         let request = Request::Head {
-            path: Self::reference_path(name, reference, resource_kind),
+            path: Self::reference_path(path, reference, resource_kind),
             headers: vec![Header::authorization_bearer(&token)],
             query: HashMap::new(),
         };
@@ -291,13 +325,14 @@ impl ProxyingBlobStore {
         )
         .start_guard();
         let span = guard.span().clone();
+        let api_host = upstream.api_host();
 
         let result = self
             .with_timeout("HEAD", reference, async move {
                 self.rest_client
                     .lock()
                     .await
-                    .execute(&span, DOCKER_REGISTRY, request)
+                    .execute(&span, &api_host, request)
                     .await
                     .map_err(|err| Self::failed(reference, err))
             })
@@ -327,9 +362,12 @@ impl ProxyingBlobStore {
             }
             // See the matching arm in remote_stats: Docker Hub's anonymous
             // 401 means the same thing a 404 would here.
-            Response::Error {
-                status: 404 | 401, ..
-            } => Err(BlobStoreError::DigestNotFound(reference.to_string())),
+            Response::Error { status: 404, .. } => {
+                Err(BlobStoreError::DigestNotFound(reference.to_string()))
+            }
+            Response::Error { status: 401, .. } if matches!(upstream, Upstream::DockerHub) => {
+                Err(BlobStoreError::DigestNotFound(reference.to_string()))
+            }
             Response::Error { status, body, .. } => Err(Self::failed(
                 reference,
                 format!("status {status}: {}", body.unwrap_or_default()),
@@ -340,7 +378,7 @@ impl ProxyingBlobStore {
     fn log_local_error(
         &self,
         operation: &str,
-        name: &Name,
+        repository: &Repository,
         reference: impl std::fmt::Display,
         err: &BlobStoreError,
     ) {
@@ -348,7 +386,7 @@ impl ProxyingBlobStore {
             Span::new(Arc::clone(&self.reporter), "Cache lookup", ScopeKind::Task).start_guard();
         guard.span().message(
             log::Level::Warn,
-            &format!("{operation} {name} {reference}: local lookup failed, not falling back to remote: {err}"),
+            &format!("{operation} {repository} {reference}: local lookup failed, not falling back to remote: {err}"),
         );
         guard.finish_with_outcome(Outcome::Failed);
     }
@@ -356,7 +394,7 @@ impl ProxyingBlobStore {
     fn log_cache_decision(
         &self,
         operation: &str,
-        name: &Name,
+        repository: &Repository,
         reference: impl std::fmt::Display,
         hit: bool,
     ) {
@@ -369,7 +407,7 @@ impl ProxyingBlobStore {
         };
         guard.span().message(
             log::Level::Info,
-            &format!("{operation} {name} {reference}: local cache {outcome}"),
+            &format!("{operation} {repository} {reference}: local cache {outcome}"),
         );
         guard.finish_with_outcome(Outcome::Ok);
     }
@@ -499,36 +537,42 @@ impl AsyncRead for VerifiedCacheReader {
 impl BlobStore for ProxyingBlobStore {
     async fn save(
         &self,
-        name: &Name,
+        repository: &Repository,
         claimed: &Digest,
         reader: BodyAsyncReader,
         mediatype: &str,
         resource_kind: ResourceKind,
     ) -> Result<(), BlobStoreError> {
+        repository.require_local()?;
         self.primary_blob_store
-            .save(name, claimed, reader, mediatype, resource_kind)
+            .save(repository, claimed, reader, mediatype, resource_kind)
             .await
     }
 
     async fn get(
         &self,
-        name: &Name,
+        repository: &Repository,
         digest: &Digest,
         resource_kind: ResourceKind,
     ) -> Result<BodyAsyncReader, BlobStoreError> {
         match self
             .primary_blob_store
-            .get(name, digest, resource_kind)
+            .get(repository, digest, resource_kind)
             .await
         {
             Ok(reader) => {
-                self.log_cache_decision("get", name, digest, true);
+                self.log_cache_decision("get", repository, digest, true);
                 Ok(reader)
             }
             Err(BlobStoreError::DigestNotFound(_)) => {
-                self.log_cache_decision("get", name, digest, false);
-                let (media_type, remote_body) =
-                    self.remote_get(name, digest, resource_kind).await?;
+                let Some((upstream, path)) = repository.as_upstream() else {
+                    self.log_cache_decision("get", repository, digest, false);
+                    return Err(BlobStoreError::DigestNotFound(digest.to_string()));
+                };
+                self.log_cache_decision("get", repository, digest, false);
+                let (media_type, remote_body) = self
+                    .remote_get(upstream, path, digest, resource_kind)
+                    .await?;
 
                 let (sink, receiver) = mpsc::unbounded_channel();
                 let (done_tx, done_rx) = oneshot::channel();
@@ -536,12 +580,18 @@ impl BlobStore for ProxyingBlobStore {
 
                 let primary_blob_store = Arc::clone(&self.primary_blob_store);
                 let reporter = Arc::clone(&self.reporter);
-                let name = name.clone();
+                let repository = repository.clone();
                 let digest = digest.clone();
 
                 tokio::spawn(async move {
                     let result = primary_blob_store
-                        .save(&name, &digest, Box::new(tee), &media_type, resource_kind)
+                        .save(
+                            &repository,
+                            &digest,
+                            Box::new(tee),
+                            &media_type,
+                            resource_kind,
+                        )
                         .await;
 
                     let guard = Span::new(Arc::clone(&reporter), "Cache write", ScopeKind::Task)
@@ -550,7 +600,7 @@ impl BlobStore for ProxyingBlobStore {
                         Ok(()) => {
                             guard.span().message(
                                 log::Level::Info,
-                                &format!("cached {name} {digest} ({resource_kind:?})"),
+                                &format!("cached {repository} {digest} ({resource_kind:?})"),
                             );
                             guard.finish_with_outcome(Outcome::Ok);
                         }
@@ -558,7 +608,7 @@ impl BlobStore for ProxyingBlobStore {
                             guard.span().message(
                                 log::Level::Warn,
                                 &format!(
-                                    "failed to cache {name} {digest} ({resource_kind:?}): {err}"
+                                    "failed to cache {repository} {digest} ({resource_kind:?}): {err}"
                                 ),
                             );
                             guard.finish_with_outcome(Outcome::Failed);
@@ -571,7 +621,7 @@ impl BlobStore for ProxyingBlobStore {
                 Ok(Box::new(VerifiedCacheReader::new(receiver, done_rx)) as BodyAsyncReader)
             }
             Err(err) => {
-                self.log_local_error("get", name, digest, &err);
+                self.log_local_error("get", repository, digest, &err);
                 Err(err)
             }
         }
@@ -579,25 +629,29 @@ impl BlobStore for ProxyingBlobStore {
 
     async fn exists(
         &self,
-        name: &Name,
+        repository: &Repository,
         digest: &Digest,
         resource_kind: ResourceKind,
     ) -> Result<bool, BlobStoreError> {
         match self
             .primary_blob_store
-            .exists(name, digest, resource_kind)
+            .exists(repository, digest, resource_kind)
             .await
         {
             Ok(true) => {
-                self.log_cache_decision("exists", name, digest, true);
+                self.log_cache_decision("exists", repository, digest, true);
                 Ok(true)
             }
             Ok(false) => {
-                self.log_cache_decision("exists", name, digest, false);
-                self.remote_exists(name, digest, resource_kind).await
+                self.log_cache_decision("exists", repository, digest, false);
+                let Some((upstream, path)) = repository.as_upstream() else {
+                    return Ok(false);
+                };
+                self.remote_exists(upstream, path, digest, resource_kind)
+                    .await
             }
             Err(err) => {
-                self.log_local_error("exists", name, digest, &err);
+                self.log_local_error("exists", repository, digest, &err);
                 Err(err)
             }
         }
@@ -605,25 +659,30 @@ impl BlobStore for ProxyingBlobStore {
 
     async fn stats(
         &self,
-        name: &Name,
+        repository: &Repository,
         digest: &Digest,
         resource_kind: ResourceKind,
     ) -> Result<Stats, BlobStoreError> {
         match self
             .primary_blob_store
-            .stats(name, digest, resource_kind)
+            .stats(repository, digest, resource_kind)
             .await
         {
             Ok(stats) => {
-                self.log_cache_decision("stats", name, digest, true);
+                self.log_cache_decision("stats", repository, digest, true);
                 Ok(stats)
             }
             Err(BlobStoreError::DigestNotFound(_)) => {
-                self.log_cache_decision("stats", name, digest, false);
-                self.remote_stats(name, digest, resource_kind).await
+                let Some((upstream, path)) = repository.as_upstream() else {
+                    self.log_cache_decision("stats", repository, digest, false);
+                    return Err(BlobStoreError::DigestNotFound(digest.to_string()));
+                };
+                self.log_cache_decision("stats", repository, digest, false);
+                self.remote_stats(upstream, path, digest, resource_kind)
+                    .await
             }
             Err(err) => {
-                self.log_local_error("stats", name, digest, &err);
+                self.log_local_error("stats", repository, digest, &err);
                 Err(err)
             }
         }
@@ -631,37 +690,42 @@ impl BlobStore for ProxyingBlobStore {
 
     async fn delete(
         &self,
-        name: &Name,
+        repository: &Repository,
         digest: &Digest,
         resource_kind: ResourceKind,
     ) -> Result<(), BlobStoreError> {
+        repository.require_local()?;
         self.primary_blob_store
-            .delete(name, digest, resource_kind)
+            .delete(repository, digest, resource_kind)
             .await
     }
 
     async fn resolve_reference(
         &self,
-        name: &Name,
+        repository: &Repository,
         reference: &str,
         resource_kind: ResourceKind,
     ) -> Result<Digest, BlobStoreError> {
         match self
             .primary_blob_store
-            .resolve_reference(name, reference, resource_kind)
+            .resolve_reference(repository, reference, resource_kind)
             .await
         {
             Ok(digest) => {
-                self.log_cache_decision("resolve_reference", name, reference, true);
+                self.log_cache_decision("resolve_reference", repository, reference, true);
                 Ok(digest)
             }
             Err(BlobStoreError::DigestNotFound(_)) => {
-                self.log_cache_decision("resolve_reference", name, reference, false);
-                self.remote_resolve_reference(name, reference, resource_kind)
+                let Some((upstream, path)) = repository.as_upstream() else {
+                    self.log_cache_decision("resolve_reference", repository, reference, false);
+                    return Err(BlobStoreError::DigestNotFound(reference.to_string()));
+                };
+                self.log_cache_decision("resolve_reference", repository, reference, false);
+                self.remote_resolve_reference(upstream, path, reference, resource_kind)
                     .await
             }
             Err(err) => {
-                self.log_local_error("resolve_reference", name, reference, &err);
+                self.log_local_error("resolve_reference", repository, reference, &err);
                 Err(err)
             }
         }
@@ -687,8 +751,12 @@ mod tests {
         Arc::new(NullReporter)
     }
 
-    fn test_name() -> Name {
+    fn test_repository() -> Repository {
         "foo".parse().unwrap()
+    }
+
+    fn test_upstream_repository() -> Repository {
+        "docker.io/foo".parse().unwrap()
     }
 
     fn test_digest() -> Digest {
@@ -718,36 +786,33 @@ mod tests {
     mod blob_path {
         use super::*;
 
-        #[test]
-        fn test_blob_path_should_prefix_library_when_there_is_no_namespace() {
-            let name = test_name();
-            let digest = test_digest();
-
-            assert_eq!(
-                ProxyingBlobStore::blob_path(&name, &digest, ResourceKind::Blob),
-                format!("/v2/library/{name}/blobs/{digest}")
-            );
+        fn test_path() -> RepositoryPath {
+            let repository: Repository = "docker.io/foo".parse().unwrap();
+            let Some((_, path)) = repository.as_upstream() else {
+                panic!("expected an upstream repository");
+            };
+            path.clone()
         }
 
         #[test]
-        fn test_blob_path_should_use_the_namespace_as_is_when_present() {
-            let name = Name::from_namespaced("foo", "bar").unwrap();
+        fn test_blob_path_should_use_the_repository_path_as_is() {
+            let path = test_path();
             let digest = test_digest();
 
             assert_eq!(
-                ProxyingBlobStore::blob_path(&name, &digest, ResourceKind::Blob),
-                format!("/v2/foo/bar/blobs/{digest}")
+                ProxyingBlobStore::blob_path(&path, &digest, ResourceKind::Blob),
+                format!("/v2/{path}/blobs/{digest}")
             );
         }
 
         #[test]
         fn test_blob_path_should_use_the_manifests_segment_for_manifests() {
-            let name = test_name();
+            let path = test_path();
             let digest = test_digest();
 
             assert_eq!(
-                ProxyingBlobStore::blob_path(&name, &digest, ResourceKind::Manifest),
-                format!("/v2/library/{name}/manifests/{digest}")
+                ProxyingBlobStore::blob_path(&path, &digest, ResourceKind::Manifest),
+                format!("/v2/{path}/manifests/{digest}")
             );
         }
     }
@@ -939,9 +1004,12 @@ mod tests {
                 MockRedirectFollowingClient::new(),
             );
 
-            let name = test_name();
+            let repository = test_repository();
             let digest = test_digest();
-            let mut reader = store.get(&name, &digest, ResourceKind::Blob).await.unwrap();
+            let mut reader = store
+                .get(&repository, &digest, ResourceKind::Blob)
+                .await
+                .unwrap();
 
             let mut buf = Vec::new();
             reader.read_to_end(&mut buf).await.unwrap();
@@ -984,9 +1052,12 @@ mod tests {
 
             let store = build_store(Arc::new(primary), token_exchange, rest_client);
 
-            let name = test_name();
+            let repository = test_upstream_repository();
             let digest = test_digest();
-            let mut reader = store.get(&name, &digest, ResourceKind::Blob).await.unwrap();
+            let mut reader = store
+                .get(&repository, &digest, ResourceKind::Blob)
+                .await
+                .unwrap();
 
             let mut buf = Vec::new();
             reader.read_to_end(&mut buf).await.unwrap();
@@ -1009,15 +1080,35 @@ mod tests {
                 MockRedirectFollowingClient::new(),
             );
 
-            let name = test_name();
+            let repository = test_repository();
             let digest = test_digest();
-            let result = store.get(&name, &digest, ResourceKind::Blob).await;
+            let result = store.get(&repository, &digest, ResourceKind::Blob).await;
 
             assert!(matches!(
                 result,
                 Err(BlobStoreError::FailedToRetrieveDigest { details, .. })
                     if details == "permission denied"
             ));
+        }
+
+        #[tokio::test]
+        async fn test_get_should_not_fall_back_to_remote_for_a_local_repository_miss() {
+            let mut primary = MockBlobStore::new();
+            primary.expect_get().return_once(|_, digest, _| {
+                Err(BlobStoreError::DigestNotFound(digest.to_string()))
+            });
+
+            let store = build_store(
+                Arc::new(primary),
+                MockTokenExchange::new(),
+                MockRedirectFollowingClient::new(),
+            );
+
+            let repository = test_repository();
+            let digest = test_digest();
+            let result = store.get(&repository, &digest, ResourceKind::Blob).await;
+
+            assert!(matches!(result, Err(BlobStoreError::DigestNotFound(_))));
         }
     }
 
@@ -1035,11 +1126,11 @@ mod tests {
                 MockRedirectFollowingClient::new(),
             );
 
-            let name = test_name();
+            let repository = test_repository();
             let digest = test_digest();
             assert!(
                 store
-                    .exists(&name, &digest, ResourceKind::Blob)
+                    .exists(&repository, &digest, ResourceKind::Blob)
                     .await
                     .unwrap()
             );
@@ -1068,11 +1159,11 @@ mod tests {
 
             let store = build_store(Arc::new(primary), token_exchange, rest_client);
 
-            let name = test_name();
+            let repository = test_upstream_repository();
             let digest = test_digest();
             assert!(
                 store
-                    .exists(&name, &digest, ResourceKind::Blob)
+                    .exists(&repository, &digest, ResourceKind::Blob)
                     .await
                     .unwrap()
             );
@@ -1099,11 +1190,11 @@ mod tests {
 
             let store = build_store(Arc::new(primary), token_exchange, rest_client);
 
-            let name = test_name();
+            let repository = test_repository();
             let digest = test_digest();
             assert!(
                 !store
-                    .exists(&name, &digest, ResourceKind::Blob)
+                    .exists(&repository, &digest, ResourceKind::Blob)
                     .await
                     .unwrap()
             );
@@ -1126,15 +1217,36 @@ mod tests {
                 MockRedirectFollowingClient::new(),
             );
 
-            let name = test_name();
+            let repository = test_repository();
             let digest = test_digest();
-            let result = store.exists(&name, &digest, ResourceKind::Blob).await;
+            let result = store.exists(&repository, &digest, ResourceKind::Blob).await;
 
             assert!(matches!(
                 result,
                 Err(BlobStoreError::FailedToRetrieveDigest { details, .. })
                     if details == "permission denied"
             ));
+        }
+
+        #[tokio::test]
+        async fn test_exists_should_not_fall_back_to_remote_for_a_local_repository_miss() {
+            let mut primary = MockBlobStore::new();
+            primary.expect_exists().return_once(|_, _, _| Ok(false));
+
+            let store = build_store(
+                Arc::new(primary),
+                MockTokenExchange::new(),
+                MockRedirectFollowingClient::new(),
+            );
+
+            let repository = test_repository();
+            let digest = test_digest();
+            assert!(
+                !store
+                    .exists(&repository, &digest, ResourceKind::Blob)
+                    .await
+                    .unwrap()
+            );
         }
     }
 
@@ -1159,11 +1271,11 @@ mod tests {
                 MockRedirectFollowingClient::new(),
             );
 
-            let name = test_name();
+            let repository = test_repository();
             let digest = test_digest();
             assert_eq!(
                 store
-                    .stats(&name, &digest, ResourceKind::Blob)
+                    .stats(&repository, &digest, ResourceKind::Blob)
                     .await
                     .unwrap(),
                 expected
@@ -1195,10 +1307,10 @@ mod tests {
 
             let store = build_store(Arc::new(primary), token_exchange, rest_client);
 
-            let name = test_name();
+            let repository = test_upstream_repository();
             let digest = test_digest();
             let stats = store
-                .stats(&name, &digest, ResourceKind::Blob)
+                .stats(&repository, &digest, ResourceKind::Blob)
                 .await
                 .unwrap();
 
@@ -1229,9 +1341,9 @@ mod tests {
 
             let store = build_store(Arc::new(primary), token_exchange, rest_client);
 
-            let name = test_name();
+            let repository = test_repository();
             let digest = test_digest();
-            let result = store.stats(&name, &digest, ResourceKind::Blob).await;
+            let result = store.stats(&repository, &digest, ResourceKind::Blob).await;
 
             assert!(matches!(result, Err(BlobStoreError::DigestNotFound(_))));
         }
@@ -1253,15 +1365,35 @@ mod tests {
                 MockRedirectFollowingClient::new(),
             );
 
-            let name = test_name();
+            let repository = test_repository();
             let digest = test_digest();
-            let result = store.stats(&name, &digest, ResourceKind::Blob).await;
+            let result = store.stats(&repository, &digest, ResourceKind::Blob).await;
 
             assert!(matches!(
                 result,
                 Err(BlobStoreError::FailedToRetrieveDigest { details, .. })
                     if details == "permission denied"
             ));
+        }
+
+        #[tokio::test]
+        async fn test_stats_should_not_fall_back_to_remote_for_a_local_repository_miss() {
+            let mut primary = MockBlobStore::new();
+            primary.expect_stats().return_once(|_, digest, _| {
+                Err(BlobStoreError::DigestNotFound(digest.to_string()))
+            });
+
+            let store = build_store(
+                Arc::new(primary),
+                MockTokenExchange::new(),
+                MockRedirectFollowingClient::new(),
+            );
+
+            let repository = test_repository();
+            let digest = test_digest();
+            let result = store.stats(&repository, &digest, ResourceKind::Blob).await;
+
+            assert!(matches!(result, Err(BlobStoreError::DigestNotFound(_))));
         }
     }
 
@@ -1283,9 +1415,9 @@ mod tests {
                 MockRedirectFollowingClient::new(),
             );
 
-            let name = test_name();
+            let repository = test_repository();
             let result = store
-                .resolve_reference(&name, "latest", ResourceKind::Manifest)
+                .resolve_reference(&repository, "latest", ResourceKind::Manifest)
                 .await;
 
             assert_eq!(result.unwrap(), digest);
@@ -1316,9 +1448,9 @@ mod tests {
 
             let store = build_store(Arc::new(primary), token_exchange, rest_client);
 
-            let name = test_name();
+            let repository = test_upstream_repository();
             let result = store
-                .resolve_reference(&name, "latest", ResourceKind::Manifest)
+                .resolve_reference(&repository, "latest", ResourceKind::Manifest)
                 .await;
 
             assert_eq!(result.unwrap(), test_digest());
@@ -1349,9 +1481,9 @@ mod tests {
 
             let store = build_store(Arc::new(primary), token_exchange, rest_client);
 
-            let name = test_name();
+            let repository = test_repository();
             let result = store
-                .resolve_reference(&name, "latest", ResourceKind::Manifest)
+                .resolve_reference(&repository, "latest", ResourceKind::Manifest)
                 .await;
 
             assert!(
@@ -1384,9 +1516,9 @@ mod tests {
 
             let store = build_store(Arc::new(primary), token_exchange, rest_client);
 
-            let name = test_name();
+            let repository = test_upstream_repository();
             let result = store
-                .resolve_reference(&name, "latest", ResourceKind::Manifest)
+                .resolve_reference(&repository, "latest", ResourceKind::Manifest)
                 .await;
 
             assert!(matches!(
@@ -1415,9 +1547,9 @@ mod tests {
                 MockRedirectFollowingClient::new(),
             );
 
-            let name = test_name();
+            let repository = test_repository();
             let result = store
-                .resolve_reference(&name, "latest", ResourceKind::Manifest)
+                .resolve_reference(&repository, "latest", ResourceKind::Manifest)
                 .await;
 
             assert!(matches!(
@@ -1490,13 +1622,13 @@ mod tests {
                 MockRedirectFollowingClient::new(),
             );
 
-            let name = test_name();
+            let repository = test_repository();
             let digest = test_digest();
             let reader = reader_of(b"blob").await;
 
             store
                 .save(
-                    &name,
+                    &repository,
                     &digest,
                     reader,
                     "application/octet-stream",
@@ -1504,6 +1636,31 @@ mod tests {
                 )
                 .await
                 .unwrap();
+        }
+
+        #[tokio::test]
+        async fn test_save_should_reject_an_upstream_repository() {
+            let store = build_store(
+                Arc::new(MockBlobStore::new()),
+                MockTokenExchange::new(),
+                MockRedirectFollowingClient::new(),
+            );
+
+            let repository = test_upstream_repository();
+            let digest = test_digest();
+            let reader = reader_of(b"blob").await;
+
+            let result = store
+                .save(
+                    &repository,
+                    &digest,
+                    reader,
+                    "application/octet-stream",
+                    ResourceKind::Blob,
+                )
+                .await;
+
+            assert!(matches!(result, Err(BlobStoreError::NotLocal(_))));
         }
     }
 
@@ -1521,13 +1678,50 @@ mod tests {
                 MockRedirectFollowingClient::new(),
             );
 
-            let name = test_name();
+            let repository = test_repository();
             let digest = test_digest();
 
             store
-                .delete(&name, &digest, ResourceKind::Blob)
+                .delete(&repository, &digest, ResourceKind::Blob)
                 .await
                 .unwrap();
+        }
+
+        #[tokio::test]
+        async fn test_delete_should_reject_an_upstream_repository() {
+            let store = build_store(
+                Arc::new(MockBlobStore::new()),
+                MockTokenExchange::new(),
+                MockRedirectFollowingClient::new(),
+            );
+
+            let repository = test_upstream_repository();
+            let digest = test_digest();
+
+            let result = store.delete(&repository, &digest, ResourceKind::Blob).await;
+
+            assert!(matches!(result, Err(BlobStoreError::NotLocal(_))));
+        }
+    }
+
+    mod require_docker_hub {
+        use super::*;
+        use resin_types::Upstream;
+
+        #[test]
+        fn test_should_accept_docker_hub() {
+            assert!(ProxyingBlobStore::require_docker_hub(&Upstream::DockerHub).is_ok());
+        }
+
+        #[test]
+        fn test_should_reject_another_registry() {
+            let upstream = Upstream::Other("ghcr.io".parse().unwrap());
+
+            let result = ProxyingBlobStore::require_docker_hub(&upstream);
+
+            assert!(
+                matches!(result, Err(BlobStoreError::UnsupportedUpstream(host)) if host == "ghcr.io")
+            );
         }
     }
 }

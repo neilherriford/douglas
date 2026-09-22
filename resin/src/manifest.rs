@@ -28,26 +28,24 @@ pub(crate) async fn info(
     State(state): State<ManifestState>,
     Path((repository, reference)): Path<(String, String)>,
 ) -> Result<impl IntoResponse, ServerError> {
-    let repository: Repository = repository.parse()?;
-    let name = repository.require_local()?;
-    manifest_info(state, name.clone(), reference).await
+    manifest_info(state, repository.parse()?, reference).await
 }
 
 async fn manifest_info(
     state: ManifestState,
-    name: Name,
+    repository: Repository,
     reference: String,
 ) -> Result<impl IntoResponse, ServerError> {
     let digest = get_digest_from_reference(
         Arc::clone(&state.blob_store),
-        &name,
+        &repository,
         &reference,
         Arc::clone(&state.tag_store),
     )
     .await?;
     let stats = state
         .blob_store
-        .stats(&name, &digest, ResourceKind::Manifest)
+        .stats(&repository, &digest, ResourceKind::Manifest)
         .await
         .map_err(to_manifest_error)?;
     Ok((
@@ -66,7 +64,7 @@ async fn manifest_info(
 
 async fn get_digest_from_reference(
     blob_store: Arc<dyn BlobStore>,
-    name: &Name,
+    repository: &Repository,
     reference: &str,
     tag_store: Arc<dyn TagStore>,
 ) -> Result<Digest, ServerError> {
@@ -74,58 +72,58 @@ async fn get_digest_from_reference(
         return Ok(digest);
     }
 
-    match tag_store.read(&Repository::Local(name.clone()), reference) {
-        Ok(digest) => Ok(digest),
-        Err(TagStoreError::UnknownRepository(_)) | Err(TagStoreError::UnknwonTag { .. }) => {
-            blob_store
-                .resolve_reference(name, reference, ResourceKind::Manifest)
-                .await
-                .map_err(|err| match err {
-                    BlobStoreError::DigestNotFound(_) => {
-                        ServerError::ManifestUnknown(reference.to_string())
-                    }
-                    other => ServerError::Internal(Box::new(other)),
-                })
+    if matches!(repository, Repository::Local(_)) {
+        match tag_store.read(repository, reference) {
+            Ok(digest) => return Ok(digest),
+            Err(TagStoreError::UnknownRepository(_)) | Err(TagStoreError::UnknwonTag { .. }) => {}
+            Err(err) => return Err(ServerError::BadRequest(err.to_string())),
         }
-        Err(err) => Err(ServerError::BadRequest(err.to_string())),
     }
+
+    blob_store
+        .resolve_reference(repository, reference, ResourceKind::Manifest)
+        .await
+        .map_err(|err| match err {
+            BlobStoreError::DigestNotFound(_) => {
+                ServerError::ManifestUnknown(reference.to_string())
+            }
+            other => ServerError::Internal(Box::new(other)),
+        })
 }
 
 pub(crate) async fn read(
     State(state): State<ManifestState>,
     Path((repository, reference)): Path<(String, String)>,
 ) -> Result<impl IntoResponse, ServerError> {
-    let repository: Repository = repository.parse()?;
-    let name = repository.require_local()?;
-    read_manifest(state, name.clone(), reference).await
+    read_manifest(state, repository.parse()?, reference).await
 }
 
 async fn read_manifest(
     state: ManifestState,
-    name: Name,
+    repository: Repository,
     reference: String,
 ) -> Result<impl IntoResponse, ServerError> {
     let digest = get_digest_from_reference(
         Arc::clone(&state.blob_store),
-        &name,
+        &repository,
         &reference,
         Arc::clone(&state.tag_store),
     )
     .await?;
     let stats = state
         .blob_store
-        .stats(&name, &digest, ResourceKind::Manifest)
+        .stats(&repository, &digest, ResourceKind::Manifest)
         .await
         .map_err(to_manifest_error)?;
     let reader = state
         .blob_store
-        .get(&name, &digest, ResourceKind::Manifest)
+        .get(&repository, &digest, ResourceKind::Manifest)
         .await
         .map_err(to_manifest_error)?;
     let reader = crate::stream_logging::LoggingReader::new(
         reader,
         Arc::clone(&state.reporter),
-        format!("manifest {name} {digest}"),
+        format!("manifest {repository} {digest}"),
     );
     let stream = ReaderStream::new(reader);
 
@@ -162,6 +160,7 @@ async fn write_manifest(
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<impl IntoResponse, ServerError> {
+    let repository = Repository::Local(name.clone());
     let media_type = headers
         .get("Content-Type")
         .and_then(|value| value.to_str().ok())
@@ -174,7 +173,13 @@ async fn write_manifest(
             let source = Box::new(std::io::Cursor::new(body));
             state
                 .blob_store
-                .save(&name, &claimed, source, media_type, ResourceKind::Manifest)
+                .save(
+                    &repository,
+                    &claimed,
+                    source,
+                    media_type,
+                    ResourceKind::Manifest,
+                )
                 .await?;
             claimed
         }
@@ -182,12 +187,16 @@ async fn write_manifest(
             let source = Box::new(std::io::Cursor::new(body));
             state
                 .blob_store
-                .save(&name, &computed, source, media_type, ResourceKind::Manifest)
+                .save(
+                    &repository,
+                    &computed,
+                    source,
+                    media_type,
+                    ResourceKind::Manifest,
+                )
                 .await?;
 
-            state
-                .tag_store
-                .write(&Repository::Local(name.clone()), &reference, &computed)?;
+            state.tag_store.write(&repository, &reference, &computed)?;
             computed
         }
     };
@@ -279,10 +288,11 @@ async fn delete_manifest(
             "manifest delete requires a digest reference, not a tag".to_string(),
         )
     })?;
+    let repository = Repository::Local(name.clone());
 
     state
         .blob_store
-        .delete(&name, &digest, ResourceKind::Manifest)
+        .delete(&repository, &digest, ResourceKind::Manifest)
         .await
         .map_err(|err| match err {
             BlobStoreError::DigestNotFound(_) => ServerError::ManifestUnknown(digest.to_string()),
@@ -352,19 +362,19 @@ mod tests {
             manifest::get_digest_from_reference,
             tag_store::{MockTagStore, TagStoreError},
         };
-        use resin_types::Name;
-        use std::{str::FromStr, sync::Arc};
+        use resin_types::Repository;
+        use std::sync::Arc;
 
         #[tokio::test]
         async fn test_should_return_digest_directly_when_reference_is_a_digest() {
-            let name = Name::from_str("foo").unwrap();
+            let repository: Repository = "foo".parse().unwrap();
             let tag_store = MockTagStore::new();
             let blob_store = MockBlobStore::new();
             let sha = "ff".repeat(32);
 
             let actual = get_digest_from_reference(
                 Arc::new(blob_store),
-                &name,
+                &repository,
                 &format!("sha256:{sha}"),
                 Arc::new(tag_store),
             )
@@ -375,7 +385,7 @@ mod tests {
 
         #[tokio::test]
         async fn test_should_resolve_tag_via_tag_store_when_reference_is_not_a_digest() {
-            let name = Name::from_str("foo").unwrap();
+            let repository: Repository = "foo".parse().unwrap();
             let mut tag_store = MockTagStore::new();
             let blob_store = MockBlobStore::new();
             let sha = "ff".repeat(32);
@@ -388,7 +398,7 @@ mod tests {
 
             let actual = get_digest_from_reference(
                 Arc::new(blob_store),
-                &name,
+                &repository,
                 "latest",
                 Arc::new(tag_store),
             )
@@ -399,7 +409,7 @@ mod tests {
 
         #[tokio::test]
         async fn test_should_resolve_remotely_when_tag_is_unknown_locally() {
-            let name = Name::from_str("foo").unwrap();
+            let repository: Repository = "foo".parse().unwrap();
             let mut tag_store = MockTagStore::new();
             let mut blob_store = MockBlobStore::new();
             let sha = "ff".repeat(32);
@@ -418,7 +428,7 @@ mod tests {
 
             let actual = get_digest_from_reference(
                 Arc::new(blob_store),
-                &name,
+                &repository,
                 "latest",
                 Arc::new(tag_store),
             )
@@ -430,7 +440,7 @@ mod tests {
         #[tokio::test]
         async fn test_should_return_manifest_unknown_when_repository_is_unknown_and_remote_resolution_fails()
          {
-            let name = Name::from_str("foo").unwrap();
+            let repository: Repository = "foo".parse().unwrap();
             let mut tag_store = MockTagStore::new();
             let mut blob_store = MockBlobStore::new();
 
@@ -445,7 +455,7 @@ mod tests {
 
             let actual = get_digest_from_reference(
                 Arc::new(blob_store),
-                &name,
+                &repository,
                 "latest",
                 Arc::new(tag_store),
             )
@@ -457,7 +467,7 @@ mod tests {
         #[tokio::test]
         async fn test_should_return_manifest_unknown_when_tag_is_unknown_and_remote_resolution_fails()
          {
-            let name = Name::from_str("foo").unwrap();
+            let repository: Repository = "foo".parse().unwrap();
             let mut tag_store = MockTagStore::new();
             let mut blob_store = MockBlobStore::new();
 
@@ -475,7 +485,7 @@ mod tests {
 
             let actual = get_digest_from_reference(
                 Arc::new(blob_store),
-                &name,
+                &repository,
                 "latest",
                 Arc::new(tag_store),
             )
@@ -486,7 +496,7 @@ mod tests {
 
         #[tokio::test]
         async fn test_should_return_bad_request_for_other_tag_store_errors() {
-            let name = Name::from_str("foo").unwrap();
+            let repository: Repository = "foo".parse().unwrap();
             let mut tag_store = MockTagStore::new();
             let blob_store = MockBlobStore::new();
 
@@ -498,13 +508,37 @@ mod tests {
 
             let actual = get_digest_from_reference(
                 Arc::new(blob_store),
-                &name,
+                &repository,
                 "latest",
                 Arc::new(tag_store),
             )
             .await;
 
             assert!(matches!(actual, Err(ServerError::BadRequest(_))));
+        }
+
+        #[tokio::test]
+        async fn test_should_skip_the_tag_store_entirely_for_an_upstream_repository() {
+            let repository: Repository = "ghcr.io/foo/bar".parse().unwrap();
+            let mut tag_store = MockTagStore::new();
+            let mut blob_store = MockBlobStore::new();
+            let sha = "ff".repeat(32);
+            let expected = Digest(format!("sha256:{sha}"));
+
+            tag_store.expect_read().times(0);
+            blob_store
+                .expect_resolve_reference()
+                .returning(move |_, _, _| Ok(Digest(format!("sha256:{sha}"))));
+
+            let actual = get_digest_from_reference(
+                Arc::new(blob_store),
+                &repository,
+                "latest",
+                Arc::new(tag_store),
+            )
+            .await;
+
+            assert!(matches!(actual, Ok(digest) if digest == expected));
         }
     }
 
