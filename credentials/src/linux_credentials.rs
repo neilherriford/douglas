@@ -637,82 +637,133 @@ mod tests {
         }
     }
 
-    // mod create_group {
-    //     use super::super::*;
-    //     use crate::queries::MockQueries;
-    //     use mockall::predicate;
-    //     use os::{MockOs, OsError};
-    //     use std::sync::Arc;
+    mod create_group {
+        use super::super::*;
+        use crate::queries::MockQueries;
+        use mockall::{Sequence, predicate};
+        use os::{MockOs, OsError};
+        use std::sync::Arc;
 
-    //     #[test]
-    //     fn should_not_recreate_existing_group() {
-    //         let os = MockOs::new();
-    //         let mut queries = MockQueries::new();
+        #[test]
+        fn should_not_recreate_existing_group() {
+            let os = MockOs::new();
+            let mut queries = MockQueries::new();
 
-    //         queries
-    //             .expect_group_exists()
-    //             .with(predicate::eq("foo"))
-    //             .return_const(true);
+            queries
+                .expect_get_group_id()
+                .with(predicate::eq("foo"))
+                .returning(|_| Some(123));
 
-    //         let actual = LinuxCredentials {
-    //             os: Arc::new(os),
-    //             queries: Box::new(queries),
-    //         }
-    //         .create_group("foo");
+            let actual = LinuxCredentials {
+                os: Arc::new(os),
+                queries: Box::new(queries),
+            }
+            .create_group("foo");
 
-    //         assert!(matches!(actual, Ok(())));
-    //     }
+            assert!(matches!(actual, Ok(123)));
+        }
 
-    //     #[test]
-    //     fn should_return_error_if_could_not_create_group() {
-    //         let mut os = MockOs::new();
-    //         let mut queries = MockQueries::new();
+        #[test]
+        fn should_return_error_if_could_not_create_group() {
+            let mut os = MockOs::new();
+            let mut queries = MockQueries::new();
 
-    //         queries
-    //             .expect_group_exists()
-    //             .with(predicate::eq("foo"))
-    //             .return_const(false);
+            queries
+                .expect_get_group_id()
+                .with(predicate::eq("foo"))
+                .returning(|_| None);
 
-    //         os.expect_execute()
-    //             .withf(move |command, args, _| {
-    //                 command == "groupadd" && *args == vec!["foo".to_string()]
-    //             })
-    //             .times(1)
-    //             .return_once(move |_, _, _| Err(OsError::IoError(std::io::Error::other("oops"))));
+            os.expect_execute()
+                .withf(move |command, args, _| {
+                    command == "groupadd" && *args == vec!["foo".to_string()]
+                })
+                .times(1)
+                .return_once(move |_, _, _| Err(OsError::IoError(std::io::Error::other("oops"))));
 
-    //         let actual = LinuxCredentials {
-    //             os: Arc::new(os),
-    //             queries: Box::new(queries),
-    //         }
-    //         .create_group("foo");
-    //         assert!(matches!(actual, Err(CredentialsError::IoError(_))));
-    //     }
+            let actual = LinuxCredentials {
+                os: Arc::new(os),
+                queries: Box::new(queries),
+            }
+            .create_group("foo");
+            assert!(matches!(actual, Err(CredentialsError::IoError(_))));
+        }
 
-    //     #[test]
-    //     fn should_create_group() {
-    //         let mut os = MockOs::new();
-    //         let mut queries = MockQueries::new();
+        #[test]
+        fn should_report_group_not_found_if_still_missing_after_groupadd() {
+            let mut os = MockOs::new();
+            let mut queries = MockQueries::new();
+            let mut sequence = Sequence::new();
 
-    //         queries
-    //             .expect_group_exists()
-    //             .with(predicate::eq("foo"))
-    //             .return_const(false);
+            queries
+                .expect_get_group_id()
+                .with(predicate::eq("foo"))
+                .times(1)
+                .in_sequence(&mut sequence)
+                .returning(|_| None);
 
-    //         os.expect_execute()
-    //             .withf(move |command, args, _| {
-    //                 command == "groupadd" && *args == vec!["foo".to_string()]
-    //             })
-    //             .times(1)
-    //             .return_once(move |_, _, _| Ok(()));
+            os.expect_execute()
+                .withf(move |command, args, _| {
+                    command == "groupadd" && *args == vec!["foo".to_string()]
+                })
+                .times(1)
+                .in_sequence(&mut sequence)
+                .return_once(move |_, _, _| Ok(()));
 
-    //         let actual = LinuxCredentials {
-    //             os: Arc::new(os),
-    //             queries: Box::new(queries),
-    //         }
-    //         .create_group("foo");
-    //         assert!(matches!(actual, Ok(())));
-    //     }
-    // }
+            queries
+                .expect_get_group_id()
+                .with(predicate::eq("foo"))
+                .times(1)
+                .in_sequence(&mut sequence)
+                .returning(|_| None);
+
+            let actual = LinuxCredentials {
+                os: Arc::new(os),
+                queries: Box::new(queries),
+            }
+            .create_group("foo");
+
+            assert!(matches!(
+                actual,
+                Err(CredentialsError::GroupNotFoundError { name }) if name == "foo"
+            ));
+        }
+
+        #[test]
+        fn should_create_group() {
+            let mut os = MockOs::new();
+            let mut queries = MockQueries::new();
+            let mut sequence = Sequence::new();
+
+            queries
+                .expect_get_group_id()
+                .with(predicate::eq("foo"))
+                .times(1)
+                .in_sequence(&mut sequence)
+                .returning(|_| None);
+
+            os.expect_execute()
+                .withf(move |command, args, _| {
+                    command == "groupadd" && *args == vec!["foo".to_string()]
+                })
+                .times(1)
+                .in_sequence(&mut sequence)
+                .return_once(move |_, _, _| Ok(()));
+
+            queries
+                .expect_get_group_id()
+                .with(predicate::eq("foo"))
+                .times(1)
+                .in_sequence(&mut sequence)
+                .returning(|_| Some(123));
+
+            let actual = LinuxCredentials {
+                os: Arc::new(os),
+                queries: Box::new(queries),
+            }
+            .create_group("foo");
+            assert!(matches!(actual, Ok(123)));
+        }
+    }
 
     mod group_exists {
         use super::super::*;
