@@ -1,7 +1,7 @@
 use crate::{
     blob_store::{BlobStore, BlobStoreError, ResourceKind, Stats},
     digest::Digest,
-    token_exchange::{DockerHubTokenExchange, TokenExchange},
+    token_exchange::{ChallengeTokenExchange, TokenExchange},
 };
 use async_trait::async_trait;
 use bytes::{Buf, Bytes};
@@ -37,7 +37,7 @@ impl ProxyingBlobStore {
         Self {
             reporter: Arc::clone(&reporter),
             primary_blob_store,
-            token_exchange: Box::new(DockerHubTokenExchange::new(Arc::clone(&reporter))),
+            token_exchange: Box::new(ChallengeTokenExchange::new(Arc::clone(&reporter))),
             rest_client: Mutex::new(Box::new(TlsRedirectFollowingClient::new(
                 5,
                 ServerClosedConnections::Ignore,
@@ -121,16 +121,23 @@ impl ProxyingBlobStore {
 
     async fn remote_token(
         &self,
+        upstream: &Upstream,
         path: &RepositoryPath,
         digest: &Digest,
-    ) -> Result<String, BlobStoreError> {
+    ) -> Result<Option<String>, BlobStoreError> {
         self.with_timeout("token fetch", digest, async {
             self.token_exchange
-                .fetch_token(path)
+                .fetch_token(upstream, path)
                 .await
                 .map_err(|err| Self::failed(digest, err))
         })
         .await
+    }
+
+    fn authorization_headers(token: Option<&str>) -> Vec<Header> {
+        token
+            .map(|token| vec![Header::authorization_bearer(token)])
+            .unwrap_or_default()
     }
 
     async fn remote_get(
@@ -141,11 +148,11 @@ impl ProxyingBlobStore {
         resource_kind: ResourceKind,
     ) -> Result<(String, BodyAsyncReader), BlobStoreError> {
         Self::require_docker_hub(upstream)?;
-        let token = self.remote_token(path, digest).await?;
+        let token = self.remote_token(upstream, path, digest).await?;
 
         let request = Request::Get {
             path: Self::blob_path(path, digest, resource_kind),
-            headers: vec![Header::authorization_bearer(&token)],
+            headers: Self::authorization_headers(token.as_deref()),
             query: HashMap::new(),
         };
 
@@ -228,11 +235,11 @@ impl ProxyingBlobStore {
         resource_kind: ResourceKind,
     ) -> Result<Stats, BlobStoreError> {
         Self::require_docker_hub(upstream)?;
-        let token = self.remote_token(path, digest).await?;
+        let token = self.remote_token(upstream, path, digest).await?;
 
         let request = Request::Head {
             path: Self::blob_path(path, digest, resource_kind),
-            headers: vec![Header::authorization_bearer(&token)],
+            headers: Self::authorization_headers(token.as_deref()),
             query: HashMap::new(),
         };
 
@@ -308,13 +315,13 @@ impl ProxyingBlobStore {
         Self::require_docker_hub(upstream)?;
         let token = self
             .token_exchange
-            .fetch_token(path)
+            .fetch_token(upstream, path)
             .await
             .map_err(|err| Self::failed(reference, err))?;
 
         let request = Request::Head {
             path: Self::reference_path(path, reference, resource_kind),
-            headers: vec![Header::authorization_bearer(&token)],
+            headers: Self::authorization_headers(token.as_deref()),
             query: HashMap::new(),
         };
 
@@ -1037,7 +1044,7 @@ mod tests {
             let mut token_exchange = MockTokenExchange::new();
             token_exchange
                 .expect_fetch_token()
-                .return_once(|_| Ok("token".to_string()));
+                .return_once(|_, _| Ok(Some("token".to_string())));
 
             let body = reader_of(b"Lorem ipsum dolor sit amet").await;
             let mut rest_client = MockRedirectFollowingClient::new();
@@ -1144,7 +1151,7 @@ mod tests {
             let mut token_exchange = MockTokenExchange::new();
             token_exchange
                 .expect_fetch_token()
-                .return_once(|_| Ok("token".to_string()));
+                .return_once(|_, _| Ok(Some("token".to_string())));
 
             let mut rest_client = MockRedirectFollowingClient::new();
             rest_client.expect_execute().return_once(|_, _, _| {
@@ -1177,7 +1184,7 @@ mod tests {
             let mut token_exchange = MockTokenExchange::new();
             token_exchange
                 .expect_fetch_token()
-                .return_once(|_| Ok("token".to_string()));
+                .return_once(|_, _| Ok(Some("token".to_string())));
 
             let mut rest_client = MockRedirectFollowingClient::new();
             rest_client.expect_execute().return_once(|_, _, _| {
@@ -1292,7 +1299,7 @@ mod tests {
             let mut token_exchange = MockTokenExchange::new();
             token_exchange
                 .expect_fetch_token()
-                .return_once(|_| Ok("token".to_string()));
+                .return_once(|_, _| Ok(Some("token".to_string())));
 
             let mut rest_client = MockRedirectFollowingClient::new();
             rest_client.expect_execute().return_once(|_, _, _| {
@@ -1328,7 +1335,7 @@ mod tests {
             let mut token_exchange = MockTokenExchange::new();
             token_exchange
                 .expect_fetch_token()
-                .return_once(|_| Ok("token".to_string()));
+                .return_once(|_, _| Ok(Some("token".to_string())));
 
             let mut rest_client = MockRedirectFollowingClient::new();
             rest_client.expect_execute().return_once(|_, _, _| {
@@ -1435,7 +1442,7 @@ mod tests {
             let mut token_exchange = MockTokenExchange::new();
             token_exchange
                 .expect_fetch_token()
-                .return_once(|_| Ok("token".to_string()));
+                .return_once(|_, _| Ok(Some("token".to_string())));
 
             let digest = test_digest();
             let mut rest_client = MockRedirectFollowingClient::new();
@@ -1468,7 +1475,7 @@ mod tests {
             let mut token_exchange = MockTokenExchange::new();
             token_exchange
                 .expect_fetch_token()
-                .return_once(|_| Ok("token".to_string()));
+                .return_once(|_, _| Ok(Some("token".to_string())));
 
             let mut rest_client = MockRedirectFollowingClient::new();
             rest_client.expect_execute().return_once(|_, _, _| {
@@ -1504,7 +1511,7 @@ mod tests {
             let mut token_exchange = MockTokenExchange::new();
             token_exchange
                 .expect_fetch_token()
-                .return_once(|_| Ok("token".to_string()));
+                .return_once(|_, _| Ok(Some("token".to_string())));
 
             let mut rest_client = MockRedirectFollowingClient::new();
             rest_client.expect_execute().return_once(|_, _, _| {
