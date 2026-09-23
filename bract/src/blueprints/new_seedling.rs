@@ -192,8 +192,9 @@ impl<'a> StateObserver<'a> {
         }
 
         let resin_name: resin_types::Name = name.as_ref().parse()?;
+        let repository = resin_types::Repository::Local(resin_name);
 
-        if self.resin_client.repository_registered(&resin_name).await? {
+        if self.resin_client.repository_registered(&repository).await? {
             result.registered = true;
         }
 

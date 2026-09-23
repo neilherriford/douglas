@@ -120,7 +120,9 @@ async fn prune(deps: Dependencies<'_>, deadwood: &Deadwood) -> Result<(), PruneD
         let Ok(resin_name) = name.parse::<resin_types::Name>() else {
             continue;
         };
-        resin_client.delete_repository(&resin_name).await?;
+        resin_client
+            .delete_repository(&resin_types::Repository::Local(resin_name))
+            .await?;
     }
 
     for name in &deadwood.mounts {

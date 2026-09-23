@@ -586,7 +586,10 @@ impl<'a> Command<Context<'a>> for DeleteResinRepository {
             .start_guard();
 
         let resin_name: resin_types::Name = self.seedling_name.as_ref().parse()?;
-        context.resin_client.delete_repository(&resin_name).await?;
+        context
+            .resin_client
+            .delete_repository(&resin_types::Repository::Local(resin_name))
+            .await?;
 
         guard.finish(Ok(()))
     }

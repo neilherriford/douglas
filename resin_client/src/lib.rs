@@ -24,9 +24,15 @@ pub enum Error {
 #[async_trait]
 pub trait Client: Send + Sync {
     async fn image_exists(&mut self, name: &VersionedImageName) -> Result<bool, Error>;
-    async fn repository_registered(&mut self, name: &resin_types::Name) -> Result<bool, Error>;
-    async fn list_repositories(&mut self) -> Result<Vec<resin_types::Name>, Error>;
-    async fn delete_repository(&mut self, name: &resin_types::Name) -> Result<(), Error>;
+    async fn repository_registered(
+        &mut self,
+        repository: &resin_types::Repository,
+    ) -> Result<bool, Error>;
+    async fn list_repositories(&mut self) -> Result<Vec<resin_types::Repository>, Error>;
+    async fn delete_repository(
+        &mut self,
+        repository: &resin_types::Repository,
+    ) -> Result<(), Error>;
 }
 
 #[cfg_attr(feature = "mock", automock)]
@@ -98,15 +104,18 @@ impl Client for HttpClient {
         }
     }
 
-    async fn repository_registered(&mut self, name: &resin_types::Name) -> Result<bool, Error> {
+    async fn repository_registered(
+        &mut self,
+        repository: &resin_types::Repository,
+    ) -> Result<bool, Error> {
         let guard = Span::new(
             Arc::clone(&self.reporter),
-            &format!("Checking repository registration status for {name}"),
+            &format!("Checking repository registration status for {repository}"),
             log::ScopeKind::Task,
         )
         .start_guard();
         let request = Request::Get {
-            path: format!("/v2/{name}/tags/list"),
+            path: format!("/v2/{repository}/tags/list"),
             headers: Vec::new(),
             query: HashMap::new(),
         };
@@ -117,7 +126,7 @@ impl Client for HttpClient {
         }
     }
 
-    async fn list_repositories(&mut self) -> Result<Vec<resin_types::Name>, Error> {
+    async fn list_repositories(&mut self) -> Result<Vec<resin_types::Repository>, Error> {
         let guard = Span::new(
             Arc::clone(&self.reporter),
             "Listing registered repositories",
@@ -139,7 +148,7 @@ impl Client for HttpClient {
                 Ok(catalog
                     .repositories
                     .into_iter()
-                    .filter_map(|name| name.parse().ok())
+                    .filter_map(|repository| repository.parse().ok())
                     .collect())
             }
             Response::Okay { body: None, .. } => Ok(Vec::new()),
@@ -147,16 +156,19 @@ impl Client for HttpClient {
         })
     }
 
-    async fn delete_repository(&mut self, name: &resin_types::Name) -> Result<(), Error> {
+    async fn delete_repository(
+        &mut self,
+        repository: &resin_types::Repository,
+    ) -> Result<(), Error> {
         let guard = Span::new(
             Arc::clone(&self.reporter),
-            &format!("Deleting repository {name}"),
+            &format!("Deleting repository {repository}"),
             log::ScopeKind::Task,
         )
         .start_guard();
 
         let request = Request::Delete {
-            path: format!("/v2/{name}/"),
+            path: format!("/v2/{repository}/"),
             headers: Vec::new(),
             query: HashMap::new(),
         };
@@ -312,6 +324,103 @@ mod tests {
         }
     }
 
+    mod repository_registered {
+        use super::*;
+
+        #[tokio::test]
+        async fn test_should_return_true_when_tags_list_is_found() {
+            let mut rest_client = MockRestClient::new();
+            rest_client
+                .expect_execute()
+                .withf(|_, request| {
+                    matches!(request, Request::Get { path, .. } if path == "/v2/hello-world/tags/list")
+                })
+                .returning(|_, _| {
+                    Ok(Response::Okay {
+                        headers: Vec::new(),
+                        body: None,
+                    })
+                });
+
+            let mut client = client(rest_client);
+            let repository: resin_types::Repository = "hello-world".parse().unwrap();
+
+            assert!(
+                client
+                    .repository_registered(&repository)
+                    .await
+                    .expect("should check registration")
+            );
+        }
+
+        #[tokio::test]
+        async fn test_should_use_the_upstream_repositorys_path() {
+            let mut rest_client = MockRestClient::new();
+            rest_client
+                .expect_execute()
+                .withf(|_, request| {
+                    matches!(request, Request::Get { path, .. } if path == "/v2/ghcr.io/foo/bar/tags/list")
+                })
+                .returning(|_, _| {
+                    Ok(Response::Okay {
+                        headers: Vec::new(),
+                        body: None,
+                    })
+                });
+
+            let mut client = client(rest_client);
+            let repository: resin_types::Repository = "ghcr.io/foo/bar".parse().unwrap();
+
+            assert!(
+                client
+                    .repository_registered(&repository)
+                    .await
+                    .expect("should check registration")
+            );
+        }
+
+        #[tokio::test]
+        async fn test_should_return_false_when_tags_list_is_missing() {
+            let mut rest_client = MockRestClient::new();
+            rest_client.expect_execute().returning(|_, _| {
+                Ok(Response::Error {
+                    headers: Vec::new(),
+                    status: 404,
+                    body: None,
+                })
+            });
+
+            let mut client = client(rest_client);
+            let repository: resin_types::Repository = "hello-world".parse().unwrap();
+
+            assert!(
+                !client
+                    .repository_registered(&repository)
+                    .await
+                    .expect("should check registration")
+            );
+        }
+
+        #[tokio::test]
+        async fn test_should_error_on_unexpected_response() {
+            let mut rest_client = MockRestClient::new();
+            rest_client.expect_execute().returning(|_, _| {
+                Ok(Response::Error {
+                    headers: Vec::new(),
+                    status: 500,
+                    body: None,
+                })
+            });
+
+            let mut client = client(rest_client);
+            let repository: resin_types::Repository = "hello-world".parse().unwrap();
+
+            let result = client.repository_registered(&repository).await;
+
+            assert!(matches!(result, Err(Error::UnexpectedResponse(_))));
+        }
+    }
+
     mod list_repositories {
         use super::*;
 
@@ -326,7 +435,10 @@ mod tests {
                 .returning(|_, _| {
                     Ok(Response::Okay {
                         headers: Vec::new(),
-                        body: Some(r#"{"repositories": ["hello-world", "traefik"]}"#.to_string()),
+                        body: Some(
+                            r#"{"repositories": ["hello-world", "traefik", "docker.io/nginx"]}"#
+                                .to_string(),
+                        ),
                     })
                 });
 
@@ -339,7 +451,11 @@ mod tests {
 
             assert_eq!(
                 result,
-                vec!["hello-world".parse().unwrap(), "traefik".parse().unwrap(),]
+                vec![
+                    "hello-world".parse::<resin_types::Repository>().unwrap(),
+                    "traefik".parse().unwrap(),
+                    "docker.io/nginx".parse().unwrap(),
+                ]
             );
         }
 
@@ -400,9 +516,31 @@ mod tests {
                 });
 
             let mut client = client(rest_client);
-            let name: resin_types::Name = "hello-world".parse().unwrap();
+            let repository: resin_types::Repository = "hello-world".parse().unwrap();
 
-            let result = client.delete_repository(&name).await;
+            let result = client.delete_repository(&repository).await;
+
+            assert!(result.is_ok());
+        }
+
+        #[tokio::test]
+        async fn test_should_use_the_upstream_repositorys_path() {
+            let mut rest_client = MockRestClient::new();
+            rest_client
+                .expect_execute()
+                .withf(|_, request| {
+                    matches!(request, Request::Delete { path, .. } if path == "/v2/ghcr.io/foo/bar/")
+                })
+                .returning(|_, _| {
+                    Ok(Response::NoContent {
+                        headers: Vec::new(),
+                    })
+                });
+
+            let mut client = client(rest_client);
+            let repository: resin_types::Repository = "ghcr.io/foo/bar".parse().unwrap();
+
+            let result = client.delete_repository(&repository).await;
 
             assert!(result.is_ok());
         }
@@ -419,9 +557,9 @@ mod tests {
             });
 
             let mut client = client(rest_client);
-            let name: resin_types::Name = "hello-world".parse().unwrap();
+            let repository: resin_types::Repository = "hello-world".parse().unwrap();
 
-            let result = client.delete_repository(&name).await;
+            let result = client.delete_repository(&repository).await;
 
             assert!(matches!(result, Err(Error::UnexpectedResponse(_))));
         }
