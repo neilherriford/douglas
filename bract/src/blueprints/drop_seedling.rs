@@ -884,7 +884,7 @@ mod tests {
             name: name(),
             version: seedbank_types::Version(1),
             definition: seedbank_types::SeedlingDefinition::new(
-                docker_types::VersionedImageName::specific("hello-world", "1"),
+                seedbank_types::ImageSource::Local,
                 std::collections::HashMap::new(),
                 seedbank_types::Routing::None,
                 HealthCheck {

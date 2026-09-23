@@ -23,6 +23,8 @@ pub enum BootstrapError {
     NameParse(#[from] NameParseError),
     #[error("JSON serialization error: {0}")]
     SerdeJson(#[from] serde_json::Error),
+    #[error("Image reference error: {0}")]
+    ImageReference(#[from] docker_types::ImageReferenceError),
 }
 
 type Step<'a> = Box<dyn Command<Context<'a>>>;
@@ -178,9 +180,8 @@ pub mod definitions {
 
     mod traefik {
         use crate::bootstrap::core_seedlings::BootstrapError;
-        use docker_types::VersionedImageName;
         use seedbank::{Mount, MountContents, MountType, Name, SeedlingDefinition};
-        use seedbank_types::{HealthCheckCommand, Version};
+        use seedbank_types::{HealthCheckCommand, ImageSource, Version};
         use serde_json::json;
         use std::num::NonZeroU8;
         use std::str::FromStr;
@@ -195,7 +196,7 @@ pub mod definitions {
             let mount_name: Name = "config".parse()?;
 
             let definition = SeedlingDefinition::new(
-                VersionedImageName::specific(name.as_ref(), "v3.7.7"),
+                ImageSource::External("docker.io/traefik:v3.7.7".parse()?),
                 HashMap::from([(
                     mount_name,
                     Mount::with_files(
@@ -262,9 +263,8 @@ pub mod definitions {
 
     mod openbao {
         use crate::bootstrap::core_seedlings::BootstrapError;
-        use docker_types::VersionedImageName;
         use seedbank::{Mount, MountContents, MountType, Name, SeedlingDefinition};
-        use seedbank_types::{HealthCheckCommand, Version};
+        use seedbank_types::{HealthCheckCommand, ImageSource, Version};
         use serde_json::json;
         use std::num::NonZeroU8;
         use std::str::FromStr;
@@ -297,10 +297,8 @@ pub mod definitions {
             let data_mount: Name = "data".parse()?;
 
             let definition = SeedlingDefinition::new(
-                VersionedImageName::namespaced_specific(
-                    "openbao",
-                    "openbao",
-                    openbao::IMAGE_VERSION,
+                ImageSource::External(
+                    format!("docker.io/openbao/openbao:{}", openbao::IMAGE_VERSION).parse()?,
                 ),
                 HashMap::from([
                     (

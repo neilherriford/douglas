@@ -4,7 +4,7 @@ use bract_types::{Deadwood, seedling_name_from_agent_prefixed, seedling_name_fro
 use config::DouglasFolders;
 use file_system::{FileReader, FileSystemError, Folder};
 use identity::Identity;
-use seedbank_types::{Name, NameParseError};
+use seedbank_types::{ImageSource, Name, NameParseError};
 use std::collections::HashSet;
 use thiserror::Error;
 
@@ -45,7 +45,9 @@ pub async fn execute(deps: Dependencies<'_>) -> Result<Deadwood, FindDeadwoodErr
     let mut known_image_repositories: HashSet<String> = HashSet::new();
     for name in &seedling_names {
         let seedling = deps.seedbank_client.load(name).await?;
-        known_image_repositories.insert(seedling.definition.image.formatted_name());
+        if seedling.definition.image == ImageSource::Local {
+            known_image_repositories.insert(name.to_string());
+        }
     }
 
     let live_containers = deps.docker_client.list_containers().await?;

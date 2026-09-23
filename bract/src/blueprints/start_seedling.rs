@@ -44,6 +44,8 @@ pub enum StartSeedlingError {
     CoreSeedling(String),
     #[error("Seedling start failed")]
     FailedToStart,
+    #[error("Image source resolution error {0}")]
+    ImageSourceResolutionError(#[from] seedbank_types::ImageSourceResolutionError),
 }
 
 struct Context<'a> {
@@ -217,9 +219,7 @@ impl<'a> StateObserver<'a> {
             .docker_client
             .image_exists(
                 self.registry,
-                ImageRef::Target(docker_types::PullTarget::from(
-                    seedling.definition.image.clone(),
-                )),
+                ImageRef::Target(seedling.definition.image.resolve(name)?),
             )
             .await?
         {
@@ -1239,7 +1239,7 @@ mod tests {
             name: name(),
             version: seedbank_types::Version(1),
             definition: seedbank_types::SeedlingDefinition::new(
-                docker_types::VersionedImageName::specific("hello-world", "1"),
+                seedbank_types::ImageSource::Local,
                 mounts,
                 seedbank_types::Routing::None,
                 health_check(),

@@ -65,6 +65,10 @@ pub enum ReconcileSeedlingError {
     WouldDowngrade,
     #[error("Agent provisioning was requested but not available")]
     MissingAgentProvisioning,
+    #[error("Image path component error {0}")]
+    ImagePathComponentError(#[from] docker_types::ImagePathComponentError),
+    #[error("Image source resolution error {0}")]
+    ImageSourceResolutionError(#[from] seedbank_types::ImageSourceResolutionError),
 }
 
 impl HasDockerClient for Context<'_> {
@@ -301,7 +305,7 @@ impl<'a> StateObserver<'a> {
         );
 
         result.image_status = self
-            .discover_image_status(&seedling_definition.image)
+            .discover_image_status(name, &seedling_definition.image)
             .await?;
         guard.span().message(
             Level::Info,
@@ -486,22 +490,31 @@ impl<'a> StateObserver<'a> {
 
     async fn discover_image_status(
         &mut self,
-        image: &docker_types::VersionedImageName,
+        name: &seedbank_types::Name,
+        image: &seedbank_types::ImageSource,
     ) -> Result<ImageStatus, ReconcileSeedlingError> {
+        let pull_target = image.resolve(name)?;
+
         if self
             .docker_client
-            .image_exists(
-                self.registry,
-                ImageRef::Target(docker_types::PullTarget::from(image.clone())),
-            )
+            .image_exists(self.registry, ImageRef::Target(pull_target))
             .await?
         {
-            Ok(ImageStatus::Local)
-        } else if self.resin_client.image_exists(image).await? {
-            Ok(ImageStatus::AvailableFromResin)
-        } else {
-            Ok(ImageStatus::Unknown)
+            return Ok(ImageStatus::Local);
         }
+
+        if *image == seedbank_types::ImageSource::Local {
+            let local_name = VersionedImageName {
+                namespace: None,
+                name: name.as_ref().parse()?,
+                version: docker_types::Version::Latest,
+            };
+            if self.resin_client.image_exists(&local_name).await? {
+                return Ok(ImageStatus::AvailableFromResin);
+            }
+        }
+
+        Ok(ImageStatus::Unknown)
     }
 
     async fn discover_container(
@@ -640,6 +653,7 @@ fn create_plan<'a>(
     plan_mount_steps(&mut steps, name, &mut state);
     plan_image_step(
         &mut steps,
+        name,
         registry,
         seedling_definition,
         state.image_status,
@@ -723,6 +737,7 @@ fn plan_mount_steps(
 
 fn plan_image_step(
     steps: &mut Vec<Step<Context<'_>>>,
+    name: &seedbank_types::Name,
     registry: &docker_types::Registry,
     seedling_definition: &seedbank_types::SeedlingDefinition,
     image_status: ImageStatus,
@@ -732,7 +747,7 @@ fn plan_image_step(
         ImageStatus::Local => {}
         ImageStatus::AvailableFromResin => push_step(
             steps,
-            PullImageFromResin::new(registry, seedling_definition.image.clone()),
+            PullImageFromResin::new(registry, seedling_definition.image.resolve(name)?),
         ),
     }
     Ok(())
@@ -1613,10 +1628,10 @@ struct PullImageFromResin {
 }
 
 impl PullImageFromResin {
-    pub fn new(registry: &docker_types::Registry, name: VersionedImageName) -> Self {
+    pub fn new(registry: &docker_types::Registry, name: docker_types::PullTarget) -> Self {
         Self {
             registry: registry.clone(),
-            name: docker_types::PullTarget::from(name),
+            name,
         }
     }
 }
@@ -1675,23 +1690,20 @@ fn published_ports_for(
 }
 
 fn build_new_container(
-    name: ContainerName,
+    seedling_name: &seedbank_types::Name,
+    container_name: ContainerName,
     seedling_definition: &seedbank_types::SeedlingDefinition,
-    uid: u32,
-    gid: u32,
+    run_as: ContainerUser,
     mounts: Vec<MountDefinition>,
     version: &seedbank_types::Version,
     environment_variables: Vec<docker_types::EnvironmentVariable>,
-) -> NewContainer {
-    NewContainer {
-        name,
-        run_as: Some(ContainerUser {
-            user_id: uid,
-            group_id: gid,
-        }),
+) -> Result<NewContainer, ReconcileSeedlingError> {
+    Ok(NewContainer {
+        name: container_name,
+        run_as: Some(run_as),
         command: seedling_definition.command.clone(),
         environment_variables,
-        image: docker_types::PullTarget::from(seedling_definition.image.clone()),
+        image: seedling_definition.image.resolve(seedling_name)?,
         mounts,
         added_capabilities: seedling_definition.added_capabilities.clone(),
         labels: vec![
@@ -1699,7 +1711,7 @@ fn build_new_container(
             labels::create_origin_label(seedling_definition.origin),
         ],
         published_ports: published_ports_for(seedling_definition),
-    }
+    })
 }
 
 struct BuildContainer {
@@ -1790,14 +1802,17 @@ impl<'a> Command<Context<'a>> for BuildContainer {
         };
 
         let new_container = build_new_container(
+            context.name,
             new_container_name,
             context.seedling_definition,
-            uid,
-            gid,
+            ContainerUser {
+                user_id: uid,
+                group_id: gid,
+            },
             mounts,
             context.version,
             environment_variables,
-        );
+        )?;
 
         context
             .docker_client
@@ -2166,7 +2181,7 @@ mod tests {
 
     fn seedling_definition() -> seedbank_types::SeedlingDefinition {
         seedbank_types::SeedlingDefinition::new(
-            VersionedImageName::specific("traefik", "v3.7.7"),
+            seedbank_types::ImageSource::Local,
             HashMap::new(),
             seedbank_types::Routing::None,
             HealthCheck {
@@ -2636,14 +2651,18 @@ mod tests {
             .with_capability(docker_types::Capability::Chown);
 
         let new_container = build_new_container(
+            &name(),
             container_name(&name()).unwrap(),
             &definition,
-            1000,
-            1000,
+            ContainerUser {
+                user_id: 1000,
+                group_id: 1000,
+            },
             Vec::new(),
             &seedbank_types::Version(1),
             Vec::new(),
-        );
+        )
+        .unwrap();
 
         assert_eq!(
             new_container.command,
@@ -2660,14 +2679,18 @@ mod tests {
         let definition = seedling_definition();
 
         let new_container = build_new_container(
+            &name(),
             container_name(&name()).unwrap(),
             &definition,
-            1000,
-            1000,
+            ContainerUser {
+                user_id: 1000,
+                group_id: 1000,
+            },
             Vec::new(),
             &seedbank_types::Version(1),
             Vec::new(),
-        );
+        )
+        .unwrap();
 
         assert_eq!(new_container.command, None);
         assert!(new_container.added_capabilities.is_empty());
@@ -2682,14 +2705,18 @@ mod tests {
         )];
 
         let new_container = build_new_container(
+            &name(),
             container_name(&name()).unwrap(),
             &definition,
-            1000,
-            1000,
+            ContainerUser {
+                user_id: 1000,
+                group_id: 1000,
+            },
             Vec::new(),
             &seedbank_types::Version(1),
             environment_variables.clone(),
-        );
+        )
+        .unwrap();
 
         assert_eq!(new_container.environment_variables, environment_variables);
     }
@@ -2699,14 +2726,18 @@ mod tests {
         let definition = seedling_definition().with_origin(seedbank_types::Origin::Core);
 
         let new_container = build_new_container(
+            &name(),
             container_name(&name()).unwrap(),
             &definition,
-            1000,
-            1000,
+            ContainerUser {
+                user_id: 1000,
+                group_id: 1000,
+            },
             Vec::new(),
             &seedbank_types::Version(1),
             Vec::new(),
-        );
+        )
+        .unwrap();
 
         assert_eq!(
             labels::get_origin(&new_container.labels),
@@ -2719,14 +2750,18 @@ mod tests {
         let definition = seedling_definition().with_origin(seedbank_types::Origin::User);
 
         let new_container = build_new_container(
+            &name(),
             container_name(&name()).unwrap(),
             &definition,
-            1000,
-            1000,
+            ContainerUser {
+                user_id: 1000,
+                group_id: 1000,
+            },
             Vec::new(),
             &seedbank_types::Version(1),
             Vec::new(),
-        );
+        )
+        .unwrap();
 
         assert_eq!(
             labels::get_origin(&new_container.labels),
@@ -3194,6 +3229,107 @@ mod tests {
                 &seedbank_types::Version(seedling_version),
             )
             .await
+    }
+
+    async fn discover_image_status_with(
+        docker_client: docker::MockClient,
+        mut resin_client: resin_client::MockClient,
+        image: &seedbank_types::ImageSource,
+    ) -> Result<ImageStatus, ReconcileSeedlingError> {
+        let seedbank_client = seedbank_client::MockClient::new();
+        let rolodex = crate::rolodex::MockRolodex::new();
+        let douglas_folders = DouglasFolders::new();
+        let folder = file_system::MockFolder::new();
+        let inspect = file_system::MockInspect::new();
+        let file_reader = file_system::MockFileReader::new();
+        let permissions = file_system::MockPermissions::new();
+        let registry = registry();
+        let mut observer = StateObserver {
+            docker_client: &docker_client,
+            seedbank_client: &seedbank_client,
+            resin_client: &mut resin_client,
+            rolodex: &rolodex,
+            douglas_folders: &douglas_folders,
+            folder: &folder,
+            inspect: &inspect,
+            file_reader: &file_reader,
+            permissions: &permissions,
+            registry: &registry,
+        };
+
+        observer.discover_image_status(&name(), image).await
+    }
+
+    fn external_image() -> seedbank_types::ImageSource {
+        seedbank_types::ImageSource::External("ghcr.io/foo/bar:1.2.3".parse().unwrap())
+    }
+
+    #[tokio::test]
+    async fn test_discover_image_status_should_be_local_when_docker_has_a_local_image() {
+        let mut docker_client = docker::MockClient::new();
+        docker_client
+            .expect_image_exists()
+            .returning(|_, _| Ok(true));
+        let resin_client = resin_client::MockClient::new();
+
+        let result = discover_image_status_with(
+            docker_client,
+            resin_client,
+            &seedbank_types::ImageSource::Local,
+        )
+        .await;
+
+        assert!(matches!(result, Ok(ImageStatus::Local)));
+    }
+
+    #[tokio::test]
+    async fn test_discover_image_status_should_be_local_when_docker_has_an_external_image() {
+        let mut docker_client = docker::MockClient::new();
+        docker_client
+            .expect_image_exists()
+            .returning(|_, _| Ok(true));
+        let mut resin_client = resin_client::MockClient::new();
+        resin_client.expect_image_exists().times(0);
+
+        let result =
+            discover_image_status_with(docker_client, resin_client, &external_image()).await;
+
+        assert!(matches!(result, Ok(ImageStatus::Local)));
+    }
+
+    #[tokio::test]
+    async fn test_discover_image_status_should_check_resin_for_a_local_image_missing_locally() {
+        let mut docker_client = docker::MockClient::new();
+        docker_client
+            .expect_image_exists()
+            .returning(|_, _| Ok(false));
+        let mut resin_client = resin_client::MockClient::new();
+        resin_client.expect_image_exists().returning(|_| Ok(true));
+
+        let result = discover_image_status_with(
+            docker_client,
+            resin_client,
+            &seedbank_types::ImageSource::Local,
+        )
+        .await;
+
+        assert!(matches!(result, Ok(ImageStatus::AvailableFromResin)));
+    }
+
+    #[tokio::test]
+    async fn test_discover_image_status_should_not_check_resin_for_an_external_image_missing_locally()
+     {
+        let mut docker_client = docker::MockClient::new();
+        docker_client
+            .expect_image_exists()
+            .returning(|_, _| Ok(false));
+        let mut resin_client = resin_client::MockClient::new();
+        resin_client.expect_image_exists().times(0);
+
+        let result =
+            discover_image_status_with(docker_client, resin_client, &external_image()).await;
+
+        assert!(matches!(result, Ok(ImageStatus::Unknown)));
     }
 
     fn docker_with_version(

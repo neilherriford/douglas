@@ -31,6 +31,8 @@ pub enum NewSeedlingError {
     ReservedName(String),
     #[error("Mount references unregistered sibling seedlings: {0:?}")]
     MissingMountSiblings(Vec<String>),
+    #[error("Image source resolution error {0}")]
+    ImageSourceResolutionError(#[from] seedbank_types::ImageSourceResolutionError),
 }
 
 struct Context<'a> {
@@ -43,7 +45,6 @@ struct State {
     container_exists: bool,
     image_exists: bool,
     registered: bool,
-    image_name: docker_types::ImagePathComponent,
     missing_mount_siblings: Vec<String>,
 }
 
@@ -127,6 +128,21 @@ impl<'a> StateObserver<'a> {
         }
     }
 
+    async fn local_image_already_exists(
+        &self,
+        name: &seedbank_types::Name,
+        image: &seedbank_types::ImageSource,
+    ) -> Result<bool, NewSeedlingError> {
+        if *image != seedbank_types::ImageSource::Local {
+            return Ok(false);
+        }
+
+        Ok(self
+            .docker_client
+            .image_exists(self.registry, ImageRef::Target(image.resolve(name)?))
+            .await?)
+    }
+
     pub async fn discover(
         &mut self,
         span: &Span,
@@ -141,14 +157,12 @@ impl<'a> StateObserver<'a> {
             .start_guard();
 
         let container_name = name.as_ref().parse::<docker_types::ContainerName>()?;
-        let image_name = name.as_ref().parse::<docker_types::ImagePathComponent>()?;
 
         let mut result = State {
             seedling_exists: false,
             container_exists: false,
             image_exists: false,
             registered: false,
-            image_name: image_name.clone(),
             missing_mount_siblings: Vec::new(),
         };
 
@@ -169,17 +183,7 @@ impl<'a> StateObserver<'a> {
         }
 
         if self
-            .docker_client
-            .image_exists(
-                self.registry,
-                ImageRef::Target(docker_types::PullTarget::from(
-                    docker_types::VersionedImageName {
-                        namespace: None,
-                        name: image_name,
-                        version: docker_types::Version::Latest,
-                    },
-                )),
-            )
+            .local_image_already_exists(name, &user_seedling_definition.image)
             .await?
         {
             result.container_exists = true;
@@ -231,11 +235,7 @@ fn create_plan<'a>(
 
     push_step(
         &mut steps,
-        NewSeedlingFromSpec::new(
-            name.clone(),
-            state.image_name.clone(),
-            user_seedling_definition.clone(),
-        ),
+        NewSeedlingFromSpec::new(name.clone(), user_seedling_definition.clone()),
     );
 
     if user_seedling_definition.route == seedbank_types::RouteSpec::Root {
@@ -247,19 +247,16 @@ fn create_plan<'a>(
 
 struct NewSeedlingFromSpec {
     seedling_name: seedbank_types::Name,
-    image_name: docker_types::ImagePathComponent,
     user_seedling_definition: seedbank_types::UserSeedlingDefinition,
 }
 
 impl NewSeedlingFromSpec {
     pub fn new(
         seedling_name: seedbank_types::Name,
-        image_name: docker_types::ImagePathComponent,
         user_seedling_definition: seedbank_types::UserSeedlingDefinition,
     ) -> Self {
         Self {
             seedling_name,
-            image_name,
             user_seedling_definition,
         }
     }
@@ -289,13 +286,8 @@ impl<'a> Command<Context<'a>> for NewSeedlingFromSpec {
             )
             .start_guard();
 
-        let image = docker_types::VersionedImageName {
-            namespace: None,
-            name: self.image_name.clone(),
-            version: docker_types::Version::Latest,
-        };
         let definition = seedbank_types::SeedlingDefinition::new(
-            image,
+            self.user_seedling_definition.image.clone(),
             self.user_seedling_definition.mounts.clone(),
             seedbank_types::Routing::Routed {
                 route: self.user_seedling_definition.route.clone(),
@@ -395,6 +387,18 @@ mod tests {
         "foo".parse().expect("valid name")
     }
 
+    fn registry() -> docker_types::Registry {
+        "localhost:7376".parse().unwrap()
+    }
+
+    fn root_span() -> Span {
+        struct NullReporter;
+        impl log::Reporter for NullReporter {
+            fn emit(&self, _event: log::Event) {}
+        }
+        Span::new(Arc::new(NullReporter), "test", ScopeKind::Group)
+    }
+
     fn user_seedling_definition() -> seedbank_types::UserSeedlingDefinition {
         seedbank_types::UserSeedlingDefinition::new(
             std::collections::HashMap::new(),
@@ -415,13 +419,78 @@ mod tests {
             container_exists: false,
             image_exists: false,
             registered: false,
-            image_name: "foo".parse().expect("valid image name"),
             missing_mount_siblings: Vec::new(),
         }
     }
 
     fn step_descriptions(steps: Vec<Step<Context<'_>>>) -> Vec<String> {
         steps.iter().map(std::string::ToString::to_string).collect()
+    }
+
+    async fn discover_with(
+        docker_client: docker::MockClient,
+        user_seedling_definition: &seedbank_types::UserSeedlingDefinition,
+    ) -> Result<State, NewSeedlingError> {
+        let mut seedbank_client = seedbank_client::MockClient::new();
+        seedbank_client.expect_exists().returning(|_| Ok(false));
+        let mut resin_client = resin_client::MockClient::new();
+        resin_client
+            .expect_repository_registered()
+            .returning(|_| Ok(false));
+        let registry = registry();
+        let mut observer = StateObserver::new(
+            &docker_client,
+            &registry,
+            &seedbank_client,
+            &mut resin_client,
+        );
+
+        observer
+            .discover(&root_span(), &name(), user_seedling_definition)
+            .await
+    }
+
+    #[tokio::test]
+    async fn test_discover_should_check_docker_image_existence_for_a_local_seedling() {
+        let mut docker_client = docker::MockClient::new();
+        docker_client
+            .expect_container_exists()
+            .returning(|_| Ok(false));
+        docker_client
+            .expect_image_exists()
+            .returning(|_, _| Ok(false));
+
+        let result = discover_with(docker_client, &user_seedling_definition()).await;
+
+        assert!(matches!(
+            result,
+            Ok(State {
+                image_exists: false,
+                ..
+            })
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_discover_should_skip_the_docker_image_existence_check_for_an_external_seedling() {
+        let mut docker_client = docker::MockClient::new();
+        docker_client
+            .expect_container_exists()
+            .returning(|_| Ok(false));
+        docker_client.expect_image_exists().times(0);
+        let definition = user_seedling_definition().with_image(
+            seedbank_types::ImageSource::External("ghcr.io/foo/bar:1.2.3".parse().unwrap()),
+        );
+
+        let result = discover_with(docker_client, &definition).await;
+
+        assert!(matches!(
+            result,
+            Ok(State {
+                image_exists: false,
+                ..
+            })
+        ));
     }
 
     #[test]

@@ -496,7 +496,7 @@ mod tests {
 
     fn definition_with_secrets(access: Option<SecretsAccess>) -> SeedlingDefinition {
         SeedlingDefinition::new(
-            docker_types::VersionedImageName::latest("test"),
+            seedbank_types::ImageSource::Local,
             HashMap::new(),
             seedbank_types::Routing::None,
             HealthCheck {

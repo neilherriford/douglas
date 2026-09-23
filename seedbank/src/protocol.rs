@@ -93,8 +93,7 @@ fn error_response(err: Error) -> Response {
 mod tests {
     use super::*;
     use crate::{Id, MockSeedbank, Name, Seedling, SeedlingDefinition};
-    use docker_types::VersionedImageName;
-    use seedbank_types::{HealthCheck, HealthCheckCommand, Version};
+    use seedbank_types::{HealthCheck, HealthCheckCommand, ImageSource, Version};
     use std::{collections::HashMap, num::NonZeroU8, str::FromStr};
 
     fn name(value: &str) -> Name {
@@ -111,7 +110,7 @@ mod tests {
 
     fn definition() -> SeedlingDefinition {
         SeedlingDefinition::new(
-            VersionedImageName::latest("test"),
+            ImageSource::Local,
             HashMap::new(),
             seedbank_types::Routing::None,
             HealthCheck {

@@ -1,4 +1,4 @@
-use docker_types::{Capability, ImageReference, VersionedImageName};
+use docker_types::{Capability, ImagePath, ImagePathComponentError, ImageReference, PullTarget};
 use file_system::{RelativePath, RelativePathError};
 use refined_string::{StringRules, Validated};
 use regex::Regex;
@@ -351,8 +351,41 @@ pub enum Origin {
 #[serde(tag = "type", content = "value", rename_all = "snake_case")]
 pub enum ImageSource {
     #[default]
-    Pushed,
+    Local,
     External(ImageReference),
+}
+
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum ImageSourceResolutionError {
+    #[error("upstream registry host is not a valid image path component: {0}")]
+    InvalidUpstreamHost(ImagePathComponentError),
+}
+
+impl ImageSource {
+    pub fn resolve(&self, seedling_name: &Name) -> Result<PullTarget, ImageSourceResolutionError> {
+        match self {
+            ImageSource::Local => Ok(PullTarget::latest(seedling_name.as_ref())),
+            ImageSource::External(reference) => {
+                let registry_component = reference
+                    .registry
+                    .as_ref()
+                    .parse()
+                    .map_err(ImageSourceResolutionError::InvalidUpstreamHost)?;
+
+                let mut components = vec![registry_component];
+                if let Some(namespace) = &reference.namespace {
+                    components.push(namespace.clone());
+                }
+                components.push(reference.name.clone());
+
+                Ok(PullTarget {
+                    path: ImagePath::new(components)
+                        .expect("at least the registry segment is always present"),
+                    version: docker_types::Version::Specific(reference.version.clone()),
+                })
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -402,7 +435,7 @@ pub struct HealthCheck {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SeedlingDefinition {
-    pub image: VersionedImageName,
+    pub image: ImageSource,
     pub mounts: HashMap<Name, Mount>,
     pub routing: Routing,
     pub published_ports: Vec<PortMapping>,
@@ -417,7 +450,7 @@ pub struct SeedlingDefinition {
 
 impl SeedlingDefinition {
     pub fn new(
-        image: VersionedImageName,
+        image: ImageSource,
         mounts: HashMap<Name, Mount>,
         routing: Routing,
         health_check: HealthCheck,
@@ -723,7 +756,7 @@ mod tests {
 
     fn seedling_definition() -> SeedlingDefinition {
         SeedlingDefinition::new(
-            docker_types::VersionedImageName::specific("hello-world", "1"),
+            ImageSource::Local,
             HashMap::new(),
             Routing::None,
             HealthCheck {
@@ -767,17 +800,17 @@ mod tests {
     }
 
     #[test]
-    fn test_image_source_should_default_to_pushed() {
-        assert_eq!(ImageSource::default(), ImageSource::Pushed);
+    fn test_image_source_should_default_to_local() {
+        assert_eq!(ImageSource::default(), ImageSource::Local);
     }
 
     #[test]
-    fn test_image_source_pushed_should_round_trip_through_toml() {
-        let toml = toml::to_string(&ImageSource::Pushed).expect("should serialize");
+    fn test_image_source_local_should_round_trip_through_toml() {
+        let toml = toml::to_string(&ImageSource::Local).expect("should serialize");
 
         let round_tripped: ImageSource = toml::from_str(&toml).expect("should deserialize");
 
-        assert_eq!(round_tripped, ImageSource::Pushed);
+        assert_eq!(round_tripped, ImageSource::Local);
     }
 
     #[test]
@@ -789,6 +822,47 @@ mod tests {
         let round_tripped: ImageSource = toml::from_str(&toml).expect("should deserialize");
 
         assert_eq!(round_tripped, source);
+    }
+
+    #[test]
+    fn test_local_should_resolve_to_the_seedling_name_at_latest() {
+        let name: Name = "hello-world".parse().unwrap();
+
+        let target = ImageSource::Local.resolve(&name).unwrap();
+
+        assert_eq!(target, PullTarget::latest("hello-world"));
+    }
+
+    #[test]
+    fn test_external_should_resolve_to_the_registry_folded_into_the_path() {
+        let reference: ImageReference = "ghcr.io/foo/bar:1.2.3".parse().unwrap();
+        let name: Name = "hello-world".parse().unwrap();
+
+        let target = ImageSource::External(reference).resolve(&name).unwrap();
+
+        assert_eq!(target.formatted_name(), "ghcr.io/foo/bar");
+        assert_eq!(target.version_formatted_name(), "ghcr.io/foo/bar:1.2.3");
+    }
+
+    #[test]
+    fn test_external_without_a_namespace_should_resolve_to_a_two_segment_path() {
+        let reference: ImageReference = "docker.io/nginx:1.27".parse().unwrap();
+        let name: Name = "hello-world".parse().unwrap();
+
+        let target = ImageSource::External(reference).resolve(&name).unwrap();
+
+        assert_eq!(target.formatted_name(), "docker.io/nginx");
+    }
+
+    #[test]
+    fn test_external_with_a_port_bearing_registry_should_be_rejected() {
+        let reference: ImageReference = "localhost:7376/nginx:1.27".parse().unwrap();
+        let name: Name = "hello-world".parse().unwrap();
+
+        assert!(matches!(
+            ImageSource::External(reference).resolve(&name),
+            Err(ImageSourceResolutionError::InvalidUpstreamHost(_))
+        ));
     }
 
     fn user_seedling_definition() -> UserSeedlingDefinition {
@@ -806,8 +880,8 @@ mod tests {
     }
 
     #[test]
-    fn test_user_seedling_definition_new_should_default_image_to_pushed() {
-        assert_eq!(user_seedling_definition().image, ImageSource::Pushed);
+    fn test_user_seedling_definition_new_should_default_image_to_local() {
+        assert_eq!(user_seedling_definition().image, ImageSource::Local);
     }
 
     #[test]
@@ -820,7 +894,7 @@ mod tests {
     }
 
     #[test]
-    fn test_user_seedling_definition_should_default_image_to_pushed_when_omitted_from_serialized_toml()
+    fn test_user_seedling_definition_should_default_image_to_local_when_omitted_from_serialized_toml()
      {
         let toml = r#"
             mounts = {}
@@ -833,6 +907,6 @@ mod tests {
 
         let definition: UserSeedlingDefinition = toml::from_str(toml).expect("should deserialize");
 
-        assert_eq!(definition.image, ImageSource::Pushed);
+        assert_eq!(definition.image, ImageSource::Local);
     }
 }

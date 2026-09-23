@@ -947,14 +947,13 @@ impl Seedbank for Server {
 mod tests {
     use super::*;
     use blueprint::listener::ListenerDefinition;
-    use docker_types::VersionedImageName;
     use file_system::{
         Entry, MockBindableUnixDomainSocketFile, MockFileDeleter, MockFileReader, MockFileWriter,
         MockFolder, MockFolderDeleter, MockInspect, MockPermissions, Modes,
     };
     use heartbeat::MockHeartbeatWriter;
     use log::Event;
-    use seedbank_types::{HealthCheck, HealthCheckCommand};
+    use seedbank_types::{HealthCheck, HealthCheckCommand, ImageSource};
     use std::num::NonZeroU8;
 
     struct NullReporter;
@@ -977,7 +976,7 @@ mod tests {
 
     fn definition() -> SeedlingDefinition {
         SeedlingDefinition::new(
-            VersionedImageName::latest("test"),
+            ImageSource::Local,
             HashMap::new(),
             seedbank_types::Routing::None,
             HealthCheck {
@@ -989,7 +988,7 @@ mod tests {
 
     fn definition_with_mounts(mounts: HashMap<Name, Mount>) -> SeedlingDefinition {
         SeedlingDefinition::new(
-            VersionedImageName::latest("test"),
+            ImageSource::Local,
             mounts,
             seedbank_types::Routing::None,
             HealthCheck {

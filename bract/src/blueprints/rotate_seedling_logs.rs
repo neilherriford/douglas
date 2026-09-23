@@ -144,7 +144,7 @@ mod tests {
             name: "openbao".parse().unwrap(),
             version: seedbank_types::Version(1),
             definition: seedbank_types::SeedlingDefinition::new(
-                docker_types::VersionedImageName::specific("openbao", "1"),
+                seedbank_types::ImageSource::Local,
                 mounts,
                 seedbank_types::Routing::None,
                 seedbank_types::HealthCheck {
