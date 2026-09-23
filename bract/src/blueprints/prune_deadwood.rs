@@ -117,12 +117,10 @@ async fn prune(deps: Dependencies<'_>, deadwood: &Deadwood) -> Result<(), PruneD
     }
 
     for name in &deadwood.resin_repositories {
-        let Ok(resin_name) = name.parse::<resin_types::Name>() else {
+        let Ok(repository) = name.parse::<resin_types::Repository>() else {
             continue;
         };
-        resin_client
-            .delete_repository(&resin_types::Repository::Local(resin_name))
-            .await?;
+        resin_client.delete_repository(&repository).await?;
     }
 
     for name in &deadwood.mounts {
@@ -476,6 +474,37 @@ mod tests {
 
         let deadwood = Deadwood {
             resin_repositories: vec!["stale".to_string()],
+            ..Deadwood::default()
+        };
+
+        let result = prune(
+            Dependencies {
+                docker_client: &MockClient::new(),
+                resin_client: &mut resin_client,
+                file_deleter: &MockFileDeleter::new(),
+                folder_deleter: &MockFolderDeleter::new(),
+                openbao_client_factory: &openbao::MockClientFactory::new(),
+                file_reader: &MockFileReader::new(),
+                identity: &mut MockIdentity::new(),
+                douglas_folders: &DouglasFolders::new(),
+            },
+            &deadwood,
+        )
+        .await;
+
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_prune_should_delete_a_deadwood_upstream_resin_repository() {
+        let mut resin_client = MockResinClient::new();
+        resin_client
+            .expect_delete_repository()
+            .withf(|repository| repository.to_string() == "ghcr.io/foo/bar")
+            .returning(|_| Ok(()));
+
+        let deadwood = Deadwood {
+            resin_repositories: vec!["ghcr.io/foo/bar".to_string()],
             ..Deadwood::default()
         };
 

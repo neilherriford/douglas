@@ -45,8 +45,8 @@ pub async fn execute(deps: Dependencies<'_>) -> Result<Deadwood, FindDeadwoodErr
     let mut known_image_repositories: HashSet<String> = HashSet::new();
     for name in &seedling_names {
         let seedling = deps.seedbank_client.load(name).await?;
-        if seedling.definition.image == ImageSource::Local {
-            known_image_repositories.insert(name.to_string());
+        if let Some(repository) = known_repository(name, &seedling.definition.image) {
+            known_image_repositories.insert(repository.to_string());
         }
     }
 
@@ -95,6 +95,17 @@ pub async fn execute(deps: Dependencies<'_>) -> Result<Deadwood, FindDeadwoodErr
             openbao_secrets: &openbao_secret_names,
         },
     ))
+}
+
+fn known_repository(name: &Name, image: &ImageSource) -> Option<resin_types::Repository> {
+    match image {
+        ImageSource::Local => name
+            .as_ref()
+            .parse::<resin_types::Name>()
+            .ok()
+            .map(resin_types::Repository::Local),
+        ImageSource::External(reference) => reference.formatted_name().parse().ok(),
+    }
 }
 
 fn protect_core_seedling_names(mut names: HashSet<String>) -> HashSet<String> {
@@ -259,6 +270,23 @@ mod tests {
         assert!(result.contains("hello-world"));
         assert!(result.contains("traefik"));
         assert!(result.contains("openbao"));
+    }
+
+    #[test]
+    fn known_repository_should_use_the_seedlings_own_name_when_local() {
+        let repository = known_repository(&name("hello-world"), &ImageSource::Local).unwrap();
+
+        assert_eq!(repository, "hello-world".parse().unwrap());
+    }
+
+    #[test]
+    fn known_repository_should_use_the_resolved_upstream_path_when_external() {
+        let reference = "docker.io/openbao/openbao:2.4.3".parse().unwrap();
+        let image = ImageSource::External(reference);
+
+        let repository = known_repository(&name("openbao"), &image).unwrap();
+
+        assert_eq!(repository, "docker.io/openbao/openbao".parse().unwrap());
     }
 
     #[test]
