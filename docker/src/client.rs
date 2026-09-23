@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use docker_types::{
     ContainerId, ContainerName, ContainerSnapshot, ExecId, ExecInspectionResult,
     ExecInstanceOptions, ExecStartOptions, ImageDefinition, ImageId, Ipv4Subnet, Label, MountName,
-    NetworkName, NewContainer, Registry, Status, VersionedImageName,
+    NetworkName, NewContainer, PullTarget, Registry, Status,
 };
 use log::Reporter;
 #[cfg(feature = "mock")]
@@ -49,7 +49,7 @@ pub trait Client: Send + Sync {
     async fn pull_image(
         &self,
         registry: &Registry,
-        image_name: &VersionedImageName,
+        image_name: &PullTarget,
     ) -> Result<ImageDefinition, DockerError>;
     async fn container_exists(&self, container_ref: ContainerRef) -> Result<bool, DockerError>;
     async fn start_container(&self, container_ref: ContainerRef) -> Result<(), DockerError>;
@@ -152,7 +152,7 @@ impl std::fmt::Display for ContainerRef {
 }
 
 pub enum ImageRef {
-    VersionedName(VersionedImageName),
+    Target(PullTarget),
     ImageId(ImageId),
 }
 
@@ -195,7 +195,7 @@ impl Client for UdsClient {
     async fn pull_image(
         &self,
         registry: &Registry,
-        image_name: &VersionedImageName,
+        image_name: &PullTarget,
     ) -> Result<ImageDefinition, DockerError> {
         image::pull(
             Arc::clone(&self.reporter),

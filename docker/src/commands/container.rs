@@ -606,13 +606,13 @@ pub async fn create(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use docker_types::VersionedImageName;
+    use docker_types::PullTarget;
     use serde_json::{Value, json};
 
     fn new_container() -> NewContainer {
         NewContainer {
             name: "traefik".parse().unwrap(),
-            image: VersionedImageName::specific("traefik", "v3.7.7"),
+            image: PullTarget::specific("traefik", "v3.7.7"),
             run_as: None,
             command: None,
             environment_variables: Vec::new(),

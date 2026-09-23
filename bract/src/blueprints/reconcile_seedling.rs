@@ -490,7 +490,10 @@ impl<'a> StateObserver<'a> {
     ) -> Result<ImageStatus, ReconcileSeedlingError> {
         if self
             .docker_client
-            .image_exists(self.registry, ImageRef::VersionedName(image.clone()))
+            .image_exists(
+                self.registry,
+                ImageRef::Target(docker_types::PullTarget::from(image.clone())),
+            )
             .await?
         {
             Ok(ImageStatus::Local)
@@ -1606,14 +1609,14 @@ impl<'a> Command<Context<'a>> for EnsureAgentMount {
 
 struct PullImageFromResin {
     registry: docker_types::Registry,
-    name: VersionedImageName,
+    name: docker_types::PullTarget,
 }
 
 impl PullImageFromResin {
     pub fn new(registry: &docker_types::Registry, name: VersionedImageName) -> Self {
         Self {
             registry: registry.clone(),
-            name,
+            name: docker_types::PullTarget::from(name),
         }
     }
 }
@@ -1688,7 +1691,7 @@ fn build_new_container(
         }),
         command: seedling_definition.command.clone(),
         environment_variables,
-        image: seedling_definition.image.clone(),
+        image: docker_types::PullTarget::from(seedling_definition.image.clone()),
         mounts,
         added_capabilities: seedling_definition.added_capabilities.clone(),
         labels: vec![
@@ -1969,7 +1972,7 @@ impl<'a> Command<Context<'a>> for BuildAgentContainer {
                 provision_seedling_secrets::AGENT_CONFIG_FILE_NAME
             )),
             environment_variables: Vec::new(),
-            image: VersionedImageName::namespaced_specific(
+            image: docker_types::PullTarget::namespaced_specific(
                 "openbao",
                 "openbao",
                 openbao::IMAGE_VERSION,

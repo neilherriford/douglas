@@ -3,8 +3,8 @@ use crate::DockerError;
 use crate::client::ImageRef;
 use crate::{deserialize_container_command, to_general_error};
 use docker_types::{
-    EnvironmentVariable, Healthcheck, Id, ImageDefinition, ImageId, Label, Registry,
-    VersionedImageName, deserialize_environment_variables, deserialize_id, deserialize_labels,
+    EnvironmentVariable, Healthcheck, Id, ImageDefinition, ImageId, Label, PullTarget, Registry,
+    deserialize_environment_variables, deserialize_id, deserialize_labels,
 };
 use log::{Reporter, Span};
 use serde::{Deserialize, Deserializer};
@@ -167,9 +167,9 @@ async fn find_image(
     guard: &log::ScopeGuard,
 ) -> Result<Json, DockerError> {
     let (filter_key, filter_value): (&str, String) = match image_ref {
-        ImageRef::VersionedName(name) => (
+        ImageRef::Target(target) => (
             "reference",
-            format!("{registry}/{}", name.version_formatted_name()),
+            format!("{registry}/{}", target.version_formatted_name()),
         ),
         ImageRef::ImageId(ImageId::Full(id)) => ("id", id.to_string()),
         ImageRef::ImageId(ImageId::Short(id)) => ("id", id.to_string()),
@@ -226,18 +226,16 @@ pub async fn pull(
     parser: Arc<dyn Parser<Json, ParseError = JsonParserError>>,
     chunked_parser: Arc<dyn Parser<Vec<Json>, ParseError = JsonParserError>>,
     registry: &Registry,
-    versioned_image_name: &VersionedImageName,
+    pull_target: &PullTarget,
 ) -> Result<ImageDefinition, DockerError> {
     let guard = Span::new(Arc::clone(&reporter), "Pull image", log::ScopeKind::Task).start_guard();
 
-    let from_image = format!("{registry}/{}", versioned_image_name.formatted_name());
+    let from_image = format!("{registry}/{}", pull_target.formatted_name());
+    let tag = pull_target.version.to_string();
     let request = Request::Post {
         path: create_path_and_query_string(
             "/images/create",
-            HashMap::from([
-                ("fromImage", from_image.as_str()),
-                ("tag", &versioned_image_name.version.to_string()),
-            ]),
+            HashMap::from([("fromImage", from_image.as_str()), ("tag", tag.as_str())]),
         ),
         headers: vec![],
         body: None,
@@ -261,7 +259,7 @@ pub async fn pull(
             rest_client,
             parser,
             registry,
-            ImageRef::VersionedName(versioned_image_name.clone()),
+            ImageRef::Target(pull_target.clone()),
         )
         .await,
     )

@@ -217,7 +217,9 @@ impl<'a> StateObserver<'a> {
             .docker_client
             .image_exists(
                 self.registry,
-                ImageRef::VersionedName(seedling.definition.image.clone()),
+                ImageRef::Target(docker_types::PullTarget::from(
+                    seedling.definition.image.clone(),
+                )),
             )
             .await?
         {

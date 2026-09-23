@@ -172,11 +172,13 @@ impl<'a> StateObserver<'a> {
             .docker_client
             .image_exists(
                 self.registry,
-                ImageRef::VersionedName(docker_types::VersionedImageName {
-                    namespace: None,
-                    name: image_name,
-                    version: docker_types::Version::Latest,
-                }),
+                ImageRef::Target(docker_types::PullTarget::from(
+                    docker_types::VersionedImageName {
+                        namespace: None,
+                        name: image_name,
+                        version: docker_types::Version::Latest,
+                    },
+                )),
             )
             .await?
         {

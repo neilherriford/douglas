@@ -1,5 +1,7 @@
 mod image_reference;
+mod pull_target;
 pub use image_reference::{ImageReference, ImageReferenceError};
+pub use pull_target::{ImagePath, PullTarget};
 
 use refined_string::{StringRules, Validated};
 use regex::Regex;
@@ -693,7 +695,7 @@ impl Serialize for MountDefinition {
 #[derive(Debug, PartialEq, Clone)]
 pub struct NewContainer {
     pub name: ContainerName,
-    pub image: VersionedImageName,
+    pub image: PullTarget,
     pub run_as: Option<ContainerUser>,
     pub command: Option<String>,
     pub environment_variables: Vec<EnvironmentVariable>,
