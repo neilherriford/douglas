@@ -2094,6 +2094,7 @@ dependencies = [
  "openbao",
  "openbao_types",
  "rand 0.9.2",
+ "seedbank_types",
  "serde",
  "serde_json",
  "simple_rest_client",

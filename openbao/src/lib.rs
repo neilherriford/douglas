@@ -14,6 +14,14 @@ pub const IMAGE_VERSION: &str = "2.6.2";
 pub const AGENT_LOCAL_PROXY_PORT: u16 = 8100;
 pub const API_PORT: u16 = 8201;
 
+pub fn image_source() -> seedbank_types::ImageSource {
+    seedbank_types::ImageSource::External(
+        format!("docker.io/openbao/openbao:{IMAGE_VERSION}")
+            .parse()
+            .expect("openbao's own image reference is always valid"),
+    )
+}
+
 use simple_rest_client::{
     RestClientError, assertions::AssertionError, parsers::json::JsonParserError,
     unix_domain_socket::BuilderError,

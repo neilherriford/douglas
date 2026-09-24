@@ -264,7 +264,7 @@ pub mod definitions {
     mod openbao {
         use crate::bootstrap::core_seedlings::BootstrapError;
         use seedbank::{Mount, MountContents, MountType, Name, SeedlingDefinition};
-        use seedbank_types::{HealthCheckCommand, ImageSource, Version};
+        use seedbank_types::{HealthCheckCommand, Version};
         use serde_json::json;
         use std::num::NonZeroU8;
         use std::str::FromStr;
@@ -297,9 +297,7 @@ pub mod definitions {
             let data_mount: Name = "data".parse()?;
 
             let definition = SeedlingDefinition::new(
-                ImageSource::External(
-                    format!("docker.io/openbao/openbao:{}", openbao::IMAGE_VERSION).parse()?,
-                ),
+                openbao::image_source(),
                 HashMap::from([
                     (
                         log_mount,

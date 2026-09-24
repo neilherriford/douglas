@@ -503,18 +503,21 @@ impl<'a> StateObserver<'a> {
             return Ok(ImageStatus::Local);
         }
 
-        if *image == seedbank_types::ImageSource::Local {
-            let local_name = VersionedImageName {
-                namespace: None,
-                name: name.as_ref().parse()?,
-                version: docker_types::Version::Latest,
-            };
-            if self.resin_client.image_exists(&local_name).await? {
-                return Ok(ImageStatus::AvailableFromResin);
+        match image {
+            seedbank_types::ImageSource::Local => {
+                let local_name = VersionedImageName {
+                    namespace: None,
+                    name: name.as_ref().parse()?,
+                    version: docker_types::Version::Latest,
+                };
+                if self.resin_client.image_exists(&local_name).await? {
+                    Ok(ImageStatus::AvailableFromResin)
+                } else {
+                    Ok(ImageStatus::Unknown)
+                }
             }
+            seedbank_types::ImageSource::External(_) => Ok(ImageStatus::AvailableFromResin),
         }
-
-        Ok(ImageStatus::Unknown)
     }
 
     async fn discover_container(
@@ -641,7 +644,6 @@ fn create_plan<'a>(
 ) -> Result<Vec<Step<Context<'a>>>, ReconcileSeedlingError> {
     let mut steps: Vec<Step<Context>> = Vec::new();
     let agent_requested = seedling_definition.secrets.is_some();
-
     plan_seedling_and_credentials_steps(
         &mut steps,
         name,
@@ -1987,11 +1989,7 @@ impl<'a> Command<Context<'a>> for BuildAgentContainer {
                 provision_seedling_secrets::AGENT_CONFIG_FILE_NAME
             )),
             environment_variables: Vec::new(),
-            image: docker_types::PullTarget::namespaced_specific(
-                "openbao",
-                "openbao",
-                openbao::IMAGE_VERSION,
-            ),
+            image: openbao::image_source().resolve(&self.seedling_name)?,
             mounts: vec![mount],
             added_capabilities: std::collections::HashSet::new(),
             labels: vec![
@@ -3317,7 +3315,26 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_discover_image_status_should_not_check_resin_for_an_external_image_missing_locally()
+    async fn test_discover_image_status_should_be_unknown_for_a_local_image_missing_everywhere() {
+        let mut docker_client = docker::MockClient::new();
+        docker_client
+            .expect_image_exists()
+            .returning(|_, _| Ok(false));
+        let mut resin_client = resin_client::MockClient::new();
+        resin_client.expect_image_exists().returning(|_| Ok(false));
+
+        let result = discover_image_status_with(
+            docker_client,
+            resin_client,
+            &seedbank_types::ImageSource::Local,
+        )
+        .await;
+
+        assert!(matches!(result, Ok(ImageStatus::Unknown)));
+    }
+
+    #[tokio::test]
+    async fn test_discover_image_status_should_be_available_from_resin_for_an_external_image_missing_locally()
      {
         let mut docker_client = docker::MockClient::new();
         docker_client
@@ -3329,7 +3346,7 @@ mod tests {
         let result =
             discover_image_status_with(docker_client, resin_client, &external_image()).await;
 
-        assert!(matches!(result, Ok(ImageStatus::Unknown)));
+        assert!(matches!(result, Ok(ImageStatus::AvailableFromResin)));
     }
 
     fn docker_with_version(

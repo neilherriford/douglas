@@ -133,7 +133,7 @@ impl From<RepositoryError> for ServerError {
     fn from(error: RepositoryError) -> Self {
         match error {
             RepositoryError::NotLocal(repository) => ServerError::MethodNotAllowed(format!(
-                "{repository} is not available: upstream repositories are not supported yet"
+                "{repository} cannot be written to: only local repositories accept a push"
             )),
             other => ServerError::InvalidName(other.to_string()),
         }
@@ -228,7 +228,6 @@ struct ManifestState {
 #[derive(Clone)]
 struct SystemState {
     repository_store: Arc<dyn RepositoryStore>,
-    seedling_registration_client: Arc<dyn seedling_registration_client::Client>,
 }
 
 struct LocalBlobRoot {
@@ -524,7 +523,6 @@ impl Server {
     fn system_routes(&self) -> Router {
         let system_state = SystemState {
             repository_store: Arc::clone(&self.repository_store),
-            seedling_registration_client: Arc::clone(&self.seedling_registration_client),
         };
 
         Router::new()
@@ -906,7 +904,8 @@ impl IntoResponse for BlobUploaderError {
             BlobUploaderError::FileSystemError(_)
             | BlobUploaderError::HashFailure
             | BlobUploaderError::DigestError(_)
-            | BlobUploaderError::NetworkError(_) => (
+            | BlobUploaderError::NetworkError(_)
+            | BlobUploaderError::BlockingTaskFailed(_) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 error_code::UNSUPPORTED,
                 self.to_string(),

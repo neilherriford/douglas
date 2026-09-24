@@ -1032,6 +1032,7 @@ mod tests {
             primary
                 .expect_save()
                 .once()
+                .withf(|repository, _, _, _, _| repository == &test_upstream_repository())
                 .returning(|_, _, mut reader, _, _| {
                     // Drain the tee'd reader in the background
                     tokio::spawn(async move {

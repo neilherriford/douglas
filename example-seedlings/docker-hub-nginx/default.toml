@@ -1,0 +1,14 @@
+route = "subdomain"
+mounts = {}
+
+[image]
+type = "external"
+reference = "docker.io/nginxinc/nginx-unprivileged:1.27"
+
+[ports]
+public = 8080
+additional = []
+
+[health_check]
+command = "true"
+wait_time_in_seconds = 1

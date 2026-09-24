@@ -437,4 +437,85 @@ mod tests {
             assert!(actual.is_ok());
         }
     }
+
+    mod handlers_reject_upstream_repository {
+        use crate::{
+            ServerError, UploadState,
+            blob_mounter::MockBlobMounter,
+            blob_uploader::MockBlobUploader,
+            upload::{CompleteParams, StartParams, abort, complete, start, write_chunk},
+        };
+        use axum::extract::{Path, Query, State};
+        use axum::http::HeaderMap;
+        use seedling_registration_client::MockClient;
+        use std::sync::Arc;
+        use uuid::Uuid;
+
+        fn state() -> UploadState {
+            let mut seedling_registration_client = MockClient::new();
+            seedling_registration_client
+                .expect_seedling_registered()
+                .times(0);
+
+            UploadState {
+                blob_uploader: Arc::new(MockBlobUploader::new()),
+                blob_mounter: Arc::new(MockBlobMounter::new()),
+                seedling_registration_client: Arc::new(seedling_registration_client),
+            }
+        }
+
+        #[tokio::test]
+        async fn test_start_should_reject_upstream_repository() {
+            let actual = start(
+                State(state()),
+                Path("ghcr.io/foo/bar".to_string()),
+                Query(StartParams {
+                    mount: None,
+                    from: None,
+                }),
+            )
+            .await;
+
+            assert!(matches!(actual, Err(ServerError::MethodNotAllowed(_))));
+        }
+
+        #[tokio::test]
+        async fn test_write_chunk_should_reject_upstream_repository() {
+            let actual = write_chunk(
+                State(state()),
+                Path(("ghcr.io/foo/bar".to_string(), Uuid::max())),
+                HeaderMap::new(),
+                axum::body::Body::empty(),
+            )
+            .await;
+
+            assert!(matches!(actual, Err(ServerError::MethodNotAllowed(_))));
+        }
+
+        #[tokio::test]
+        async fn test_complete_should_reject_upstream_repository() {
+            let actual = complete(
+                State(state()),
+                Path(("ghcr.io/foo/bar".to_string(), Uuid::max())),
+                Query(CompleteParams {
+                    digest: "sha256:ff".to_string(),
+                }),
+                HeaderMap::new(),
+            )
+            .await;
+
+            assert!(matches!(actual, Err(ServerError::MethodNotAllowed(_))));
+        }
+
+        #[tokio::test]
+        async fn test_abort_should_reject_upstream_repository() {
+            let actual = abort(
+                State(state()),
+                Path(("ghcr.io/foo/bar".to_string(), Uuid::max())),
+            )
+            .await;
+
+            assert!(matches!(actual, Err(ServerError::MethodNotAllowed(_))));
+        }
+    }
 }

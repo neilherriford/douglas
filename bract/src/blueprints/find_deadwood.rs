@@ -68,6 +68,7 @@ pub async fn execute(deps: Dependencies<'_>) -> Result<Deadwood, FindDeadwoodErr
         .list_repositories()
         .await?
         .iter()
+        .filter(|repository| matches!(repository, resin_types::Repository::Local(_)))
         .map(std::string::ToString::to_string)
         .collect();
 

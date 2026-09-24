@@ -5,7 +5,7 @@ use crate::{
 use file_system::{
     EntryKind, FileAppender, FileDeleter, FileRenamer, FileSystemError, FileWriter, Folder,
 };
-use resin_types::{Name, NameParseError};
+use resin_types::{Name, NameParseError, Repository};
 use sha2::Sha256;
 use std::{
     collections::HashMap,
@@ -41,6 +41,8 @@ pub enum BlobUploaderError {
     RangeMismatch { expected: u64, received: u64 },
     #[error("Name parse error: {0}")]
     NameParseError(#[from] NameParseError),
+    #[error("Blocking file write task failed: {0}")]
+    BlockingTaskFailed(String),
 }
 
 struct Paths {
@@ -51,7 +53,7 @@ struct Paths {
 impl Paths {
     pub fn new(root: &Path, registry: &Name) -> Self {
         let mut registry_root = root.to_path_buf();
-        registry_root.push(registry.fs_safe());
+        registry_root.push(Repository::Local(registry.clone()).storage_path());
 
         let mut temp_root = registry_root.clone();
         temp_root.push("tmp");
@@ -249,8 +251,17 @@ impl BlobUploader for FileBlobUploader {
                     break;
                 }
                 let chunk = &buffer[..bytes_read];
-                self.file_appender.append_all_bytes(&path, chunk)?;
                 sha2::digest::Update::update(&mut hasher, chunk);
+
+                let file_appender = Arc::clone(&self.file_appender);
+                let append_path = path.clone();
+                let owned_chunk = chunk.to_vec();
+                tokio::task::spawn_blocking(move || {
+                    file_appender.append_all_bytes(&append_path, &owned_chunk)
+                })
+                .await
+                .map_err(|err| BlobUploaderError::BlockingTaskFailed(err.to_string()))??;
+
                 written += bytes_read as u64;
             }
 
@@ -446,7 +457,7 @@ mod tests {
 
             folder
                 .expect_create_recursively()
-                .with(predicate::eq(PathBuf::from("/tmp/foo/tmp")))
+                .with(predicate::eq(PathBuf::from("/tmp/local/foo/tmp")))
                 .returning(|_| Err(FileSystemError::ExpectedFileError));
 
             let state = Arc::new(Mutex::new(
@@ -484,8 +495,8 @@ mod tests {
             let repositories_root = PathBuf::from("/tmp");
             let registry = Name::from_str("foo").unwrap();
 
-            folder.expect_create_folder_recursively_with("/tmp/foo/tmp");
-            file_deleter.expect_file_to_be_deleted(&format!("/tmp/foo/tmp/{}", Uuid::max()));
+            folder.expect_create_folder_recursively_with("/tmp/local/foo/tmp");
+            file_deleter.expect_file_to_be_deleted(&format!("/tmp/local/foo/tmp/{}", Uuid::max()));
             let state = Arc::new(Mutex::new(
                 HashMap::<Name, HashMap<Uuid, PartialUpload>>::new(),
             ));
@@ -573,9 +584,9 @@ mod tests {
             let repositories_root = PathBuf::from("/tmp");
             let registry = Name::from_str("foo").unwrap();
 
-            folder.expect_create_folder_recursively_with("/tmp/foo/tmp");
+            folder.expect_create_folder_recursively_with("/tmp/local/foo/tmp");
 
-            let temp_file = &format!("/tmp/foo/tmp/{}", Uuid::max());
+            let temp_file = &format!("/tmp/local/foo/tmp/{}", Uuid::max());
             file_appender.given_append_all_bytes_fails_once_with(
                 temp_file,
                 vec![0xDE, 0xAD, 0xBE, 0xEF],
@@ -629,8 +640,8 @@ mod tests {
             let repositories_root = PathBuf::from("/tmp");
             let registry = Name::from_str("foo").unwrap();
 
-            folder.expect_create_folder_recursively_with("/tmp/foo/tmp");
-            let temp_file = &format!("/tmp/foo/tmp/{}", Uuid::max());
+            folder.expect_create_folder_recursively_with("/tmp/local/foo/tmp");
+            let temp_file = &format!("/tmp/local/foo/tmp/{}", Uuid::max());
             file_deleter.expect_file_to_be_deleted(temp_file);
 
             let state = Arc::new(Mutex::new(
@@ -677,8 +688,8 @@ mod tests {
             let repositories_root = PathBuf::from("/tmp");
             let registry = Name::from_str("foo").unwrap();
 
-            folder.expect_create_folder_recursively_with("/tmp/foo/tmp");
-            let temp_file = &format!("/tmp/foo/tmp/{}", Uuid::max());
+            folder.expect_create_folder_recursively_with("/tmp/local/foo/tmp");
+            let temp_file = &format!("/tmp/local/foo/tmp/{}", Uuid::max());
 
             file_appender.expect_append_all_bytes_with(temp_file, vec![0xDE, 0xAD, 0xBE, 0xEF]);
             file_deleter.expect_file_to_be_deleted(temp_file);
@@ -784,9 +795,9 @@ mod tests {
                 HashMap::<Name, HashMap<Uuid, PartialUpload>>::new(),
             ));
             let uuid_factory = Arc::new(Uuid::max);
-            let temp_file = &format!("/tmp/foo/tmp/{}", Uuid::max());
+            let temp_file = &format!("/tmp/local/foo/tmp/{}", Uuid::max());
 
-            folder.expect_create_folder_recursively_with("/tmp/foo/tmp");
+            folder.expect_create_folder_recursively_with("/tmp/local/foo/tmp");
             file_deleter.expect_file_to_be_deleted(temp_file);
             file_appender.expect_append_all_bytes_with(temp_file, vec![0xC0, 0xDE]);
 
@@ -834,27 +845,27 @@ mod tests {
                 HashMap::<Name, HashMap<Uuid, PartialUpload>>::new(),
             ));
             let uuid_factory = Arc::new(Uuid::max);
-            let temp_file = &format!("/tmp/foo/tmp/{}", Uuid::max());
+            let temp_file = &format!("/tmp/local/foo/tmp/{}", Uuid::max());
             let actual_sha = "1b96011418a3675a82b529695daac30914827d65d2ff3e0bc6873526a1beefcf";
             let prefix = actual_sha[0..2].to_string();
 
             folder
-                .expect_create_folder_recursively_with("/tmp/foo/tmp")
+                .expect_create_folder_recursively_with("/tmp/local/foo/tmp")
                 .expect_create_folder_recursively_with(&format!(
-                    "/tmp/foo/blobs/sha256/{prefix}/{actual_sha}"
+                    "/tmp/local/foo/blobs/sha256/{prefix}/{actual_sha}"
                 ));
             file_deleter.expect_file_to_be_deleted(temp_file);
             file_deleter.expect_file_to_be_deleted(&format!(
-                "/tmp/foo/blobs/sha256/{prefix}/{actual_sha}/{actual_sha}"
+                "/tmp/local/foo/blobs/sha256/{prefix}/{actual_sha}/{actual_sha}"
             ));
             file_deleter.expect_file_to_be_deleted(&format!(
-                "/tmp/foo/blobs/sha256/{prefix}/{actual_sha}/{actual_sha}.mediatype"
+                "/tmp/local/foo/blobs/sha256/{prefix}/{actual_sha}/{actual_sha}.mediatype"
             ));
             file_appender.expect_append_all_bytes_with(temp_file, vec![0xC0, 0xDE]);
 
             file_renamer.given_rename_fails_once_with(
                 temp_file,
-                &format!("/tmp/foo/blobs/sha256/{prefix}/{actual_sha}/{actual_sha}"),
+                &format!("/tmp/local/foo/blobs/sha256/{prefix}/{actual_sha}/{actual_sha}"),
                 FileSystemError::ExpectedFileError,
             );
 
@@ -900,30 +911,30 @@ mod tests {
                 HashMap::<Name, HashMap<Uuid, PartialUpload>>::new(),
             ));
             let uuid_factory = Arc::new(Uuid::max);
-            let temp_file = &format!("/tmp/foo/tmp/{}", Uuid::max());
+            let temp_file = &format!("/tmp/local/foo/tmp/{}", Uuid::max());
             let actual_sha = "1b96011418a3675a82b529695daac30914827d65d2ff3e0bc6873526a1beefcf";
             let prefix = actual_sha[0..2].to_string();
 
             folder
-                .expect_create_folder_recursively_with("/tmp/foo/tmp")
+                .expect_create_folder_recursively_with("/tmp/local/foo/tmp")
                 .expect_create_folder_recursively_with(&format!(
-                    "/tmp/foo/blobs/sha256/{prefix}/{actual_sha}"
+                    "/tmp/local/foo/blobs/sha256/{prefix}/{actual_sha}"
                 ));
             file_deleter.expect_file_to_be_deleted(temp_file);
             file_deleter.expect_file_to_be_deleted(&format!(
-                "/tmp/foo/blobs/sha256/{prefix}/{actual_sha}/{actual_sha}"
+                "/tmp/local/foo/blobs/sha256/{prefix}/{actual_sha}/{actual_sha}"
             ));
             file_deleter.expect_file_to_be_deleted(&format!(
-                "/tmp/foo/blobs/sha256/{prefix}/{actual_sha}/{actual_sha}.mediatype"
+                "/tmp/local/foo/blobs/sha256/{prefix}/{actual_sha}/{actual_sha}.mediatype"
             ));
             file_appender.expect_append_all_bytes_with(temp_file, vec![0xC0, 0xDE]);
 
             file_renamer.expect_rename_with(
                 temp_file,
-                &format!("/tmp/foo/blobs/sha256/{prefix}/{actual_sha}/{actual_sha}"),
+                &format!("/tmp/local/foo/blobs/sha256/{prefix}/{actual_sha}/{actual_sha}"),
             );
             file_writer.given_write_to_file_fails_once_with(
-                &format!("/tmp/foo/blobs/sha256/{prefix}/{actual_sha}/{actual_sha}.mediatype"),
+                &format!("/tmp/local/foo/blobs/sha256/{prefix}/{actual_sha}/{actual_sha}.mediatype"),
                 "mediatype",
                 FileSystemError::ExpectedFileError,
             );
@@ -970,23 +981,23 @@ mod tests {
                 HashMap::<Name, HashMap<Uuid, PartialUpload>>::new(),
             ));
             let uuid_factory = Arc::new(Uuid::max);
-            let temp_file = &format!("/tmp/foo/tmp/{}", Uuid::max());
+            let temp_file = &format!("/tmp/local/foo/tmp/{}", Uuid::max());
             let actual_sha = "1b96011418a3675a82b529695daac30914827d65d2ff3e0bc6873526a1beefcf";
             let prefix = actual_sha[0..2].to_string();
 
             folder
-                .expect_create_folder_recursively_with("/tmp/foo/tmp")
+                .expect_create_folder_recursively_with("/tmp/local/foo/tmp")
                 .expect_create_folder_recursively_with(&format!(
-                    "/tmp/foo/blobs/sha256/{prefix}/{actual_sha}"
+                    "/tmp/local/foo/blobs/sha256/{prefix}/{actual_sha}"
                 ));
             file_appender.expect_append_all_bytes_with(temp_file, vec![0xC0, 0xDE]);
 
             file_renamer.expect_rename_with(
                 temp_file,
-                &format!("/tmp/foo/blobs/sha256/{prefix}/{actual_sha}/{actual_sha}"),
+                &format!("/tmp/local/foo/blobs/sha256/{prefix}/{actual_sha}/{actual_sha}"),
             );
             file_writer.expect_write_to_file_with_contents(
-                &format!("/tmp/foo/blobs/sha256/{prefix}/{actual_sha}/{actual_sha}.mediatype"),
+                &format!("/tmp/local/foo/blobs/sha256/{prefix}/{actual_sha}/{actual_sha}.mediatype"),
                 "mediatype",
             );
 
@@ -1027,23 +1038,23 @@ mod tests {
                 HashMap::<Name, HashMap<Uuid, PartialUpload>>::new(),
             ));
             let uuid_factory = Arc::new(Uuid::max);
-            let temp_file = &format!("/tmp/foo/tmp/{}", Uuid::max());
+            let temp_file = &format!("/tmp/local/foo/tmp/{}", Uuid::max());
             let actual_sha = "1b96011418a3675a82b529695daac30914827d65d2ff3e0bc6873526a1beefcf";
             let prefix = actual_sha[0..2].to_string();
 
             folder
-                .expect_create_folder_recursively_with("/tmp/foo/tmp")
+                .expect_create_folder_recursively_with("/tmp/local/foo/tmp")
                 .expect_create_folder_recursively_with(&format!(
-                    "/tmp/foo/blobs/sha256/{prefix}/{actual_sha}"
+                    "/tmp/local/foo/blobs/sha256/{prefix}/{actual_sha}"
                 ));
             file_appender.expect_append_all_bytes_with(temp_file, vec![0xC0, 0xDE]);
 
             file_renamer.expect_rename_with(
                 temp_file,
-                &format!("/tmp/foo/blobs/sha256/{prefix}/{actual_sha}/{actual_sha}"),
+                &format!("/tmp/local/foo/blobs/sha256/{prefix}/{actual_sha}/{actual_sha}"),
             );
             file_writer.expect_write_to_file_with_contents(
-                &format!("/tmp/foo/blobs/sha256/{prefix}/{actual_sha}/{actual_sha}.mediatype"),
+                &format!("/tmp/local/foo/blobs/sha256/{prefix}/{actual_sha}/{actual_sha}.mediatype"),
                 "mediatype",
             );
 
@@ -1093,23 +1104,23 @@ mod tests {
             let uuid_factory = Arc::new(move || remaining.lock().unwrap().pop_front().unwrap());
 
             folder
-                .expect_create_folder_recursively_with("/tmp/foo/tmp")
+                .expect_create_folder_recursively_with("/tmp/local/foo/tmp")
                 .expect_create_folder_recursively_with(&format!(
-                    "/tmp/foo/blobs/sha256/{prefix}/{actual_sha}"
+                    "/tmp/local/foo/blobs/sha256/{prefix}/{actual_sha}"
                 ));
             file_appender.expect_append_all_bytes_with(
-                &format!("/tmp/foo/tmp/{first_uuid}"),
+                &format!("/tmp/local/foo/tmp/{first_uuid}"),
                 vec![0xC0, 0xDE],
             );
             file_renamer.expect_rename_with(
-                &format!("/tmp/foo/tmp/{first_uuid}"),
-                &format!("/tmp/foo/blobs/sha256/{prefix}/{actual_sha}/{actual_sha}"),
+                &format!("/tmp/local/foo/tmp/{first_uuid}"),
+                &format!("/tmp/local/foo/blobs/sha256/{prefix}/{actual_sha}/{actual_sha}"),
             );
             file_writer.expect_write_to_file_with_contents(
-                &format!("/tmp/foo/blobs/sha256/{prefix}/{actual_sha}/{actual_sha}.mediatype"),
+                &format!("/tmp/local/foo/blobs/sha256/{prefix}/{actual_sha}/{actual_sha}.mediatype"),
                 "mediatype",
             );
-            file_deleter.expect_file_to_be_deleted(&format!("/tmp/foo/tmp/{second_uuid}"));
+            file_deleter.expect_file_to_be_deleted(&format!("/tmp/local/foo/tmp/{second_uuid}"));
 
             let blob_uploader = FileBlobUploader {
                 repositories_root,
@@ -1155,23 +1166,23 @@ mod tests {
                 HashMap::<Name, HashMap<Uuid, PartialUpload>>::new(),
             ));
             let uuid_factory = Arc::new(Uuid::max);
-            let temp_file = &format!("/tmp/foo/tmp/{}", Uuid::max());
+            let temp_file = &format!("/tmp/local/foo/tmp/{}", Uuid::max());
             let actual_sha = "1b96011418a3675a82b529695daac30914827d65d2ff3e0bc6873526a1beefcf";
             let prefix = actual_sha[0..2].to_string();
 
             folder
-                .expect_create_folder_recursively_with("/tmp/foo/tmp")
+                .expect_create_folder_recursively_with("/tmp/local/foo/tmp")
                 .expect_create_folder_recursively_with(&format!(
-                    "/tmp/foo/blobs/sha256/{prefix}/{actual_sha}"
+                    "/tmp/local/foo/blobs/sha256/{prefix}/{actual_sha}"
                 ));
             file_appender.expect_append_all_bytes_with(temp_file, vec![0xC0, 0xDE]);
 
             file_renamer.expect_rename_with(
                 temp_file,
-                &format!("/tmp/foo/blobs/sha256/{prefix}/{actual_sha}/{actual_sha}"),
+                &format!("/tmp/local/foo/blobs/sha256/{prefix}/{actual_sha}/{actual_sha}"),
             );
             file_writer.expect_write_to_file_with_contents(
-                &format!("/tmp/foo/blobs/sha256/{prefix}/{actual_sha}/{actual_sha}.mediatype"),
+                &format!("/tmp/local/foo/blobs/sha256/{prefix}/{actual_sha}/{actual_sha}.mediatype"),
                 "mediatype",
             );
 
@@ -1272,9 +1283,9 @@ mod tests {
                 HashMap::<Name, HashMap<Uuid, PartialUpload>>::new(),
             ));
             let uuid_factory = Arc::new(Uuid::max);
-            let temp_file = &format!("/tmp/foo/tmp/{}", Uuid::max());
+            let temp_file = &format!("/tmp/local/foo/tmp/{}", Uuid::max());
 
-            folder.expect_create_folder_recursively_with("/tmp/foo/tmp");
+            folder.expect_create_folder_recursively_with("/tmp/local/foo/tmp");
             file_deleter.expect_file_to_be_deleted(temp_file);
 
             let blob_uploader = FileBlobUploader {
@@ -1307,9 +1318,9 @@ mod tests {
                 HashMap::<Name, HashMap<Uuid, PartialUpload>>::new(),
             ));
             let uuid_factory = Arc::new(Uuid::max);
-            let temp_file = &format!("/tmp/foo/tmp/{}", Uuid::max());
+            let temp_file = &format!("/tmp/local/foo/tmp/{}", Uuid::max());
 
-            folder.expect_create_folder_recursively_with("/tmp/foo/tmp");
+            folder.expect_create_folder_recursively_with("/tmp/local/foo/tmp");
             file_deleter.expect_file_to_be_deleted(temp_file);
 
             let blob_uploader = FileBlobUploader {
@@ -1347,9 +1358,9 @@ mod tests {
             let remaining = Mutex::new(std::collections::VecDeque::from([first_uuid, second_uuid]));
             let uuid_factory = Arc::new(move || remaining.lock().unwrap().pop_front().unwrap());
 
-            folder.expect_create_folder_recursively_with("/tmp/foo/tmp");
-            file_deleter.expect_file_to_be_deleted(&format!("/tmp/foo/tmp/{first_uuid}"));
-            file_deleter.expect_file_to_be_deleted(&format!("/tmp/foo/tmp/{second_uuid}"));
+            folder.expect_create_folder_recursively_with("/tmp/local/foo/tmp");
+            file_deleter.expect_file_to_be_deleted(&format!("/tmp/local/foo/tmp/{first_uuid}"));
+            file_deleter.expect_file_to_be_deleted(&format!("/tmp/local/foo/tmp/{second_uuid}"));
 
             let blob_uploader = FileBlobUploader {
                 repositories_root,
@@ -1390,9 +1401,9 @@ mod tests {
                 HashMap::<Name, HashMap<Uuid, PartialUpload>>::new(),
             ));
             let uuid_factory = Arc::new(Uuid::max);
-            let temp_file = &format!("/tmp/foo/tmp/{}", Uuid::max());
+            let temp_file = &format!("/tmp/local/foo/tmp/{}", Uuid::max());
 
-            folder.expect_create_folder_recursively_with("/tmp/foo/tmp");
+            folder.expect_create_folder_recursively_with("/tmp/local/foo/tmp");
             file_deleter.expect_file_to_be_deleted(temp_file);
 
             let blob_uploader = FileBlobUploader {
@@ -1454,14 +1465,14 @@ mod tests {
             let expected_filename_to_delete = Uuid::max().to_string();
             folder.given_folder_entries("/tmp", vec![Entry::create_directory("foo")]);
             folder.given_folder_entries(
-                "/tmp/foo/tmp",
+                "/tmp/local/foo/tmp",
                 vec![
                     Entry::create_file_entry(&expected_filename_to_delete),
                     Entry::create_directory(&Uuid::nil().to_string()),
                 ],
             );
             file_deleter.given_delete_to_fail_once_with(
-                &format!("/tmp/foo/tmp/{expected_filename_to_delete}"),
+                &format!("/tmp/local/foo/tmp/{expected_filename_to_delete}"),
                 FileSystemError::ExpectedFileError,
             );
 
@@ -1501,14 +1512,14 @@ mod tests {
             let expected_filename_to_delete = Uuid::max().to_string();
             folder.given_folder_entries("/tmp", vec![Entry::create_directory("foo")]);
             folder.given_folder_entries(
-                "/tmp/foo/tmp",
+                "/tmp/local/foo/tmp",
                 vec![
                     Entry::create_file_entry(&expected_filename_to_delete),
                     Entry::create_directory(&Uuid::nil().to_string()),
                 ],
             );
             file_deleter
-                .expect_file_to_be_deleted(&format!("/tmp/foo/tmp/{expected_filename_to_delete}"));
+                .expect_file_to_be_deleted(&format!("/tmp/local/foo/tmp/{expected_filename_to_delete}"));
 
             let blob_uploader = FileBlobUploader {
                 repositories_root,
@@ -1539,19 +1550,19 @@ mod tests {
                 HashMap::<Name, HashMap<Uuid, PartialUpload>>::new(),
             ));
             let uuid_factory = Arc::new(Uuid::max);
-            let temp_file = &format!("/tmp/foo/tmp/{}", Uuid::max());
+            let temp_file = &format!("/tmp/local/foo/tmp/{}", Uuid::max());
             let actual_sha = "1b96011418a3675a82b529695daac30914827d65d2ff3e0bc6873526a1beefcf";
             let prefix = actual_sha[0..2].to_string();
             let active_uuid = Uuid::max().to_string();
 
             folder
-                .expect_create_folder_recursively_with("/tmp/foo/tmp")
+                .expect_create_folder_recursively_with("/tmp/local/foo/tmp")
                 .expect_create_folder_recursively_with(&format!(
-                    "/tmp/foo/blobs/sha256/{prefix}/{actual_sha}"
+                    "/tmp/local/foo/blobs/sha256/{prefix}/{actual_sha}"
                 ));
             folder.given_folder_entries("/tmp", vec![Entry::create_directory("foo")]);
             folder.given_folder_entries(
-                "/tmp/foo/tmp",
+                "/tmp/local/foo/tmp",
                 vec![
                     Entry::create_file_entry(&active_uuid),
                     Entry::create_directory(&Uuid::nil().to_string()),
@@ -1562,10 +1573,10 @@ mod tests {
 
             file_renamer.expect_rename_with(
                 temp_file,
-                &format!("/tmp/foo/blobs/sha256/{prefix}/{actual_sha}/{actual_sha}"),
+                &format!("/tmp/local/foo/blobs/sha256/{prefix}/{actual_sha}/{actual_sha}"),
             );
             file_writer.expect_write_to_file_with_contents(
-                &format!("/tmp/foo/blobs/sha256/{prefix}/{actual_sha}/{actual_sha}.mediatype"),
+                &format!("/tmp/local/foo/blobs/sha256/{prefix}/{actual_sha}/{actual_sha}.mediatype"),
                 "mediatype",
             );
 
@@ -1660,9 +1671,9 @@ mod tests {
                 HashMap::<Name, HashMap<Uuid, PartialUpload>>::new(),
             ));
             let uuid_factory = Arc::new(Uuid::max);
-            let temp_file = &format!("/tmp/foo/tmp/{}", Uuid::max());
+            let temp_file = &format!("/tmp/local/foo/tmp/{}", Uuid::max());
 
-            folder.expect_create_folder_recursively_with("/tmp/foo/tmp");
+            folder.expect_create_folder_recursively_with("/tmp/local/foo/tmp");
             file_appender.expect_append_all_bytes_with(temp_file, vec![0xC0, 0xDE]);
             file_deleter.expect_file_to_be_deleted(temp_file);
 

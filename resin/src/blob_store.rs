@@ -503,6 +503,10 @@ mod tests {
                 "blob".parse().unwrap()
             }
 
+            fn test_upstream_repository() -> Repository {
+                "docker.io/foo".parse().unwrap()
+            }
+
             fn blob_root_provider(path: &'static str) -> MockBlobRoot {
                 let mut blob_root = MockBlobRoot::new();
                 blob_root
@@ -789,6 +793,49 @@ mod tests {
             }
 
             #[tokio::test]
+            async fn test_should_pass_the_upstream_repository_through_to_blob_root() {
+                let folder = MockFolder::new();
+                let file_writer = MockFileWriter::new();
+                let file_reader = MockFileReader::new();
+                let file_renamer = MockFileRenamer::new();
+                let file_deleter = MockFileDeleter::new();
+                let mut inspect = MockInspect::new();
+
+                let actual_sha = "05174bbf0d407087e45b12baae17117426852ff3a9e58d12a0ebb9a10b409743";
+                inspect.given_exists(&format!("/tmp/blobs/sha256/05/{actual_sha}/{actual_sha}/"));
+
+                let mut blob_root = MockBlobRoot::new();
+                blob_root
+                    .expect_get()
+                    .withf(|repository, _| repository == &test_upstream_repository())
+                    .returning(|_, _| Ok(PathBuf::from("/tmp")));
+
+                let store = FileBlobStore::new(
+                    Arc::new(blob_root),
+                    Arc::new(folder),
+                    Arc::new(file_writer),
+                    Arc::new(file_reader),
+                    Arc::new(file_renamer),
+                    Arc::new(file_deleter),
+                    Arc::new(inspect),
+                );
+
+                let source = std::io::Cursor::new(vec![0xBA, 0xAD, 0xF0, 0x0D]);
+                let digest = digest::Digest(format!("sha256:{actual_sha}"));
+                let result = store
+                    .save(
+                        &test_upstream_repository(),
+                        &digest,
+                        Box::new(source),
+                        "mediatype",
+                        ResourceKind::Blob,
+                    )
+                    .await;
+
+                assert!(matches!(result, Ok(())))
+            }
+
+            #[tokio::test]
             async fn test_should_not_overwrite_write() {
                 let folder = MockFolder::new();
                 let file_writer = MockFileWriter::new();
@@ -911,12 +958,53 @@ mod tests {
                 "blob".parse().unwrap()
             }
 
+            fn test_upstream_repository() -> Repository {
+                "docker.io/foo".parse().unwrap()
+            }
+
             fn blob_root_provider() -> MockBlobRoot {
                 let mut blob_root = MockBlobRoot::new();
                 blob_root
                     .expect_get()
                     .returning(|_, _| Ok(std::path::PathBuf::from("/tmp")));
                 blob_root
+            }
+
+            #[tokio::test]
+            async fn test_should_pass_the_upstream_repository_through_to_blob_root() {
+                let folder = MockFolder::new();
+                let file_writer = MockFileWriter::new();
+                let file_reader = MockFileReader::new();
+                let file_renamer = MockFileRenamer::new();
+                let file_deleter = MockFileDeleter::new();
+                let mut inspect = MockInspect::new();
+
+                let sha = "ff".repeat(32);
+                inspect.given_exists(&format!("/tmp/blobs/sha256/ff/{sha}/{sha}"));
+
+                let mut blob_root = MockBlobRoot::new();
+                blob_root
+                    .expect_get()
+                    .withf(|repository, _| repository == &test_upstream_repository())
+                    .returning(|_, _| Ok(std::path::PathBuf::from("/tmp")));
+
+                let store = FileBlobStore::new(
+                    Arc::new(blob_root),
+                    Arc::new(folder),
+                    Arc::new(file_writer),
+                    Arc::new(file_reader),
+                    Arc::new(file_renamer),
+                    Arc::new(file_deleter),
+                    Arc::new(inspect),
+                );
+                let actual = store
+                    .exists(
+                        &test_upstream_repository(),
+                        &digest::Digest(format!("sha256:{sha}")),
+                        ResourceKind::Blob,
+                    )
+                    .await;
+                assert!(matches!(actual, Ok(true)));
             }
 
             #[tokio::test]

@@ -10,7 +10,7 @@ use heartbeat::{HeartbeatWriter, LocalHeartbeatWriter};
 
 use crate::{
     labels::LabelError,
-    rolodex::{FileRolodex, Rolodex},
+    rolodex::{FileRolodex, Rolodex, RolodexError},
 };
 use async_trait::async_trait;
 use blueprint::listener::SocketListenerFactory;
@@ -89,6 +89,8 @@ pub enum Error {
     ),
     #[error("Name parse error: {0}")]
     NameParseError(#[from] seedbank_types::NameParseError),
+    #[error("Rolodex error: {0}")]
+    RolodexError(#[from] RolodexError),
 }
 
 #[derive(Error, Debug)]
@@ -962,6 +964,21 @@ impl Server for Bract {
     }
 
     async fn start_seedling(&self, reporter: Arc<dyn Reporter>, name: &Name) -> Result<(), Error> {
+        if self.seedbank_client.exists(name).await.is_ok_and(|exists| exists)
+            && self.rolodex.find_service_account(name.as_ref())?.is_none()
+        {
+            let seedling = self.seedbank_client.load(name).await?;
+            return self
+                .do_reconcile_seedling(
+                    reporter,
+                    name,
+                    &seedling.version,
+                    &seedling.definition,
+                    Some(&seedling.id),
+                )
+                .await;
+        }
+
         blueprints::start_seedling::execute(
             reporter,
             self.into(),

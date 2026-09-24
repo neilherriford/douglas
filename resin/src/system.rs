@@ -1,4 +1,4 @@
-use crate::{ServerError, SystemState, authorize::authorize_write};
+use crate::{ServerError, SystemState};
 use axum::{
     extract::{Path, State},
     http::StatusCode,
@@ -43,7 +43,7 @@ pub(crate) async fn delete_repository(
     Path(repository): Path<String>,
 ) -> Result<impl IntoResponse, ServerError> {
     let repository: Repository = repository.parse()?;
-    let name = authorize_write(&repository, state.seedling_registration_client.as_ref()).await?;
+    let name = repository.require_local()?.clone();
     state.repository_store.delete(&Repository::Local(name))?;
     Ok(StatusCode::NO_CONTENT)
 }
