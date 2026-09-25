@@ -18,7 +18,7 @@ use simple_rest_client::assertions::{
 };
 use simple_rest_client::parsers::Parser;
 use simple_rest_client::parsers::json::JsonParserError;
-use simple_rest_client::{Header, RestClient, create_path_and_query_string};
+use simple_rest_client::{Header, Response, RestClient, create_path_and_query_string};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -504,7 +504,9 @@ pub async fn start(
             .await
             .map_err(to_general_error)?
     };
-    assert_no_content(response)?;
+    if !matches!(response, Response::Error { status: 304, .. }) {
+        assert_no_content(response)?;
+    }
 
     guard.finish(Ok(()))
 }
@@ -606,8 +608,68 @@ pub async fn create(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use docker_types::PullTarget;
+    use docker_types::{ContainerName, PullTarget};
+    use log::Event;
     use serde_json::{Value, json};
+    use simple_rest_client::MockRestClient;
+
+    struct NullReporter;
+
+    impl Reporter for NullReporter {
+        fn emit(&self, _event: Event) {}
+    }
+
+    fn reporter() -> Arc<dyn Reporter> {
+        Arc::new(NullReporter)
+    }
+
+    fn container_ref() -> ContainerRef {
+        ContainerRef::FullName("doug.openbao".parse::<ContainerName>().unwrap())
+    }
+
+    fn start_with_response(response: Response) -> Result<(), DockerError> {
+        let mut mock = MockRestClient::new();
+        mock.expect_execute()
+            .times(1)
+            .return_once(move |_, _| Ok(response));
+        let rest_client = tokio::sync::Mutex::new(mock);
+
+        tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap()
+            .block_on(start(reporter(), &rest_client, container_ref()))
+    }
+
+    #[test]
+    fn test_start_should_succeed_when_docker_starts_the_container() {
+        let result = start_with_response(Response::NoContent {
+            headers: Vec::new(),
+        });
+
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_start_should_succeed_when_the_container_is_already_started() {
+        let result = start_with_response(Response::Error {
+            headers: Vec::new(),
+            status: 304,
+            body: None,
+        });
+
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_start_should_fail_on_any_other_error_status() {
+        let result = start_with_response(Response::Error {
+            headers: Vec::new(),
+            status: 500,
+            body: None,
+        });
+
+        assert!(result.is_err());
+    }
 
     fn new_container() -> NewContainer {
         NewContainer {
