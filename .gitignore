@@ -20,3 +20,4 @@ testing-utils/memory-graph/memory-usage-*.png
 testing-utils/nix/build-image.sh
 .zed/**
 keys/douglas_signing.key
+testing-utils/nix/resin-cache/
