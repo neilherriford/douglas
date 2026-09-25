@@ -1,8 +1,9 @@
-use crate::cli::OutputStyle;
+use crate::cli::{OutputStyle, TemplateStyle};
 use crate::commands::{CommandContext, parse_seedling_name, print_error, print_status_json};
 use ::config::DouglasFolders;
 use bract_client::Client;
 use crossterm::style::Stylize;
+use docker_types::ImageReference;
 use file_system::{FileReader, FileSystemError, UnixFileReader};
 use seedbank_types::{HealthCheck, HealthCheckCommand};
 use std::{
@@ -19,7 +20,7 @@ fn example_name(value: &str) -> seedbank_types::Name {
         .unwrap_or_else(|_| unreachable!("'{value}' is a valid seedling name literal"))
 }
 
-fn example_user_seedling_definition() -> seedbank_types::UserSeedlingDefinition {
+fn example_seedling() -> seedbank_types::UserSeedlingDefinition {
     let mut mounts = HashMap::new();
 
     mounts.insert(
@@ -84,8 +85,38 @@ fn example_user_seedling_definition() -> seedbank_types::UserSeedlingDefinition 
     )
 }
 
-pub(crate) fn create_seedling_template(output_style: OutputStyle) -> ExitCode {
-    let toml = match toml::to_string_pretty(&example_user_seedling_definition()) {
+fn example_foreign_image() -> ImageReference {
+    "docker.io/hello-world:nanoserver-ltsc2022"
+        .parse()
+        .unwrap_or_else(|_| unreachable!("the sample foreign image literal is a valid reference"))
+}
+
+fn template_definition(
+    root: bool,
+    template_style: TemplateStyle,
+) -> seedbank_types::UserSeedlingDefinition {
+    let seedling = if root {
+        example_seedling()
+    } else {
+        example_seedling().with_subdomain_route()
+    };
+
+    match template_style {
+        TemplateStyle::LocalImage => seedling.with_image(seedbank_types::ImageSource::Local),
+        TemplateStyle::ForeignImage => seedling.with_image(seedbank_types::ImageSource::External(
+            example_foreign_image(),
+        )),
+    }
+}
+
+pub(crate) fn create_seedling_template(
+    root: bool,
+    template_style: TemplateStyle,
+    output_style: OutputStyle,
+) -> ExitCode {
+    let template = template_definition(root, template_style);
+
+    let toml = match toml::to_string_pretty(&template) {
         Ok(toml) => toml,
         Err(err) => {
             eprintln!("{}", format!("Could not render template: {err}").red());
@@ -320,7 +351,7 @@ mod tests {
 
     #[test]
     fn test_example_user_seedling_definition_should_declare_the_expected_mounts() {
-        let definition = example_user_seedling_definition();
+        let definition = example_seedling();
 
         assert_eq!(definition.mounts.len(), 4);
         assert!(definition.mounts.contains_key(&example_name("config")));
@@ -335,7 +366,7 @@ mod tests {
 
     #[test]
     fn test_example_user_seedling_definition_should_opt_the_log_mount_into_rotation() {
-        let definition = example_user_seedling_definition();
+        let definition = example_seedling();
 
         let Some(log_mount) = definition.mounts.get(&example_name("log")) else {
             panic!("should declare a log mount");
@@ -414,6 +445,137 @@ mod tests {
         assert_eq!(
             SeedlingAction::Drop.error_prefix(),
             "Could not drop seedling"
+        );
+    }
+
+    #[test]
+    fn test_template_definition_should_use_the_root_route_when_root_is_set() {
+        let definition = template_definition(true, TemplateStyle::LocalImage);
+
+        assert_eq!(definition.route, seedbank_types::RouteSpec::Root);
+    }
+
+    #[test]
+    fn test_template_definition_should_use_a_subdomain_route_when_root_is_not_set() {
+        let definition = template_definition(false, TemplateStyle::LocalImage);
+
+        assert_eq!(definition.route, seedbank_types::RouteSpec::Subdomain);
+    }
+
+    #[test]
+    fn test_template_definition_should_use_a_local_image_for_the_local_image_style() {
+        let definition = template_definition(false, TemplateStyle::LocalImage);
+
+        assert_eq!(definition.image, seedbank_types::ImageSource::Local);
+    }
+
+    #[test]
+    fn test_template_definition_should_use_an_external_image_for_the_foreign_image_style() {
+        let definition = template_definition(false, TemplateStyle::ForeignImage);
+
+        assert_eq!(
+            definition.image,
+            seedbank_types::ImageSource::External(example_foreign_image())
+        );
+    }
+
+    #[test]
+    fn test_template_definition_should_apply_root_independently_of_the_image_style() {
+        let definition = template_definition(true, TemplateStyle::ForeignImage);
+
+        assert_eq!(definition.route, seedbank_types::RouteSpec::Root);
+        assert_eq!(
+            definition.image,
+            seedbank_types::ImageSource::External(example_foreign_image())
+        );
+    }
+
+    #[test]
+    fn test_the_sample_foreign_image_should_resolve_to_a_pull_target_for_a_seedling() {
+        let definition = template_definition(false, TemplateStyle::ForeignImage);
+
+        let Ok(target) = definition.image.resolve(&example_name("hello-world")) else {
+            panic!("the sample foreign image should resolve");
+        };
+
+        assert_eq!(target.formatted_name(), "docker.io/hello-world");
+    }
+
+    #[test]
+    fn test_template_should_round_trip_through_toml_for_root_and_local_image() {
+        let definition = template_definition(true, TemplateStyle::LocalImage);
+
+        let Ok(rendered) = toml::to_string_pretty(&definition) else {
+            panic!("should render the template");
+        };
+        let Ok(parsed) = toml::from_str::<seedbank_types::UserSeedlingDefinition>(&rendered) else {
+            panic!("should parse the rendered template");
+        };
+
+        assert_eq!(parsed, definition);
+    }
+
+    #[test]
+    fn test_template_should_round_trip_through_toml_for_subdomain_and_local_image() {
+        let definition = template_definition(false, TemplateStyle::LocalImage);
+
+        let Ok(rendered) = toml::to_string_pretty(&definition) else {
+            panic!("should render the template");
+        };
+        let Ok(parsed) = toml::from_str::<seedbank_types::UserSeedlingDefinition>(&rendered) else {
+            panic!("should parse the rendered template");
+        };
+
+        assert_eq!(parsed, definition);
+    }
+
+    #[test]
+    fn test_template_should_round_trip_through_toml_for_root_and_foreign_image() {
+        let definition = template_definition(true, TemplateStyle::ForeignImage);
+
+        let Ok(rendered) = toml::to_string_pretty(&definition) else {
+            panic!("should render the template");
+        };
+        let Ok(parsed) = toml::from_str::<seedbank_types::UserSeedlingDefinition>(&rendered) else {
+            panic!("should parse the rendered template");
+        };
+
+        assert_eq!(parsed, definition);
+    }
+
+    #[test]
+    fn test_template_should_round_trip_through_toml_for_subdomain_and_foreign_image() {
+        let definition = template_definition(false, TemplateStyle::ForeignImage);
+
+        let Ok(rendered) = toml::to_string_pretty(&definition) else {
+            panic!("should render the template");
+        };
+        let Ok(parsed) = toml::from_str::<seedbank_types::UserSeedlingDefinition>(&rendered) else {
+            panic!("should parse the rendered template");
+        };
+
+        assert_eq!(parsed, definition);
+    }
+
+    #[test]
+    fn test_docker_hub_nginx_example_definition_should_use_an_external_image() {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("example-seedlings/docker-hub-nginx/default.toml");
+        let Ok(contents) = std::fs::read_to_string(&path) else {
+            panic!("should read {}", path.display());
+        };
+        let Ok(definition) = toml::from_str::<seedbank_types::UserSeedlingDefinition>(&contents)
+        else {
+            panic!("should parse the docker-hub-nginx example seedling definition");
+        };
+        let Ok(expected) = "docker.io/nginxinc/nginx-unprivileged:1.27".parse::<ImageReference>()
+        else {
+            panic!("the expected reference literal should parse");
+        };
+
+        assert_eq!(
+            definition.image,
+            seedbank_types::ImageSource::External(expected)
         );
     }
 }

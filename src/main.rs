@@ -98,8 +98,12 @@ fn main() -> ExitCode {
             output_style,
         )),
         Commands::Seedling {
-            seedling: SeedlingCommand::CreateTemplate,
-        } => seedling::create_seedling_template(output_style),
+            seedling:
+                SeedlingCommand::CreateTemplate {
+                    root,
+                    template_style,
+                },
+        } => seedling::create_seedling_template(root, template_style, output_style),
         Commands::Seedling {
             seedling: SeedlingCommand::Prune { yes },
         } => run_with_tokio(prune_deadwood(output_style, yes)),

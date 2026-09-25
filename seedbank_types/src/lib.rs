@@ -348,7 +348,7 @@ pub enum Origin {
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "type", content = "value", rename_all = "snake_case")]
+#[serde(tag = "type", content = "reference", rename_all = "snake_case")]
 pub enum ImageSource {
     #[default]
     Local,
@@ -521,6 +521,11 @@ impl UserSeedlingDefinition {
 
     pub fn with_image(mut self, image: ImageSource) -> Self {
         self.image = image;
+        self
+    }
+
+    pub fn with_subdomain_route(mut self) -> Self {
+        self.route = RouteSpec::Subdomain;
         self
     }
 }
@@ -908,5 +913,103 @@ mod tests {
         let definition: UserSeedlingDefinition = toml::from_str(toml).expect("should deserialize");
 
         assert_eq!(definition.image, ImageSource::Local);
+    }
+
+    #[test]
+    fn test_route_spec_should_default_to_root() {
+        assert_eq!(RouteSpec::default(), RouteSpec::Root);
+    }
+
+    #[test]
+    fn test_user_seedling_definition_new_should_default_route_to_root() {
+        assert_eq!(user_seedling_definition().route, RouteSpec::Root);
+    }
+
+    #[test]
+    fn test_user_seedling_definition_should_default_route_to_root_when_omitted_from_serialized_toml()
+     {
+        let toml = r#"
+            mounts = {}
+            ports = { public = 8080, additional = [] }
+
+            [health_check]
+            command = "true"
+            wait_time_in_seconds = 1
+        "#;
+
+        let definition: UserSeedlingDefinition = toml::from_str(toml).expect("should deserialize");
+
+        assert_eq!(definition.route, RouteSpec::Root);
+    }
+
+    #[test]
+    fn test_with_subdomain_route_should_set_the_subdomain_route() {
+        let definition = user_seedling_definition().with_subdomain_route();
+
+        assert_eq!(definition.route, RouteSpec::Subdomain);
+    }
+
+    #[test]
+    fn test_with_subdomain_route_should_leave_every_other_field_alone() {
+        let original = user_seedling_definition();
+
+        let definition = original.clone().with_subdomain_route();
+
+        assert_eq!(
+            definition,
+            UserSeedlingDefinition {
+                route: RouteSpec::Subdomain,
+                ..original
+            }
+        );
+    }
+
+    #[test]
+    fn test_user_seedling_definition_should_parse_the_documented_external_image_form() {
+        let toml = r#"
+            mounts = {}
+            route = "subdomain"
+
+            [image]
+            type = "external"
+            reference = "docker.io/library/nginx:1.27"
+
+            [ports]
+            public = 8080
+            additional = []
+
+            [health_check]
+            command = "true"
+            wait_time_in_seconds = 1
+        "#;
+
+        let definition: UserSeedlingDefinition = toml::from_str(toml).expect("should deserialize");
+
+        let reference: ImageReference = "docker.io/library/nginx:1.27".parse().unwrap();
+        assert_eq!(definition.image, ImageSource::External(reference));
+        assert_eq!(definition.route, RouteSpec::Subdomain);
+    }
+
+    #[test]
+    fn test_user_seedling_definition_should_reject_an_external_image_keyed_by_value() {
+        let toml = r#"
+            mounts = {}
+
+            [image]
+            type = "external"
+            value = "docker.io/library/nginx:1.27"
+
+            [ports]
+            public = 8080
+            additional = []
+
+            [health_check]
+            command = "true"
+            wait_time_in_seconds = 1
+        "#;
+
+        let result = toml::from_str::<UserSeedlingDefinition>(toml);
+
+        assert!(result.is_err());
     }
 }

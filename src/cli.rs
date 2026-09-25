@@ -206,6 +206,13 @@ pub(crate) enum ServiceCommand {
     },
 }
 
+#[derive(ValueEnum, Clone, Debug, Copy, Default)]
+pub(crate) enum TemplateStyle {
+    #[default]
+    LocalImage,
+    ForeignImage,
+}
+
 #[derive(Subcommand, Debug)]
 pub(crate) enum SeedlingCommand {
     #[command(about = "Query seedling status")]
@@ -239,7 +246,15 @@ pub(crate) enum SeedlingCommand {
         file: Option<PathBuf>,
     },
     #[command(about = "Create a blank template for a seedling")]
-    CreateTemplate,
+    CreateTemplate {
+        #[arg(long, value_enum, default_value_t = TemplateStyle::default())]
+        template_style: TemplateStyle,
+        #[arg(
+            long,
+            help = "Mount the seedling at the root level as opposed to a subdomain.  Only one seedling may be at the root"
+        )]
+        root: bool,
+    },
     #[command(
         about = "Find and remove deadwood containers, networks, route files, and resin repositories"
     )]
@@ -284,7 +299,7 @@ impl std::fmt::Display for Commands {
                 seedling: SeedlingCommand::New { .. },
             } => f.write_str("create seedling"),
             Commands::Seedling {
-                seedling: SeedlingCommand::CreateTemplate,
+                seedling: SeedlingCommand::CreateTemplate { .. },
             } => f.write_str("create seedling template"),
             Commands::Seedling {
                 seedling: SeedlingCommand::Prune { .. },
@@ -418,6 +433,104 @@ mod command_coverage_tests {
              surface (left = live CLI commands, right = commands claimed via `# covers:` \
              lines) — add, rename, or remove a step's `# covers:` line to match"
         );
+    }
+}
+
+#[cfg(test)]
+mod create_template_argument_tests {
+    use super::{Cli, Commands, SeedlingCommand, TemplateStyle};
+    use clap::{Parser, error::ErrorKind};
+
+    fn parse(arguments: &[&str]) -> Result<Cli, clap::Error> {
+        let mut command_line = vec!["douglas", "seedling", "create-template"];
+        command_line.extend_from_slice(arguments);
+        Cli::try_parse_from(command_line)
+    }
+
+    fn create_template_arguments(arguments: &[&str]) -> (TemplateStyle, bool) {
+        let Ok(cli) = parse(arguments) else {
+            panic!("should parse {arguments:?}");
+        };
+        let Commands::Seedling {
+            seedling:
+                SeedlingCommand::CreateTemplate {
+                    template_style,
+                    root,
+                },
+        } = cli.command
+        else {
+            panic!("should parse as create-template");
+        };
+
+        (template_style, root)
+    }
+
+    #[test]
+    fn test_create_template_should_default_to_the_local_image_style_without_root() {
+        let (template_style, root) = create_template_arguments(&[]);
+
+        assert!(matches!(template_style, TemplateStyle::LocalImage));
+        assert!(!root);
+    }
+
+    #[test]
+    fn test_create_template_should_accept_the_local_image_style_explicitly() {
+        let (template_style, root) = create_template_arguments(&["--template-style=local-image"]);
+
+        assert!(matches!(template_style, TemplateStyle::LocalImage));
+        assert!(!root);
+    }
+
+    #[test]
+    fn test_create_template_should_accept_the_foreign_image_style() {
+        let (template_style, root) = create_template_arguments(&["--template-style=foreign-image"]);
+
+        assert!(matches!(template_style, TemplateStyle::ForeignImage));
+        assert!(!root);
+    }
+
+    #[test]
+    fn test_create_template_should_accept_the_root_flag_alone() {
+        let (template_style, root) = create_template_arguments(&["--root"]);
+
+        assert!(matches!(template_style, TemplateStyle::LocalImage));
+        assert!(root);
+    }
+
+    #[test]
+    fn test_create_template_should_accept_a_style_followed_by_the_root_flag() {
+        let (template_style, root) =
+            create_template_arguments(&["--template-style=foreign-image", "--root"]);
+
+        assert!(matches!(template_style, TemplateStyle::ForeignImage));
+        assert!(root);
+    }
+
+    #[test]
+    fn test_create_template_should_accept_the_root_flag_followed_by_a_style() {
+        let (template_style, root) =
+            create_template_arguments(&["--root", "--template-style=foreign-image"]);
+
+        assert!(matches!(template_style, TemplateStyle::ForeignImage));
+        assert!(root);
+    }
+
+    #[test]
+    fn test_create_template_should_reject_an_unknown_style() {
+        let Err(error) = parse(&["--template-style=bogus"]) else {
+            panic!("should reject an unknown style");
+        };
+
+        assert_eq!(error.kind(), ErrorKind::InvalidValue);
+    }
+
+    #[test]
+    fn test_create_template_should_display_as_create_seedling_template_whatever_the_flags() {
+        let Ok(cli) = parse(&["--root", "--template-style=foreign-image"]) else {
+            panic!("should parse");
+        };
+
+        assert_eq!(cli.command.to_string(), "create seedling template");
     }
 }
 
