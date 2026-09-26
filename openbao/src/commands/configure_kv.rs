@@ -11,7 +11,7 @@ use simple_rest_client::{
 };
 use std::{collections::HashMap, sync::Arc};
 
-fn ensure_key_value(mount: &Mounts) -> Result<(), Error> {
+pub(crate) fn ensure_key_value(mount: &Mounts) -> Result<(), Error> {
     if mount.engine_type() == "kv" {
         return Ok(());
     }

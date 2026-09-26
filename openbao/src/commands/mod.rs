@@ -8,6 +8,7 @@ pub(crate) mod configure_cluster;
 pub(crate) mod configure_kv;
 pub(crate) mod configure_urls;
 pub(crate) mod init;
+pub(crate) mod kv_secret;
 pub(crate) mod log_in;
 pub(crate) mod mounts;
 pub(crate) mod pki_role;

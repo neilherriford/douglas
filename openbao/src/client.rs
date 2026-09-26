@@ -4,7 +4,10 @@ use crate::{
 };
 use async_trait::async_trait;
 use log::Reporter;
-use openbao_types::{AuthType, Capability, KvConfig, Mounts, Secret, Secrets, Status};
+use openbao_types::{
+    AuthType, Capability, KvConfig, KvPath, Mounts, Secret, SecretRecord, SecretValue, Secrets,
+    Status,
+};
 use simple_rest_client::{RestClient, parsers::json::JsonParser, unix_domain_socket::build_client};
 use std::{
     collections::{HashMap, HashSet},
@@ -30,6 +33,33 @@ pub trait Client: Send + Sync {
         config: KvConfig,
     ) -> Result<(), Error>;
     async fn read_kv_config(&mut self, token: &str, mount: Mounts) -> Result<KvConfig, Error>;
+    async fn write_secret(
+        &mut self,
+        token: &str,
+        mount: Mounts,
+        path: KvPath,
+        data: HashMap<String, SecretValue>,
+        cas: u32,
+    ) -> Result<u32, Error>;
+    async fn read_secret(
+        &mut self,
+        token: &str,
+        mount: Mounts,
+        path: KvPath,
+        version: Option<u32>,
+    ) -> Result<Option<SecretRecord>, Error>;
+    async fn list_secrets(
+        &mut self,
+        token: &str,
+        mount: Mounts,
+        path: KvPath,
+    ) -> Result<Vec<String>, Error>;
+    async fn delete_secret(
+        &mut self,
+        token: &str,
+        mount: Mounts,
+        path: KvPath,
+    ) -> Result<(), Error>;
     async fn list_mounts(&mut self, token: &str) -> Result<HashMap<String, String>, Error>;
     async fn is_auth_method_enabled(
         &mut self,
@@ -213,6 +243,81 @@ impl Client for SocketClient {
             &self.parser,
             token,
             &mount,
+        )
+        .await
+    }
+
+    async fn write_secret(
+        &mut self,
+        token: &str,
+        mount: Mounts,
+        path: KvPath,
+        data: HashMap<String, SecretValue>,
+        cas: u32,
+    ) -> Result<u32, Error> {
+        commands::kv_secret::write(
+            Arc::clone(&self.reporter),
+            self.rest_client.as_mut(),
+            &self.parser,
+            token,
+            &mount,
+            &commands::kv_secret::SecretWrite {
+                path: &path,
+                data: &data,
+                cas,
+            },
+        )
+        .await
+    }
+
+    async fn read_secret(
+        &mut self,
+        token: &str,
+        mount: Mounts,
+        path: KvPath,
+        version: Option<u32>,
+    ) -> Result<Option<SecretRecord>, Error> {
+        commands::kv_secret::read(
+            Arc::clone(&self.reporter),
+            self.rest_client.as_mut(),
+            &self.parser,
+            token,
+            &mount,
+            &path,
+            version,
+        )
+        .await
+    }
+
+    async fn list_secrets(
+        &mut self,
+        token: &str,
+        mount: Mounts,
+        path: KvPath,
+    ) -> Result<Vec<String>, Error> {
+        commands::kv_secret::list(
+            Arc::clone(&self.reporter),
+            self.rest_client.as_mut(),
+            &self.parser,
+            token,
+            &mount,
+            &path,
+        )
+        .await
+    }
+
+    async fn delete_secret(
+        &mut self,
+        token: &str,
+        mount: Mounts,
+        path: KvPath,
+    ) -> Result<(), Error> {
+        commands::kv_secret::delete(
+            Arc::clone(&self.reporter),
+            self.rest_client.as_mut(),
+            token,
+            &mount,
+            &path,
         )
         .await
     }

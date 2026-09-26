@@ -168,6 +168,109 @@ impl KvConfig {
     }
 }
 
+#[derive(Debug, PartialEq, Eq, Clone)]
+pub enum KvPathError {
+    Empty,
+    EmptySegment,
+    RelativeSegment,
+    InvalidCharacter(char),
+}
+
+impl std::fmt::Display for KvPathError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            KvPathError::Empty => f.write_str("key value path cannot be empty"),
+            KvPathError::EmptySegment => f.write_str("key value path has an empty segment"),
+            KvPathError::RelativeSegment => {
+                f.write_str("key value path cannot contain '.' or '..' segments")
+            }
+            KvPathError::InvalidCharacter(character) => {
+                write!(f, "key value path contains invalid character {character:?}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for KvPathError {}
+
+#[derive(Debug, PartialEq, Eq, Clone)]
+pub struct KvPath(String);
+
+impl KvPath {
+    pub fn new(path: &str) -> Result<Self, KvPathError> {
+        if path.is_empty() {
+            return Err(KvPathError::Empty);
+        }
+
+        for segment in path.split('/') {
+            if segment.is_empty() {
+                return Err(KvPathError::EmptySegment);
+            }
+            if segment == "." || segment == ".." {
+                return Err(KvPathError::RelativeSegment);
+            }
+            if let Some(character) = segment
+                .chars()
+                .find(|character| !Self::is_allowed(*character))
+            {
+                return Err(KvPathError::InvalidCharacter(character));
+            }
+        }
+
+        Ok(Self(path.to_string()))
+    }
+
+    fn is_allowed(character: char) -> bool {
+        character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | '-')
+    }
+}
+
+impl std::str::FromStr for KvPath {
+    type Err = KvPathError;
+
+    fn from_str(path: &str) -> Result<Self, Self::Err> {
+        Self::new(path)
+    }
+}
+
+impl std::fmt::Display for KvPath {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct SecretValue(String);
+
+impl SecretValue {
+    pub fn new(value: &str) -> Self {
+        Self(value.to_string())
+    }
+
+    pub fn expose(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for SecretValue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("SecretValue(<redacted>)")
+    }
+}
+
+impl std::fmt::Display for SecretValue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("<redacted>")
+    }
+}
+
+#[derive(Debug, PartialEq, Eq, Clone)]
+pub struct SecretRecord {
+    pub data: std::collections::HashMap<String, SecretValue>,
+    pub version: u32,
+}
+
 impl Serialize for Mounts {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -284,6 +387,102 @@ mod tests {
     #[test]
     fn engine_type_should_be_pki_for_the_public_key_infrastructure_mount() {
         assert_eq!(Mounts::PublicKeyInfrastructure.engine_type(), "pki");
+    }
+
+    #[test]
+    fn kv_path_should_accept_slash_separated_segments_of_safe_characters() {
+        assert!(KvPath::new("seedlings/hello-world/DB_PASSWORD").is_ok());
+        assert!(KvPath::new("a.b/c_d/e-f").is_ok());
+    }
+
+    #[test]
+    fn kv_path_should_display_the_path_it_was_built_from() {
+        assert_eq!(
+            KvPath::new("seedlings/hello/KEY").unwrap().to_string(),
+            "seedlings/hello/KEY"
+        );
+    }
+
+    #[test]
+    fn kv_path_should_reject_an_empty_path() {
+        assert_eq!(KvPath::new(""), Err(KvPathError::Empty));
+    }
+
+    #[test]
+    fn kv_path_should_reject_empty_segments() {
+        for path in ["/leading", "trailing/", "double//slash"] {
+            assert_eq!(KvPath::new(path), Err(KvPathError::EmptySegment), "{path}");
+        }
+    }
+
+    #[test]
+    fn kv_path_should_reject_relative_segments() {
+        for path in ["../escape", "a/../b", "./a", "a/."] {
+            assert_eq!(
+                KvPath::new(path),
+                Err(KvPathError::RelativeSegment),
+                "{path}"
+            );
+        }
+    }
+
+    #[test]
+    fn kv_path_should_reject_characters_that_could_change_the_request() {
+        assert_eq!(
+            KvPath::new("a?list=true"),
+            Err(KvPathError::InvalidCharacter('?'))
+        );
+        assert_eq!(KvPath::new("a b"), Err(KvPathError::InvalidCharacter(' ')));
+        assert_eq!(KvPath::new("a%2e"), Err(KvPathError::InvalidCharacter('%')));
+        assert_eq!(
+            KvPath::new("a\nb"),
+            Err(KvPathError::InvalidCharacter('\n'))
+        );
+        assert_eq!(
+            KvPath::new("a\\b"),
+            Err(KvPathError::InvalidCharacter('\\'))
+        );
+    }
+
+    #[test]
+    fn secret_value_should_redact_in_debug_and_display() {
+        let value = SecretValue::new("hunter2");
+
+        assert!(!format!("{value:?}").contains("hunter2"));
+        assert!(!format!("{value}").contains("hunter2"));
+    }
+
+    #[test]
+    fn secret_value_should_expose_its_value_only_on_request() {
+        assert_eq!(SecretValue::new("hunter2").expose(), "hunter2");
+    }
+
+    #[test]
+    fn secret_value_should_serialize_as_a_plain_string() {
+        assert_eq!(
+            serde_json::to_string(&SecretValue::new("hunter2")).unwrap(),
+            r#""hunter2""#
+        );
+    }
+
+    #[test]
+    fn secret_value_should_deserialize_from_a_plain_string() {
+        let value: SecretValue = serde_json::from_str(r#""hunter2""#).unwrap();
+
+        assert_eq!(value.expose(), "hunter2");
+    }
+
+    #[test]
+    fn secret_record_should_not_reveal_its_values_in_debug() {
+        let record = SecretRecord {
+            data: std::collections::HashMap::from([(
+                "value".to_string(),
+                SecretValue::new("hunter2"),
+            )]),
+            version: 3,
+        };
+
+        assert!(!format!("{record:?}").contains("hunter2"));
     }
 
     #[test]
