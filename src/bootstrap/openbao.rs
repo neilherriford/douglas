@@ -91,6 +91,7 @@ struct Context<'a> {
 struct Installed {
     kv: bool,
     managed_secrets: bool,
+    managed_secrets_configured: bool,
     pki: bool,
     ca_configured: bool,
     acme: bool,
@@ -208,15 +209,16 @@ impl StateObserver<'_> {
         openbao_client: &mut dyn openbao::Client,
         token: &str,
     ) -> Installed {
+        let managed_secrets =
+            Self::is_mounted(openbao_client, token, openbao_types::Mounts::ManagedSecrets).await;
+        let managed_secrets_configured =
+            managed_secrets && Self::managed_secrets_configured(openbao_client, token).await;
+
         Installed {
             app_role: Self::app_role_installed(openbao_client, token).await,
             kv: Self::is_mounted(openbao_client, token, openbao_types::Mounts::KeyValueStore).await,
-            managed_secrets: Self::is_mounted(
-                openbao_client,
-                token,
-                openbao_types::Mounts::ManagedSecrets,
-            )
-            .await,
+            managed_secrets,
+            managed_secrets_configured,
             pki: Self::is_mounted(
                 openbao_client,
                 token,
@@ -275,6 +277,19 @@ impl StateObserver<'_> {
             return false;
         };
         state
+    }
+
+    async fn managed_secrets_configured(
+        openbao_client: &mut dyn openbao::Client,
+        token: &str,
+    ) -> bool {
+        let Ok(config) = openbao_client
+            .read_kv_config(token, openbao_types::Mounts::ManagedSecrets)
+            .await
+        else {
+            return false;
+        };
+        config == openbao_types::KvConfig::managed_secrets()
     }
 
     async fn is_acme_enabled(openbao_client: &mut dyn openbao::Client, token: &str) -> bool {
@@ -342,6 +357,8 @@ fn push_top_up(result: &mut Vec<Step<'_>>, installed: &Installed) {
     }
     if !installed.managed_secrets {
         push_managed_secrets_setup(result);
+    } else if !installed.managed_secrets_configured {
+        push_step(result, ConfigureManagedSecrets::default());
     }
     if !installed.pki {
         push_step(
@@ -1554,6 +1571,9 @@ mod tests {
         client
             .expect_is_mounted()
             .returning(|_, mount| Ok(matches!(mount, openbao_types::Mounts::ManagedSecrets)));
+        client
+            .expect_read_kv_config()
+            .returning(|_, _| Ok(openbao_types::KvConfig::managed_secrets()));
         client.expect_is_acme_enabled().returning(|_| Ok(true));
         client
             .expect_root_ca_is_configured()
@@ -1575,6 +1595,139 @@ mod tests {
         };
         assert!(installed.managed_secrets);
         assert!(!installed.kv);
+    }
+
+    #[tokio::test]
+    async fn observe_reports_the_managed_secrets_mount_as_configured_when_its_config_matches() {
+        let file_reader = file_reader_with_credentials(true);
+        let mut identity = MockIdentity::new();
+        identity
+            .expect_decrypt()
+            .returning(|_, _| Ok("decrypted".to_string()));
+        let mut client = MockOpenBaoClient::new();
+        client
+            .expect_login()
+            .returning(|_, _, _| Ok("token".to_string()));
+        client
+            .expect_is_auth_method_enabled()
+            .returning(|_, _| Ok(true));
+        client
+            .expect_is_mounted()
+            .returning(|_, mount| Ok(matches!(mount, openbao_types::Mounts::ManagedSecrets)));
+        client
+            .expect_read_kv_config()
+            .returning(|_, _| Ok(openbao_types::KvConfig::managed_secrets()));
+        client.expect_is_acme_enabled().returning(|_| Ok(true));
+        client
+            .expect_root_ca_is_configured()
+            .returning(|_| Ok(true));
+        client.expect_pki_role_exists().returning(|_, _| Ok(true));
+
+        let state = observe(
+            &file_reader,
+            &mut identity,
+            &mut client,
+            openbao_status(true, false),
+            true,
+            false,
+        )
+        .await;
+
+        let Ok(State::Unsealed(DouglasCredentials::Working(installed))) = state else {
+            panic!("should be working");
+        };
+        assert!(installed.managed_secrets);
+        assert!(installed.managed_secrets_configured);
+    }
+
+    #[tokio::test]
+    async fn observe_reports_the_managed_secrets_mount_as_unconfigured_when_its_config_differs() {
+        let file_reader = file_reader_with_credentials(true);
+        let mut identity = MockIdentity::new();
+        identity
+            .expect_decrypt()
+            .returning(|_, _| Ok("decrypted".to_string()));
+        let mut client = MockOpenBaoClient::new();
+        client
+            .expect_login()
+            .returning(|_, _, _| Ok("token".to_string()));
+        client
+            .expect_is_auth_method_enabled()
+            .returning(|_, _| Ok(true));
+        client
+            .expect_is_mounted()
+            .returning(|_, mount| Ok(matches!(mount, openbao_types::Mounts::ManagedSecrets)));
+        client.expect_read_kv_config().returning(|_, _| {
+            Ok(openbao_types::KvConfig {
+                max_versions: 10,
+                cas_required: false,
+            })
+        });
+        client.expect_is_acme_enabled().returning(|_| Ok(true));
+        client
+            .expect_root_ca_is_configured()
+            .returning(|_| Ok(true));
+        client.expect_pki_role_exists().returning(|_, _| Ok(true));
+
+        let state = observe(
+            &file_reader,
+            &mut identity,
+            &mut client,
+            openbao_status(true, false),
+            true,
+            false,
+        )
+        .await;
+
+        let Ok(State::Unsealed(DouglasCredentials::Working(installed))) = state else {
+            panic!("should be working");
+        };
+        assert!(installed.managed_secrets);
+        assert!(!installed.managed_secrets_configured);
+    }
+
+    #[tokio::test]
+    async fn observe_reports_the_managed_secrets_mount_as_unconfigured_when_its_config_cannot_be_read()
+     {
+        let file_reader = file_reader_with_credentials(true);
+        let mut identity = MockIdentity::new();
+        identity
+            .expect_decrypt()
+            .returning(|_, _| Ok("decrypted".to_string()));
+        let mut client = MockOpenBaoClient::new();
+        client
+            .expect_login()
+            .returning(|_, _, _| Ok("token".to_string()));
+        client
+            .expect_is_auth_method_enabled()
+            .returning(|_, _| Ok(true));
+        client
+            .expect_is_mounted()
+            .returning(|_, mount| Ok(matches!(mount, openbao_types::Mounts::ManagedSecrets)));
+        client
+            .expect_read_kv_config()
+            .returning(|_, _| Err(openbao::Error::NotAuthenticated));
+        client.expect_is_acme_enabled().returning(|_| Ok(true));
+        client
+            .expect_root_ca_is_configured()
+            .returning(|_| Ok(true));
+        client.expect_pki_role_exists().returning(|_, _| Ok(true));
+
+        let state = observe(
+            &file_reader,
+            &mut identity,
+            &mut client,
+            openbao_status(true, false),
+            true,
+            false,
+        )
+        .await;
+
+        let Ok(State::Unsealed(DouglasCredentials::Working(installed))) = state else {
+            panic!("should be working");
+        };
+        assert!(installed.managed_secrets);
+        assert!(!installed.managed_secrets_configured);
     }
 
     #[tokio::test]
@@ -1748,6 +1901,7 @@ mod tests {
         let state = State::Unsealed(DouglasCredentials::Working(Installed {
             kv: true,
             managed_secrets: true,
+            managed_secrets_configured: true,
             pki: true,
             ca_configured: true,
             acme: true,
@@ -1763,6 +1917,7 @@ mod tests {
         let state = State::Unsealed(DouglasCredentials::Working(Installed {
             kv: true,
             managed_secrets: true,
+            managed_secrets_configured: true,
             pki: true,
             ca_configured: false,
             acme: true,
@@ -1786,6 +1941,7 @@ mod tests {
         let state = State::Unsealed(DouglasCredentials::Working(Installed {
             kv: false,
             managed_secrets: false,
+            managed_secrets_configured: false,
             pki: false,
             ca_configured: false,
             acme: false,
@@ -1816,6 +1972,7 @@ mod tests {
         let state = State::Unsealed(DouglasCredentials::Working(Installed {
             kv: true,
             managed_secrets: false,
+            managed_secrets_configured: false,
             pki: true,
             ca_configured: true,
             acme: true,
@@ -1831,6 +1988,22 @@ mod tests {
                 "Configure managed secrets",
             ],
         );
+    }
+
+    #[test]
+    fn create_plan_only_configures_the_managed_secrets_when_mounted_but_not_configured() {
+        let state = State::Unsealed(DouglasCredentials::Working(Installed {
+            kv: true,
+            managed_secrets: true,
+            managed_secrets_configured: false,
+            pki: true,
+            ca_configured: true,
+            acme: true,
+            acme_pki_role: true,
+            app_role: true,
+        }));
+
+        assert_plan_steps(&state, &["Log in as Douglas", "Configure managed secrets"]);
     }
 
     #[test]

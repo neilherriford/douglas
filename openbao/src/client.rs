@@ -29,6 +29,7 @@ pub trait Client: Send + Sync {
         mount: Mounts,
         config: KvConfig,
     ) -> Result<(), Error>;
+    async fn read_kv_config(&mut self, token: &str, mount: Mounts) -> Result<KvConfig, Error>;
     async fn list_mounts(&mut self, token: &str) -> Result<HashMap<String, String>, Error>;
     async fn is_auth_method_enabled(
         &mut self,
@@ -201,6 +202,17 @@ impl Client for SocketClient {
             token,
             &mount,
             &config,
+        )
+        .await
+    }
+
+    async fn read_kv_config(&mut self, token: &str, mount: Mounts) -> Result<KvConfig, Error> {
+        commands::configure_kv::read(
+            Arc::clone(&self.reporter),
+            self.rest_client.as_mut(),
+            &self.parser,
+            token,
+            &mount,
         )
         .await
     }

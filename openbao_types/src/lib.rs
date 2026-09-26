@@ -153,7 +153,7 @@ impl std::fmt::Display for Mounts {
 
 pub const MANAGED_SECRETS_MAX_VERSIONS: u32 = 20;
 
-#[derive(Debug, PartialEq, Eq, Clone, Serialize)]
+#[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
 pub struct KvConfig {
     pub max_versions: u32,
     pub cas_required: bool,
@@ -292,6 +292,16 @@ mod tests {
 
         assert_eq!(config.max_versions, MANAGED_SECRETS_MAX_VERSIONS);
         assert!(config.cas_required);
+    }
+
+    #[test]
+    fn kv_config_should_deserialize_ignoring_the_fields_it_does_not_model() {
+        let config: KvConfig = serde_json::from_str(
+            r#"{"max_versions":20,"cas_required":true,"delete_version_after":"0s"}"#,
+        )
+        .unwrap();
+
+        assert_eq!(config, KvConfig::managed_secrets());
     }
 
     #[test]
