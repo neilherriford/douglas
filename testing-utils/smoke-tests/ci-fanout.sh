@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Runs the whole smoke suite in parallel: one disposable, headless qemu VM per
-# scenario, booted from testing-utils/nix/douglas-ci.iso. See CI_QEMU_SMOKE.md
-# for how this came to be.
+# scenario, booted from testing-utils/nix/douglas-ci.iso. See README.markdown
+# in this directory for how it works and how to extend it.
 #
 # A scenario is a directory under scenarios/; its numbered scripts run in
 # order on a fresh VM after setup/ (deploy the binary, `douglas start`).
@@ -184,7 +184,7 @@ fi
 
 # --- preflight -------------------------------------------------------------
 if [ ! -f "$CI_ISO" ]; then
-    echo "missing $CI_ISO — build it first (see CI_QEMU_SMOKE.md)" >&2
+    echo "missing $CI_ISO — build it first (see "Rebuilding the CI image" in testing-utils/smoke-tests/README.markdown)" >&2
     exit 1
 fi
 if [ ! -x "$QEMU_BIN" ]; then

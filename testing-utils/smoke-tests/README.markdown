@@ -240,8 +240,11 @@ missing from it just falls back to a normal pull.
 
 ## Rebuilding the CI image
 
-The image is built on the nix build VM (no local nix install needed). From
-`testing-utils/nix/`, with `BUILD_VM` set to the build host and its key:
+The image is built on a nix build VM (no local nix install needed): the Linux
+build environment described in `testing-utils/nix/README.markdown`, reachable
+over ssh. The `ssh-keys/` and `ssh-host-keys/` directories from that README must
+exist first, since both are baked into the image. From `testing-utils/nix/`, with
+`BUILD_VM` set to the build host and `BUILD_KEY` to its private key:
 
 ```bash
 rsync -az -e "ssh -i $BUILD_KEY" ci-configuration.nix flake.nix "$BUILD_VM:~/nix/"

@@ -99,3 +99,13 @@ echo $CARGO_TARGET_DIR        # should be /mnt/share/cache/target
 If the share isn't configured in UTM, none of this is fatal — the VM
 still boots, you just get an ephemeral `~/.cargo`/`~/.rustup` and
 default `target/` that don't survive a reboot.
+
+## The CI image
+
+`ci-configuration.nix` is a second, headless image, built as `.#ci`, that the
+parallel smoke-test platform boots one copy of per scenario under qemu. It has no
+Rust toolchain (douglas is cross-compiled on the host), keeps Docker and `/home`
+on throwaway virtio disks rather than RAM, and uses the same `ssh-keys/` and
+`ssh-host-keys/` as the dev image. Build it with `nix build .#ci` in the build
+environment above. See "Rebuilding the CI image" in
+`../smoke-tests/README.markdown` for copying the result to `douglas-ci.iso`.
