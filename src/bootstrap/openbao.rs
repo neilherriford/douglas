@@ -81,7 +81,7 @@ struct Context<'a> {
     douglas_folders: &'a DouglasFolders,
     identity: &'a mut dyn Identity,
     unseal_codes: Option<Vec<Secret>>,
-    root_token: Option<String>,
+    admin_token: Option<String>,
     douglas_role_id: Option<String>,
     douglas_secret_id: Option<String>,
 }
@@ -394,7 +394,13 @@ fn create_plan<'a>(state: &State) -> Result<Vec<Step<'a>>, OpenBaoError> {
             return Err(OpenBaoError::DouglasSecretsFailed);
         }
         State::Unsealed(DouglasCredentials::Working(installed)) => {
-            push_top_up(&mut result, installed);
+            let mut top_up: Vec<Step<'a>> = vec![];
+            push_top_up(&mut top_up, installed);
+
+            if !top_up.is_empty() {
+                push_step(&mut result, LoginAsDouglas::default());
+                result.append(&mut top_up);
+            }
         }
     }
 
@@ -431,7 +437,7 @@ impl<'a> Command<Context<'a>> for InitializeOpenBao {
             .await?;
 
         context.unseal_codes = Some(secrets.secrets.clone());
-        context.root_token = Some(secrets.root_token.clone());
+        context.admin_token = Some(secrets.root_token.clone());
 
         guard.finish(Ok(()))
     }
@@ -629,14 +635,14 @@ impl<'a> Command<Context<'a>> for Mount {
             .create_child("Mount key value store", ScopeKind::Step)
             .start_guard();
 
-        let Some(root_token) = &context.root_token else {
+        let Some(admin_token) = &context.admin_token else {
             guard.finish_with_outcome(Outcome::Failed);
             return Err(Box::new(OpenBaoError::SecretsRequired));
         };
 
         if context
             .openbao_client
-            .is_mounted(root_token, self.mount.clone())
+            .is_mounted(admin_token, self.mount.clone())
             .await?
         {
             guard.span().message(Level::Info, "Already mounted!");
@@ -645,8 +651,46 @@ impl<'a> Command<Context<'a>> for Mount {
 
         context
             .openbao_client
-            .mount(root_token, self.mount.clone())
+            .mount(admin_token, self.mount.clone())
             .await?;
+
+        guard.finish(Ok(()))
+    }
+}
+
+#[derive(Debug, Default)]
+struct LoginAsDouglas {}
+
+impl std::fmt::Display for LoginAsDouglas {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Log in as Douglas")
+    }
+}
+
+#[async_trait]
+impl<'a> Command<Context<'a>> for LoginAsDouglas {
+    fn name(&self) -> String {
+        "Log in as Douglas".to_string()
+    }
+
+    async fn run(
+        &mut self,
+        span: &Span,
+        context: &mut Context<'a>,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let guard = span
+            .create_child("Logging in as Douglas", ScopeKind::Step)
+            .start_guard();
+
+        let token = openbao::app_role::login(
+            context.openbao_client,
+            context.file_reader,
+            context.identity,
+            context.douglas_folders,
+        )
+        .await?;
+
+        context.admin_token = Some(token);
 
         guard.finish(Ok(()))
     }
@@ -676,7 +720,7 @@ impl<'a> Command<Context<'a>> for ConfigureManagedSecrets {
             .create_child("Configuring managed secrets", ScopeKind::Step)
             .start_guard();
 
-        let Some(root_token) = &context.root_token else {
+        let Some(admin_token) = &context.admin_token else {
             guard.finish_with_outcome(Outcome::Failed);
             return Err(Box::new(OpenBaoError::SecretsRequired));
         };
@@ -684,7 +728,7 @@ impl<'a> Command<Context<'a>> for ConfigureManagedSecrets {
         context
             .openbao_client
             .configure_kv(
-                root_token,
+                admin_token,
                 openbao_types::Mounts::ManagedSecrets,
                 openbao_types::KvConfig::managed_secrets(),
             )
@@ -718,14 +762,14 @@ impl<'a> Command<Context<'a>> for EnableAppRoleAuth {
             .create_child("Enabling AppRole auth method", ScopeKind::Step)
             .start_guard();
 
-        let Some(root_token) = &context.root_token else {
+        let Some(admin_token) = &context.admin_token else {
             guard.finish_with_outcome(Outcome::Failed);
             return Err(Box::new(OpenBaoError::SecretsRequired));
         };
 
         if context
             .openbao_client
-            .is_auth_method_enabled(root_token, &openbao_types::AuthType::AppRole)
+            .is_auth_method_enabled(admin_token, &openbao_types::AuthType::AppRole)
             .await?
         {
             guard
@@ -736,7 +780,7 @@ impl<'a> Command<Context<'a>> for EnableAppRoleAuth {
 
         context
             .openbao_client
-            .enable_auth_method(root_token, &openbao_types::AuthType::AppRole)
+            .enable_auth_method(admin_token, &openbao_types::AuthType::AppRole)
             .await?;
 
         guard.finish(Ok(()))
@@ -767,14 +811,14 @@ impl<'a> Command<Context<'a>> for GenerateRootCA {
             .create_child("Generating root CA", ScopeKind::Step)
             .start_guard();
 
-        let Some(root_token) = &context.root_token else {
+        let Some(admin_token) = &context.admin_token else {
             guard.finish_with_outcome(Outcome::Failed);
             return Err(Box::new(OpenBaoError::SecretsRequired));
         };
 
         if context
             .openbao_client
-            .root_ca_is_configured(root_token)
+            .root_ca_is_configured(admin_token)
             .await?
         {
             guard.span().message(Level::Info, "CA already configured!");
@@ -783,7 +827,7 @@ impl<'a> Command<Context<'a>> for GenerateRootCA {
 
         context
             .openbao_client
-            .generate_root_ca(root_token, "douglas")
+            .generate_root_ca(admin_token, "douglas")
             .await?;
 
         guard.finish(Ok(()))
@@ -814,14 +858,14 @@ impl<'a> Command<Context<'a>> for SetIssuingCRL {
             .create_child("Setting issuing/CRL URLs", ScopeKind::Step)
             .start_guard();
 
-        let Some(root_token) = &context.root_token else {
+        let Some(admin_token) = &context.admin_token else {
             guard.finish_with_outcome(Outcome::Failed);
             return Err(Box::new(OpenBaoError::SecretsRequired));
         };
 
         context
             .openbao_client
-            .set_issuing_crl(root_token, &base_url())
+            .set_issuing_crl(admin_token, &base_url())
             .await?;
 
         guard.finish(Ok(()))
@@ -852,14 +896,14 @@ impl<'a> Command<Context<'a>> for ConfigureClusterPath {
             .create_child("Configuring cluster path", ScopeKind::Step)
             .start_guard();
 
-        let Some(root_token) = &context.root_token else {
+        let Some(admin_token) = &context.admin_token else {
             guard.finish_with_outcome(Outcome::Failed);
             return Err(Box::new(OpenBaoError::SecretsRequired));
         };
 
         context
             .openbao_client
-            .set_cluster_url(root_token, &base_url())
+            .set_cluster_url(admin_token, &base_url())
             .await?;
 
         guard.finish(Ok(()))
@@ -890,14 +934,14 @@ impl<'a> Command<Context<'a>> for EnableAcme {
             .create_child("Enabling ACME", ScopeKind::Step)
             .start_guard();
 
-        let Some(root_token) = &context.root_token else {
+        let Some(admin_token) = &context.admin_token else {
             guard.finish_with_outcome(Outcome::Failed);
             return Err(Box::new(OpenBaoError::SecretsRequired));
         };
 
         context
             .openbao_client
-            .set_acme_enabled(root_token, true)
+            .set_acme_enabled(admin_token, true)
             .await?;
 
         guard.finish(Ok(()))
@@ -928,14 +972,14 @@ impl<'a> Command<Context<'a>> for CreateAcmePkiRole {
             .create_child("Creating ACME PKI Role", ScopeKind::Step)
             .start_guard();
 
-        let Some(root_token) = &context.root_token else {
+        let Some(admin_token) = &context.admin_token else {
             guard.finish_with_outcome(Outcome::Failed);
             return Err(Box::new(OpenBaoError::SecretsRequired));
         };
 
         context
             .openbao_client
-            .create_pki_role(root_token, ACME_PKI_ROLE, ACME_PKI_DOMAINS)
+            .create_pki_role(admin_token, ACME_PKI_ROLE, ACME_PKI_DOMAINS)
             .await?;
 
         guard.finish(Ok(()))
@@ -966,7 +1010,7 @@ impl<'a> Command<Context<'a>> for CreateDouglasAppRolePolicy {
             .create_child("Creating Douglas App Role Policy", ScopeKind::Step)
             .start_guard();
 
-        let Some(root_token) = &context.root_token else {
+        let Some(admin_token) = &context.admin_token else {
             guard.finish_with_outcome(Outcome::Failed);
             return Err(Box::new(OpenBaoError::SecretsRequired));
         };
@@ -1019,13 +1063,13 @@ impl<'a> Command<Context<'a>> for CreateDouglasAppRolePolicy {
 
         context
             .openbao_client
-            .create_policy(root_token, DOUGLAS_ADMIN_POLICY_NAME, &policies)
+            .create_policy(admin_token, DOUGLAS_ADMIN_POLICY_NAME, &policies)
             .await?;
 
         context
             .openbao_client
             .create_auth(
-                root_token,
+                admin_token,
                 &openbao_types::AuthType::AppRole,
                 DOUGLAS_APP_ROLE_NAME,
                 vec![DOUGLAS_ADMIN_POLICY_NAME.to_string()],
@@ -1060,7 +1104,7 @@ impl<'a> Command<Context<'a>> for CreateDouglasAppRoleSecret {
             .create_child("Creating Douglas App Role Secret", ScopeKind::Step)
             .start_guard();
 
-        let Some(root_token) = &context.root_token else {
+        let Some(admin_token) = &context.admin_token else {
             guard.finish_with_outcome(Outcome::Failed);
             return Err(Box::new(OpenBaoError::SecretsRequired));
         };
@@ -1068,7 +1112,7 @@ impl<'a> Command<Context<'a>> for CreateDouglasAppRoleSecret {
         let role_id = context
             .openbao_client
             .get_role_id(
-                root_token,
+                admin_token,
                 &openbao_types::AuthType::AppRole,
                 DOUGLAS_APP_ROLE_NAME,
             )
@@ -1077,7 +1121,7 @@ impl<'a> Command<Context<'a>> for CreateDouglasAppRoleSecret {
         let secret_id = context
             .openbao_client
             .create_auth_secret(
-                root_token,
+                admin_token,
                 &openbao_types::AuthType::AppRole,
                 DOUGLAS_APP_ROLE_NAME,
             )
@@ -1162,12 +1206,12 @@ impl<'a> Command<Context<'a>> for RevokeAdminToken {
             .create_child("Revoking root token", ScopeKind::Step)
             .start_guard();
 
-        let Some(root_token) = &context.root_token else {
+        let Some(admin_token) = &context.admin_token else {
             guard.finish_with_outcome(Outcome::Failed);
             return Err(Box::new(OpenBaoError::SecretsRequired));
         };
 
-        context.openbao_client.revoke_token(root_token).await?;
+        context.openbao_client.revoke_token(admin_token).await?;
 
         guard.finish(Ok(()))
     }
@@ -1250,7 +1294,7 @@ pub async fn perform(reporter: Arc<dyn Reporter>, deps: Dependencies<'_>) -> boo
         douglas_folders,
         identity,
         file_reader: file_reader.as_ref(),
-        root_token: None,
+        admin_token: None,
         unseal_codes: None,
         douglas_role_id: None,
         douglas_secret_id: None,
@@ -1694,6 +1738,7 @@ mod tests {
         assert_plan_steps(
             &state,
             &[
+                "Log in as Douglas",
                 "Generate root CA",
                 "Set issuing/CRL URLs",
                 "Configure cluster path",
@@ -1716,6 +1761,7 @@ mod tests {
         assert_plan_steps(
             &state,
             &[
+                "Log in as Douglas",
                 "key value store",
                 "managed secrets",
                 "Configure managed secrets",
@@ -1742,7 +1788,14 @@ mod tests {
             app_role: true,
         }));
 
-        assert_plan_steps(&state, &["managed secrets", "Configure managed secrets"]);
+        assert_plan_steps(
+            &state,
+            &[
+                "Log in as Douglas",
+                "managed secrets",
+                "Configure managed secrets",
+            ],
+        );
     }
 
     #[test]
@@ -1819,7 +1872,7 @@ mod command_tests {
                 douglas_folders: &self.douglas_folders,
                 identity: &mut self.identity,
                 unseal_codes: None,
-                root_token: None,
+                admin_token: None,
                 douglas_role_id: None,
                 douglas_secret_id: None,
             }
@@ -1851,7 +1904,7 @@ mod command_tests {
             let mut context = fixture.context();
             run_command(InitializeOpenBao::default(), &mut context).await;
 
-            assert_eq!(context.root_token, Some("root-token".to_string()));
+            assert_eq!(context.admin_token, Some("root-token".to_string()));
             assert_eq!(
                 context.unseal_codes,
                 Some(vec![Secret {
@@ -2014,11 +2067,77 @@ mod command_tests {
         }
     }
 
+    mod login_as_douglas {
+        use super::*;
+
+        fn fixture_with_credentials() -> Fixture {
+            let mut fixture = Fixture::new();
+            fixture.file_reader.expect_exists().returning(|_| true);
+            fixture
+                .file_reader
+                .expect_read_all()
+                .returning(|_| Ok("encrypted".to_string()));
+            fixture
+                .identity
+                .expect_decrypt()
+                .returning(|_, _| Ok("decrypted".to_string()));
+            fixture
+        }
+
+        #[tokio::test]
+        async fn run_should_hold_the_login_token_as_the_admin_token() {
+            let mut fixture = fixture_with_credentials();
+            fixture
+                .openbao_client
+                .expect_login()
+                .withf(|_, role_id, secret_id| role_id == "decrypted" && secret_id == "decrypted")
+                .times(1)
+                .returning(|_, _, _| Ok("douglas-token".to_string()));
+            let mut context = fixture.context();
+
+            run_command(LoginAsDouglas::default(), &mut context).await;
+
+            assert_eq!(context.admin_token, Some("douglas-token".to_string()));
+        }
+
+        #[tokio::test]
+        async fn run_should_fail_without_logging_in_when_the_credentials_are_not_available() {
+            let mut fixture = Fixture::new();
+            fixture.file_reader.expect_exists().returning(|_| false);
+            fixture.openbao_client.expect_login().times(0);
+            let mut context = fixture.context();
+
+            let result = LoginAsDouglas::default()
+                .run(&test_span(), &mut context)
+                .await;
+
+            assert!(result.is_err());
+            assert_eq!(context.admin_token, None);
+        }
+
+        #[tokio::test]
+        async fn run_should_fail_and_hold_no_token_when_the_login_is_rejected() {
+            let mut fixture = fixture_with_credentials();
+            fixture
+                .openbao_client
+                .expect_login()
+                .returning(|_, _, _| Err(openbao::Error::NotAuthenticated));
+            let mut context = fixture.context();
+
+            let result = LoginAsDouglas::default()
+                .run(&test_span(), &mut context)
+                .await;
+
+            assert!(result.is_err());
+            assert_eq!(context.admin_token, None);
+        }
+    }
+
     mod configure_managed_secrets {
         use super::*;
 
         #[tokio::test]
-        async fn run_should_fail_without_a_root_token() {
+        async fn run_should_fail_without_an_admin_token() {
             let mut fixture = Fixture::new();
             fixture.openbao_client.expect_configure_kv().times(0);
             let mut context = fixture.context();
@@ -2045,7 +2164,7 @@ mod command_tests {
                 .returning(|_, _, _| Ok(()));
 
             let mut context = fixture.context();
-            context.root_token = Some("root-token".to_string());
+            context.admin_token = Some("root-token".to_string());
 
             run_command(ConfigureManagedSecrets::default(), &mut context).await;
         }
@@ -2058,7 +2177,7 @@ mod command_tests {
                 .expect_configure_kv()
                 .returning(|_, _, _| Err(openbao::Error::NotAuthenticated));
             let mut context = fixture.context();
-            context.root_token = Some("root-token".to_string());
+            context.admin_token = Some("root-token".to_string());
 
             let result = ConfigureManagedSecrets::default()
                 .run(&test_span(), &mut context)
@@ -2072,7 +2191,7 @@ mod command_tests {
         use super::*;
 
         #[tokio::test]
-        async fn run_should_fail_without_a_root_token() {
+        async fn run_should_fail_without_an_admin_token() {
             let mut fixture = Fixture::new();
             let mut context = fixture.context();
 
@@ -2098,7 +2217,7 @@ mod command_tests {
                 .returning(|_, _| Ok(()));
 
             let mut context = fixture.context();
-            context.root_token = Some("root-token".to_string());
+            context.admin_token = Some("root-token".to_string());
 
             run_command(Mount::new(Mounts::KeyValueStore), &mut context).await;
         }
@@ -2113,7 +2232,7 @@ mod command_tests {
             fixture.openbao_client.expect_mount().times(0);
 
             let mut context = fixture.context();
-            context.root_token = Some("root-token".to_string());
+            context.admin_token = Some("root-token".to_string());
 
             run_command(Mount::new(Mounts::PublicKeyInfrastructure), &mut context).await;
         }
@@ -2136,7 +2255,7 @@ mod command_tests {
                 .returning(|_, _| Ok("-----BEGIN CERTIFICATE-----".to_string()));
 
             let mut context = fixture.context();
-            context.root_token = Some("root-token".to_string());
+            context.admin_token = Some("root-token".to_string());
 
             run_command(GenerateRootCA::default(), &mut context).await;
         }
@@ -2151,7 +2270,7 @@ mod command_tests {
             fixture.openbao_client.expect_generate_root_ca().times(0);
 
             let mut context = fixture.context();
-            context.root_token = Some("root-token".to_string());
+            context.admin_token = Some("root-token".to_string());
 
             run_command(GenerateRootCA::default(), &mut context).await;
         }
@@ -2170,7 +2289,7 @@ mod command_tests {
                 .returning(|_, _| Ok(()));
 
             let mut context = fixture.context();
-            context.root_token = Some("root-token".to_string());
+            context.admin_token = Some("root-token".to_string());
 
             run_command(SetIssuingCRL::default(), &mut context).await;
         }
@@ -2189,7 +2308,7 @@ mod command_tests {
                 .returning(|_, _| Ok(()));
 
             let mut context = fixture.context();
-            context.root_token = Some("root-token".to_string());
+            context.admin_token = Some("root-token".to_string());
 
             run_command(ConfigureClusterPath::default(), &mut context).await;
         }
@@ -2208,7 +2327,7 @@ mod command_tests {
                 .returning(|_, _| Ok(()));
 
             let mut context = fixture.context();
-            context.root_token = Some("root-token".to_string());
+            context.admin_token = Some("root-token".to_string());
 
             run_command(EnableAcme::default(), &mut context).await;
         }
@@ -2231,7 +2350,7 @@ mod command_tests {
                 .returning(|_, _, _| Ok(()));
 
             let mut context = fixture.context();
-            context.root_token = Some("root-token".to_string());
+            context.admin_token = Some("root-token".to_string());
 
             run_command(CreateAcmePkiRole::default(), &mut context).await;
         }
@@ -2255,7 +2374,7 @@ mod command_tests {
                 .returning(|_, _| Ok(()));
 
             let mut context = fixture.context();
-            context.root_token = Some("root-token".to_string());
+            context.admin_token = Some("root-token".to_string());
 
             run_command(EnableAppRoleAuth::default(), &mut context).await;
         }
@@ -2270,7 +2389,7 @@ mod command_tests {
             fixture.openbao_client.expect_enable_auth_method().times(0);
 
             let mut context = fixture.context();
-            context.root_token = Some("root-token".to_string());
+            context.admin_token = Some("root-token".to_string());
 
             run_command(EnableAppRoleAuth::default(), &mut context).await;
         }
@@ -2301,7 +2420,7 @@ mod command_tests {
                 .returning(|_, _, _, _| Ok(()));
 
             let mut context = fixture.context();
-            context.root_token = Some("root-token".to_string());
+            context.admin_token = Some("root-token".to_string());
 
             run_command(CreateDouglasAppRolePolicy::default(), &mut context).await;
         }
@@ -2323,7 +2442,7 @@ mod command_tests {
                 .returning(|_, _, _| Ok("secret-1".to_string()));
 
             let mut context = fixture.context();
-            context.root_token = Some("root-token".to_string());
+            context.admin_token = Some("root-token".to_string());
 
             run_command(CreateDouglasAppRoleSecret::default(), &mut context).await;
 
@@ -2390,7 +2509,7 @@ mod command_tests {
                 .returning(|_| Ok(()));
 
             let mut context = fixture.context();
-            context.root_token = Some("root-token".to_string());
+            context.admin_token = Some("root-token".to_string());
 
             run_command(RevokeAdminToken::default(), &mut context).await;
         }
