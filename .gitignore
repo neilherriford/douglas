@@ -5,6 +5,7 @@
 **/ssh-host-keys/*
 **/ssh-keys/*
 douglas-dev.iso
+douglas-ci.iso
 **/cargo-test*.profraw
 journal.md
 journal.markdown
