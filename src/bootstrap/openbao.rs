@@ -583,6 +583,7 @@ impl Mount {
         Self {
             description: match &mount {
                 openbao_types::Mounts::KeyValueStore => "key value store",
+                openbao_types::Mounts::ManagedSecrets => "managed secrets",
                 openbao_types::Mounts::PublicKeyInfrastructure => "public key infrastructure",
             }
             .to_string(),

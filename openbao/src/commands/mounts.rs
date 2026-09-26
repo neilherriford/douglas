@@ -58,7 +58,7 @@ pub async fn create<'a>(
         path: format!("/v1/sys/mounts/{mount}"),
         headers: vec![Header::content_type_json(), open_bao_token_header(token)],
         body: Some(serde_json::to_string(&MountRequest {
-            mount: mount.clone(),
+            engine_type: mount.engine_type(),
             description: create_description(&mount),
             options: create_options(&mount),
             config: create_config(&mount),
@@ -74,7 +74,7 @@ pub async fn create<'a>(
 
 fn create_config(mount: &Mounts) -> Option<Config> {
     match mount {
-        Mounts::KeyValueStore => None,
+        Mounts::KeyValueStore | Mounts::ManagedSecrets => None,
         Mounts::PublicKeyInfrastructure => Some(Config {
             max_lease_ttl: Some("87600h".to_string()),
         }),
@@ -82,7 +82,7 @@ fn create_config(mount: &Mounts) -> Option<Config> {
 }
 
 fn create_options(mount: &Mounts) -> Option<HashMap<String, String>> {
-    if mount != &Mounts::KeyValueStore {
+    if mount.engine_type() != "kv" {
         return None;
     }
 
@@ -92,6 +92,7 @@ fn create_options(mount: &Mounts) -> Option<HashMap<String, String>> {
 fn create_description(mount: &Mounts) -> String {
     match mount {
         Mounts::KeyValueStore => "Douglas key value store",
+        Mounts::ManagedSecrets => "Douglas managed secrets",
         Mounts::PublicKeyInfrastructure => "Douglas public key infrastructure",
     }
     .to_string()
@@ -100,7 +101,7 @@ fn create_description(mount: &Mounts) -> String {
 #[derive(Debug, Serialize)]
 struct MountRequest {
     #[serde(rename = "type")]
-    mount: Mounts,
+    engine_type: &'static str,
     description: String,
     config: Option<Config>,
     options: Option<HashMap<String, String>>,
@@ -136,6 +137,54 @@ mod tests {
             Some(HashMap::from([("version".to_string(), "2".to_string())]))
         );
         assert_eq!(create_options(&Mounts::PublicKeyInfrastructure), None);
+    }
+
+    #[test]
+    fn create_options_should_set_kv_version_two_for_the_managed_secrets_mount() {
+        assert_eq!(
+            create_options(&Mounts::ManagedSecrets),
+            Some(HashMap::from([("version".to_string(), "2".to_string())]))
+        );
+    }
+
+    #[test]
+    fn create_config_should_leave_the_managed_secrets_mount_at_its_defaults() {
+        assert!(create_config(&Mounts::ManagedSecrets).is_none());
+    }
+
+    #[test]
+    fn create_description_should_distinguish_the_two_key_value_mounts() {
+        assert_ne!(
+            create_description(&Mounts::KeyValueStore),
+            create_description(&Mounts::ManagedSecrets)
+        );
+    }
+
+    #[tokio::test]
+    async fn mount_should_post_a_kv_v2_request_of_type_kv_at_the_douglas_path_for_managed_secrets()
+    {
+        let mut rest_client = MockRestClient::new();
+        rest_client
+            .expect_execute()
+            .withf(|_, request| {
+                matches!(
+                    request,
+                    Request::Post { path, body, .. }
+                        if path == "/v1/sys/mounts/douglas"
+                            && body.as_deref()
+                                == Some(r#"{"type":"kv","description":"Douglas managed secrets","config":null,"options":{"version":"2"}}"#)
+                )
+            })
+            .returning(|_, _| Ok(Response::NoContent { headers: Vec::new() }));
+
+        create(
+            Arc::new(NullReporter),
+            &mut rest_client,
+            "root-token",
+            Mounts::ManagedSecrets,
+        )
+        .await
+        .expect("should mount the managed secrets store");
     }
 
     #[tokio::test]

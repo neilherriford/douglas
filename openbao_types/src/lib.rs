@@ -128,13 +128,24 @@ impl std::fmt::Display for AuthType {
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub enum Mounts {
     KeyValueStore,
+    ManagedSecrets,
     PublicKeyInfrastructure,
+}
+
+impl Mounts {
+    pub fn engine_type(&self) -> &'static str {
+        match self {
+            Mounts::KeyValueStore | Mounts::ManagedSecrets => "kv",
+            Mounts::PublicKeyInfrastructure => "pki",
+        }
+    }
 }
 
 impl std::fmt::Display for Mounts {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Mounts::KeyValueStore => f.write_str("kv"),
+            Mounts::ManagedSecrets => f.write_str("douglas"),
             Mounts::PublicKeyInfrastructure => f.write_str("pki"),
         }
     }
@@ -236,6 +247,26 @@ mod tests {
             serde_json::to_string(&Mounts::KeyValueStore).unwrap(),
             r#""kv""#
         );
+    }
+
+    #[test]
+    fn managed_secrets_should_mount_at_douglas() {
+        assert_eq!(Mounts::ManagedSecrets.to_string(), "douglas");
+        assert_eq!(
+            serde_json::to_string(&Mounts::ManagedSecrets).unwrap(),
+            r#""douglas""#
+        );
+    }
+
+    #[test]
+    fn engine_type_should_be_kv_for_both_key_value_mounts() {
+        assert_eq!(Mounts::KeyValueStore.engine_type(), "kv");
+        assert_eq!(Mounts::ManagedSecrets.engine_type(), "kv");
+    }
+
+    #[test]
+    fn engine_type_should_be_pki_for_the_public_key_infrastructure_mount() {
+        assert_eq!(Mounts::PublicKeyInfrastructure.engine_type(), "pki");
     }
 
     #[test]
