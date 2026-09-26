@@ -4,7 +4,7 @@ use crate::{
 };
 use async_trait::async_trait;
 use log::Reporter;
-use openbao_types::{AuthType, Capability, Mounts, Secret, Secrets, Status};
+use openbao_types::{AuthType, Capability, KvConfig, Mounts, Secret, Secrets, Status};
 use simple_rest_client::{RestClient, parsers::json::JsonParser, unix_domain_socket::build_client};
 use std::{
     collections::{HashMap, HashSet},
@@ -23,6 +23,12 @@ pub trait Client: Send + Sync {
     ) -> Result<Secrets, Error>;
     async fn is_mounted(&mut self, token: &str, mount: Mounts) -> Result<bool, Error>;
     async fn mount(&mut self, token: &str, mount: Mounts) -> Result<(), Error>;
+    async fn configure_kv(
+        &mut self,
+        token: &str,
+        mount: Mounts,
+        config: KvConfig,
+    ) -> Result<(), Error>;
     async fn list_mounts(&mut self, token: &str) -> Result<HashMap<String, String>, Error>;
     async fn is_auth_method_enabled(
         &mut self,
@@ -179,6 +185,22 @@ impl Client for SocketClient {
             self.rest_client.as_mut(),
             token,
             mount,
+        )
+        .await
+    }
+
+    async fn configure_kv(
+        &mut self,
+        token: &str,
+        mount: Mounts,
+        config: KvConfig,
+    ) -> Result<(), Error> {
+        commands::configure_kv::execute(
+            Arc::clone(&self.reporter),
+            self.rest_client.as_mut(),
+            token,
+            &mount,
+            &config,
         )
         .await
     }

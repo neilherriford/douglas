@@ -5,6 +5,7 @@ pub(crate) mod acl_policy;
 pub(crate) mod acme;
 pub(crate) mod auth;
 pub(crate) mod configure_cluster;
+pub(crate) mod configure_kv;
 pub(crate) mod configure_urls;
 pub(crate) mod init;
 pub(crate) mod log_in;

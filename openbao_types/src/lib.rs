@@ -151,6 +151,23 @@ impl std::fmt::Display for Mounts {
     }
 }
 
+pub const MANAGED_SECRETS_MAX_VERSIONS: u32 = 20;
+
+#[derive(Debug, PartialEq, Eq, Clone, Serialize)]
+pub struct KvConfig {
+    pub max_versions: u32,
+    pub cas_required: bool,
+}
+
+impl KvConfig {
+    pub fn managed_secrets() -> Self {
+        Self {
+            max_versions: MANAGED_SECRETS_MAX_VERSIONS,
+            cas_required: true,
+        }
+    }
+}
+
 impl Serialize for Mounts {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -267,6 +284,22 @@ mod tests {
     #[test]
     fn engine_type_should_be_pki_for_the_public_key_infrastructure_mount() {
         assert_eq!(Mounts::PublicKeyInfrastructure.engine_type(), "pki");
+    }
+
+    #[test]
+    fn kv_config_managed_secrets_should_retain_many_versions_and_require_check_and_set() {
+        let config = KvConfig::managed_secrets();
+
+        assert_eq!(config.max_versions, MANAGED_SECRETS_MAX_VERSIONS);
+        assert!(config.cas_required);
+    }
+
+    #[test]
+    fn kv_config_should_serialize_with_the_field_names_openbao_expects() {
+        assert_eq!(
+            serde_json::to_string(&KvConfig::managed_secrets()).unwrap(),
+            r#"{"max_versions":20,"cas_required":true}"#
+        );
     }
 
     #[test]
