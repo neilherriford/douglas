@@ -986,6 +986,85 @@ impl<'a> Command<Context<'a>> for CreateAcmePkiRole {
     }
 }
 
+fn douglas_admin_policy() -> HashMap<String, HashSet<Capability>> {
+    HashMap::from([
+        ("sys/mounts".to_string(), HashSet::from([Capability::Read])),
+        ("sys/auth".to_string(), HashSet::from([Capability::Read])),
+        (
+            "sys/mounts/kv".to_string(),
+            HashSet::from([
+                Capability::Create,
+                Capability::Read,
+                Capability::Update,
+                Capability::Sudo,
+            ]),
+        ),
+        (
+            "sys/mounts/pki".to_string(),
+            HashSet::from([
+                Capability::Create,
+                Capability::Read,
+                Capability::Update,
+                Capability::Sudo,
+            ]),
+        ),
+        (
+            "sys/mounts/douglas".to_string(),
+            HashSet::from([
+                Capability::Create,
+                Capability::Read,
+                Capability::Update,
+                Capability::Sudo,
+            ]),
+        ),
+        (
+            "pki/*".to_string(),
+            HashSet::from([Capability::Create, Capability::Read, Capability::Update]),
+        ),
+        (
+            "douglas/config".to_string(),
+            HashSet::from([Capability::Create, Capability::Read, Capability::Update]),
+        ),
+        (
+            "douglas/data/*".to_string(),
+            HashSet::from([
+                Capability::Create,
+                Capability::Read,
+                Capability::Update,
+                Capability::Delete,
+            ]),
+        ),
+        (
+            "douglas/metadata/*".to_string(),
+            HashSet::from([
+                Capability::Read,
+                Capability::Update,
+                Capability::Delete,
+                Capability::List,
+            ]),
+        ),
+        (
+            "sys/policies/acl/*".to_string(),
+            HashSet::from([
+                Capability::Create,
+                Capability::Read,
+                Capability::Update,
+                Capability::Delete,
+            ]),
+        ),
+        (
+            "auth/approle/role/*".to_string(),
+            HashSet::from([
+                Capability::Create,
+                Capability::Read,
+                Capability::Update,
+                Capability::Delete,
+                Capability::List,
+            ]),
+        ),
+    ])
+}
+
 #[derive(Debug, Default)]
 struct CreateDouglasAppRolePolicy {}
 
@@ -1015,51 +1094,7 @@ impl<'a> Command<Context<'a>> for CreateDouglasAppRolePolicy {
             return Err(Box::new(OpenBaoError::SecretsRequired));
         };
 
-        let policies = HashMap::from([
-            ("sys/mounts".to_string(), HashSet::from([Capability::Read])),
-            ("sys/auth".to_string(), HashSet::from([Capability::Read])),
-            (
-                "sys/mounts/kv".to_string(),
-                HashSet::from([
-                    Capability::Create,
-                    Capability::Read,
-                    Capability::Update,
-                    Capability::Sudo,
-                ]),
-            ),
-            (
-                "sys/mounts/pki".to_string(),
-                HashSet::from([
-                    Capability::Create,
-                    Capability::Read,
-                    Capability::Update,
-                    Capability::Sudo,
-                ]),
-            ),
-            (
-                "pki/*".to_string(),
-                HashSet::from([Capability::Create, Capability::Read, Capability::Update]),
-            ),
-            (
-                "sys/policies/acl/*".to_string(),
-                HashSet::from([
-                    Capability::Create,
-                    Capability::Read,
-                    Capability::Update,
-                    Capability::Delete,
-                ]),
-            ),
-            (
-                "auth/approle/role/*".to_string(),
-                HashSet::from([
-                    Capability::Create,
-                    Capability::Read,
-                    Capability::Update,
-                    Capability::Delete,
-                    Capability::List,
-                ]),
-            ),
-        ]);
+        let policies = douglas_admin_policy();
 
         context
             .openbao_client
@@ -2404,8 +2439,10 @@ mod command_tests {
             fixture
                 .openbao_client
                 .expect_create_policy()
-                .withf(|token, name, _policies| {
-                    token == "root-token" && name == DOUGLAS_ADMIN_POLICY_NAME
+                .withf(|token, name, policies| {
+                    token == "root-token"
+                        && name == DOUGLAS_ADMIN_POLICY_NAME
+                        && *policies == douglas_admin_policy()
                 })
                 .returning(|_, _, _| Ok(()));
             fixture
@@ -2423,6 +2460,89 @@ mod command_tests {
             context.admin_token = Some("root-token".to_string());
 
             run_command(CreateDouglasAppRolePolicy::default(), &mut context).await;
+        }
+
+        fn granted(path: &str) -> HashSet<Capability> {
+            douglas_admin_policy()
+                .get(path)
+                .cloned()
+                .unwrap_or_else(|| panic!("policy should cover {path}"))
+        }
+
+        #[test]
+        fn policy_should_let_douglas_mount_and_configure_the_managed_secrets_mount() {
+            assert_eq!(
+                granted("sys/mounts/douglas"),
+                granted("sys/mounts/kv"),
+                "managed secrets mount rights should match the key value mount"
+            );
+            assert!(granted("douglas/config").contains(&Capability::Update));
+            assert!(granted("douglas/config").contains(&Capability::Read));
+        }
+
+        #[test]
+        fn policy_should_let_douglas_write_read_and_delete_managed_secret_versions() {
+            assert_eq!(
+                granted("douglas/data/*"),
+                HashSet::from([
+                    Capability::Create,
+                    Capability::Read,
+                    Capability::Update,
+                    Capability::Delete,
+                ])
+            );
+        }
+
+        #[test]
+        fn policy_should_let_douglas_read_list_and_manage_managed_secret_metadata() {
+            assert_eq!(
+                granted("douglas/metadata/*"),
+                HashSet::from([
+                    Capability::Read,
+                    Capability::Update,
+                    Capability::Delete,
+                    Capability::List,
+                ])
+            );
+        }
+
+        #[test]
+        fn policy_should_not_let_douglas_permanently_destroy_secret_versions() {
+            let policy = douglas_admin_policy();
+
+            assert!(
+                !policy
+                    .keys()
+                    .any(|path| path.starts_with("douglas/destroy")),
+                "destroying a version makes it unrestorable"
+            );
+        }
+
+        #[test]
+        fn policy_should_not_reach_the_seedling_key_value_store() {
+            let policy = douglas_admin_policy();
+
+            assert!(!policy.keys().any(|path| path.starts_with("kv/data")
+                || path.starts_with("kv/metadata")
+                || path == "kv/*"));
+        }
+
+        #[test]
+        fn policy_should_keep_the_existing_grants() {
+            for path in [
+                "sys/mounts",
+                "sys/auth",
+                "sys/mounts/kv",
+                "sys/mounts/pki",
+                "pki/*",
+                "sys/policies/acl/*",
+                "auth/approle/role/*",
+            ] {
+                assert!(
+                    douglas_admin_policy().contains_key(path),
+                    "policy should still cover {path}"
+                );
+            }
         }
     }
 
