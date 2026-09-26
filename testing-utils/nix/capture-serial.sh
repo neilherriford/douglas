@@ -4,7 +4,7 @@
 # VM wedge during an unattended run can be diagnosed after the fact instead
 # of needing someone watching live when it happens.
 #
-# A guest-level reboot (steps/00-reboot.sh's `sudo reboot`) does NOT tear
+# A guest-level reboot (testing-utils/memory-graph/reboot.sh's `sudo reboot`) does NOT tear
 # down the host-side pty this reads from — the serial device belongs to the
 # VM process itself, not the guest OS, so this keeps capturing straight
 # through every reboot in a run, including whatever happens during a wedge.

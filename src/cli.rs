@@ -388,24 +388,33 @@ mod command_coverage_tests {
         paths
     }
 
-    fn steps_dir() -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("testing-utils/smoke-tests/steps")
+    fn smoke_tests_dir() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("testing-utils/smoke-tests")
     }
 
-    fn covered_command_paths() -> Vec<String> {
-        let dir = steps_dir();
-        let entries = std::fs::read_dir(&dir)
+    fn collect_script_paths(dir: &std::path::Path, scripts: &mut Vec<PathBuf>) {
+        let entries = std::fs::read_dir(dir)
             .unwrap_or_else(|err| panic!("should read {}: {err}", dir.display()));
-
-        let mut covered = Vec::new();
         for entry in entries {
             let Ok(entry) = entry else {
                 panic!("should read directory entry");
             };
             let path = entry.path();
-            if path.extension().and_then(|ext| ext.to_str()) != Some("sh") {
-                continue;
+            if path.is_dir() {
+                collect_script_paths(&path, scripts);
+            } else if path.extension().and_then(|ext| ext.to_str()) == Some("sh") {
+                scripts.push(path);
             }
+        }
+    }
+
+    fn covered_command_paths() -> Vec<String> {
+        let mut scripts = Vec::new();
+        collect_script_paths(&smoke_tests_dir().join("setup"), &mut scripts);
+        collect_script_paths(&smoke_tests_dir().join("scenarios"), &mut scripts);
+
+        let mut covered = Vec::new();
+        for path in scripts {
             let contents = std::fs::read_to_string(&path)
                 .unwrap_or_else(|err| panic!("should read {}: {err}", path.display()));
             for line in contents.lines() {
@@ -418,7 +427,7 @@ mod command_coverage_tests {
     }
 
     #[test]
-    fn test_smoke_test_steps_should_cover_every_non_hidden_cli_command() {
+    fn test_smoke_test_scripts_should_cover_every_non_hidden_cli_command() {
         let mut actual = collect_leaf_command_paths(&Cli::command(), "");
         actual.sort();
         actual.dedup();
@@ -429,7 +438,7 @@ mod command_coverage_tests {
 
         assert_eq!(
             actual, expected,
-            "testing-utils/smoke-tests/steps/*.sh is out of sync with the CLI's actual command \
+            "the scripts under testing-utils/smoke-tests/setup and scenarios are out of sync with the CLI's actual command \
              surface (left = live CLI commands, right = commands claimed via `# covers:` \
              lines) — add, rename, or remove a step's `# covers:` line to match"
         );

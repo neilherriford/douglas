@@ -40,6 +40,10 @@
 set -uo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")"
 SMOKE_TESTS_DIR="../smoke-tests"
+# The smoke suite has no default VM (its scenarios are destructive), but this
+# tool is meant for the interactive UTM dev VM, so it opts in explicitly.
+export DOUGLAS_SMOKE_VM="${DOUGLAS_SMOKE_VM:-dev@douglas-dev.local}"
+export DOUGLAS_SMOKE_EXAMPLE_SEEDLINGS="${DOUGLAS_SMOKE_EXAMPLE_SEEDLINGS:-/mnt/share/douglas/example-seedlings}"
 source "$SMOKE_TESTS_DIR/lib.sh"
 
 DURATION_SECONDS="${DURATION_SECONDS:-300}"
@@ -87,7 +91,7 @@ build_release() {
 # sampling *is* meant to capture starts right after this returns.
 provision_pre_start() {
     if [ "$SKIP_REBOOT" != "1" ]; then
-        bash "$SMOKE_TESTS_DIR/steps/00-reboot.sh" || exit 1
+        bash ./reboot.sh || exit 1
     fi
     build_release
 }
@@ -98,10 +102,10 @@ provision_pre_start() {
 # reconciling, hello-world/secrets coming up, all as it happens rather than
 # only once everything has already settled into steady state.
 provision_post_start() {
-    bash "$SMOKE_TESTS_DIR/steps/10-start.sh" || return 1
+    bash "$SMOKE_TESTS_DIR/setup/10-start.sh" || return 1
 
-    bash "$SMOKE_TESTS_DIR/steps/20-seedling-new.sh" || return 1
-    bash "$SMOKE_TESTS_DIR/steps/25-push-image.sh" || return 1
+    bash "$SMOKE_TESTS_DIR/scenarios/seedling-lifecycle/20-seedling-new.sh" || return 1
+    bash "$SMOKE_TESTS_DIR/scenarios/seedling-lifecycle/25-push-image.sh" || return 1
 
     echo "Provisioning secrets seedling (create-only, no teardown)..."
     ssh -o LogLevel=ERROR -i "$SSH_KEY" "$VM" "~/douglas seedling new --name secrets" \

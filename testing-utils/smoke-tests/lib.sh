@@ -1,11 +1,11 @@
-# Shared helpers for smoke test steps. Sourced by each script in steps/
-# (and by happy-path.sh, which just executes each step as its own process).
+# Shared helpers for smoke test steps. Sourced by every script under setup/
+# and scenarios/ (run-scenario.sh executes each one as its own process).
 #
 # Not meant to be run directly.
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && cd .. && pwd)"
 SSH_KEY="${DOUGLAS_SMOKE_SSH_KEY:-$REPO_ROOT/testing-utils/nix/ssh-keys/douglas_id_ed25519}"
-VM="${DOUGLAS_SMOKE_VM:-dev@douglas-dev.local}"
+VM="${DOUGLAS_SMOKE_VM:?set DOUGLAS_SMOKE_VM to the ssh target of a disposable smoke VM (ci-fanout.sh does this); scenarios kill, upgrade and stop douglas, so there is deliberately no default}"
 SSH_CONTROL_PATH="/tmp/douglas-smoke-%C"
 SSH_MUX_OPTS=(-o ControlMaster=auto -o ControlPath="$SSH_CONTROL_PATH" -o ControlPersist=600)
 FAILURES=0
@@ -187,33 +187,71 @@ wait_until() {
     pass "$desc"
 }
 
-BUILT_BINARY="/mnt/share/cache/target/debug/douglas"
-XTASK_SIGN="cd /mnt/share/douglas && cargo run -p xtask --quiet -- sign"
+# The pristine, already-signed binary that setup/05-deploy.sh put on the
+# guest; upgrade candidates are copies of it, re-signed.
+BUILT_BINARY="\$HOME/douglas"
+
+# Where the example seedlings (docker build contexts) are on the guest.
+# ci-fanout.sh copies just example-seedlings/ there; the UTM memory tool points
+# this at its shared folder instead.
+EXAMPLE_SEEDLINGS="${DOUGLAS_SMOKE_EXAMPLE_SEEDLINGS:-\$HOME/example-seedlings}"
+
+# host_sign <remote path> [xtask sign flags...]
+# The guest has no Rust toolchain, so signing happens on the host: copy the
+# file down, run xtask's sign subcommand locally against the checkout's own
+# signing key, and copy the signed result back.
+host_sign() {
+    local remote_path="$1"
+    shift
+    local local_path
+    local_path="$(mktemp)"
+
+    scp -o LogLevel=ERROR -i "$SSH_KEY" "$VM:$remote_path" "$local_path" >/dev/null
+    (cd "$REPO_ROOT" && cargo run -p xtask --quiet -- sign "$local_path" "$@") >/dev/null
+    scp -o LogLevel=ERROR -i "$SSH_KEY" "$local_path" "$VM:$remote_path" >/dev/null
+
+    rm -f "$local_path"
+}
+
+# deploy_prebuilt_binary <local path> — ci-fanout.sh cross-compiles and signs
+# the binary once on the host, shared read-only across every scenario, so
+# setup/05-deploy.sh only has to copy that one file into place.
+deploy_prebuilt_binary() {
+    local local_path="$1"
+    scp -o LogLevel=ERROR -i "$SSH_KEY" "$local_path" "$VM:douglas" >/dev/null \
+        && ssh_out "chmod +x douglas"
+}
+
+# cargo_version — the checkout's Cargo.toml version. Read on the host, where the
+# scenario scripts run, so nothing about the Rust source needs to be on the guest.
+cargo_version() {
+    grep -m1 '^version' "$REPO_ROOT/Cargo.toml" | sed -E 's/version = "(.*)"/\1/'
+}
 
 # next_version — sets CURRENT_VERSION (the checkout's Cargo.toml version) and
 # NEW_VERSION (one patch higher), so a candidate can be signed as a genuinely
 # higher version without touching the checkout.
 next_version() {
-    CURRENT_VERSION="$(ssh_out "grep -m1 '^version' /mnt/share/douglas/Cargo.toml | sed -E 's/version = \"(.*)\"/\1/'")"
+    CURRENT_VERSION="$(cargo_version)"
     IFS='.' read -r major minor patch <<<"$CURRENT_VERSION"
     NEW_VERSION="$major.$minor.$((patch + 1))"
 }
 
 # build_upgrade_candidate <destination> [xtask sign flags...]
-# A signed copy of the binary 05-build.sh built, re-signed as the next patch
-# version (plus any extra `xtask sign` flags such as --core openbao=2). No
-# rebuild, so it takes seconds.
+# A signed copy of the deployed binary, re-signed as the next patch version
+# (plus any extra `xtask sign` flags such as --core openbao=2). No rebuild,
+# so it takes seconds.
 build_upgrade_candidate() {
     local destination="$1"
     shift
 
     next_version
 
-    assert_success "copy the built binary to $destination" ssh_out \
+    assert_success "copy the deployed binary to $destination" ssh_out \
         "cp $BUILT_BINARY $destination"
 
-    assert_success "sign the copy as v$NEW_VERSION" ssh_out \
-        "$XTASK_SIGN $destination --version $NEW_VERSION $*"
+    assert_success "sign the copy as v$NEW_VERSION" host_sign \
+        "$destination" --version "$NEW_VERSION" "$@"
 }
 
 # build_stub_upgrade_candidate <destination> <shell script body>
@@ -229,19 +267,8 @@ build_stub_upgrade_candidate() {
     assert_success "write the stub candidate" ssh_out \
         "printf '#!/bin/sh\n%s\n' '$body' > $destination && chmod +x $destination"
 
-    assert_success "sign the stub as v$NEW_VERSION" ssh_out \
-        "$XTASK_SIGN $destination --version $NEW_VERSION"
-}
-
-run_prelude() {
-    section "setup"
-    for step in "$@"; do
-        if ! bash "$step"; then
-            fail "prelude step $step failed"
-            FAILURES=$((FAILURES + 1))
-            finish
-        fi
-    done
+    assert_success "sign the stub as v$NEW_VERSION" host_sign \
+        "$destination" --version "$NEW_VERSION"
 }
 
 # log_line_count <remote log path> — captured before a step, passed to
